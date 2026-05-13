@@ -61,6 +61,125 @@ where
     }
 }
 
+fn edge_leaf<K: Key + 'static, V: Value + 'static, F>(
+    page: PageImpl,
+    high_edge: bool,
+    path: &mut Vec<Branch>,
+    get_page: &mut F,
+) -> Result<Leaf>
+where
+    F: FnMut(PageNumber) -> Result<PageImpl>,
+{
+    let (page, len) = descend_edge::<K, V, F>(page, high_edge, path, get_page)?;
+    Ok(Leaf {
+        page,
+        position: if high_edge { len } else { 0 },
+        len,
+    })
+}
+
+fn descend_to_bound<K: Key + 'static, V: Value + 'static, F>(
+    page: PageImpl,
+    bound: Bound<&[u8]>,
+    path: &mut Vec<Branch>,
+    get_page: &mut F,
+) -> Result<Leaf>
+where
+    F: FnMut(PageNumber) -> Result<PageImpl>,
+{
+    match page.memory()[0] {
+        LEAF => {
+            let (position, len) = {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                (
+                    lower_bound_entry::<K>(&accessor, bound),
+                    accessor.num_pairs(),
+                )
+            };
+            Ok(Leaf {
+                page,
+                position,
+                len,
+            })
+        }
+        BRANCH => {
+            let (child_index, child_page) = {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let child_index = child_to_visit::<K>(&accessor, bound, false);
+                (child_index, accessor.child_page(child_index).unwrap())
+            };
+            path.push(Branch::new(page, child_index));
+            let child = get_page(child_page)?;
+            descend_to_bound::<K, V, F>(child, bound, path, get_page)
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn move_to_adjacent_leaf<K: Key + 'static, V: Value + 'static, F>(
+    path: &mut Vec<Branch>,
+    forward: bool,
+    get_page: &mut F,
+) -> Result<Option<Leaf>>
+where
+    F: FnMut(PageNumber) -> Result<PageImpl>,
+{
+    for index in (0..path.len()).rev() {
+        let next_child = {
+            let frame = &path[index];
+            let accessor = BranchAccessor::new(&frame.page, K::fixed_width());
+            if forward {
+                let child_index = frame.child_index + 1;
+                (child_index < accessor.count_children())
+                    .then(|| (child_index, accessor.child_page(child_index).unwrap()))
+            } else {
+                frame
+                    .child_index
+                    .checked_sub(1)
+                    .map(|child_index| (child_index, accessor.child_page(child_index).unwrap()))
+            }
+        };
+
+        if let Some((child_index, child_page)) = next_child {
+            path[index].child_index = child_index;
+            path.truncate(index + 1);
+            let page = get_page(child_page)?;
+            return edge_leaf::<K, V, F>(page, !forward, path, get_page).map(Some);
+        }
+    }
+
+    Ok(None)
+}
+
+fn prepare_leaf<K: Key + 'static, V: Value + 'static, F>(
+    leaf: &mut Option<Leaf>,
+    path: &mut Vec<Branch>,
+    forward: bool,
+    get_page: &mut F,
+) -> Result<bool>
+where
+    F: FnMut(PageNumber) -> Result<PageImpl>,
+{
+    while let Some(current) = leaf.as_ref() {
+        if (forward && current.position < current.len) || (!forward && current.position > 0) {
+            return Ok(true);
+        }
+        let Some(next_leaf) = move_to_adjacent_leaf::<K, V, F>(path, forward, get_page)? else {
+            return Ok(false);
+        };
+        *leaf = Some(next_leaf);
+    }
+
+    Ok(false)
+}
+
+fn entry<K: Key + 'static, V: Value + 'static>(leaf: &Leaf, position: usize) -> EntryGuard<K, V> {
+    let (key, value) = LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width())
+        .entry_ranges(position)
+        .expect("cursor entry must exist");
+    EntryGuard::new(leaf.page.clone(), key, value)
+}
+
 #[derive(Clone)]
 struct Leaf {
     page: PageImpl,
@@ -97,137 +216,104 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
     pub(super) fn seek_to(&mut self, bound: Bound<&[u8]>) -> Result {
         self.path.clear();
         let root_page = self.manager.get_page(self.root, self.hint)?;
-        self.descend_to_bound(root_page, bound)
+        let Self {
+            manager,
+            hint,
+            path,
+            leaf,
+            ..
+        } = self;
+        let mut get_page = |page| manager.get_page(page, *hint);
+        *leaf = Some(descend_to_bound::<K, V, _>(
+            root_page,
+            bound,
+            path,
+            &mut get_page,
+        )?);
+        Ok(())
     }
 
     pub(super) fn seek_to_end(&mut self) -> Result {
         self.path.clear();
         let root_page = self.manager.get_page(self.root, self.hint)?;
-        self.descend_edge(root_page, true)
-    }
-
-    fn descend_to_bound(&mut self, page: PageImpl, bound: Bound<&[u8]>) -> Result {
-        match page.memory()[0] {
-            LEAF => {
-                let (position, len) = {
-                    let accessor =
-                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                    (
-                        lower_bound_entry::<K>(&accessor, bound),
-                        accessor.num_pairs(),
-                    )
-                };
-                self.set_leaf(page, position, len);
-                Ok(())
-            }
-            BRANCH => {
-                let (child_index, child_page) = {
-                    let accessor = BranchAccessor::new(&page, K::fixed_width());
-                    let child_index = child_to_visit::<K>(&accessor, bound, false);
-                    (child_index, accessor.child_page(child_index).unwrap())
-                };
-                self.path.push(Branch::new(page, child_index));
-                let page = self.manager.get_page(child_page, self.hint)?;
-                self.descend_to_bound(page, bound)
-            }
-            _ => unreachable!(),
-        }
-    }
-
-    fn descend_edge(&mut self, page: PageImpl, high_edge: bool) -> Result {
-        let manager = &self.manager;
-        let hint = self.hint;
-        let mut get_page = |page| manager.get_page(page, hint);
-        let (page, len) = descend_edge::<K, V, _>(page, high_edge, &mut self.path, &mut get_page)?;
-        let position = if high_edge { len } else { 0 };
-        self.set_leaf(page, position, len);
+        let Self {
+            manager,
+            hint,
+            path,
+            leaf,
+            ..
+        } = self;
+        let mut get_page = |page| manager.get_page(page, *hint);
+        *leaf = Some(edge_leaf::<K, V, _>(root_page, true, path, &mut get_page)?);
         Ok(())
     }
 
-    fn set_leaf(&mut self, page: PageImpl, position: usize, len: usize) {
-        self.leaf = Some(Leaf {
-            page,
-            position,
-            len,
-        });
+    fn prepare_next(&mut self) -> Result<bool> {
+        let Self {
+            manager,
+            hint,
+            path,
+            leaf,
+            ..
+        } = self;
+        let mut get_page = |page| manager.get_page(page, *hint);
+        prepare_leaf::<K, V, _>(leaf, path, true, &mut get_page)
     }
 
-    fn move_to_adjacent_leaf(&mut self, forward: bool) -> Result<bool> {
-        for index in (0..self.path.len()).rev() {
-            let next_child = {
-                let frame = &self.path[index];
-                let accessor = BranchAccessor::new(&frame.page, K::fixed_width());
-                if forward {
-                    let child_index = frame.child_index + 1;
-                    (child_index < accessor.count_children())
-                        .then(|| (child_index, accessor.child_page(child_index).unwrap()))
-                } else {
-                    frame
-                        .child_index
-                        .checked_sub(1)
-                        .map(|child_index| (child_index, accessor.child_page(child_index).unwrap()))
-                }
-            };
-
-            if let Some((child_index, child_page)) = next_child {
-                self.path[index].child_index = child_index;
-                self.path.truncate(index + 1);
-                let page = self.manager.get_page(child_page, self.hint)?;
-                self.descend_edge(page, !forward)?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    fn prepare_prev(&mut self) -> Result<bool> {
+        let Self {
+            manager,
+            hint,
+            path,
+            leaf,
+            ..
+        } = self;
+        let mut get_page = |page| manager.get_page(page, *hint);
+        prepare_leaf::<K, V, _>(leaf, path, false, &mut get_page)
     }
 
     pub(super) fn normalize_forward_gap(&mut self) -> Result {
-        let Some(leaf) = self.leaf.as_ref() else {
+        if self
+            .leaf
+            .as_ref()
+            .is_none_or(|leaf| leaf.position != leaf.len)
+        {
             return Ok(());
-        };
-        if leaf.position == leaf.len {
-            self.move_to_adjacent_leaf(true)?;
+        }
+
+        let Self {
+            manager,
+            hint,
+            path,
+            leaf,
+            ..
+        } = self;
+        let mut get_page = |page| manager.get_page(page, *hint);
+        if let Some(next_leaf) = move_to_adjacent_leaf::<K, V, _>(path, true, &mut get_page)? {
+            *leaf = Some(next_leaf);
         }
         Ok(())
     }
 
     pub(super) fn next(&mut self) -> Result<Option<EntryGuard<K, V>>> {
-        loop {
-            let Some(leaf) = self.leaf.as_ref() else {
-                return Ok(None);
-            };
-            if leaf.position < leaf.len {
-                let entry = self.get_entry(leaf.position);
-                self.leaf
-                    .as_mut()
-                    .expect("cursor must be positioned")
-                    .position += 1;
-                return Ok(Some(entry));
-            }
-
-            if !self.move_to_adjacent_leaf(true)? {
-                return Ok(None);
-            }
+        if !self.prepare_next()? {
+            return Ok(None);
         }
+
+        let leaf = self.leaf.as_mut().expect("cursor must be positioned");
+        let position = leaf.position;
+        leaf.position += 1;
+        Ok(Some(entry(leaf, position)))
     }
 
     pub(super) fn prev(&mut self) -> Result<Option<EntryGuard<K, V>>> {
-        loop {
-            let Some(leaf) = self.leaf.as_ref() else {
-                return Ok(None);
-            };
-            if leaf.position > 0 {
-                let entry = leaf.position - 1;
-                self.leaf
-                    .as_mut()
-                    .expect("cursor must be positioned")
-                    .position = entry;
-                return Ok(Some(self.get_entry(entry)));
-            }
-
-            if !self.move_to_adjacent_leaf(false)? {
-                return Ok(None);
-            }
+        if !self.prepare_prev()? {
+            return Ok(None);
         }
+
+        let leaf = self.leaf.as_mut().expect("cursor must be positioned");
+        leaf.position -= 1;
+        Ok(Some(entry(leaf, leaf.position)))
     }
 
     fn page_number(&self) -> PageNumber {
@@ -260,15 +346,6 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
             }
         }
         unreachable!("distinct cursor pages must diverge in their branch path")
-    }
-
-    fn get_entry(&self, entry: usize) -> EntryGuard<K, V> {
-        let leaf = self.leaf.as_ref().expect("cursor must be positioned");
-        let (key, value) =
-            LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width())
-                .entry_ranges(entry)
-                .expect("cursor entry must exist");
-        EntryGuard::new(leaf.page.clone(), key, value)
     }
 }
 
@@ -320,13 +397,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         let high_edge = matches!(position, CursorMutPosition::End);
         let page_allocator = self.page_allocator;
         let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
-        let (page, len) = descend_edge::<K, V, _>(root, high_edge, &mut self.path, &mut get_page)?;
-        let position = if high_edge { len } else { 0 };
-        self.leaf = Some(Leaf {
-            page,
-            position,
-            len,
-        });
+        self.leaf = Some(edge_leaf::<K, V, _>(
+            root,
+            high_edge,
+            &mut self.path,
+            &mut get_page,
+        )?);
         Ok(())
     }
 
@@ -374,5 +450,79 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             Arc::clone(self.allocated),
         );
         Ok(Some(helper.pop_leaf_entry(leaf, path, position)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_store::btree_base::LeafBuilder;
+    use crate::tree_store::{
+        AllocationPolicy, InMemoryBackend, PAGE_SIZE, PageTrackerPolicy, TransactionalMemory,
+    };
+
+    fn cursor_with_entries(entries: &[u64]) -> Cursor<u64, u64> {
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
+        mem.begin_repair().unwrap();
+        let mem = Arc::new(mem);
+        let page_allocator = PageAllocator::new(mem, AllocationPolicy::Default);
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let keys_and_values: Vec<_> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    u64::as_bytes(entry).as_ref().to_vec(),
+                    u64::as_bytes(entry).as_ref().to_vec(),
+                )
+            })
+            .collect();
+        let mut builder = LeafBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            entries.len(),
+            u64::fixed_width(),
+            u64::fixed_width(),
+        );
+        for (key, value) in &keys_and_values {
+            builder.push(key, value);
+        }
+        let page = builder.build().unwrap();
+        let root = page.get_page_number();
+        drop(page);
+
+        let mut cursor = Cursor::<u64, u64>::new(root, page_allocator.resolver(), PageHint::None);
+        cursor.seek_to(Bound::Unbounded).unwrap();
+        cursor
+    }
+
+    #[test]
+    fn cursor_preserves_boundary_gap_after_failed_next() {
+        let mut cursor = cursor_with_entries(&[1, 2, 3]);
+
+        for expected in [1, 2, 3] {
+            assert_eq!(cursor.next().unwrap().unwrap().key(), expected);
+        }
+        assert!(cursor.next().unwrap().is_none());
+
+        assert_eq!(cursor.prev().unwrap().unwrap().key(), 3);
+        assert_eq!(cursor.prev().unwrap().unwrap().key(), 2);
+    }
+
+    #[test]
+    fn cursor_preserves_boundary_gap_after_failed_prev() {
+        let mut cursor = cursor_with_entries(&[1, 2, 3]);
+
+        assert!(cursor.prev().unwrap().is_none());
+
+        assert_eq!(cursor.next().unwrap().unwrap().key(), 1);
+        assert_eq!(cursor.next().unwrap().unwrap().key(), 2);
     }
 }
