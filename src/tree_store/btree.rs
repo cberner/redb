@@ -690,11 +690,17 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     where
         K: 'a0,
     {
-        let iter = self.range(range)?;
+        let lower_bound = range
+            .start_bound()
+            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
+        let upper_bound = range
+            .end_bound()
+            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
 
         let result = BtreeExtractIf::new(
             &mut self.root,
-            iter,
+            lower_bound,
+            upper_bound,
             predicate,
             self.freed_pages.clone(),
             self.allocated_pages.clone(),

@@ -492,6 +492,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(Some(entry_ref(leaf, leaf.position)))
     }
 
+    pub(super) fn peek_prev(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
+        if !self.prepare_prev()? {
+            return Ok(None);
+        }
+        let leaf = self.leaf.as_ref().expect("cursor must be positioned");
+        Ok(Some(entry_ref(leaf, leaf.position - 1)))
+    }
+
     pub(super) fn next(&mut self) -> Result<bool> {
         if !self.prepare_next()? {
             return Ok(false);
@@ -503,6 +511,20 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(true)
     }
 
+    pub(super) fn prev(&mut self) -> Result<bool> {
+        if !self.prepare_prev()? {
+            return Ok(false);
+        }
+        self.leaf
+            .as_mut()
+            .expect("cursor must be positioned")
+            .position -= 1;
+        Ok(true)
+    }
+
+    /// Removes and returns the next entry.
+    ///
+    /// The returned guards must be dropped before mutating the tree again.
     pub(super) fn remove_next(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
@@ -512,6 +534,20 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         let leaf = self.leaf.take().expect("cursor must be positioned");
         let position = leaf.position;
         self.remove_leaf_entry(leaf.page, position)
+    }
+
+    /// Removes and returns the next entry.
+    ///
+    /// The caller may continue mutating the tree while the returned guards are live.
+    pub(super) fn remove_next_detached(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        if !self.prepare_next()? {
+            return Ok(None);
+        }
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        let position = leaf.position;
+        self.remove_leaf_entry_detached(leaf.page, position)
     }
 
     pub(super) fn remove_next_discard(&mut self) -> Result<bool> {
@@ -527,6 +563,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(true)
     }
 
+    /// Removes and returns the previous entry.
+    ///
+    /// The returned guards must be dropped before mutating the tree again.
     pub(super) fn remove_prev(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
@@ -538,10 +577,41 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.remove_leaf_entry(leaf.page, position)
     }
 
+    /// Removes and returns the previous entry.
+    ///
+    /// The caller may continue mutating the tree while the returned guards are live.
+    pub(super) fn remove_prev_detached(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        if !self.prepare_prev()? {
+            return Ok(None);
+        }
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        let position = leaf.position - 1;
+        self.remove_leaf_entry_detached(leaf.page, position)
+    }
+
     fn remove_leaf_entry(
         &mut self,
         leaf: PageImpl,
         position: usize,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.remove_leaf_entry_inner(leaf, position, true)
+    }
+
+    fn remove_leaf_entry_detached(
+        &mut self,
+        leaf: PageImpl,
+        position: usize,
+    ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.remove_leaf_entry_inner(leaf, position, false)
+    }
+
+    fn remove_leaf_entry_inner(
+        &mut self,
+        leaf: PageImpl,
+        position: usize,
+        allow_in_place: bool,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
         let path = std::mem::take(&mut self.path)
             .into_iter()
@@ -553,7 +623,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             &mut *self.freed,
             Arc::clone(self.allocated),
         );
-        Ok(Some(helper.pop_leaf_entry(leaf, path, position)?))
+        let entry = if allow_in_place {
+            helper.pop_leaf_entry(leaf, path, position)?
+        } else {
+            helper.pop_leaf_entry_detached(leaf, path, position)?
+        };
+        Ok(Some(entry))
     }
 }
 
