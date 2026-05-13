@@ -6,8 +6,9 @@ use crate::tree_store::multimap_btree::{
     finalize_tree_and_subtree_checksums, verify_tree_and_subtree_checksums,
 };
 use crate::tree_store::{
-    Btree, BtreeMut, BtreeRangeIter, InternalTableDefinition, PageAllocator, PageHint, PageNumber,
-    PageNumberHashSet, PageResolver, PageTrackerPolicy, RawBtree, TableType, multimap_btree_stats,
+    Btree, BtreeCursorRange, BtreeMut, InternalTableDefinition, PageAllocator, PageHint,
+    PageNumber, PageNumberHashSet, PageResolver, PageTrackerPolicy, RawBtree, TableType,
+    multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
@@ -40,7 +41,7 @@ impl PageListMut {
 }
 
 pub struct TableNameIter {
-    inner: BtreeRangeIter<&'static str, InternalTableDefinition>,
+    inner: BtreeCursorRange<&'static str, InternalTableDefinition>,
     table_type: TableType,
 }
 
