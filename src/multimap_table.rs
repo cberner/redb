@@ -763,10 +763,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 let all_pages = AllPageNumbersBtreeIter::new(
                     root,
                     V::fixed_width(),
-                    <() as Value>::fixed_width(),
                     self.page_allocator.resolver(),
                     PageHint::None,
-                )?;
+                );
                 for page in all_pages {
                     pages.push(page?);
                 }

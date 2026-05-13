@@ -367,18 +367,15 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn all_pages_iter(&self) -> Result<Option<AllPageNumbersBtreeIter>> {
-        if let Some(root) = self.root.map(|x| x.root) {
-            Ok(Some(AllPageNumbersBtreeIter::new(
-                root,
+    pub(crate) fn all_pages_iter(&self) -> Option<AllPageNumbersBtreeIter> {
+        self.root.map(|x| {
+            AllPageNumbersBtreeIter::new(
+                x.root,
                 K::fixed_width(),
-                V::fixed_width(),
                 self.page_allocator.resolver(),
                 PageHint::None,
-            )?))
-        } else {
-            Ok(None)
-        }
+            )
+        })
     }
 
     pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result
