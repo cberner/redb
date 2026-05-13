@@ -15,7 +15,7 @@ pub(crate) use btree_base::BtreeHeader;
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
 pub(crate) use btree_cursor_range::BtreeCursorRange;
-pub(crate) use btree_iters::{AllPageNumbersBtreeIter, BtreeRangeIter};
+pub(crate) use btree_iters::AllPageNumbersBtreeIter;
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;
