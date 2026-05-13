@@ -520,3 +520,50 @@ fn multimap_remove_subtree_backed_key() {
     assert_eq!(table.len().unwrap(), 1001);
     assert_eq!(table.get(&0u64).unwrap().len(), 999);
 }
+
+#[test]
+fn multimap_remove_triggers_subtree_to_inline_demotion() {
+    // Removing values from a subtree-backed key until few enough remain to fit
+    // inline causes the subtree to be automatically demoted back to inline storage.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // 260 u64 values exceed the inline promotion threshold (256 entries),
+        // so key 0 is stored in a subtree.
+        for v in 0..260u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        let stats = table.stats().unwrap();
+        assert!(stats.stored_bytes() > 0);
+        assert!(stats.leaf_pages() >= 1);
+        let _ = stats.branch_pages();
+        let _ = stats.metadata_bytes();
+        let _ = stats.fragmented_bytes();
+
+        // Removing 10 values crosses the demotion threshold (at removal 5, when
+        // 255 entries remain), converting the subtree back to inline storage.
+        for v in 0..10u64 {
+            assert!(table.remove(&0u64, &v).unwrap());
+        }
+        assert_eq!(table.len().unwrap(), 250);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 250);
+    let values: Vec<u64> = table
+        .get(&0u64)
+        .unwrap()
+        .map(|v| v.unwrap().value())
+        .collect();
+    assert_eq!(values, (10..260u64).collect::<Vec<_>>());
+}
