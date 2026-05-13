@@ -672,13 +672,7 @@ impl<
     type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
+        self.inner.next()
     }
 }
 
@@ -689,13 +683,7 @@ impl<
 > DoubleEndedIterator for ExtractIf<'_, K, V, F>
 {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let entry = self.inner.next_back()?;
-        Some(entry.map(|entry| {
-            let (page, key_range, value_range) = entry.into_raw();
-            let key = AccessGuard::with_page(page.clone(), key_range);
-            let value = AccessGuard::with_page(page, value_range);
-            (key, value)
-        }))
+        self.inner.next_back()
     }
 }
 

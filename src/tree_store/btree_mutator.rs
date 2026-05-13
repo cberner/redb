@@ -55,7 +55,6 @@ struct InsertionResult<'a, V: Value + 'static> {
 
 pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<BtreeHeader>,
-    modify_uncommitted: bool,
     page_allocator: PageAllocator,
     freed: &'b mut Vec<PageNumber>,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
@@ -73,27 +72,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     ) -> Self {
         Self {
             root,
-            modify_uncommitted: true,
-            page_allocator,
-            freed,
-            allocated,
-            _key_type: PhantomData,
-            _value_type: PhantomData,
-            _lifetime: PhantomData,
-        }
-    }
-
-    // Creates a new mutator which will not modify any existing uncommitted pages, or free any existing pages.
-    // It will still queue pages for future freeing in the freed vec
-    pub(crate) fn new_do_not_modify(
-        root: &'b mut Option<BtreeHeader>,
-        page_allocator: PageAllocator,
-        freed: &'b mut Vec<PageNumber>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
-    ) -> Self {
-        Self {
-            root,
-            modify_uncommitted: false,
             page_allocator,
             freed,
             allocated,
@@ -104,15 +82,11 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     fn conditional_free(&mut self, page_number: PageNumber) {
-        if self.modify_uncommitted {
-            let mut allocated = self.allocated.lock().unwrap();
-            if !self
-                .page_allocator
-                .free_if_uncommitted(page_number, &mut allocated)
-            {
-                self.freed.push(page_number);
-            }
-        } else {
+        let mut allocated = self.allocated.lock().unwrap();
+        if !self
+            .page_allocator
+            .free_if_uncommitted(page_number, &mut allocated)
+        {
             self.freed.push(page_number);
         }
     }
@@ -196,8 +170,30 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         path: Vec<(PageImpl, usize)>,
         position: usize,
     ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
+        self.pop_leaf_entry_inner(leaf, path, position, true)
+    }
+
+    pub(super) fn pop_leaf_entry_detached(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        position: usize,
+    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
+        self.pop_leaf_entry_inner(leaf, path, position, false)
+    }
+
+    fn pop_leaf_entry_inner(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        position: usize,
+        allow_in_place: bool,
+    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
+        // If `allow_in_place` is true, callers must drop the returned guards before mutating the
+        // tree again.
         let length = self.root.expect("pop requires a root").length;
-        let (mut result, key, value) = self.delete_leaf_at_position(leaf, position, true)?;
+        let (mut result, key, value) =
+            self.delete_leaf_at_position(leaf, position, true, allow_in_place)?;
         for (page, child_index) in path.into_iter().rev() {
             result = self.apply_child_deletion_result(page, child_index, result)?;
         }
@@ -347,10 +343,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         )
                     }
                 };
-                if self.page_allocator.uncommitted(page.get_page_number())
-                    && self.modify_uncommitted
-                    && has_inplace_space()
-                {
+                if self.page_allocator.uncommitted(page.get_page_number()) && has_inplace_space() {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let copied_value = accessor.entry(position).unwrap().value().to_vec();
@@ -405,7 +398,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        if self.modify_uncommitted && self.page_allocator.uncommitted(page_number) {
+                        if self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
@@ -440,7 +433,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     let existing_value = if found {
                         let (start, end) = accessor.value_range(position).unwrap();
-                        if self.modify_uncommitted && self.page_allocator.uncommitted(page_number) {
+                        if self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
                             let mut allocated = self.allocated.lock().unwrap();
@@ -517,7 +510,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 }
 
                 if sub_result.additional_sibling.is_none()
-                    && self.modify_uncommitted
                     && self.page_allocator.uncommitted(page.get_page_number())
                 {
                     let page_number = page.get_page_number();
@@ -620,7 +612,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<()> {
-        assert!(self.modify_uncommitted);
         let header = self.root.expect("Key not found (tree is empty)");
         self.insert_inplace_helper(
             self.page_allocator.get_page_mut(header.root)?,
@@ -668,6 +659,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         page: PageImpl,
         position: usize,
         want_key: bool,
+        allow_in_place: bool,
     ) -> Result<(
         DeletionResult,
         Option<AccessGuard<'a, K>>,
@@ -688,8 +680,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         // Fast-path for dirty pages: perform in-place removal without allocating a new page.
         // The threshold matches the merge threshold (page_size/3) so that we use in-place
         // removal for all cases where the page won't need merging with a sibling.
-        if uncommitted
-            && self.modify_uncommitted
+        if allow_in_place
+            && uncommitted
             && new_required_bytes >= self.page_allocator.get_page_size() / 3
             && accessor.num_pairs() > 1
         {
@@ -745,7 +737,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             Subtree(new_page.get_page_number())
         };
         let (key_range, value_range) = accessor.entry_ranges(position).unwrap();
-        let (key_guard, value_guard) = if uncommitted && self.modify_uncommitted {
+        let (key_guard, value_guard) = if uncommitted {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
             drop(page);
@@ -777,7 +769,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok((Subtree(page.get_page_number()), None));
         }
         let (result, key_guard, value_guard) =
-            self.delete_leaf_at_position(page, position, false)?;
+            self.delete_leaf_at_position(page, position, false, true)?;
         assert!(key_guard.is_none());
         Ok((result, Some(value_guard)))
     }
@@ -843,9 +835,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 return Ok(Subtree(original_page_number));
             }
 
-            let result_page = if self.page_allocator.uncommitted(original_page_number)
-                && self.modify_uncommitted
-            {
+            let result_page = if self.page_allocator.uncommitted(original_page_number) {
                 drop(page);
                 let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
                 let mut mutator = BranchMutator::new(mutpage.memory_mut());
