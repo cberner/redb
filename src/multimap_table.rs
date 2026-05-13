@@ -4,7 +4,7 @@ use crate::sealed::Sealed;
 use crate::table::{ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
-    BtreeRangeIter, DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
+    DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
     RawBtree, RawLeafBuilder, multimap_btree_stats,
 };
@@ -97,7 +97,7 @@ impl<'a, V: Key> LeafKeyIter<'a, V> {
 }
 
 enum ValueIterState<'a, V: Key + 'static> {
-    Subtree(Box<BtreeRangeIter<V, ()>>),
+    Subtree(Box<BtreeCursorRange<V, ()>>),
     InlineLeaf(LeafKeyIter<'a, V>),
 }
 
@@ -114,7 +114,7 @@ pub struct MultimapValue<'a, V: Key + 'static> {
 
 impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     fn new_subtree(
-        inner: BtreeRangeIter<V, ()>,
+        inner: BtreeCursorRange<V, ()>,
         num_values: u64,
         guard: Arc<TransactionGuard>,
     ) -> Self {
@@ -131,7 +131,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
     }
 
     fn new_subtree_free_on_drop(
-        inner: BtreeRangeIter<V, ()>,
+        inner: BtreeCursorRange<V, ()>,
         num_values: u64,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
         allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
@@ -179,7 +179,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             SubtreeV2 => {
                 let root = collection.value().as_subtree().root;
                 Self::new_subtree(
-                    BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                    BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                         &(..),
                         Some(root),
                         mem,
@@ -209,7 +209,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             }
             SubtreeV2 => {
                 let root = collection.value().as_subtree().root;
-                let inner = BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                let inner = BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
                     page_allocator.resolver(),
@@ -784,7 +784,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
                     self.page_allocator.resolver(),
@@ -832,7 +832,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
             MultimapValue::from_collection(collection, guard, self.page_allocator.resolver())?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
                     self.page_allocator.resolver(),
@@ -985,7 +985,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
                     self.mem.clone(),
@@ -1052,7 +1052,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
             )?
         } else {
             MultimapValue::new_subtree(
-                BtreeRangeIter::new::<RangeFull, &V::SelfType<'_>>(
+                BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
                     self.mem.clone(),
