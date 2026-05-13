@@ -19,7 +19,7 @@
 //! A simple, portable, high-performance, ACID, embedded key-value store.
 //!
 //! redb is written in pure Rust and is loosely inspired by [lmdb][lmdb]. Data is stored in a collection
-//! of copy-on-write B-trees. For more details, see the [design doc][design].
+//! of copy-on-write B+trees. For more details, see the [design doc][design].
 //!
 //! # Features
 //!

@@ -11,7 +11,7 @@ serializable, in which all writes are applied sequentially.
 Each table is a key-value mapping providing an interface similar to `BTreeMap`.
 
 # File format
-Logically, a redb database file consists of some metadata, and several B-trees:
+Logically, a redb database file consists of some metadata, and several B+trees:
 * pending free tree: mapping from transaction ids to the list of pages they freed
 * table tree: name -> table definition mapping of table names to their definitions
 * data tree(s) (per one table): key -> value mapping for table
@@ -91,7 +91,7 @@ inspired by the PNG magic number.
 * first bit: `primary_bit` flag which indicates whether transaction slot 0 or transaction slot 1 contains the latest commit.
 * second bit: `recovery_required` flag, if set then the recovery process must be run when opening the database. This can be
   a full repair, in which the region tracker and regional allocator states -- described below -- are reconstructed by walking
-  the btree from all active roots, or a quick-repair, in which the state is simply loaded from the allocator state table.
+  the B+tree from all active roots, or a quick-repair, in which the state is simply loaded from the allocator state table.
 * third bit: `two_phase_commit` flag, which indicates whether the transaction in the primary slot was written using 2-phase
   commit. If so, the primary slot is guaranteed to be valid, and repair won't look at the secondary slot. This flag is always
   updated atomically along with the primary bit.
@@ -185,7 +185,7 @@ the leaf layer.
 Each region consists of a header containing metadata -- primarily the allocation state of the region's pages -- and a
 data section containing pages. Pages have a base size, which defaults to the OS page size, and are
 variably sized in higher orders in power of 2 multiples of the base size. The format of pages is
-described in the [following section](#b-tree-pages)
+described in the [following section](#btree-pages)
 
 ```
 <-------------------------------------------- 8 bytes ------------------------------------------->
@@ -227,9 +227,11 @@ only after a clean shutdown; the latter is usable even after a crash.
 ==================================================================================================
 ```
 
-## B-tree pages
+## B+tree pages
 
-Allocated pages may be of two types: b-tree branch pages, or b-tree leaf pages. The format of each is described below:
+redb stores data in a B+tree, in which only leaf pages contain key-value pairs; branch pages
+contain only routing keys and pointers to their children. Allocated pages may therefore be of two
+types: B+tree branch pages, or B+tree leaf pages. The format of each is described below:
 
 ### Branch page:
 * 1 byte: type
@@ -345,8 +347,8 @@ occur during the fsync:
 ## 2-phase durable commits (2PC)
 A 2-phase commit strategy can also be used which mitigates a theoretical attack when handling malicious data
 and when the attacker has high degree of control over the redb process (see below).
-First, data is written to a new copy of the btree, second an `fsync` is performed,
-finally the byte controlling which copy of the btree is the primary is flipped and a second `fsync` is performed.
+First, data is written to a new copy of the B+tree, second an `fsync` is performed,
+finally the byte controlling which copy of the B+tree is the primary is flipped and a second `fsync` is performed.
 
 ### Security of 1PC+C
 Given that the 1PC+C commit strategy relies on a non-cyptographic checksum (XXH3) there is, at least in theory, a way to attack it.
@@ -371,13 +373,13 @@ To do this they need to:
 
 With complete control over the workload, or read access to the database file (3) is possible, since XXH3 is not collision resistant.
 However, it requires the attacker to have knowledge of the database contents, because the input to the checksum includes
-many other values (all the other keys in the b-tree root, along with their child node numbers)
+many other values (all the other keys in the B+tree root, along with their child node numbers)
 
 # MVCC (multi-version concurrency control)
 
 redb uses MVCC to isolate transactions from one another. This is implemented on top of the copy-on-write
-b-tree data structure which underlies most of redb. Read transactions make a private copy of the root
-of the b-tree, and are registered in the database so that no pages that root references are freed.
+B+tree data structure which underlies most of redb. Read transactions make a private copy of the root
+of the B+tree, and are registered in the database so that no pages that root references are freed.
 When a write transaction frees a page it is pushed into a queue, and only reused after all read transactions
 that could reference it have completed.
 
@@ -386,7 +388,7 @@ that could reference it have completed.
 Savepoints and rollback are implemented on the same MVCC structures. When a savepoint is created it
 registers as a read transaction to preserve a snapshot of the database. Additionally, it saves a copy
 of the page allocator state -- this is about 64kB per 1GB of values (assuming 4kb pages). To rollback
-the database to a savepoint the root of the b-tree is restored, and the snapshot of the page allocator
+the database to a savepoint the root of the B+tree is restored, and the snapshot of the page allocator
 is diff'ed against the currently allocated pages to determine which have been allocated since the savepoint
 was created. These pages are then queued to be freed, completing the rollback.
 
@@ -426,7 +428,7 @@ The following invariants must be maintained
 #### Modification during write transactions
 Write transactions uphold the required invariants through a very simple mechanism. All modifications
 to commited pages are performed copy-on-write. That is a new page is allocated, modifications are
-made in the new page, and a new b-tree is constructed to reference the new page. Dirty pages are
+made in the new page, and a new B+tree is constructed to reference the new page. Dirty pages are
 allowed to be modified in-place -- usually accomplished by freeing them.
 The normal tables, system tables, and also the freed tree use this approach.
 When a transaction aborts, all pages it allocated are immediately freed.
@@ -472,7 +474,7 @@ b) it is not referenced, in which case it is in the pending free state and is co
 Initial file format
 
 ## v2
-Added a length field to both btrees and tables. This allows for constant time `len()`
+Added a length field to both B+trees and tables. This allows for constant time `len()`
 
 ## v3
 * Removed the freed tree. Instead, these pages are stored in two system tables, one for the data tree
