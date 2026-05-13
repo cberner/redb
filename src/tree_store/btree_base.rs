@@ -682,15 +682,30 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         accessor: &'a LeafAccessor<'_>,
         except: Option<usize>,
     ) {
+        if let Some(except) = except {
+            self.push_all_except_indexes(accessor, &[except]);
+        } else {
+            self.push_all_except_indexes(accessor, &[]);
+        }
+    }
+
+    // `except` must contain valid leaf indexes in strictly ascending order.
+    pub(super) fn push_all_except_indexes(
+        &mut self,
+        accessor: &'a LeafAccessor<'_>,
+        except: &[usize],
+    ) {
+        debug_assert!(except.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut next_except = 0;
         for i in 0..accessor.num_pairs() {
-            if let Some(except) = except
-                && except == i
-            {
+            if next_except < except.len() && except[next_except] == i {
+                next_except += 1;
                 continue;
             }
             let entry = accessor.entry(i).unwrap();
             self.push(entry.key(), entry.value());
         }
+        debug_assert_eq!(next_except, except.len());
     }
 
     pub(super) fn should_split(&self) -> bool {
@@ -957,6 +972,16 @@ pub(super) struct LeafMutator<'b> {
     page: &'b mut [u8],
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
+}
+
+struct RemovedLeafRanges<'a> {
+    indices: &'a [usize],
+    key_ranges: &'a [Range<usize>],
+    value_ranges: &'a [Range<usize>],
+    key_bytes: usize,
+    value_bytes: usize,
+    old_total_len: usize,
+    num_pairs: usize,
 }
 
 impl<'b> LeafMutator<'b> {
@@ -1238,6 +1263,175 @@ impl<'b> LeafMutator<'b> {
         let start = value_end;
         let end = last_value_end;
         self.page.copy_within(start..end, dest);
+    }
+
+    // `indices` must contain valid leaf indices in strictly ascending order.
+    pub(super) fn remove_indices(&mut self, indices: &[usize]) {
+        let (key_ranges, value_ranges, key_bytes, value_bytes, old_total_len, num_pairs) = {
+            let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+            assert!(!indices.is_empty());
+            assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(*indices.last().unwrap() < accessor.num_pairs());
+            assert!(indices.len() < accessor.num_pairs());
+
+            let mut key_ranges = Vec::with_capacity(indices.len());
+            let mut value_ranges = Vec::with_capacity(indices.len());
+            let mut key_bytes = 0;
+            let mut value_bytes = 0;
+            for &index in indices {
+                let (key, value) = accessor.entry_ranges(index).unwrap();
+                key_bytes += key.len();
+                value_bytes += value.len();
+                key_ranges.push(key);
+                value_ranges.push(value);
+            }
+
+            (
+                key_ranges,
+                value_ranges,
+                key_bytes,
+                value_bytes,
+                accessor.total_length(),
+                accessor.num_pairs(),
+            )
+        };
+
+        self.remove_index_ranges(RemovedLeafRanges {
+            indices,
+            key_ranges: &key_ranges,
+            value_ranges: &value_ranges,
+            key_bytes,
+            value_bytes,
+            old_total_len,
+            num_pairs,
+        });
+    }
+
+    fn remove_index_ranges(&mut self, removed_ranges: RemovedLeafRanges<'_>) {
+        let indices = removed_ranges.indices;
+        debug_assert_eq!(indices.len(), removed_ranges.key_ranges.len());
+        debug_assert_eq!(indices.len(), removed_ranges.value_ranges.len());
+        debug_assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+        debug_assert!(*indices.last().unwrap() < removed_ranges.num_pairs);
+        debug_assert!(indices.len() < removed_ranges.num_pairs);
+
+        let key_ptr_size = if self.fixed_key_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        let value_ptr_size = if self.fixed_value_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        let new_num_pairs = removed_ranges.num_pairs - indices.len();
+        let removed_pointer_bytes = (key_ptr_size + value_ptr_size) * indices.len();
+
+        self.update_removed_indices(removed_pointer_bytes, &removed_ranges);
+
+        let mut source = 4;
+        let mut dest = 4;
+        if key_ptr_size != 0 {
+            for &index in indices {
+                let start = 4 + key_ptr_size * index;
+                Self::compact_before_hole(
+                    self.page,
+                    &mut source,
+                    &mut dest,
+                    start..start + key_ptr_size,
+                );
+            }
+        }
+        if value_ptr_size != 0 {
+            let value_pointers_start = 4 + key_ptr_size * removed_ranges.num_pairs;
+            for &index in indices {
+                let start = value_pointers_start + value_ptr_size * index;
+                Self::compact_before_hole(
+                    self.page,
+                    &mut source,
+                    &mut dest,
+                    start..start + value_ptr_size,
+                );
+            }
+        }
+        for range in removed_ranges.key_ranges {
+            Self::compact_before_hole(self.page, &mut source, &mut dest, range.clone());
+        }
+        for range in removed_ranges.value_ranges {
+            Self::compact_before_hole(self.page, &mut source, &mut dest, range.clone());
+        }
+        Self::compact_tail(
+            self.page,
+            &mut source,
+            &mut dest,
+            removed_ranges.old_total_len,
+        );
+        debug_assert_eq!(
+            dest,
+            removed_ranges.old_total_len
+                - removed_pointer_bytes
+                - removed_ranges.key_bytes
+                - removed_ranges.value_bytes
+        );
+        self.page[2..4].copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
+    }
+
+    fn update_removed_indices(
+        &mut self,
+        removed_pointer_bytes: usize,
+        removed_ranges: &RemovedLeafRanges<'_>,
+    ) {
+        let mut removed = 0;
+        let mut removed_key_bytes_before = 0;
+        let mut removed_value_bytes_before = 0;
+        for i in 0..removed_ranges.num_pairs {
+            if removed < removed_ranges.indices.len() && removed_ranges.indices[removed] == i {
+                removed_key_bytes_before += removed_ranges.key_ranges[removed].len();
+                removed_value_bytes_before += removed_ranges.value_ranges[removed].len();
+                removed += 1;
+                continue;
+            }
+
+            if self.fixed_key_size.is_none() {
+                let delta =
+                    -isize::try_from(removed_pointer_bytes + removed_key_bytes_before).unwrap();
+                self.update_key_end(i, delta);
+            }
+            if self.fixed_value_size.is_none() {
+                let delta = -isize::try_from(
+                    removed_pointer_bytes + removed_ranges.key_bytes + removed_value_bytes_before,
+                )
+                .unwrap();
+                self.update_value_end(i, delta);
+            }
+        }
+        debug_assert_eq!(removed, removed_ranges.indices.len());
+    }
+
+    fn compact_before_hole(
+        page: &mut [u8],
+        source: &mut usize,
+        dest: &mut usize,
+        hole: Range<usize>,
+    ) {
+        debug_assert!(*source <= hole.start);
+        if *source < hole.start {
+            if *source != *dest {
+                page.copy_within(*source..hole.start, *dest);
+            }
+            *dest += hole.start - *source;
+        }
+        *source = hole.end;
+    }
+
+    fn compact_tail(page: &mut [u8], source: &mut usize, dest: &mut usize, end: usize) {
+        if *source < end {
+            if *source != *dest {
+                page.copy_within(*source..end, *dest);
+            }
+            *dest += end - *source;
+        }
     }
 
     fn update_key_end(&mut self, i: usize, delta: isize) {

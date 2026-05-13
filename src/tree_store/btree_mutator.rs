@@ -24,7 +24,7 @@ enum DeletionResult {
     // A leaf with fewer entries than desired
     PartialLeaf {
         page: Arc<[u8]>,
-        deleted_pair: usize,
+        deleted_pairs: DeletedPairs,
     },
     // A branch page subtree with fewer children than desired.
     // Held in unbuilt form: the caller will merge it with a sibling and build a new page,
@@ -38,6 +38,33 @@ enum DeletionResult {
     // Indicates that the branch node was deleted, and includes the only remaining child.
     // Checksum is retained for the same reason as `PartialBranch`.
     DeletedBranch(PageNumber, Checksum),
+}
+
+#[derive(Debug)]
+enum DeletedPairs {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl DeletedPairs {
+    fn len(&self) -> usize {
+        match self {
+            Self::One(_) => 1,
+            Self::Many(indexes) => indexes.len(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LeafDeleteDisposition {
+    Delete,
+    Merge,
+    Rebuild,
+}
+
+struct LeafDeletePlan {
+    retained_pairs: usize,
+    disposition: LeafDeleteDisposition,
 }
 
 struct InsertionResult<'a, V: Value + 'static> {
@@ -118,18 +145,24 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let new_root = match deletion_result {
             Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
             DeletedLeaf => None,
-            PartialLeaf { page, deleted_pair } => {
+            PartialLeaf {
+                page,
+                deleted_pairs,
+            } => {
                 let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
                 let mut builder = LeafBuilder::new(
                     &self.page_allocator,
                     &self.allocated,
-                    accessor.num_pairs() - 1,
+                    accessor.num_pairs() - deleted_pairs.len(),
                     K::fixed_width(),
                     V::fixed_width(),
                 );
-                builder.push_all_except(&accessor, Some(deleted_pair));
+                Self::push_all_except_deleted(&mut builder, &accessor, &deleted_pairs);
                 let page = builder.build()?;
-                assert_eq!(new_length, accessor.num_pairs() as u64 - 1);
+                assert_eq!(
+                    new_length,
+                    accessor.num_pairs() as u64 - deleted_pairs.len() as u64
+                );
                 Some(BtreeHeader::new(
                     page.get_page_number(),
                     DEFERRED,
@@ -202,6 +235,23 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             key.expect("deleted key must be returned when requested"),
             value,
         ))
+    }
+
+    pub(super) fn delete_leaf_entries(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        indexes: &[usize],
+    ) -> Result {
+        if indexes.is_empty() {
+            return Ok(());
+        }
+        let length = self.root.expect("delete requires a root").length;
+        let mut result = self.delete_leaf_indexes(leaf, indexes)?;
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+        self.finish_deletion(result, length - indexes.len() as u64)
     }
 
     #[allow(clippy::type_complexity)]
@@ -667,24 +717,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     )> {
         let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
         assert!(position < accessor.num_pairs());
-        let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs())
-            - accessor.length_of_pairs(position, position + 1);
-        let new_required_bytes = RawLeafBuilder::required_bytes(
-            accessor.num_pairs() - 1,
-            new_kv_bytes,
-            K::fixed_width(),
-            V::fixed_width(),
-        );
+        let deleted_bytes = accessor.length_of_pairs(position, position + 1);
+        let plan = self.plan_leaf_delete(&accessor, 1, deleted_bytes);
         let uncommitted = self.page_allocator.uncommitted(page.get_page_number());
 
         // Fast-path for dirty pages: perform in-place removal without allocating a new page.
         // The threshold matches the merge threshold (page_size/3) so that we use in-place
         // removal for all cases where the page won't need merging with a sibling.
-        if allow_in_place
-            && uncommitted
-            && new_required_bytes >= self.page_allocator.get_page_size() / 3
-            && accessor.num_pairs() > 1
-        {
+        if allow_in_place && uncommitted && plan.disposition == LeafDeleteDisposition::Rebuild {
             let (start, end) = accessor.value_range(position).unwrap();
             let key_guard = if want_key {
                 // The returned value guard owns the mutable page and removes the entry on drop,
@@ -709,32 +749,17 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok((Subtree(page_number), key_guard, guard));
         }
 
-        let result = if accessor.num_pairs() == 1 {
-            DeletedLeaf
-        } else if new_required_bytes < self.page_allocator.get_page_size() / 3 {
-            // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
-            // full pages, so we use 33% instead of 50% to avoid oscillating
-            PartialLeaf {
+        let result = match plan.disposition {
+            LeafDeleteDisposition::Delete => DeletedLeaf,
+            LeafDeleteDisposition::Merge => PartialLeaf {
                 page: page.to_arc(),
-                deleted_pair: position,
-            }
-        } else {
-            let mut builder = LeafBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
-                accessor.num_pairs() - 1,
-                K::fixed_width(),
-                V::fixed_width(),
-            );
-            for i in 0..accessor.num_pairs() {
-                if i == position {
-                    continue;
-                }
-                let entry = accessor.entry(i).unwrap();
-                builder.push(entry.key(), entry.value());
-            }
-            let new_page = builder.build()?;
-            Subtree(new_page.get_page_number())
+                deleted_pairs: DeletedPairs::One(position),
+            },
+            LeafDeleteDisposition::Rebuild => Subtree(self.build_leaf_except_indexes(
+                &accessor,
+                plan.retained_pairs,
+                &[position],
+            )?),
         };
         let (key_range, value_range) = accessor.entry_ranges(position).unwrap();
         let (key_guard, value_guard) = if uncommitted {
@@ -772,6 +797,107 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             self.delete_leaf_at_position(page, position, false, true)?;
         assert!(key_guard.is_none());
         Ok((result, Some(value_guard)))
+    }
+
+    fn delete_leaf_indexes(&mut self, page: PageImpl, indexes: &[usize]) -> Result<DeletionResult> {
+        debug_assert!(!indexes.is_empty());
+        debug_assert!(indexes.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        assert!(*indexes.last().unwrap() < accessor.num_pairs());
+
+        let deleted_bytes: usize = indexes
+            .iter()
+            .map(|&index| accessor.length_of_pairs(index, index + 1))
+            .sum();
+        let plan = self.plan_leaf_delete(&accessor, indexes.len(), deleted_bytes);
+        let page_number = page.get_page_number();
+
+        if self.page_allocator.uncommitted(page_number)
+            && plan.disposition == LeafDeleteDisposition::Rebuild
+        {
+            drop(page);
+            let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
+            let mut mutator =
+                LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+            mutator.remove_indices(indexes);
+            return Ok(Subtree(page_number));
+        }
+
+        let result = match plan.disposition {
+            LeafDeleteDisposition::Delete => DeletedLeaf,
+            LeafDeleteDisposition::Merge => PartialLeaf {
+                page: page.to_arc(),
+                deleted_pairs: DeletedPairs::Many(indexes.to_vec()),
+            },
+            LeafDeleteDisposition::Rebuild => {
+                Subtree(self.build_leaf_except_indexes(&accessor, plan.retained_pairs, indexes)?)
+            }
+        };
+
+        drop(page);
+        self.conditional_free(page_number);
+        Ok(result)
+    }
+
+    fn plan_leaf_delete(
+        &self,
+        accessor: &LeafAccessor<'_>,
+        deleted_pairs: usize,
+        deleted_bytes: usize,
+    ) -> LeafDeletePlan {
+        let retained_pairs = accessor.num_pairs() - deleted_pairs;
+        let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs()) - deleted_bytes;
+        let new_required_bytes = RawLeafBuilder::required_bytes(
+            retained_pairs,
+            new_kv_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+
+        // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
+        // full pages, so 33% avoids oscillating.
+        let disposition = if retained_pairs == 0 {
+            LeafDeleteDisposition::Delete
+        } else if new_required_bytes < self.page_allocator.get_page_size() / 3 {
+            LeafDeleteDisposition::Merge
+        } else {
+            LeafDeleteDisposition::Rebuild
+        };
+
+        LeafDeletePlan {
+            retained_pairs,
+            disposition,
+        }
+    }
+
+    fn build_leaf_except_indexes(
+        &mut self,
+        accessor: &LeafAccessor<'_>,
+        retained_pairs: usize,
+        indexes: &[usize],
+    ) -> Result<PageNumber> {
+        let mut builder = LeafBuilder::new(
+            &self.page_allocator,
+            &self.allocated,
+            retained_pairs,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        builder.push_all_except_indexes(accessor, indexes);
+        let new_page = builder.build()?;
+        Ok(new_page.get_page_number())
+    }
+
+    fn push_all_except_deleted<'leaf>(
+        builder: &mut LeafBuilder<'leaf, '_>,
+        accessor: &'leaf LeafAccessor<'_>,
+        deleted_pairs: &DeletedPairs,
+    ) {
+        match deleted_pairs {
+            DeletedPairs::One(index) => builder.push_all_except(accessor, Some(*index)),
+            DeletedPairs::Many(indexes) => builder.push_all_except_indexes(accessor, indexes),
+        }
     }
 
     fn finalize_branch_builder(
@@ -896,11 +1022,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             PartialLeaf {
                 page: partial_child_page,
-                deleted_pair,
+                deleted_pairs,
             } => {
                 let partial_child_accessor =
                     LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
                 assert!(partial_child_accessor.num_pairs() > 1);
+                let retained_pairs = partial_child_accessor.num_pairs() - deleted_pairs.len();
 
                 let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
                 assert!(merge_with < accessor.count_children());
@@ -917,11 +1044,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let mut child_builder = LeafBuilder::new(
                         &self.page_allocator,
                         &self.allocated,
-                        partial_child_accessor.num_pairs() - 1,
+                        retained_pairs,
                         K::fixed_width(),
                         V::fixed_width(),
                     );
-                    child_builder.push_all_except(&partial_child_accessor, Some(deleted_pair));
+                    Self::push_all_except_deleted(
+                        &mut child_builder,
+                        &partial_child_accessor,
+                        &deleted_pairs,
+                    );
                     let new_page = child_builder.build()?;
                     builder.push_all(&accessor);
                     builder.replace_child(child_index, new_page.get_page_number(), DEFERRED);
@@ -948,19 +1079,24 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         let mut child_builder = LeafBuilder::new(
                             &self.page_allocator,
                             &self.allocated,
-                            partial_child_accessor.num_pairs() - 1
-                                + merge_with_accessor.num_pairs(),
+                            retained_pairs + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
                             V::fixed_width(),
                         );
                         if child_index < merge_with {
-                            child_builder
-                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
+                            Self::push_all_except_deleted(
+                                &mut child_builder,
+                                &partial_child_accessor,
+                                &deleted_pairs,
+                            );
                         }
                         child_builder.push_all_except(&merge_with_accessor, None);
                         if child_index > merge_with {
-                            child_builder
-                                .push_all_except(&partial_child_accessor, Some(deleted_pair));
+                            Self::push_all_except_deleted(
+                                &mut child_builder,
+                                &partial_child_accessor,
+                                &deleted_pairs,
+                            );
                         }
                         if child_builder.should_split() {
                             let (new_page1, split_key, new_page2) = child_builder.build_split()?;

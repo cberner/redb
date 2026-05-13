@@ -410,6 +410,7 @@ pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
     allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
     path: Vec<Branch>,
     leaf: Option<Leaf>,
+    removed_indexes: Vec<usize>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -429,6 +430,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             allocated,
             path: vec![],
             leaf: None,
+            removed_indexes: vec![],
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
@@ -436,6 +438,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     pub(super) fn seek_to(&mut self, position: CursorMutPosition) -> Result {
+        assert!(self.removed_indexes.is_empty());
         self.path.clear();
         self.leaf = None;
         let Some(header) = *self.root else {
@@ -455,6 +458,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     pub(super) fn seek_to_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        assert!(self.removed_indexes.is_empty());
         self.path.clear();
         self.leaf = None;
         let Some(header) = *self.root else {
@@ -473,12 +477,38 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     fn prepare_next(&mut self) -> Result<bool> {
+        loop {
+            let Some(leaf) = self.leaf.as_ref() else {
+                return Ok(false);
+            };
+            if leaf.position < leaf.len {
+                return Ok(true);
+            }
+            if self.removed_indexes.is_empty() {
+                if !self.advance_to_next_leaf()? {
+                    return Ok(false);
+                }
+            } else {
+                self.flush_removed_entries(false)?;
+            }
+        }
+    }
+
+    fn advance_to_next_leaf(&mut self) -> Result<bool> {
         let page_allocator = self.page_allocator;
         let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
-        prepare_leaf::<K, V, _>(&mut self.leaf, &mut self.path, true, &mut get_page)
+        if let Some(next_leaf) =
+            move_to_adjacent_leaf::<K, V, _>(&mut self.path, true, &mut get_page)?
+        {
+            self.leaf = Some(next_leaf);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn prepare_prev(&mut self) -> Result<bool> {
+        assert!(self.removed_indexes.is_empty());
         let page_allocator = self.page_allocator;
         let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
         prepare_leaf::<K, V, _>(&mut self.leaf, &mut self.path, false, &mut get_page)
@@ -528,6 +558,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     pub(super) fn remove_next(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.removed_indexes.is_empty());
         if !self.prepare_next()? {
             return Ok(None);
         }
@@ -542,6 +573,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     pub(super) fn remove_next_detached(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.removed_indexes.is_empty());
         if !self.prepare_next()? {
             return Ok(None);
         }
@@ -554,12 +586,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         if !self.prepare_next()? {
             return Ok(false);
         }
-        let leaf = self.leaf.take().expect("cursor must be positioned");
-        let position = leaf.position;
-        let key = key_data::<K, V>(&leaf, position);
-        drop(self.remove_leaf_entry(leaf.page, position)?);
-        // TODO: advance from the edited leaf instead of reseeking from the root.
-        self.seek_to_bound(Bound::Excluded(&key))?;
+        let leaf = self.leaf.as_mut().expect("cursor must be positioned");
+        self.removed_indexes.push(leaf.position);
+        leaf.position += 1;
         Ok(true)
     }
 
@@ -569,6 +598,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     pub(super) fn remove_prev(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.removed_indexes.is_empty());
         if !self.prepare_prev()? {
             return Ok(None);
         }
@@ -583,12 +613,49 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     pub(super) fn remove_prev_detached(
         &mut self,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.removed_indexes.is_empty());
         if !self.prepare_prev()? {
             return Ok(None);
         }
         let leaf = self.leaf.take().expect("cursor must be positioned");
         let position = leaf.position - 1;
         self.remove_leaf_entry_detached(leaf.page, position)
+    }
+
+    pub(super) fn finish_pending_removals(&mut self) -> Result {
+        self.flush_removed_entries(true)
+    }
+
+    fn flush_removed_entries(&mut self, close: bool) -> Result {
+        if self.removed_indexes.is_empty() {
+            return Ok(());
+        }
+
+        let leaf = self.leaf.take().expect("cursor must be positioned");
+        // If the cursor is closing, no later operation needs a valid position.
+        // Otherwise the tree mutation invalidates the current path, so reseek
+        // to the first entry after the original leaf.
+        let next_bound = (!close).then(|| key_data::<K, V>(&leaf, leaf.len - 1));
+        let path = std::mem::take(&mut self.path)
+            .into_iter()
+            .map(Branch::into_parts)
+            .collect();
+        let mut removed_indexes = std::mem::take(&mut self.removed_indexes);
+        let mut helper: MutateHelper<'_, '_, K, V> = MutateHelper::new(
+            &mut *self.root,
+            (*self.page_allocator).clone(),
+            &mut *self.freed,
+            Arc::clone(self.allocated),
+        );
+        helper.delete_leaf_entries(leaf.page, path, &removed_indexes)?;
+        removed_indexes.clear();
+        self.removed_indexes = removed_indexes;
+
+        if let Some(next_bound) = next_bound {
+            // TODO: preserve enough cursor state to advance without reseeking from the root.
+            self.seek_to_bound(Bound::Excluded(&next_bound))?;
+        }
+        Ok(())
     }
 
     fn remove_leaf_entry(
@@ -613,6 +680,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         position: usize,
         allow_in_place: bool,
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.removed_indexes.is_empty());
         let path = std::mem::take(&mut self.path)
             .into_iter()
             .map(Branch::into_parts)
