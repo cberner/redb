@@ -170,13 +170,8 @@ pub(super) fn verify_tree_and_subtree_checksums(
             return Ok(false);
         }
 
-        let table_pages_iter = AllPageNumbersBtreeIter::new(
-            header.root,
-            key_size,
-            DynamicCollection::<()>::fixed_width_with(value_size),
-            mem.clone(),
-            hint,
-        )?;
+        let table_pages_iter =
+            AllPageNumbersBtreeIter::new(header.root, key_size, mem.clone(), hint);
         for table_page in table_pages_iter {
             let page = mem.get_page(table_page?, hint)?;
             let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
