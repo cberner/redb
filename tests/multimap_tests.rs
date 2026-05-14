@@ -477,7 +477,8 @@ fn multimap_value_next_back_subtree() {
 #[test]
 fn multimap_remove_subtree_backed_key() {
     // Exercises MultimapTable::remove() when the values for a key are stored in a B-tree
-    // subtree (SubtreeV2), and covers the missing-key and value-not-in-inline cases.
+    // subtree (SubtreeV2), covers the missing-key and value-not-in-inline cases, and the
+    // path where enough removals shrink the subtree back to inline storage.
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
@@ -519,4 +520,26 @@ fn multimap_remove_subtree_backed_key() {
     let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 1001);
     assert_eq!(table.get(&0u64).unwrap().len(), 999);
+
+    // Remove almost all remaining values for key 0. The subtree shrinks until its single
+    // remaining leaf is smaller than half a page, at which point the collection is rewritten
+    // back to inline storage.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        for v in 0..999u64 {
+            if v != 500 {
+                table.remove(&0u64, &v).unwrap();
+            }
+        }
+        assert_eq!(table.get(&0u64).unwrap().len(), 1);
+        assert_eq!(table.len().unwrap(), 3);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let mut iter = table.get(&0u64).unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().value(), 999);
+    assert!(iter.next().is_none());
 }
