@@ -1837,7 +1837,11 @@ fn multimap_stats() {
         let mut txn = db.begin_write().unwrap();
         txn.set_durability(Durability::None).unwrap();
         let mut table = txn.open_multimap_table(table_def).unwrap();
+        if i == 0 {
+            assert_eq!(table.stats().unwrap().leaf_pages(), 0);
+        }
         table.insert(0, i).unwrap();
+        assert!(table.stats().unwrap().leaf_pages() > 0);
         drop(table);
         txn.commit().unwrap();
 
@@ -1846,6 +1850,20 @@ fn multimap_stats() {
         assert!(bytes > last_size, "{i}");
         last_size = bytes;
     }
+
+    let read_txn = db.begin_read().unwrap();
+    let typed_stats = read_txn
+        .open_multimap_table(table_def)
+        .unwrap()
+        .stats()
+        .unwrap();
+    let untyped_stats = read_txn
+        .open_untyped_multimap_table(table_def)
+        .unwrap()
+        .stats()
+        .unwrap();
+    assert_eq!(typed_stats.leaf_pages(), untyped_stats.leaf_pages());
+    assert_eq!(typed_stats.stored_bytes(), untyped_stats.stored_bytes());
 }
 
 #[test]
