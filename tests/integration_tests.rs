@@ -7,7 +7,9 @@ use redb::{
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value, WriteTransaction,
 };
-use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
+use redb::{
+    CommitError, DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError,
+};
 use std::borrow::Borrow;
 use std::fs;
 use std::io::{ErrorKind, Write};
@@ -3484,6 +3486,111 @@ fn multimap_value_next_back_does_not_update_len() {
     }
     assert!(iter.is_empty());
     assert!(iter.next_back().is_none());
+}
+
+#[test]
+fn error_display() {
+    // Verify that Display impls for all public error types produce non-empty, meaningful
+    // messages. Errors are commonly logged or surfaced to end-users, so every Display
+    // arm must be exercised to catch formatting regressions.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // StorageError
+    let e = StorageError::ValueTooLarge(5000);
+    assert!(e.to_string().contains("5000"), "{e}");
+    assert!(!StorageError::PreviousIo.to_string().is_empty());
+    assert!(!StorageError::DatabaseClosed.to_string().is_empty());
+
+    // TableError via real operations
+    const TABLE: TableDefinition<u32, u32> = TableDefinition::new("t");
+    const WRONG: TableDefinition<u64, u64> = TableDefinition::new("t");
+    const MM: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("mm");
+
+    // TableDoesNotExist
+    let e = db.begin_read().unwrap().open_table(TABLE).unwrap_err();
+    assert!(e.to_string().contains("t"), "{e}");
+
+    let txn = db.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap();
+    txn.open_multimap_table(MM).unwrap();
+    txn.commit().unwrap();
+
+    // TableAlreadyOpen
+    let txn = db.begin_write().unwrap();
+    {
+        let _tbl = txn.open_table(TABLE).unwrap();
+        let e = txn.open_table(TABLE).unwrap_err();
+        assert!(e.to_string().contains("t"), "{e}");
+    }
+    txn.abort().unwrap();
+
+    // TableTypeMismatch
+    let txn = db.begin_write().unwrap();
+    let e = txn.open_table(WRONG).unwrap_err();
+    assert!(e.to_string().contains("t"), "{e}");
+    txn.abort().unwrap();
+
+    // TableIsMultimap / TableIsNotMultimap
+    let txn = db.begin_write().unwrap();
+    let e = txn
+        .open_table(TableDefinition::<u32, u32>::new("mm"))
+        .unwrap_err();
+    assert!(e.to_string().contains("mm"), "{e}");
+    let e = txn
+        .open_multimap_table(MultimapTableDefinition::<u32, u32>::new("t"))
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("t"), "{e}");
+    txn.abort().unwrap();
+
+    // DatabaseError
+    let e = Database::open(tmpfile.path()).unwrap_err();
+    assert!(!e.to_string().is_empty(), "{e}");
+    assert!(!DatabaseError::UpgradeRequired(0).to_string().is_empty());
+    assert!(!DatabaseError::RepairAborted.to_string().is_empty());
+    assert!(!DatabaseError::TransactionInProgress.to_string().is_empty());
+
+    // SavepointError
+    assert!(!SavepointError::InvalidSavepoint.to_string().is_empty());
+    assert!(
+        !SavepointError::ImmediateDurabilityRequired
+            .to_string()
+            .is_empty()
+    );
+
+    // CompactionError
+    assert!(
+        !CompactionError::PersistentSavepointExists
+            .to_string()
+            .is_empty()
+    );
+    assert!(
+        !CompactionError::EphemeralSavepointExists
+            .to_string()
+            .is_empty()
+    );
+    assert!(
+        !CompactionError::TransactionInProgress
+            .to_string()
+            .is_empty()
+    );
+
+    // SetDurabilityError
+    assert!(
+        !SetDurabilityError::PersistentSavepointModified
+            .to_string()
+            .is_empty()
+    );
+
+    // CommitError
+    assert!(!CommitError::TransactionPoisoned.to_string().is_empty());
+
+    // TransactionError::ReadTransactionStillInUse
+    let txn = db.begin_read().unwrap();
+    let _tbl = txn.open_table(TABLE).unwrap();
+    let e = txn.close().unwrap_err();
+    assert!(!e.to_string().is_empty(), "{e}");
 }
 
 #[test]
