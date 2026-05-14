@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
-use crate::tree_store::btree_cursor::{CursorMut, CursorMutPosition};
+use crate::tree_store::btree_cursor::{CursorMut, Position};
 use crate::tree_store::btree_iters::range_is_empty;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
@@ -502,7 +502,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             freed_pages.as_mut(),
             &self.allocated_pages,
         );
-        cursor.seek_to(CursorMutPosition::Start)?;
+        cursor.seek_to(Position::Start)?;
         cursor.remove_next()
     }
 
@@ -515,7 +515,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             freed_pages.as_mut(),
             &self.allocated_pages,
         );
-        cursor.seek_to(CursorMutPosition::End)?;
+        cursor.seek_to(Position::End)?;
         cursor.remove_prev()
     }
 
@@ -747,7 +747,11 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             freed,
             &self.allocated_pages,
         );
-        cursor.seek_to_bound(lower_bound)?;
+        match lower_bound {
+            Bound::Included(key) => cursor.seek_to(Position::Before(key))?,
+            Bound::Excluded(key) => cursor.seek_to(Position::After(key))?,
+            Bound::Unbounded => cursor.seek_to(Position::Start)?,
+        }
         while let Some(entry) = cursor.peek_next()? {
             if !Self::before_upper_bound(upper_bound, entry.key_bytes()) {
                 break;

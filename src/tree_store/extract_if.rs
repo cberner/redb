@@ -1,4 +1,4 @@
-use crate::tree_store::btree_cursor::{CursorMut, CursorMutPosition, EntryRef};
+use crate::tree_store::btree_cursor::{CursorMut, EntryRef, Position};
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
@@ -32,11 +32,7 @@ where
         &mut self,
         cursor: &mut CursorMut<'a, '_, K, V>,
     ) -> Result<Option<ExtractItem<'a, K, V>>> {
-        if matches!(self.front_bound, Unbounded) {
-            cursor.seek_to(CursorMutPosition::Start)?;
-        } else {
-            cursor.seek_to_bound(bound_as_ref(self.front_bound))?;
-        }
+        cursor.seek_to(front_seek_position(self.front_bound))?;
         while let Some(entry) = cursor.peek_next()? {
             if !self.before_back_bound(entry.key_bytes()) {
                 return Ok(None);
@@ -60,11 +56,7 @@ where
         &mut self,
         cursor: &mut CursorMut<'a, '_, K, V>,
     ) -> Result<Option<ExtractItem<'a, K, V>>> {
-        if matches!(self.back_bound, Unbounded) {
-            cursor.seek_to(CursorMutPosition::End)?;
-        } else {
-            cursor.seek_to_bound(back_seek_bound(self.back_bound))?;
-        }
+        cursor.seek_to(back_seek_position(self.back_bound))?;
         while let Some(entry) = cursor.peek_prev()? {
             if !self.after_front_bound(entry.key_bytes()) {
                 return Ok(None);
@@ -256,11 +248,19 @@ fn bound_as_ref(bound: &Bound<Vec<u8>>) -> Bound<&[u8]> {
     bound.as_ref().map(Vec::as_slice)
 }
 
-fn back_seek_bound(bound: &Bound<Vec<u8>>) -> Bound<&[u8]> {
+fn front_seek_position(bound: &Bound<Vec<u8>>) -> Position<'_> {
     match bound {
-        Included(bound) => Excluded(bound.as_slice()),
-        Excluded(bound) => Included(bound.as_slice()),
-        Unbounded => Unbounded,
+        Included(bound) => Position::Before(bound.as_slice()),
+        Excluded(bound) => Position::After(bound.as_slice()),
+        Unbounded => Position::Start,
+    }
+}
+
+fn back_seek_position(bound: &Bound<Vec<u8>>) -> Position<'_> {
+    match bound {
+        Included(bound) => Position::After(bound.as_slice()),
+        Excluded(bound) => Position::Before(bound.as_slice()),
+        Unbounded => Position::End,
     }
 }
 
