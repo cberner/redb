@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::tree_store::btree_cursor::Cursor;
+use crate::tree_store::btree_cursor::{Cursor, Position};
 use crate::tree_store::btree_iters::{EntryGuard, range_is_empty};
 use crate::tree_store::page_store::PageHint;
 use crate::tree_store::{PageNumber, PageResolver};
@@ -105,13 +105,15 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
         let root = self.root.expect("range cursor must have a root");
         let mut cursor = Cursor::new(root, self.manager.clone(), self.hint);
         match side {
-            Side::Front => {
-                cursor.seek_to(self.lower_bound.as_ref().map(Vec::as_slice))?;
-            }
+            Side::Front => match self.lower_bound.as_ref().map(Vec::as_slice) {
+                Included(key) => cursor.seek_to(Position::Before(key))?,
+                Excluded(key) => cursor.seek_to(Position::After(key))?,
+                Unbounded => cursor.seek_to(Position::Start)?,
+            },
             Side::Back => match self.upper_bound.as_ref().map(Vec::as_slice) {
-                Included(key) => cursor.seek_to(Excluded(key))?,
-                Excluded(key) => cursor.seek_to(Included(key))?,
-                Unbounded => cursor.seek_to_end()?,
+                Included(key) => cursor.seek_to(Position::After(key))?,
+                Excluded(key) => cursor.seek_to(Position::Before(key))?,
+                Unbounded => cursor.seek_to(Position::End)?,
             },
         }
         *self.slot_mut(side) = Slot::Active(cursor);

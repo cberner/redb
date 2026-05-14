@@ -1,6 +1,6 @@
 use crate::Result;
+use crate::tree_store::btree_base::BranchAccessor;
 use crate::tree_store::btree_base::{BRANCH, LEAF};
-use crate::tree_store::btree_base::{BranchAccessor, LeafAccessor};
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -9,36 +9,6 @@ use std::borrow::Borrow;
 use std::collections::Bound;
 use std::marker::PhantomData;
 use std::ops::{Range, RangeBounds};
-
-pub(super) fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, bound: Bound<&[u8]>) -> usize {
-    match bound {
-        Included(query) | Excluded(query) => {
-            let (mut position, found) = accessor.position::<K>(query);
-            if matches!(bound, Excluded(_)) && found {
-                position += 1;
-            }
-            position
-        }
-        Unbounded => 0,
-    }
-}
-
-pub(super) fn child_to_visit<K: Key>(
-    accessor: &BranchAccessor<'_, '_, PageImpl>,
-    bound: Bound<&[u8]>,
-    reverse: bool,
-) -> usize {
-    match bound {
-        Included(query) | Excluded(query) => accessor.child_for_key::<K>(query).0,
-        Unbounded => {
-            if reverse {
-                accessor.count_children() - 1
-            } else {
-                0
-            }
-        }
-    }
-}
 
 pub(crate) struct EntryGuard<K: Key, V: Value> {
     page: PageImpl,
