@@ -615,6 +615,11 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
+        // Persistent savepoints hold a live_read_transactions reference, so check for them
+        // before the generic TransactionInProgress guard to give a more specific error.
+        if self.transaction_tracker.any_persistent_savepoint_exists() {
+            return Err(CompactionError::PersistentSavepointExists);
+        }
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
@@ -623,9 +628,6 @@ impl Database {
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        if txn.list_persistent_savepoints()?.next().is_some() {
-            return Err(CompactionError::PersistentSavepointExists);
-        }
         if self.transaction_tracker.any_savepoint_exists() {
             return Err(CompactionError::EphemeralSavepointExists);
         }

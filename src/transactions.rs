@@ -830,8 +830,8 @@ impl SavepointTransactionState {
         // refcount and will release it on drop.
         tracker.invalidate_savepoints(std::mem::take(&mut self.invalidated));
         // Persistent savepoints created during this transaction stay live:
-        // drop them from our bookkeeping without releasing tracker state.
-        self.created_persistent.clear();
+        // promote them into the tracker's persistent set and drop our bookkeeping.
+        tracker.mark_savepoints_persistent(self.created_persistent.drain().map(|(id, _)| id));
     }
 
     fn apply_on_abort(&mut self, tracker: &TransactionTracker) {

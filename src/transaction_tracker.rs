@@ -81,6 +81,8 @@ struct State {
     next_transaction_id: TransactionId,
     live_write_transaction: Option<TransactionId>,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
+    // Subset of valid_savepoints that are persistent (durable across reopens)
+    persistent_savepoints: BTreeSet<SavepointId>,
     // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
     // We need to make sure that the freed-table does not get processed for these, since they are not durable yet
     // Therefore, we hold a read transaction on their nearest durable ancestor
@@ -105,6 +107,7 @@ impl TransactionTracker {
                 next_transaction_id,
                 live_write_transaction: None,
                 valid_savepoints: BTreeMap::default(),
+                persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: HashMap::default(),
                 unprocessed_freed_non_durable_commits: BTreeSet::default(),
             }),
@@ -227,6 +230,21 @@ impl TransactionTracker {
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
+        state.persistent_savepoints.insert(savepoint.get_id());
+    }
+
+    // Called on commit to promote newly created persistent savepoints into the tracker's
+    // persistent set, so compact() can distinguish them from ephemeral savepoints and
+    // regular read transactions.
+    pub(crate) fn mark_savepoints_persistent(&self, ids: impl IntoIterator<Item = SavepointId>) {
+        let mut state = self.state.lock().unwrap();
+        for id in ids {
+            state.persistent_savepoints.insert(id);
+        }
+    }
+
+    pub(crate) fn any_persistent_savepoint_exists(&self) -> bool {
+        !self.state.lock().unwrap().persistent_savepoints.is_empty()
     }
 
     pub(crate) fn register_read_transaction(
@@ -284,11 +302,10 @@ impl TransactionTracker {
 
     // Deallocates the given savepoint and its matching reference count on the transcation
     pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
-        self.state
-            .lock()
-            .unwrap()
-            .valid_savepoints
-            .remove(&savepoint);
+        let mut state = self.state.lock().unwrap();
+        state.valid_savepoints.remove(&savepoint);
+        state.persistent_savepoints.remove(&savepoint);
+        drop(state);
         self.deallocate_read_transaction(transaction);
     }
 

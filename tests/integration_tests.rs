@@ -2576,6 +2576,29 @@ fn compact_after_non_durable_commit() {
     db.compact().unwrap();
 }
 
+// compact() must refuse while a persistent savepoint exists, returning a specific error rather
+// than the generic TransactionInProgress. Deleting the savepoint allows compaction to proceed.
+#[test]
+fn compact_rejects_persistent_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::PersistentSavepointExists
+    ));
+
+    let txn = db.begin_write().unwrap();
+    txn.delete_persistent_savepoint(savepoint_id).unwrap();
+    txn.commit().unwrap();
+
+    db.compact().unwrap();
+}
+
 #[test]
 fn compact_after_post_commit_page_reuse() {
     let tmpfile = create_tempfile();
