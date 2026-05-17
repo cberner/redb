@@ -2788,6 +2788,74 @@ fn open_multimap_table_as_regular() {
     ));
 }
 
+// Exercises the Debug formatting for Table (writable) and ReadOnlyTable across all four
+// branches: empty, one entry, exactly two entries, and more than two entries.
+#[test]
+fn table_debug() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Empty table: "No entries" branch.
+    {
+        let write_txn = db.begin_write().unwrap();
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "got: {s}");
+        drop(table);
+        write_txn.abort().unwrap();
+    }
+
+    // Single entry: "One key-value" branch.
+    {
+        let write_txn = db.begin_write().unwrap();
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1u64, &10u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "got: {s}");
+        drop(table);
+        write_txn.abort().unwrap();
+    }
+
+    // Exactly two entries: "first" / "last" shown, no "more entries".
+    {
+        let write_txn = db.begin_write().unwrap();
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1u64, &10u64).unwrap();
+        table.insert(&2u64, &20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("first"), "got: {s}");
+        assert!(s.contains("last"), "got: {s}");
+        assert!(!s.contains("more entries"), "got: {s}");
+        drop(table);
+        write_txn.abort().unwrap();
+    }
+
+    // Three entries: "N more entries" branch.
+    {
+        let write_txn = db.begin_write().unwrap();
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1u64, &10u64).unwrap();
+        table.insert(&2u64, &20u64).unwrap();
+        table.insert(&3u64, &30u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("more entries"), "got: {s}");
+        drop(table);
+        write_txn.abort().unwrap();
+    }
+
+    // ReadOnlyTable Debug formatting.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&42u64, &99u64).unwrap();
+    }
+    write_txn.commit().unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("One key-value"), "got: {s}");
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
