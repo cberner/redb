@@ -2813,3 +2813,61 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn table_debug_format() {
+    // Exercises all four branches of the Debug impl for Table and ReadOnlyTable:
+    // empty, exactly one entry, exactly two entries, and three-or-more entries.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "empty: {s}");
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "one entry: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    // Two entries: both first and last appear, but no "more entries" ellipsis.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(
+            s.contains("first:") && s.contains("last:"),
+            "two entries: {s}"
+        );
+        assert!(
+            !s.contains("more entries"),
+            "two entries should have no ellipsis: {s}"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    // Three entries: the "...N more entries..." ellipsis appears.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("more entries"), "three entries: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable has its own fmt impl that delegates to the same helper.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("more entries"), "read-only three entries: {s}");
+}
