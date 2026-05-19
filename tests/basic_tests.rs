@@ -107,6 +107,43 @@ fn table_stats() {
 }
 
 #[test]
+fn table_stats_write_and_debug() {
+    // stats() can be called on a mutable Table during a write transaction.
+    // Exercises branch_pages, metadata_bytes, fragmented_bytes and the Debug
+    // formatting paths for empty, single-entry, and multi-entry tables.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+
+        let empty_dbg = format!("{:?}", table);
+        assert!(empty_dbg.contains("No entries"), "{empty_dbg}");
+
+        table.insert(&0u64, &0u64).unwrap();
+        let one_dbg = format!("{:?}", table);
+        assert!(one_dbg.contains("One key-value:"), "{one_dbg}");
+
+        // Insert enough entries to guarantee branch pages in the B-tree.
+        for i in 1u64..1000 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let many_dbg = format!("{:?}", table);
+        assert!(many_dbg.contains("more entries"), "{many_dbg}");
+
+        let stats = table.stats().unwrap();
+        assert!(stats.tree_height() >= 2);
+        assert!(stats.leaf_pages() >= 1);
+        assert!(stats.branch_pages() >= 1);
+        assert!(stats.stored_bytes() > 0);
+        assert!(stats.metadata_bytes() > 0);
+        let _ = stats.fragmented_bytes();
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
