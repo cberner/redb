@@ -471,10 +471,17 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
 
 /// A read-only untyped table
 pub struct ReadOnlyUntypedTable {
+    name: String,
     tree: RawBtree,
 }
 
 impl Sealed for ReadOnlyUntypedTable {}
+
+impl TableHandle for ReadOnlyUntypedTable {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 impl ReadableTableMetadata for ReadOnlyUntypedTable {
     /// Retrieves information about storage usage for the table
@@ -498,6 +505,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedTable {
 
 impl ReadOnlyUntypedTable {
     pub(crate) fn new(
+        name: &str,
         root_page: Option<BtreeHeader>,
         hint: PageHint,
         fixed_key_size: Option<usize>,
@@ -505,6 +513,7 @@ impl ReadOnlyUntypedTable {
         mem: PageResolver,
     ) -> Self {
         Self {
+            name: name.to_string(),
             tree: RawBtree::new(root_page, fixed_key_size, fixed_value_size, mem, hint),
         }
     }

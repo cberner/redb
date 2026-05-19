@@ -885,6 +885,7 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
 
 /// A read-only untyped multimap table
 pub struct ReadOnlyUntypedMultimapTable {
+    name: String,
     num_values: u64,
     tree: RawBtree,
     hint: PageHint,
@@ -894,6 +895,12 @@ pub struct ReadOnlyUntypedMultimapTable {
 }
 
 impl Sealed for ReadOnlyUntypedMultimapTable {}
+
+impl MultimapTableHandle for ReadOnlyUntypedMultimapTable {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
     /// Retrieves information about storage usage for the table
@@ -923,6 +930,7 @@ impl ReadableTableMetadata for ReadOnlyUntypedMultimapTable {
 
 impl ReadOnlyUntypedMultimapTable {
     pub(crate) fn new(
+        name: &str,
         root: Option<BtreeHeader>,
         num_values: u64,
         hint: PageHint,
@@ -931,6 +939,7 @@ impl ReadOnlyUntypedMultimapTable {
         mem: PageResolver,
     ) -> Self {
         Self {
+            name: name.to_string(),
             num_values,
             tree: RawBtree::new(
                 root,
@@ -949,6 +958,7 @@ impl ReadOnlyUntypedMultimapTable {
 
 /// A read-only multimap table
 pub struct ReadOnlyMultimapTable<K: Key + 'static, V: Key + 'static> {
+    name: String,
     tree: Btree<K, &'static DynamicCollection<V>>,
     num_values: u64,
     mem: PageResolver,
@@ -956,8 +966,15 @@ pub struct ReadOnlyMultimapTable<K: Key + 'static, V: Key + 'static> {
     _value_type: PhantomData<V>,
 }
 
+impl<K: Key + 'static, V: Key + 'static> MultimapTableHandle for ReadOnlyMultimapTable<K, V> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     pub(crate) fn new(
+        name: &str,
         root: Option<BtreeHeader>,
         num_values: u64,
         hint: PageHint,
@@ -965,6 +982,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         mem: PageResolver,
     ) -> Result<ReadOnlyMultimapTable<K, V>> {
         Ok(ReadOnlyMultimapTable {
+            name: name.to_string(),
             tree: Btree::new(root, hint, guard.clone(), mem.clone())?,
             num_values,
             mem,
