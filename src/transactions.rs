@@ -2448,10 +2448,11 @@ impl ReadTransaction {
         &self,
         handle: impl TableHandle,
     ) -> Result<ReadOnlyUntypedTable, TableError> {
+        let name = handle.name();
         let header = self
             .tree
-            .get_table_untyped(handle.name(), TableType::Normal)?
-            .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
+            .get_table_untyped(name, TableType::Normal)?
+            .ok_or_else(|| TableError::TableDoesNotExist(name.to_string()))?;
 
         match header {
             InternalTableDefinition::Normal {
@@ -2460,6 +2461,7 @@ impl ReadTransaction {
                 fixed_value_size,
                 ..
             } => Ok(ReadOnlyUntypedTable::new(
+                name,
                 table_root,
                 PageHint::Clean,
                 fixed_key_size,
@@ -2487,6 +2489,7 @@ impl ReadTransaction {
                 table_length,
                 ..
             } => Ok(ReadOnlyMultimapTable::new(
+                definition.name(),
                 table_root,
                 table_length,
                 PageHint::Clean,
@@ -2501,10 +2504,11 @@ impl ReadTransaction {
         &self,
         handle: impl MultimapTableHandle,
     ) -> Result<ReadOnlyUntypedMultimapTable, TableError> {
+        let name = handle.name();
         let header = self
             .tree
-            .get_table_untyped(handle.name(), TableType::Multimap)?
-            .ok_or_else(|| TableError::TableDoesNotExist(handle.name().to_string()))?;
+            .get_table_untyped(name, TableType::Multimap)?
+            .ok_or_else(|| TableError::TableDoesNotExist(name.to_string()))?;
 
         match header {
             InternalTableDefinition::Normal { .. } => unreachable!(),
@@ -2515,6 +2519,7 @@ impl ReadTransaction {
                 fixed_value_size,
                 ..
             } => Ok(ReadOnlyUntypedMultimapTable::new(
+                name,
                 table_root,
                 table_length,
                 PageHint::Clean,
