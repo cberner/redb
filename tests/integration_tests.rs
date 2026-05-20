@@ -2,7 +2,7 @@ use rand::RngExt;
 use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
 use redb::{
-    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
+    AccessGuard, Builder, CacheStats, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value, WriteTransaction,
@@ -3516,4 +3516,43 @@ fn table_definition_new_panics_on_empty_name() {
 fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
+}
+
+#[test]
+fn cache_stats() {
+    // Exercises the cache_stats() API on both Database and ReadOnlyDatabase, and all
+    // CacheStats accessors. Without the cache_metrics feature the counters are zero;
+    // with it they reflect actual activity. Either way, all accessors must be callable.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1u64, &2u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let stats: CacheStats = db.cache_stats();
+    let _ = stats.evictions();
+    let _ = stats.read_hits();
+    let _ = stats.read_misses();
+    let _ = stats.write_hits();
+    let _ = stats.write_misses();
+    let _ = stats.used_bytes();
+
+    drop(db);
+    let db = redb::ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    {
+        let table = txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.get(&1u64).unwrap().unwrap().value(), 2);
+    }
+    let stats: CacheStats = db.cache_stats();
+    let _ = stats.evictions();
+    let _ = stats.read_hits();
+    let _ = stats.read_misses();
+    let _ = stats.write_hits();
+    let _ = stats.write_misses();
+    let _ = stats.used_bytes();
 }
