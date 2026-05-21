@@ -3517,3 +3517,41 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+#[test]
+fn savepoint_precondition_errors() {
+    // ephemeral_savepoint() requires the transaction to be clean (no tables opened yet);
+    // persistent_savepoint() and delete_persistent_savepoint() additionally require
+    // Immediate durability.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Commit a persistent savepoint so delete_persistent_savepoint() has something to target.
+    let txn = db.begin_write().unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // Opening a table marks the transaction dirty; subsequent savepoint calls must fail.
+    let txn = db.begin_write().unwrap();
+    {
+        let _table = txn.open_table(U64_TABLE).unwrap();
+    }
+    assert!(matches!(
+        txn.ephemeral_savepoint(),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+    txn.abort().unwrap();
+
+    // persistent_savepoint() and delete_persistent_savepoint() require Immediate durability.
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    assert!(matches!(
+        txn.persistent_savepoint(),
+        Err(SavepointError::ImmediateDurabilityRequired)
+    ));
+    assert!(matches!(
+        txn.delete_persistent_savepoint(savepoint_id),
+        Err(SavepointError::ImmediateDurabilityRequired)
+    ));
+    txn.abort().unwrap();
+}
