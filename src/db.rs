@@ -25,7 +25,7 @@ use crate::transactions::{
 };
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
-use log::{debug, info, warn};
+use log::{debug, warn};
 
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
@@ -440,7 +440,7 @@ impl ReadOnlyDatabase {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
-        info!("Opening database in read-only {:?}", &file_path);
+        debug!("Opening database in read-only {:?}", &file_path);
         let mem = TransactionalMemory::new(
             Box::new(ReadOnlyBackend::new(file)),
             false,
@@ -927,7 +927,7 @@ impl Database {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
-        info!("Opening database {:?}", &file_path);
+        debug!("Opening database {:?}", &file_path);
         let mem = TransactionalMemory::new(
             file,
             allow_initialize,
@@ -941,7 +941,7 @@ impl Database {
         // we can just load the allocator state from there. Otherwise, we need a full repair
         if let Some(tree) = Self::get_allocator_state_table(&mem)? {
             #[cfg(feature = "logging")]
-            info!("Found valid allocator state, full repair not needed");
+            debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
             Self::mark_allocated_page_for_debug(&mut mem)?;
