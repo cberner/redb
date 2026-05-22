@@ -2790,6 +2790,57 @@ fn open_multimap_table_as_regular() {
 
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
+fn table_debug_format() {
+    // The Debug impl for Table and ReadOnlyTable formats entries as "No entries",
+    // "One key-value: ...", or "first: ..., last: ..." depending on how many entries exist.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Empty table shows "No entries".
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "empty table: {s}");
+    }
+    write_txn.abort().unwrap();
+
+    // Single entry shows "One key-value".
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 100u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "single entry: {s}");
+    }
+    write_txn.abort().unwrap();
+
+    // Three entries shows "first:", a "more entries" middle count, and "last:".
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 1u64..=3 {
+            table.insert(i, i * 10).unwrap();
+        }
+        let s = format!("{table:?}");
+        assert!(
+            s.contains("first:") && s.contains("last:") && s.contains("more entries"),
+            "multi entry: {s}"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable has the same Debug format.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(
+        s.contains("first:") && s.contains("last:"),
+        "read-only table: {s}"
+    );
+}
+
+#[test]
 fn u8_array_serialization() {
     assert_eq!(
         <&[u8; 7] as Value>::type_name(),
