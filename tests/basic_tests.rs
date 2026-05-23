@@ -107,6 +107,56 @@ fn table_stats() {
 }
 
 #[test]
+fn table_debug_format() {
+    // Debug formatting has four branches depending on the number of entries: empty, one, two
+    // (first + last with no ellipsis), and more than two (first, ellipsis, last).
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "empty table: {s}");
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 100u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "single-entry table: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(2u64, 200u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("first:"), "two-entry table: {s}");
+        assert!(!s.contains("more entries"), "two-entry table should have no ellipsis: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(3u64, 300u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("more entries"), "three-entry table: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable shares the same debug_helper; verify it is wired up.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("more entries"), "read-only table: {s}");
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
