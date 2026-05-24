@@ -1546,6 +1546,49 @@ fn regression21() {
 }
 
 #[test]
+fn compact_with_ephemeral_savepoint() {
+    // compact() must fail while an ephemeral savepoint is live, because the savepoint
+    // pins pages that compaction would need to move.
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let savepoint = write_txn.ephemeral_savepoint().unwrap();
+    write_txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact(),
+        Err(CompactionError::EphemeralSavepointExists)
+    ));
+
+    drop(savepoint);
+    db.compact().unwrap();
+}
+
+#[test]
+fn compact_with_persistent_savepoint() {
+    // compact() must fail while a persistent savepoint exists on disk, because it
+    // pins old versions of pages.
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let savepoint_id = write_txn.persistent_savepoint().unwrap();
+    write_txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact(),
+        Err(CompactionError::PersistentSavepointExists)
+    ));
+
+    let write_txn = db.begin_write().unwrap();
+    write_txn.delete_persistent_savepoint(savepoint_id).unwrap();
+    write_txn.commit().unwrap();
+
+    db.compact().unwrap();
+}
+
+#[test]
 fn regression22() {
     let tmpfile = create_tempfile();
 
