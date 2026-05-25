@@ -322,6 +322,49 @@ fn remove_all_uncommitted_subtree_collect() {
 }
 
 #[test]
+fn remove_all_committed_subtree() {
+    // remove_all on a key whose values were committed as a SubtreeV2 must correctly
+    // schedule the committed pages for freeing rather than attempting to free them immediately.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        for v in 0..2000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        let values: Vec<_> = table
+            .remove_all(&0u64)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(values.len(), 2000);
+        for (i, guard) in values.iter().enumerate() {
+            assert_eq!(guard.value(), i as u64);
+        }
+        drop(values);
+        assert!(table.is_empty().unwrap());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(
+        read_txn
+            .open_multimap_table(U64_TABLE)
+            .unwrap()
+            .is_empty()
+            .unwrap()
+    );
+}
+
+#[test]
 fn wrong_types() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
