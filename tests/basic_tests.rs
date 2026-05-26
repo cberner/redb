@@ -2813,3 +2813,28 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+// Two-phase commit writes an fsync before flipping the primary bit, providing stronger
+// durability guarantees against partial-write attacks. Verify that data committed with
+// two-phase commit survives a database reopen.
+#[test]
+fn two_phase_commit() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let mut write_txn = db.begin_write().unwrap();
+    write_txn.set_two_phase_commit(true);
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("foo", "bar").unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let db = Database::open(tmpfile.path()).unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+    assert_eq!(table.get("foo").unwrap().unwrap().value(), "bar");
+    assert_eq!(table.len().unwrap(), 2);
+}
