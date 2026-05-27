@@ -2641,6 +2641,49 @@ fn compact_does_not_grow_file() {
     );
 }
 
+// set_repair_callback / RepairSession::abort() / RepairSession::progress() /
+// DatabaseError::RepairAborted all have zero test coverage.
+//
+// When a database is opened without a valid allocator-state snapshot (the normal
+// case after any commit that did not use quick-repair), the repair callback is
+// invoked. Aborting the session surfaces as DatabaseError::RepairAborted.
+#[test]
+fn repair_callback_and_abort() {
+    use std::sync::{Arc, Mutex};
+    let tmpfile = create_tempfile();
+
+    // First open: abort the repair immediately. The open must fail.
+    let result = Database::builder()
+        .set_repair_callback(|session| {
+            let _p = session.progress(); // exercises RepairSession::progress()
+            session.abort(); // exercises RepairSession::abort()
+        })
+        .create(tmpfile.path());
+    assert!(
+        matches!(result, Err(DatabaseError::RepairAborted)),
+        "expected RepairAborted, got: {:?}",
+        result.err()
+    );
+
+    // Second open: let the repair run to completion and verify progress is non-decreasing.
+    let observed = Arc::new(Mutex::new(Vec::<f64>::new()));
+    let observed_clone = observed.clone();
+    let db = Database::builder()
+        .set_repair_callback(move |session| {
+            observed_clone.lock().unwrap().push(session.progress());
+        })
+        .create(tmpfile.path())
+        .unwrap();
+    drop(db);
+
+    let values = observed.lock().unwrap();
+    assert!(!values.is_empty(), "repair callback was never invoked");
+    assert!(
+        values.windows(2).all(|w| w[0] <= w[1]),
+        "progress values were not non-decreasing: {values:?}"
+    );
+}
+
 fn require_send<T: Send>(_: &T) {}
 fn require_sync<T: Sync + Send>(_: &T) {}
 
