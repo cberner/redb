@@ -3517,3 +3517,45 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+// compact() must be rejected while an ephemeral savepoint is alive; dropping it unblocks compaction.
+#[test]
+fn compact_rejected_with_ephemeral_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::EphemeralSavepointExists
+    ));
+
+    drop(savepoint);
+    db.compact().unwrap();
+}
+
+// compact() must be rejected while a persistent savepoint exists; deleting it unblocks compaction.
+#[test]
+fn compact_rejected_with_persistent_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::Immediate).unwrap();
+    let id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::PersistentSavepointExists
+    ));
+
+    let txn = db.begin_write().unwrap();
+    txn.delete_persistent_savepoint(id).unwrap();
+    txn.commit().unwrap();
+
+    db.compact().unwrap();
+}
