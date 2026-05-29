@@ -2813,3 +2813,60 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn table_debug_and_stats_coverage() {
+    // Exercises the Debug formatting for Table across all entry-count branches (empty, one,
+    // two, many), and the TableStats/DatabaseStats getters not covered by other tests.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        assert!(format!("{table:?}").contains("No entries"));
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        assert!(format!("{table:?}").contains("One key-value"));
+
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("first") && !s.contains("more entries"));
+
+        table.insert(3u64, 30u64).unwrap();
+        table.insert(4u64, 40u64).unwrap();
+        assert!(format!("{table:?}").contains("2 more entries"));
+
+        // Force branch pages so branch_pages() / metadata_bytes() / fragmented_bytes() are non-trivial.
+        for i in 5u64..1000 {
+            table.insert(i, i).unwrap();
+        }
+        let stats = table.stats().unwrap();
+        assert!(stats.branch_pages() > 0);
+        assert!(stats.metadata_bytes() > 0);
+        let _ = stats.fragmented_bytes();
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable: name(), Debug, and ReadTransaction Debug.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.name(), "u64");
+    assert!(format!("{table:?}").contains("first"));
+    let untyped = read_txn.open_untyped_table(U64_TABLE).unwrap();
+    assert_eq!(untyped.name(), "u64");
+    drop(table);
+    drop(untyped);
+    assert_eq!(format!("{read_txn:?}"), "ReadTransaction");
+    drop(read_txn);
+
+    // DatabaseStats::page_size().
+    let write_txn = db.begin_write().unwrap();
+    assert!(write_txn.stats().unwrap().page_size() > 0);
+    write_txn.abort().unwrap();
+}
