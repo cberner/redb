@@ -1627,6 +1627,43 @@ fn rename_open_table() {
 }
 
 #[test]
+fn rename_multimap_table() {
+    // rename_multimap_table renames a multimap and preserves its data; rename_table on a
+    // multimap returns TableIsMultimap rather than silently treating it as a regular table.
+    let mm_def: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("mm");
+    let mm_def2: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("mm2");
+    let mm_as_regular: TableDefinition<u32, u32> = TableDefinition::new("mm");
+    let other: TableDefinition<u32, u32> = TableDefinition::new("other");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut mm = write_txn.open_multimap_table(mm_def).unwrap();
+        mm.insert(1u32, 10u32).unwrap();
+        mm.insert(1u32, 20u32).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        write_txn.rename_table(mm_as_regular, other),
+        Err(TableError::TableIsMultimap(_))
+    ));
+    write_txn.rename_multimap_table(mm_def, mm_def2).unwrap();
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_multimap_table(mm_def),
+        Err(TableError::TableDoesNotExist(_))
+    ));
+    let table = read_txn.open_multimap_table(mm_def2).unwrap();
+    assert_eq!(table.len().unwrap(), 2);
+}
+
+#[test]
 fn no_dirty_reads() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
