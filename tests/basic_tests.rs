@@ -1509,6 +1509,52 @@ fn entry_vacant_into_key() {
 }
 
 #[test]
+fn entry_or_insert_with_occupied_skips_closure() {
+    // or_insert_with and or_insert_with_key must not invoke their default closures when the
+    // entry is already occupied; the existing value should be returned unchanged.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 100u64).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+
+        let mut closure_called = false;
+        let guard = table
+            .entry(1u64)
+            .unwrap()
+            .or_insert_with(|| {
+                closure_called = true;
+                999u64
+            })
+            .unwrap();
+        assert!(!closure_called);
+        assert_eq!(guard.value(), 100u64);
+        drop(guard);
+
+        let mut key_closure_called = false;
+        let guard = table
+            .entry(1u64)
+            .unwrap()
+            .or_insert_with_key(|_k| {
+                key_closure_called = true;
+                999u64
+            })
+            .unwrap();
+        assert!(!key_closure_called);
+        assert_eq!(guard.value(), 100u64);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn delete() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
