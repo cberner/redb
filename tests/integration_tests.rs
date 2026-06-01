@@ -2641,6 +2641,50 @@ fn compact_does_not_grow_file() {
     );
 }
 
+#[test]
+fn compact_fails_with_persistent_savepoint() {
+    // compact() must return PersistentSavepointExists when a persistent savepoint is
+    // live; callers must delete the savepoint before retrying.
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(definition).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::PersistentSavepointExists
+    ));
+}
+
+#[test]
+fn compact_fails_with_ephemeral_savepoint() {
+    // compact() must return EphemeralSavepointExists when an ephemeral savepoint is
+    // still live; callers must drop the savepoint before retrying.
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.abort().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::EphemeralSavepointExists
+    ));
+
+    drop(savepoint);
+}
+
 fn require_send<T: Send>(_: &T) {}
 fn require_sync<T: Sync + Send>(_: &T) {}
 

@@ -615,10 +615,9 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
-        if self.transaction_tracker.any_user_read_reference_exists() {
-            return Err(CompactionError::TransactionInProgress);
-        }
-        // Commit to free up any pending free pages
+        // Savepoints hold an internal read reference that would cause
+        // any_user_read_reference_exists() to return true before reaching the savepoint
+        // checks below. Check savepoints first so the caller gets a specific error.
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
@@ -630,6 +629,9 @@ impl Database {
             return Err(CompactionError::EphemeralSavepointExists);
         }
         txn.abort()?;
+        if self.transaction_tracker.any_user_read_reference_exists() {
+            return Err(CompactionError::TransactionInProgress);
+        }
         self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
 
         let mut compacted = false;
