@@ -1363,6 +1363,36 @@ fn entry_or_insert_with() {
 }
 
 #[test]
+fn entry_or_insert_with_occupied() {
+    // or_insert_with and or_insert_with_key must not invoke the closure when the entry is
+    // already occupied; they should return the existing value unchanged.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 42u64).unwrap();
+
+        let guard = table
+            .entry(1)
+            .unwrap()
+            .or_insert_with(|| -> u64 { panic!("closure called on occupied entry") })
+            .unwrap();
+        assert_eq!(guard.value(), 42);
+        drop(guard);
+
+        let guard = table
+            .entry(1)
+            .unwrap()
+            .or_insert_with_key(|_| -> u64 { panic!("closure called on occupied entry") })
+            .unwrap();
+        assert_eq!(guard.value(), 42);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
 fn entry_and_modify() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
