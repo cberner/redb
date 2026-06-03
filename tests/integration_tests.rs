@@ -3517,3 +3517,31 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+#[test]
+fn two_phase_commit() {
+    // Commits with two-phase commit enabled flush data before swapping the primary slot,
+    // giving a stronger durability guarantee than the default single-phase path.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_two_phase_commit(true);
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0u64, &42u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(&0u64).unwrap().unwrap().value(), 42u64);
+    drop(txn);
+    drop(db);
+
+    // Verify the commit survives a database re-open.
+    let db = Database::open(tmpfile.path()).unwrap();
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(&0u64).unwrap().unwrap().value(), 42u64);
+}
