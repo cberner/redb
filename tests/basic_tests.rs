@@ -2788,6 +2788,47 @@ fn open_multimap_table_as_regular() {
     ));
 }
 
+// ReadOnlyTable::get and ReadOnlyTable::range return arc-lifetime guards that keep
+// the read transaction alive via reference counting, allowing data access after the
+// transaction object is dropped. This mirrors the same pattern already tested for
+// multimap tables (get_arc_lifetime / range_arc_lifetime in multimap_tests.rs).
+#[test]
+fn read_only_table_arc_lifetime() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("foo", "bar").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // get() returns AccessGuard<'static, V> that outlives the transaction
+    let guard = {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        table.get("hello").unwrap().unwrap()
+        // read_txn and table are dropped here; guard keeps transaction alive
+    };
+    assert_eq!(guard.value(), "world");
+
+    // range() returns Range<'static, K, V> that outlives the transaction
+    let mut iter = {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        let start = "foo".to_string();
+        let end = "g".to_string();
+        table.range(start.as_str()..end.as_str()).unwrap()
+        // read_txn and table are dropped here; iter keeps transaction alive
+    };
+    let (key, value) = iter.next().unwrap().unwrap();
+    assert_eq!(key.value(), "foo");
+    assert_eq!(value.value(), "bar");
+    assert!(iter.next().is_none());
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
