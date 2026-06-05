@@ -5,9 +5,9 @@ use redb::CommitError;
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, MultimapTableDefinition, MultimapTableHandle, Range, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
-    TableHandle, TypeName, Value,
+    CompactionError, Database, Durability, Key, MultimapTableDefinition, MultimapTableHandle,
+    Range, ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition, TableError, TableHandle, TypeName, Value,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -2812,4 +2812,49 @@ fn u8_array_serialization() {
         let generic_order = <[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
         assert_eq!(ref_order, generic_order);
     }
+}
+
+// A live Savepoint implicitly holds a read-transaction reference, so compact() returns
+// TransactionInProgress even after the write transaction that created it has been committed.
+// Dropping the Savepoint releases that reference and allows compaction to proceed.
+#[test]
+fn compact_blocked_by_live_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // The committed transaction is gone, but the Savepoint object pins a read ref.
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::TransactionInProgress
+    ));
+
+    drop(savepoint);
+    db.compact().unwrap();
+}
+
+// A persistent savepoint also pins a read-transaction reference after the write transaction
+// that created it commits, blocking compact() the same way as an ephemeral savepoint.
+#[test]
+fn compact_blocked_by_persistent_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::Immediate).unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    assert!(matches!(
+        db.compact().unwrap_err(),
+        CompactionError::TransactionInProgress
+    ));
+
+    let txn = db.begin_write().unwrap();
+    txn.delete_persistent_savepoint(savepoint_id).unwrap();
+    txn.commit().unwrap();
+    db.compact().unwrap();
 }
