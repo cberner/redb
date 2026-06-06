@@ -107,6 +107,47 @@ fn table_stats() {
 }
 
 #[test]
+fn table_debug_format() {
+    // Exercises all branches of the Debug impl for Table and ReadOnlyTable:
+    // empty, single entry, exactly two entries, and three-or-more entries.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "empty table debug: {s}");
+    }
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "single entry debug: {s}");
+    }
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(
+            s.contains("first:") && s.contains("last:") && !s.contains("more"),
+            "two entries debug: {s}"
+        );
+    }
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("more entries"), "three entries debug: {s}");
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("Table ["), "ReadOnlyTable debug: {s}");
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
