@@ -2360,6 +2360,32 @@ fn database_lock() {
 }
 
 #[test]
+fn savepoint_errors() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // ephemeral_savepoint() requires a clean transaction (no open tables).
+    let txn = db.begin_write().unwrap();
+    {
+        let _table = txn.open_table(U64_TABLE).unwrap();
+        assert!(matches!(
+            txn.ephemeral_savepoint(),
+            Err(SavepointError::InvalidSavepoint)
+        ));
+    }
+    txn.abort().unwrap();
+
+    // persistent_savepoint() requires Immediate durability.
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    assert!(matches!(
+        txn.persistent_savepoint(),
+        Err(SavepointError::ImmediateDurabilityRequired)
+    ));
+    txn.abort().unwrap();
+}
+
+#[test]
 fn persistent_savepoint() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
