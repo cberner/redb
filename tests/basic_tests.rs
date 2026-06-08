@@ -2813,3 +2813,126 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn table_debug_and_full_stats() {
+    // Verifies Debug formatting of Table across all size branches (empty, 1, 2, and 3+
+    // entries), ReadOnlyTable Debug, all TableStats accessors, and that or_insert_with /
+    // or_insert_with_key do not invoke their closure when the entry is occupied.
+    use redb::Entry;
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("debug_and_stats");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Debug: empty table
+    let txn = db.begin_write().unwrap();
+    {
+        let table = txn.open_table(TABLE).unwrap();
+        assert!(format!("{table:?}").contains("No entries"));
+    }
+    txn.commit().unwrap();
+
+    // Debug: 1 entry
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        assert!(format!("{table:?}").contains("One key-value"));
+    }
+    txn.commit().unwrap();
+
+    // Debug: 2 entries — shows first and last, no "more entries" ellipsis
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("first:") && s.contains("last:"));
+        assert!(!s.contains("more entries"));
+    }
+    txn.commit().unwrap();
+
+    // Debug: 3+ entries — shows "N more entries" ellipsis
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        assert!(format!("{table:?}").contains("more entries"));
+    }
+    txn.commit().unwrap();
+
+    // ReadOnlyTable Debug and all TableStats accessors (including previously untested ones)
+    let txn = db.begin_read().unwrap();
+    {
+        let table = txn.open_table(TABLE).unwrap();
+        assert!(format!("{table:?}").contains("more entries"));
+        let stats = table.stats().unwrap();
+        assert!(stats.tree_height() >= 1);
+        assert!(stats.leaf_pages() >= 1);
+        assert!(stats.stored_bytes() > 0);
+        assert!(stats.metadata_bytes() > 0);
+        let _ = stats.branch_pages();
+        let _ = stats.fragmented_bytes();
+    }
+
+    // or_insert_with on an occupied entry must not call the closure
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        let mut called = false;
+        let guard = table
+            .entry(1u64)
+            .unwrap()
+            .or_insert_with(|| {
+                called = true;
+                999u64
+            })
+            .unwrap();
+        assert!(!called, "closure must not be called for occupied entry");
+        assert_eq!(guard.value(), 10u64);
+        drop(guard);
+
+        // or_insert_with_key on an occupied entry must not call the closure
+        let mut key_called = false;
+        let guard = table
+            .entry(2u64)
+            .unwrap()
+            .or_insert_with_key(|_k| {
+                key_called = true;
+                999u64
+            })
+            .unwrap();
+        assert!(!key_called, "closure must not be called for occupied entry");
+        assert_eq!(guard.value(), 20u64);
+        drop(guard);
+
+        // Verify VacantEntry paths still call the closure
+        let mut vacant_called = false;
+        let guard = table
+            .entry(100u64)
+            .unwrap()
+            .or_insert_with(|| {
+                vacant_called = true;
+                42u64
+            })
+            .unwrap();
+        assert!(vacant_called);
+        assert_eq!(guard.value(), 42u64);
+        drop(guard);
+
+        // Verify vacant or_insert_with_key passes the key to the closure
+        let guard = table
+            .entry(200u64)
+            .unwrap()
+            .or_insert_with_key(|k| k * 2)
+            .unwrap();
+        assert_eq!(guard.value(), 400u64);
+        drop(guard);
+
+        // Verify Entry variant matching works for both
+        assert!(matches!(table.entry(1u64).unwrap(), Entry::Occupied(_)));
+        assert!(matches!(table.entry(999u64).unwrap(), Entry::Vacant(_)));
+    }
+    txn.commit().unwrap();
+}
