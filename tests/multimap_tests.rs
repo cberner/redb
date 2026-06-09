@@ -543,3 +543,35 @@ fn multimap_remove_subtree_backed_key() {
     assert_eq!(iter.next().unwrap().unwrap().value(), 999);
     assert!(iter.next().is_none());
 }
+
+#[test]
+fn remove_sole_value_for_key() {
+    // Removing the only value associated with a key deletes the key from the table entirely.
+    // Also exercises get() on a missing key in an open write transaction.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(STR_TABLE).unwrap();
+        // get() on a key that was never inserted returns an empty iterator
+        assert_eq!(table.get("missing").unwrap().len(), 0);
+        // Removing the sole value must return true and drop the key from the tree
+        assert!(table.remove("hello", "world").unwrap());
+        assert_eq!(table.len().unwrap(), 0);
+        assert_eq!(table.get("hello").unwrap().len(), 0);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(STR_TABLE).unwrap();
+    assert!(table.is_empty().unwrap());
+    assert_eq!(table.get("hello").unwrap().len(), 0);
+}
