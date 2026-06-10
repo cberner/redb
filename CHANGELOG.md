@@ -8,7 +8,8 @@
   / `VacantEntry` accessors.
 * `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
   now poison the write transaction if their predicate panics, causing `WriteTransaction::commit()`
-  to return `CommitError::TransactionPoisoned`.
+  to return `CommitError::TransactionPoisoned`. `retain()` and `retain_in()` also poison the
+  transaction if an internal error prevents removals from being applied.
 * Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
   entries.
 * Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.

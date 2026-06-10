@@ -394,6 +394,10 @@ pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
     position: Option<CursorPosition>,
     // Pending removals from the current leaf, recorded in strictly increasing order.
     removed_indexes: Vec<usize>,
+    // True when a flush consumed pending removals but failed to apply them.
+    // The caller must not let the transaction commit, since entries already
+    // reported as removed may remain in the tree.
+    lost_removals: bool,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -443,6 +447,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             allocated,
             position: None,
             removed_indexes: vec![],
+            lost_removals: false,
             _key_type: PhantomData,
             _value_type: PhantomData,
             _lifetime: PhantomData,
@@ -633,6 +638,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(())
     }
 
+    /// True if a failed flush may have left entries in the tree that the
+    /// caller was told were removed. The transaction must not commit.
+    pub(super) fn lost_removals(&self) -> bool {
+        self.lost_removals
+    }
+
     fn flush_removed_entries(&mut self) -> Result<Option<Vec<u8>>> {
         if self.removed_indexes.is_empty() {
             return Ok(None);
@@ -650,7 +661,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             &mut *self.freed,
             Arc::clone(self.allocated),
         );
-        helper.delete_leaf_entries(leaf.page, path, &removed_indexes)?;
+        let result = helper.delete_leaf_entries(leaf.page, path, &removed_indexes);
+        if result.is_err() {
+            // The batch was consumed, so the removals can no longer be applied.
+            self.lost_removals = true;
+        }
+        result?;
         removed_indexes.clear();
         self.removed_indexes = removed_indexes;
 
