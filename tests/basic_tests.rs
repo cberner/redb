@@ -458,6 +458,170 @@ fn extract_if_returned_guards_survive_finalize() {
     write_txn.commit().unwrap();
 }
 
+// Guards from many extracted entries must stay readable for the life of the
+// transaction, even after the iterator is gone, for both dirty and committed
+// pages.
+#[test]
+fn extract_if_all_guards_survive_iteration() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // First pass: uncommitted pages, since the inserts are part of the same transaction.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+        let mut guards = vec![];
+        for entry in table.extract_if(|key, _| key % 2 == 0).unwrap() {
+            guards.push(entry.unwrap());
+        }
+        assert_eq!(guards.len() as u64, elements / 2);
+        for (i, (key, value)) in guards.iter().enumerate() {
+            assert_eq!(key.value(), 2 * i as u64);
+            assert_eq!(value.value(), 20 * i as u64);
+        }
+        drop(guards);
+        assert_eq!(table.len().unwrap(), elements / 2);
+    }
+    write_txn.commit().unwrap();
+
+    // Second pass: committed pages.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut guards = vec![];
+        let mut iter = table.extract_if(|_, _| true).unwrap();
+        for entry in &mut iter {
+            guards.push(entry.unwrap());
+        }
+        iter.close().unwrap();
+        assert_eq!(guards.len() as u64, elements / 2);
+        for (i, (key, value)) in guards.iter().enumerate() {
+            assert_eq!(key.value(), 2 * i as u64 + 1);
+            assert_eq!(value.value(), 10 * (2 * i as u64 + 1));
+        }
+        drop(guards);
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Draining every entry with alternating calls forces leaf deletions and
+// merges between the converging ends.
+#[test]
+fn extract_from_if_alternating_drain() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut extracted = table.extract_from_if(1000..9000, |_, _| true).unwrap();
+        let mut front_next = 1000;
+        let mut back_next = 8999;
+        let mut front = true;
+        loop {
+            let entry = if front {
+                extracted.next()
+            } else {
+                extracted.next_back()
+            };
+            let Some(entry) = entry else {
+                break;
+            };
+            let (key, value) = entry.unwrap();
+            let expected = if front {
+                front_next += 1;
+                front_next - 1
+            } else {
+                back_next -= 1;
+                back_next + 1
+            };
+            assert_eq!(key.value(), expected);
+            assert_eq!(value.value(), expected);
+            front = !front;
+        }
+        drop(extracted);
+        assert_eq!(front_next, back_next + 1);
+
+        assert_eq!(table.len().unwrap(), 2000);
+        assert!(table.get(&5000).unwrap().is_none());
+        assert_eq!(table.get(&999).unwrap().unwrap().value(), 999);
+        assert_eq!(table.get(&9000).unwrap().unwrap().value(), 9000);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Alternating next()/next_back() converges without yielding any entry twice,
+// even when the cursors meet inside a leaf.
+#[test]
+fn extract_from_if_alternating_directions() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut expected: std::collections::BTreeSet<u64> =
+            (1000..9000).filter(|key| key % 3 == 0).collect();
+        let mut extracted = table
+            .extract_from_if(1000..9000, |key, _| key % 3 == 0)
+            .unwrap();
+        let mut front = true;
+        loop {
+            let entry = if front {
+                extracted.next()
+            } else {
+                extracted.next_back()
+            };
+            let Some(entry) = entry else {
+                break;
+            };
+            let (key, value) = entry.unwrap();
+            let expected_key = if front {
+                expected.pop_first().unwrap()
+            } else {
+                expected.pop_last().unwrap()
+            };
+            assert_eq!(key.value(), expected_key);
+            assert_eq!(value.value(), expected_key);
+            front = !front;
+        }
+        drop(extracted);
+        assert!(expected.is_empty());
+
+        assert_eq!(
+            table.len().unwrap(),
+            elements - (1000..9000).filter(|key| key % 3 == 0).count() as u64
+        );
+        for key in 1000..9000 {
+            assert_eq!(table.get(&key).unwrap().is_none(), key % 3 == 0);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn retain() {
     let tmpfile = create_tempfile();
