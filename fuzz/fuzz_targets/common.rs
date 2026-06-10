@@ -138,6 +138,7 @@ pub(crate) enum FuzzOperation {
         modulus: U64Between<1, 8>,
         take: BoundedUSize<10>,
         reversed: bool,
+        alternate: bool,
     },
     ExtractFromIf {
         start_key: BoundedU64<KEY_SPACE>,
@@ -145,6 +146,7 @@ pub(crate) enum FuzzOperation {
         take: BoundedUSize<10>,
         modulus: U64Between<1, 8>,
         reversed: bool,
+        alternate: bool,
     },
     Range {
         start_key: BoundedU64<KEY_SPACE>,

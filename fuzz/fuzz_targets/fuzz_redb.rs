@@ -422,6 +422,63 @@ fn handle_multimap_table_op(
     Ok(())
 }
 
+// Drives an extract iterator from the front, the back, or alternating ends,
+// checking each yielded entry against the expected matching entries. Returns
+// the keys that were removed.
+fn check_extract_iter<F: for<'f> FnMut(u64, &'f [u8]) -> bool>(
+    mut iter: redb::ExtractIf<u64, &'static [u8], F>,
+    matching: &[(u64, usize)],
+    take: usize,
+    reversed: bool,
+    alternate: bool,
+) -> Result<Vec<u64>, redb::StorageError> {
+    let mut front_index = 0;
+    let mut back_index = matching.len();
+    let mut from_front = !reversed;
+    let mut removed = vec![];
+    for _ in 0..take {
+        let expected = if front_index < back_index {
+            if from_front {
+                front_index += 1;
+                Some(matching[front_index - 1])
+            } else {
+                back_index -= 1;
+                Some(matching[back_index])
+            }
+        } else {
+            None
+        };
+        let entry = if from_front {
+            iter.next()
+        } else {
+            iter.next_back()
+        };
+        if alternate {
+            from_front = !from_front;
+        }
+        match (expected, entry) {
+            (Some((ref_key, ref_value_len)), Some(entry)) => {
+                let (key, value) = entry?;
+                assert_eq!(ref_key, key.value());
+                assert_eq!(ref_value_len, value.value().len());
+                removed.push(ref_key);
+            }
+            (None, None) => break,
+            (None, Some(entry)) => {
+                // Propagate I/O errors so the crash-support harness can
+                // reopen the database before the next operation.
+                let (key, _) = entry?;
+                panic!("unexpected entry {}", key.value());
+            }
+            (Some(expected), None) => {
+                panic!("expected {:?} but the iterator was exhausted", expected)
+            }
+        }
+    }
+    iter.close()?;
+    Ok(removed)
+}
+
 fn handle_table_op(
     op: &FuzzOperation,
     reference: &mut BTreeMap<u64, usize>,
@@ -504,37 +561,17 @@ fn handle_table_op(
             take,
             modulus,
             reversed,
+            alternate,
         } => {
             let modulus = modulus.value;
-            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> = if *reversed {
-                Box::new(reference.iter().rev().take(take.value))
-            } else {
-                Box::new(reference.iter().take(take.value))
-            };
-            let mut iter = table.extract_if(|x, _| x % modulus == 0)?;
-            let mut remaining = take.value;
-            let mut remove_from_reference = vec![];
-            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
-                if *ref_key % modulus != 0 {
-                    continue;
-                }
-                if remaining == 0 {
-                    break;
-                }
-                remaining -= 1;
-                let next = if *reversed {
-                    iter.next_back()
-                } else {
-                    iter.next()
-                };
-                let (key, value) = next.unwrap()?;
-                remove_from_reference.push(*ref_key);
-                assert_eq!(*ref_key, key.value());
-                assert_eq!(*ref_value_len, value.value().len());
-            }
-            iter.close()?;
-            drop(reference_iter);
-            for x in remove_from_reference {
+            let matching: Vec<(u64, usize)> = reference
+                .iter()
+                .filter(|(key, _)| *key % modulus == 0)
+                .map(|(key, value_len)| (*key, *value_len))
+                .collect();
+            let iter = table.extract_if(|x, _| x % modulus == 0)?;
+            let removed = check_extract_iter(iter, &matching, take.value, *reversed, *alternate)?;
+            for x in removed {
                 reference.remove(&x);
             }
         }
@@ -544,39 +581,19 @@ fn handle_table_op(
             take,
             modulus,
             reversed,
+            alternate,
         } => {
             let start = start_key.value;
             let end = start + range_len.value;
             let modulus = modulus.value;
-            let mut reference_iter: Box<dyn Iterator<Item = (&u64, &usize)>> = if *reversed {
-                Box::new(reference.range(start..end).rev().take(take.value))
-            } else {
-                Box::new(reference.range(start..end).take(take.value))
-            };
-            let mut iter = table.extract_from_if(start..end, |x, _| x % modulus == 0)?;
-            let mut remaining = take.value;
-            let mut remove_from_reference = vec![];
-            while let Some((ref_key, ref_value_len)) = reference_iter.next() {
-                if *ref_key % modulus != 0 {
-                    continue;
-                }
-                if remaining == 0 {
-                    break;
-                }
-                remaining -= 1;
-                let next = if *reversed {
-                    iter.next_back()
-                } else {
-                    iter.next()
-                };
-                let (key, value) = next.unwrap()?;
-                remove_from_reference.push(*ref_key);
-                assert_eq!(*ref_key, key.value());
-                assert_eq!(*ref_value_len, value.value().len());
-            }
-            iter.close()?;
-            drop(reference_iter);
-            for x in remove_from_reference {
+            let matching: Vec<(u64, usize)> = reference
+                .range(start..end)
+                .filter(|(key, _)| *key % modulus == 0)
+                .map(|(key, value_len)| (*key, *value_len))
+                .collect();
+            let iter = table.extract_from_if(start..end, |x, _| x % modulus == 0)?;
+            let removed = check_extract_iter(iter, &matching, take.value, *reversed, *alternate)?;
+            for x in removed {
                 reference.remove(&x);
             }
         }
