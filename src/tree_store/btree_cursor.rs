@@ -726,8 +726,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         direction: Direction,
     ) -> (AccessGuard<'a, K>, AccessGuard<'a, V>) {
         // The Arc-backed guards stay valid because the page store hands out a
-        // fresh buffer whenever a freed page number is reused, and the
-        // detached flush below never mutates this leaf's bytes in place.
+        // fresh buffer whenever a freed page number is reused, and no flush
+        // that can run while these guards exist mutates leaf bytes in place:
+        // the detached flush below and `RangeMut`'s batch resolution by key
+        // both rewrite leaves instead.
         let index = self.record_removal(direction);
         self.state.detached_guards = true;
         let leaf = &self
@@ -840,6 +842,9 @@ enum EndState {
 
 // Pending removals of a parked end. The snapshot holds no page references,
 // so the other end is free to restructure the tree, including this leaf.
+// However, `leaf_bytes` may share the buffer of a live dirty leaf, so tree
+// mutations that can run while the batch exists must not modify leaf memory
+// in place.
 struct ParkedBatch {
     bound: Bound<Vec<u8>>,
     leaf_bytes: Arc<[u8]>,
@@ -1133,7 +1138,10 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
                 &mut self.freed,
                 Arc::clone(&self.allocated),
             );
-            let result = helper.delete_key(key);
+            // In-place deletion must be disabled: the other end's pending
+            // snapshot and any deferred-removal guards handed to the caller
+            // may share the buffer of the live leaf containing this key.
+            let result = helper.delete_key(key, false);
             self.drain_freed();
             match result {
                 Ok(removed) => debug_assert!(removed.is_some()),

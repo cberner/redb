@@ -119,16 +119,25 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
-        self.delete_key(K::as_bytes(key).as_ref())
+        self.delete_key(K::as_bytes(key).as_ref(), true)
     }
 
-    pub(super) fn delete_key(&mut self, key: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
+    // If `allow_in_place` is false, leaf memory is never modified in place, so guards and
+    // snapshots backed by leaf buffers remain valid after the deletion.
+    pub(super) fn delete_key(
+        &mut self,
+        key: &[u8],
+        allow_in_place: bool,
+    ) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(BtreeHeader {
             root: p, length, ..
         }) = *self.root
         {
-            let (deletion_result, found) =
-                self.delete_helper(self.page_allocator.get_page(p, PageHint::None)?, key)?;
+            let (deletion_result, found) = self.delete_helper(
+                self.page_allocator.get_page(p, PageHint::None)?,
+                key,
+                allow_in_place,
+            )?;
             if found.is_none() {
                 // The tree was not modified; leave *self.root untouched so that any clean
                 // root page keeps its already-valid checksum.
@@ -766,6 +775,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         key: &[u8],
+        allow_in_place: bool,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let (position, found) = {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
@@ -776,7 +786,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok((Subtree(page.get_page_number()), None));
         }
         let (result, key_guard, value_guard) =
-            self.delete_leaf_at_position(page, position, false, true)?;
+            self.delete_leaf_at_position(page, position, false, allow_in_place)?;
         assert!(key_guard.is_none());
         Ok((result, Some(value_guard)))
     }
@@ -911,6 +921,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         key: &[u8],
+        allow_in_place: bool,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = {
@@ -921,6 +932,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             self.page_allocator
                 .get_page(child_page_number, PageHint::None)?,
             key,
+            allow_in_place,
         )?;
         if found.is_none() {
             // Subtree unchanged; caller identifies this via `found.is_none()`.
@@ -1265,11 +1277,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         &mut self,
         page: PageImpl,
         key: &[u8],
+        allow_in_place: bool,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let node_mem = page.memory();
         match node_mem[0] {
-            LEAF => self.delete_leaf_helper(page, key),
-            BRANCH => self.delete_branch_helper(page, key),
+            LEAF => self.delete_leaf_helper(page, key, allow_in_place),
+            BRANCH => self.delete_branch_helper(page, key, allow_in_place),
             _ => unreachable!(),
         }
     }
