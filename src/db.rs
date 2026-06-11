@@ -579,9 +579,34 @@ impl Database {
     /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
     /// alive when this method is called.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
-        let allocator_hash = self.mem.allocator_hash();
-        let mem = Arc::get_mut(&mut self.mem).ok_or(DatabaseError::TransactionInProgress)?;
-        let mut was_clean = mem.clear_cache_and_reload()?;
+        if Arc::get_mut(&mut self.mem).is_none() {
+            return Err(DatabaseError::TransactionInProgress);
+        }
+
+        // The live in-memory state may be ahead of the durable state, because durable commits
+        // process pending freed pages after committing and publish the result as a non-durable
+        // commit. The live allocator state corresponds to the live roots, so it must be checked
+        // against a rebuild from the live roots: comparing it against the rebuild from the
+        // durable roots (after the reload below) would falsely report corruption.
+        let mut was_clean = match Self::verify_primary_checksums(self.mem.clone()) {
+            Ok(true) => {
+                let live_allocator_hash = self.mem.allocator_hash();
+                match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
+                    Ok(_) => live_allocator_hash == self.mem.allocator_hash(),
+                    Err(DatabaseError::Storage(StorageError::Corrupted(_))) => false,
+                    Err(err) => return Err(err),
+                }
+            }
+            // The live state is corrupted. The reload and repair below verify the durable state
+            // and repair from it.
+            Ok(false) | Err(StorageError::Corrupted(_)) => false,
+            Err(err) => return Err(err.into()),
+        };
+
+        let mem = Arc::get_mut(&mut self.mem).unwrap();
+        if !mem.clear_cache_and_reload()? {
+            was_clean = false;
+        }
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 
@@ -590,7 +615,7 @@ impl Database {
             _ => unreachable!(),
         })?;
 
-        if old_roots != new_roots || allocator_hash != self.mem.allocator_hash() {
+        if old_roots != new_roots {
             was_clean = false;
         }
 
@@ -855,7 +880,25 @@ impl Database {
             return Err(DatabaseError::RepairAborted);
         }
 
-        mem.begin_repair()?;
+        let [data_root, system_root] = Self::rebuild_allocator_state(mem, repair_callback)?;
+
+        mem.clear_recovery_required()?;
+
+        // We need to invalidate the userspace cache, because we're about to implicitly free the freed table
+        // by storing an empty root during the below commit()
+        mem.clear_read_cache();
+
+        Ok([data_root, system_root])
+    }
+
+    // Rebuilds the in-memory allocator state by marking every page reachable from the current
+    // roots (including the pages referenced by the freed-page tables) as allocated. Operates
+    // purely on in-memory state and does not modify the file.
+    fn rebuild_allocator_state(
+        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
+        repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+    ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
+        mem.reset_allocator_state()?;
 
         let data_root = mem.get_data_root();
         {
@@ -906,12 +949,6 @@ impl Database {
         {
             Self::check_repaired_allocated_pages_table(system_root, mem.clone())?;
         }
-
-        mem.end_repair()?;
-
-        // We need to invalidate the userspace cache, because we're about to implicitly free the freed table
-        // by storing an empty root during the below commit()
-        mem.clear_read_cache();
 
         Ok([data_root, system_root])
     }

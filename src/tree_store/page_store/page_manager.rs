@@ -539,7 +539,7 @@ impl TransactionalMemory {
             state.header = header;
             state.read_from_secondary = false;
             // Drop the previous allocator state -- it described the layout that was in memory
-            // before the reload. The caller is required to repopulate it (via begin_repair or
+            // before the reload. The caller is required to repopulate it (via reset_allocator_state or
             // load_allocator_state) before any allocation/free path runs.
             state.allocators = None;
         }
@@ -580,7 +580,9 @@ impl TransactionalMemory {
         state.header.swap_primary_slot();
     }
 
-    pub(crate) fn begin_repair(&self) -> Result<()> {
+    // Replaces the in-memory allocator state with a fresh, empty one sized to the current
+    // layout. The caller is responsible for repopulating it by marking reachable pages allocated.
+    pub(crate) fn reset_allocator_state(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.allocators = Some(Allocators::new(state.header.layout()));
         #[cfg(debug_assertions)]
@@ -607,7 +609,8 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn end_repair(&self) -> Result<()> {
+    // Durably clears the recovery flag, marking the repair as complete.
+    pub(crate) fn clear_recovery_required(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         state.header.recovery_required = false;
         self.write_header(&state.header)?;
