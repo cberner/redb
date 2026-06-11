@@ -1825,6 +1825,43 @@ fn check_integrity_clean() {
     assert!(db.check_integrity().unwrap());
 }
 
+// check_integrity() on a live handle to a healthy database must return true, including after
+// commits that freed data pages. Durable commits process pending freed pages in a post-commit
+// epilogue that updates only the live (non-durable) state, so the live allocator must be
+// validated against the live roots rather than the reloaded durable state.
+#[test]
+fn check_integrity_clean_after_delete() {
+    let tmpfile = create_tempfile();
+
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        for i in 0..1000u64 {
+            table.insert(&i, [1u8; 20].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Remove a key from the committed multi-level tree, so that the commit frees data pages
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        assert!(table.remove(&0u64).unwrap().is_some());
+    }
+    write_txn.commit().unwrap();
+
+    // The database is healthy, so check_integrity() must report it as clean. (Reopening the
+    // file and checking returns true, which proves the persisted state is consistent; the live
+    // handle must agree.)
+    assert!(db.check_integrity().unwrap());
+    // And it must remain clean when checked repeatedly
+    assert!(db.check_integrity().unwrap());
+}
+
 #[test]
 fn multimap_stats() {
     let tmpfile = create_tempfile();

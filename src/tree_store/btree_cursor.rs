@@ -1304,7 +1304,7 @@ mod tests {
             false,
         )
         .unwrap();
-        mem.begin_repair().unwrap();
+        mem.reset_allocator_state().unwrap();
         let mem = Arc::new(mem);
         let page_allocator = PageAllocator::new(mem, AllocationPolicy::Default);
         let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());

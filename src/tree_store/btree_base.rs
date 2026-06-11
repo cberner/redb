@@ -2013,7 +2013,7 @@ mod tests {
             false,
         )
         .unwrap();
-        mem.begin_repair().unwrap();
+        mem.reset_allocator_state().unwrap();
         PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
     }
 
