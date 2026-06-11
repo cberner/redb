@@ -622,6 +622,193 @@ fn extract_from_if_alternating_directions() {
     write_txn.commit().unwrap();
 }
 
+// Strictly alternating next()/next_back() over a multi-leaf tree with dense
+// removals repeatedly re-parks and resolves each end's pending removal batch.
+// Resolving a batch must not modify a leaf in place while the other end's
+// snapshot still references the same leaf buffer.
+#[test]
+fn extract_if_alternating_directions_dense_removals() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut got: Vec<u64> = vec![];
+        {
+            // Remove everything except key 0, alternating directions.
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            loop {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                match entry {
+                    Some(item) => got.push(item.unwrap().0.value()),
+                    None => break,
+                }
+            }
+        }
+        got.sort_unstable();
+        assert_eq!(got, (1..n).collect::<Vec<_>>());
+        assert_eq!(table.len().unwrap(), 1);
+        assert_eq!(table.get(&0).unwrap().unwrap().value(), 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Dropping the iterator partway through a mixed-direction scan applies both
+// ends' pending removal batches from close().
+#[test]
+fn extract_if_alternating_directions_partial_consumption() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            // Consume most of the range, then drop the iterator.
+            for _ in 0..280 {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                if let Some(item) = entry {
+                    item.unwrap();
+                } else {
+                    break;
+                }
+            }
+        }
+        assert_eq!(table.len().unwrap(), n - 280);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Even an occasional direction switch during an otherwise forward scan must
+// hand the pending batch safely between the two ends.
+#[test]
+fn extract_if_mostly_forward_occasional_next_back() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 1000u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut got: Vec<u64> = vec![];
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut i = 0u64;
+            loop {
+                let entry = if i % 50 == 0 {
+                    extracted.next_back()
+                } else {
+                    extracted.next()
+                };
+                i += 1;
+                match entry {
+                    Some(item) => got.push(item.unwrap().0.value()),
+                    None => break,
+                }
+            }
+        }
+        got.sort_unstable();
+        assert_eq!(got, (1..n).collect::<Vec<_>>());
+    }
+    write_txn.commit().unwrap();
+}
+
+// Guards yielded during a mixed-direction scan stay valid after the iterator
+// is dropped, even though they reference leaf buffers that batch resolution
+// later restructures.
+#[test]
+fn extract_if_alternating_directions_held_guards() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &(i + 1000)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut held = vec![];
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            loop {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                match entry {
+                    Some(item) => held.push(item.unwrap()),
+                    None => break,
+                }
+            }
+        }
+        held.sort_by_key(|(key, _)| key.value());
+        assert_eq!(held.len() as u64, n - 1);
+        for (i, (key, value)) in held.iter().enumerate() {
+            let expected = i as u64 + 1;
+            assert_eq!(key.value(), expected);
+            assert_eq!(value.value(), expected + 1000);
+        }
+        drop(held);
+
+        assert_eq!(table.len().unwrap(), 1);
+        assert_eq!(table.get(&0).unwrap().unwrap().value(), 1000);
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn retain() {
     let tmpfile = create_tempfile();
