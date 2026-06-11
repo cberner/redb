@@ -730,6 +730,18 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             }
         }
 
+        // num_pairs is stored as a u16, so neither half may exceed u16::MAX pairs. The
+        // byte-based division above can be arbitrarily lopsided when pair sizes are skewed
+        // (e.g. merging a leaf full of tiny pairs with one containing a huge value)
+        let max_pairs = usize::from(u16::MAX);
+        assert!(self.pairs.len() <= 2 * max_pairs);
+        let clamped = division.clamp(self.pairs.len().saturating_sub(max_pairs), max_pairs);
+        if clamped != division {
+            division = clamped;
+            first_split_key_bytes = self.pairs[..division].iter().map(|(k, _)| k.len()).sum();
+            first_split_value_bytes = self.pairs[..division].iter().map(|(_, v)| v.len()).sum();
+        }
+
         let required_size =
             self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
         let mut allocated_pages = self.allocated_pages.lock().unwrap();
@@ -1027,10 +1039,12 @@ impl<'b> LeafMutator<'b> {
         new_value: &[u8],
     ) -> bool {
         let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        // num_pairs is stored as a u16, so a leaf can never hold more than u16::MAX entries.
+        // This is reachable by appending many small entries to a large page with free space
+        if accessor.num_pairs() >= usize::from(u16::MAX) {
+            return false;
+        }
         // If this is a large page, only allow in-place appending to avoid write amplification
-        //
-        // Note: this check is also required to avoid inserting an unbounded number of small values
-        // into a large page, which could result in overflowing a u16 which is the maximum number of entries per leaf
         if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
             return false;
         }
@@ -1979,5 +1993,134 @@ impl<'b> BranchMutator<'b> {
             8 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
         self.page[offset..(offset + PageNumber::serialized_size())]
             .copy_from_slice(&page_number.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+
+    const MAX_PAIRS: usize = u16::MAX as usize;
+
+    fn make_allocator() -> PageAllocator {
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
+        mem.begin_repair().unwrap();
+        PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
+    }
+
+    fn build_leaf(
+        page_allocator: &PageAllocator,
+        allocated_pages: &Mutex<PageTrackerPolicy>,
+        keys: &[[u8; 8]],
+    ) -> PageMut<'static> {
+        let mut builder = LeafBuilder::new(
+            page_allocator,
+            allocated_pages,
+            keys.len(),
+            u64::fixed_width(),
+            None,
+        );
+        for key in keys {
+            builder.push(key, &[]);
+        }
+        builder.build().unwrap()
+    }
+
+    fn ascending_keys(n: usize) -> Vec<[u8; 8]> {
+        (0..n as u64).map(|i| i.to_le_bytes()).collect()
+    }
+
+    // num_pairs is stored as a u16. A leaf at u16::MAX pairs must reject in-place
+    // inserts even when the page has plenty of free space, since LeafMutator::insert
+    // cannot represent the new pair count
+    #[test]
+    fn leaf_inplace_insert_rejected_at_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let keys = ascending_keys(MAX_PAIRS);
+        let page = build_leaf(&page_allocator, &allocated_pages, &keys);
+
+        let accessor = LeafAccessor::new(page.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor.num_pairs(), MAX_PAIRS);
+        // The page must be a large (order > 0) page with free space remaining, so that
+        // only the pair count limit can cause the append to be rejected
+        assert!(page.get_page_number().page_order > 0);
+        assert!(page.memory().len() - accessor.total_length() > 100);
+
+        assert!(!LeafMutator::sufficient_insert_inplace_space(
+            &page,
+            MAX_PAIRS,
+            u64::fixed_width(),
+            None,
+            &(MAX_PAIRS as u64).to_le_bytes(),
+            &[],
+        ));
+    }
+
+    // In-place appends below the limit are allowed, up to exactly u16::MAX pairs
+    #[test]
+    fn leaf_inplace_append_up_to_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let keys = ascending_keys(MAX_PAIRS - 1);
+        let mut page = build_leaf(&page_allocator, &allocated_pages, &keys);
+        assert!(page.get_page_number().page_order > 0);
+
+        let key = ((MAX_PAIRS - 1) as u64).to_le_bytes();
+        assert!(LeafMutator::sufficient_insert_inplace_space(
+            &page,
+            MAX_PAIRS - 1,
+            u64::fixed_width(),
+            None,
+            &key,
+            &[],
+        ));
+        let mut mutator = LeafMutator::new(page.memory_mut(), u64::fixed_width(), None);
+        mutator.insert(MAX_PAIRS - 1, &key, &[]);
+
+        let accessor = LeafAccessor::new(page.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor.num_pairs(), MAX_PAIRS);
+        assert_eq!(accessor.last_entry().key(), key);
+    }
+
+    // Splitting divides by total bytes, which can be arbitrarily lopsided when one pair
+    // contains a huge value. Neither half may end up with more than u16::MAX pairs
+    #[test]
+    fn leaf_split_respects_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let num_pairs = MAX_PAIRS + 2;
+        let keys = ascending_keys(num_pairs);
+        let big_value = vec![0u8; 2 * 1024 * 1024];
+        let mut builder = LeafBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_pairs,
+            u64::fixed_width(),
+            None,
+        );
+        // The first pair dominates the total size, so the byte-based division alone
+        // would put more than u16::MAX pairs into the second half
+        builder.push(&keys[0], &big_value);
+        for key in &keys[1..] {
+            builder.push(key, &[]);
+        }
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split().unwrap();
+
+        let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
+        let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
+        assert!(accessor1.num_pairs() <= MAX_PAIRS);
+        assert!(accessor2.num_pairs() <= MAX_PAIRS);
     }
 }
