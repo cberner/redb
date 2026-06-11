@@ -673,7 +673,11 @@ impl<
 > Drop for ExtractIf<'_, K, V, F>
 {
     fn drop(&mut self) {
-        if self.inner.predicate_panicked()
+        // Entries already yielded may have removals pending; if a flush
+        // failed the table would silently keep them, so poison the
+        // transaction instead of letting it commit.
+        let close_failed = self.inner.close().is_err() || self.inner.close_failed();
+        if (close_failed || self.inner.predicate_panicked())
             && let Some(transaction) = self.poison_target
         {
             transaction.poison();

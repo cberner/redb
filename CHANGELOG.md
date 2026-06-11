@@ -2,13 +2,16 @@
 
 ## 4.2.0 - 2026-XX-XX
 * Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a 25x speedup.
+* Optimize `Table::extract_if()` and `Table::extract_from_if()`. Benchmarks on large tables show
+  a 1.6-4x speedup, depending on the fraction of entries extracted, and iterating the extract
+  iterator from both ends no longer degrades the removal batching.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
   `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
   / `VacantEntry` accessors.
 * `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
   now poison the write transaction if their predicate panics, causing `WriteTransaction::commit()`
-  to return `CommitError::TransactionPoisoned`. `retain()` and `retain_in()` also poison the
+  to return `CommitError::TransactionPoisoned`. They also poison the
   transaction if an internal error prevents removals from being applied.
 * Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
   entries.
