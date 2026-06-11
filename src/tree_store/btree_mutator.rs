@@ -122,7 +122,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         self.delete_key(K::as_bytes(key).as_ref())
     }
 
-    fn delete_key(&mut self, key: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
+    pub(super) fn delete_key(&mut self, key: &[u8]) -> Result<Option<AccessGuard<'a, V>>> {
         if let Some(BtreeHeader {
             root: p, length, ..
         }) = *self.root
@@ -197,36 +197,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok(())
     }
 
+    // The returned guards must be dropped before mutating the tree again.
     pub(super) fn pop_leaf_entry(
         &mut self,
         leaf: PageImpl,
         path: Vec<(PageImpl, usize)>,
         position: usize,
     ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
-        self.pop_leaf_entry_inner(leaf, path, position, true)
-    }
-
-    pub(super) fn pop_leaf_entry_detached(
-        &mut self,
-        leaf: PageImpl,
-        path: Vec<(PageImpl, usize)>,
-        position: usize,
-    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
-        self.pop_leaf_entry_inner(leaf, path, position, false)
-    }
-
-    fn pop_leaf_entry_inner(
-        &mut self,
-        leaf: PageImpl,
-        path: Vec<(PageImpl, usize)>,
-        position: usize,
-        allow_in_place: bool,
-    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
-        // If `allow_in_place` is true, callers must drop the returned guards before mutating the
-        // tree again.
         let length = self.root.expect("pop requires a root").length;
-        let (mut result, key, value) =
-            self.delete_leaf_at_position(leaf, position, true, allow_in_place)?;
+        let (mut result, key, value) = self.delete_leaf_at_position(leaf, position, true, true)?;
         for (page, child_index) in path.into_iter().rev() {
             result = self.apply_child_deletion_result(page, child_index, result)?;
         }
@@ -237,17 +216,20 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         ))
     }
 
+    // If `allow_in_place` is false, the leaf's memory is left untouched so that guards backed by
+    // it remain valid after the deletion.
     pub(super) fn delete_leaf_entries(
         &mut self,
         leaf: PageImpl,
         path: Vec<(PageImpl, usize)>,
         indexes: &[usize],
+        allow_in_place: bool,
     ) -> Result {
         if indexes.is_empty() {
             return Ok(());
         }
         let length = self.root.expect("delete requires a root").length;
-        let mut result = self.delete_leaf_indexes(leaf, indexes)?;
+        let mut result = self.delete_leaf_indexes(leaf, indexes, allow_in_place)?;
         for (page, child_index) in path.into_iter().rev() {
             result = self.apply_child_deletion_result(page, child_index, result)?;
         }
@@ -799,7 +781,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok((result, Some(value_guard)))
     }
 
-    fn delete_leaf_indexes(&mut self, page: PageImpl, indexes: &[usize]) -> Result<DeletionResult> {
+    fn delete_leaf_indexes(
+        &mut self,
+        page: PageImpl,
+        indexes: &[usize],
+        allow_in_place: bool,
+    ) -> Result<DeletionResult> {
         debug_assert!(!indexes.is_empty());
         debug_assert!(indexes.windows(2).all(|pair| pair[0] < pair[1]));
 
@@ -813,7 +800,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let plan = self.plan_leaf_delete(&accessor, indexes.len(), deleted_bytes);
         let page_number = page.get_page_number();
 
-        if self.page_allocator.uncommitted(page_number)
+        if allow_in_place
+            && self.page_allocator.uncommitted(page_number)
             && plan.disposition == LeafDeleteDisposition::Rebuild
         {
             drop(page);
