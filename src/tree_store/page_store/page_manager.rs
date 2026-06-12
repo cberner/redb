@@ -1308,6 +1308,14 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn close(&self) -> Result {
+        let shutdown_result = self.flush_shutdown_header();
+        // The backend's close() contract guarantees it is called exactly once, so it must be
+        // called even if the shutdown writes above failed
+        let close_result = self.storage.close();
+        shutdown_result.and(close_result)
+    }
+
+    fn flush_shutdown_header(&self) -> Result {
         if self.storage.check_io_errors().is_ok() && !thread::panicking() {
             let mut state = self.state.lock()?;
             if self.storage.flush().is_ok() {
@@ -1316,8 +1324,6 @@ impl TransactionalMemory {
                 self.storage.flush()?;
             }
         }
-
-        self.storage.close()?;
 
         Ok(())
     }

@@ -25,6 +25,9 @@
 * Fix a panic in `insert()` when a single leaf page accumulated 65536 entries via in-place
   appends, e.g. by inserting a large value and then many small values in ascending key order
   within the same transaction.
+* `StorageBackend::close()` is now called when the `Database` is dropped even if an I/O error
+  occurs during shutdown. Previously a shutdown I/O error could skip the `close()` call, leaking
+  any resources the backend releases there.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.
