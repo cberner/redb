@@ -2793,6 +2793,186 @@ fn compact_does_not_grow_file() {
     );
 }
 
+// A persistent savepoint must be reported as PersistentSavepointExists, even though it also
+// holds a read reference internally
+#[test]
+fn compact_returns_persistent_savepoint_error() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // No read transactions exist. Only a persistent savepoint.
+    let txn = db.begin_write().unwrap();
+    let _id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let err = db.compact().unwrap_err();
+    assert!(
+        matches!(err, CompactionError::PersistentSavepointExists),
+        "expected PersistentSavepointExists, got {err:?}"
+    );
+}
+
+// An ephemeral savepoint must be reported as EphemeralSavepointExists, even though it also
+// holds a read reference internally
+#[test]
+fn compact_returns_ephemeral_savepoint_error() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // No read transactions exist. Only an ephemeral savepoint.
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let err = db.compact().unwrap_err();
+    assert!(
+        matches!(err, CompactionError::EphemeralSavepointExists),
+        "expected EphemeralSavepointExists, got {err:?}"
+    );
+    drop(savepoint);
+}
+
+// A persistent savepoint that exists only on disk (created by a previous Database instance)
+// must still be reported as PersistentSavepointExists after reopening
+#[test]
+fn compact_returns_persistent_savepoint_error_after_reopen() {
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(1, 1).unwrap();
+        }
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        let _id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+    }
+
+    let mut db = Database::open(tmpfile.path()).unwrap();
+    let err = db.compact().unwrap_err();
+    assert!(
+        matches!(err, CompactionError::PersistentSavepointExists),
+        "expected PersistentSavepointExists, got {err:?}"
+    );
+}
+
+// A genuine read transaction (with no savepoints) must still be reported as
+// TransactionInProgress
+#[test]
+fn compact_returns_transaction_in_progress_error() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let err = db.compact().unwrap_err();
+    assert!(
+        matches!(err, CompactionError::TransactionInProgress),
+        "expected TransactionInProgress, got {err:?}"
+    );
+    drop(read_txn);
+
+    // Once the read transaction is dropped, compaction is allowed
+    db.compact().unwrap();
+}
+
+// compact() must not block when the caller still holds the write transaction that created a
+// savepoint: it must report the savepoint immediately instead of waiting (forever) in
+// begin_write()
+#[test]
+fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Hold the write transaction (and its savepoint) while calling compact() from
+    // another thread, with a timeout so a regression fails instead of hanging
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = db.compact();
+        sender.send(()).unwrap();
+        (db, result)
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("compact() deadlocked on the caller's own write transaction");
+    let (mut db, result) = handle.join().unwrap();
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CompactionError::EphemeralSavepointExists),
+        "expected EphemeralSavepointExists, got {err:?}"
+    );
+
+    drop(savepoint);
+    txn.abort().unwrap();
+    db.compact().unwrap();
+}
+
+// A persistent savepoint created by a still-uncommitted transaction must already block
+// compaction, and must stop doing so if that transaction is aborted
+#[test]
+fn compact_returns_persistent_savepoint_error_before_commit() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 1).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let _id = txn.persistent_savepoint().unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = db.compact();
+        sender.send(()).unwrap();
+        (db, result)
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("compact() deadlocked on the caller's own write transaction");
+    let (mut db, result) = handle.join().unwrap();
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CompactionError::PersistentSavepointExists),
+        "expected PersistentSavepointExists, got {err:?}"
+    );
+
+    // Aborting rolls back the persistent savepoint, so compaction is allowed again
+    txn.abort().unwrap();
+    db.compact().unwrap();
+}
+
 fn require_send<T: Send>(_: &T) {}
 fn require_sync<T: Sync + Send>(_: &T) {}
 

@@ -28,6 +28,9 @@
 * `StorageBackend::close()` is now called when the `Database` is dropped even if an I/O error
   occurs during shutdown. Previously a shutdown I/O error could skip the `close()` call, leaking
   any resources the backend releases there.
+* `compact()` now returns `CompactionError::PersistentSavepointExists` or
+  `CompactionError::EphemeralSavepointExists` instead of the misleading
+  `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

@@ -81,6 +81,8 @@ struct State {
     next_transaction_id: TransactionId,
     live_write_transaction: Option<TransactionId>,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
+    // Subset of valid_savepoints that are persistent
+    persistent_savepoints: BTreeSet<SavepointId>,
     // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
     // We need to make sure that the freed-table does not get processed for these, since they are not durable yet
     // Therefore, we hold a read transaction on their nearest durable ancestor
@@ -105,6 +107,7 @@ impl TransactionTracker {
                 next_transaction_id,
                 live_write_transaction: None,
                 valid_savepoints: BTreeMap::default(),
+                persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: HashMap::default(),
                 unprocessed_freed_non_durable_commits: BTreeSet::default(),
             }),
@@ -214,6 +217,7 @@ impl TransactionTracker {
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
         let mut state = self.state.lock().unwrap();
         assert!(state.valid_savepoints.is_empty());
+        assert!(state.persistent_savepoints.is_empty());
         state.next_savepoint_id = next_savepoint;
     }
 
@@ -227,6 +231,14 @@ impl TransactionTracker {
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
+        state.persistent_savepoints.insert(savepoint.get_id());
+    }
+
+    // Marks an already-registered savepoint as persistent
+    pub(crate) fn mark_savepoint_persistent(&self, id: SavepointId) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.valid_savepoints.contains_key(&id));
+        state.persistent_savepoints.insert(id);
     }
 
     pub(crate) fn register_read_transaction(
@@ -257,6 +269,10 @@ impl TransactionTracker {
         !self.state.lock().unwrap().valid_savepoints.is_empty()
     }
 
+    pub(crate) fn any_persistent_savepoint_exists(&self) -> bool {
+        !self.state.lock().unwrap().persistent_savepoints.is_empty()
+    }
+
     // Excludes internal read refs that only pin durable ancestors of pending
     // non-durable commits.
     pub(crate) fn any_user_read_reference_exists(&self) -> bool {
@@ -284,11 +300,11 @@ impl TransactionTracker {
 
     // Deallocates the given savepoint and its matching reference count on the transcation
     pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
-        self.state
-            .lock()
-            .unwrap()
-            .valid_savepoints
-            .remove(&savepoint);
+        {
+            let mut state = self.state.lock().unwrap();
+            state.valid_savepoints.remove(&savepoint);
+            state.persistent_savepoints.remove(&savepoint);
+        }
         self.deallocate_read_transaction(transaction);
     }
 
@@ -324,6 +340,7 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         for id in savepoints {
             state.valid_savepoints.remove(&id);
+            state.persistent_savepoints.remove(&id);
         }
     }
 

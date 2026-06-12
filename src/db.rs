@@ -640,21 +640,38 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
+        // These checks must run before begin_write(): the caller may legally hold an open
+        // WriteTransaction (it is not lifetime-bound to the Database), and if that transaction
+        // created a savepoint, blocking in begin_write() below would deadlock. Savepoints must
+        // be diagnosed before read references, because every live savepoint also holds a read
+        // reference. The tracker covers persistent savepoints created by previous Database
+        // instances, because they are re-registered when the database is opened.
+        if self.transaction_tracker.any_persistent_savepoint_exists() {
+            return Err(CompactionError::PersistentSavepointExists);
+        }
+        if self.transaction_tracker.any_savepoint_exists() {
+            return Err(CompactionError::EphemeralSavepointExists);
+        }
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
-        // Commit to free up any pending free pages
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        // Re-check inside the write transaction: a concurrent writer may have created a
+        // savepoint between the checks above and the start of this transaction.
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
         if self.transaction_tracker.any_savepoint_exists() {
             return Err(CompactionError::EphemeralSavepointExists);
         }
+        if self.transaction_tracker.any_user_read_reference_exists() {
+            return Err(CompactionError::TransactionInProgress);
+        }
         txn.abort()?;
+        // Commit to free up any pending free pages
         self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
 
         let mut compacted = false;
