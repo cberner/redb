@@ -252,6 +252,121 @@ fn previous_io_error() {
     ));
 }
 
+// StorageBackend::close() is documented to be called exactly once when the Database is
+// dropped. Verify that this holds even when an I/O error occurs during shutdown.
+#[test]
+fn close_called_exactly_once_on_shutdown_io_error() {
+    use redb::backends::InMemoryBackend;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicI64, AtomicU64};
+
+    #[derive(Debug)]
+    struct FaultBackend {
+        inner: InMemoryBackend,
+        // Counts every write/sync/set_len op
+        ops: Arc<AtomicU64>,
+        // The op that decrements this to zero fails. i64::MAX means never fail.
+        countdown: Arc<AtomicI64>,
+        close_calls: Arc<AtomicU64>,
+    }
+
+    impl FaultBackend {
+        fn new() -> (Self, Arc<AtomicU64>, Arc<AtomicI64>, Arc<AtomicU64>) {
+            let ops = Arc::new(AtomicU64::new(0));
+            let countdown = Arc::new(AtomicI64::new(i64::MAX));
+            let close_calls = Arc::new(AtomicU64::new(0));
+            (
+                Self {
+                    inner: InMemoryBackend::new(),
+                    ops: ops.clone(),
+                    countdown: countdown.clone(),
+                    close_calls: close_calls.clone(),
+                },
+                ops,
+                countdown,
+                close_calls,
+            )
+        }
+
+        fn should_fail(&self) -> bool {
+            self.ops.fetch_add(1, Ordering::SeqCst);
+            self.countdown.fetch_sub(1, Ordering::SeqCst) == 1
+        }
+    }
+
+    impl StorageBackend for FaultBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            if self.should_fail() {
+                return Err(std::io::Error::other("injected fault"));
+            }
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            if self.should_fail() {
+                return Err(std::io::Error::other("injected fault"));
+            }
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            if self.should_fail() {
+                return Err(std::io::Error::other("injected fault"));
+            }
+            self.inner.write(offset, data)
+        }
+
+        fn close(&self) -> Result<(), std::io::Error> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn workload(db: &Database) {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(&0, &0).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    // Probe how many write/sync/set_len ops a clean shutdown performs, and verify that a clean
+    // drop calls close() exactly once
+    let (backend, ops, _countdown, close_calls) = FaultBackend::new();
+    let db = Database::builder().create_with_backend(backend).unwrap();
+    workload(&db);
+    ops.store(0, Ordering::SeqCst);
+    drop(db);
+    let shutdown_ops = ops.load(Ordering::SeqCst);
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+    assert!(shutdown_ops > 0);
+
+    // Fail each shutdown op in turn; close() must still be called exactly once
+    for fail_at in 0..shutdown_ops {
+        let (backend, ops, countdown, close_calls) = FaultBackend::new();
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        workload(&db);
+        ops.store(0, Ordering::SeqCst);
+        countdown.store(i64::try_from(fail_at).unwrap() + 1, Ordering::SeqCst);
+        catch_unwind(AssertUnwindSafe(|| drop(db)))
+            .unwrap_or_else(|_| panic!("shutdown fail_at={fail_at}: panic during Database::drop"));
+        assert_eq!(
+            close_calls.load(Ordering::SeqCst),
+            1,
+            "shutdown fail_at={fail_at}: close() call count"
+        );
+    }
+}
+
 #[test]
 fn mixed_durable_commit() {
     let tmpfile = create_tempfile();
