@@ -344,13 +344,20 @@ impl TransactionTracker {
         }
     }
 
-    pub(crate) fn oldest_savepoint(&self) -> Option<(SavepointId, TransactionId)> {
+    // The oldest savepoint, ignoring the given savepoint ids. Used by committing transactions
+    // to compute the savepoint horizon as it will be after their staged savepoint deletions
+    // are applied on commit.
+    pub(crate) fn oldest_savepoint_excluding(
+        &self,
+        exclude: &BTreeSet<SavepointId>,
+    ) -> Option<(SavepointId, TransactionId)> {
         self.state
             .lock()
             .unwrap()
             .valid_savepoints
-            .first_key_value()
-            .map(|x| (*x.0, *x.1))
+            .iter()
+            .find(|(id, _)| !exclude.contains(id))
+            .map(|(id, txn_id)| (*id, *txn_id))
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
