@@ -643,6 +643,139 @@ pub(super) struct LeafBuilder<'a, 'b> {
     allocated_pages: &'b Mutex<PageTrackerPolicy>,
 }
 
+// Key-value pairs copied into owned memory, so they survive any tree
+// mutation. Entries must be pushed in ascending key order.
+#[derive(Default)]
+pub(super) struct OwnedEntryBuffer {
+    pairs: Vec<(Range<usize>, Range<usize>)>,
+    data: Vec<u8>,
+}
+
+impl OwnedEntryBuffer {
+    pub(super) fn push(&mut self, key: &[u8], value: &[u8]) {
+        let key_start = self.data.len();
+        self.data.extend_from_slice(key);
+        let key_end = self.data.len();
+        self.data.extend_from_slice(value);
+        let value_end = self.data.len();
+        self.pairs.push((key_start..key_end, key_end..value_end));
+    }
+
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.pairs
+            .iter()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+}
+
+// Accumulates key-value pairs in owned memory and builds packed leaf pages.
+// Unlike `LeafBuilder` it is not tied to a source page, so the entries it
+// buffers survive any tree mutation.
+pub(super) struct OwnedLeafBuilder {
+    pairs: Vec<(Range<usize>, Range<usize>)>,
+    data: Vec<u8>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    total_key_bytes: usize,
+    total_value_bytes: usize,
+    page_allocator: PageAllocator,
+    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+}
+
+impl OwnedLeafBuilder {
+    pub(super) fn new(
+        page_allocator: PageAllocator,
+        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        Self {
+            pairs: vec![],
+            data: vec![],
+            fixed_key_size,
+            fixed_value_size,
+            total_key_bytes: 0,
+            total_value_bytes: 0,
+            page_allocator,
+            allocated_pages,
+        }
+    }
+
+    pub(super) fn required_bytes(&self, num_pairs: usize, keys_values_bytes: usize) -> usize {
+        RawLeafBuilder::required_bytes(
+            num_pairs,
+            keys_values_bytes,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+
+    // Whether pushing the pair would overflow a standard page. An oversized
+    // pair in an empty builder never splits: it gets its own larger page,
+    // matching `LeafBuilder`'s single-large-value handling.
+    pub(super) fn would_split_with(&self, key: &[u8], value: &[u8]) -> bool {
+        let required_size = self.required_bytes(
+            self.pairs.len() + 1,
+            self.total_key_bytes + self.total_value_bytes + key.len() + value.len(),
+        );
+        required_size > self.page_allocator.get_page_size() && !self.pairs.is_empty()
+    }
+
+    pub(super) fn push(&mut self, key: &[u8], value: &[u8]) {
+        self.total_key_bytes += key.len();
+        self.total_value_bytes += value.len();
+
+        let key_start = self.data.len();
+        self.data.extend_from_slice(key);
+        let key_end = self.data.len();
+        self.data.extend_from_slice(value);
+        let value_end = self.data.len();
+        self.pairs.push((key_start..key_end, key_end..value_end));
+    }
+
+    pub(super) fn last_key(&self) -> &[u8] {
+        let key = &self
+            .pairs
+            .last()
+            .expect("owned leaf builder must have an upper key")
+            .0;
+        &self.data[key.clone()]
+    }
+
+    /// Builds a page from the buffered pairs and resets the builder for reuse.
+    pub(super) fn build_and_reset<'txn>(&mut self) -> Result<PageMut<'txn>> {
+        assert!(!self.pairs.is_empty());
+        let required_size = self.required_bytes(
+            self.pairs.len(),
+            self.total_key_bytes + self.total_value_bytes,
+        );
+        let mut page = {
+            let mut allocated_pages = self.allocated_pages.lock().unwrap();
+            self.page_allocator
+                .allocate(required_size, &mut allocated_pages)?
+        };
+        let mut builder = RawLeafBuilder::new(
+            page.memory_mut(),
+            self.pairs.len(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.total_key_bytes,
+        );
+        for (key, value) in self.pairs.drain(..) {
+            builder.append(&self.data[key], &self.data[value]);
+        }
+        drop(builder);
+        self.data.clear();
+        self.total_key_bytes = 0;
+        self.total_value_bytes = 0;
+        Ok(page)
+    }
+}
+
 impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn required_bytes(&self, num_pairs: usize, keys_values_bytes: usize) -> usize {
         RawLeafBuilder::required_bytes(

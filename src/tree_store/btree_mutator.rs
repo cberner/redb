@@ -3,7 +3,7 @@ use crate::tree_store::btree_base::{
     LeafBuilder, LeafMutator, RawLeafBuilder,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
-    DeletedBranch, DeletedLeaf, PartialBranch, PartialLeaf, Subtree,
+    DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
@@ -13,14 +13,16 @@ use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
 use std::marker::PhantomData;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 enum DeletionResult {
     // A proper subtree
     Subtree(PageNumber),
-    // A leaf with zero children
-    DeletedLeaf,
+    // A child subtree was removed completely and should be removed from its parent.
+    // If this reaches the root, the tree becomes empty.
+    DeletedSubtree,
     // A leaf with fewer entries than desired
     PartialLeaf {
         page: Arc<[u8]>,
@@ -153,7 +155,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn finish_deletion(&mut self, deletion_result: DeletionResult, new_length: u64) -> Result {
         let new_root = match deletion_result {
             Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
-            DeletedLeaf => None,
+            DeletedSubtree => None,
             PartialLeaf {
                 page,
                 deleted_pairs,
@@ -243,6 +245,94 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             result = self.apply_child_deletion_result(page, child_index, result)?;
         }
         self.finish_deletion(result, length - indexes.len() as u64)
+    }
+
+    // Replaces the contiguous `replaced_children` range of the leaf path's
+    // parent branch with `replacement_leaves`, then rebuilds the rest of the
+    // path. Each replacement's separator is its own greatest key; separators
+    // for preserved children are reused from the original branch.
+    pub(super) fn replace_leaf_children(
+        &mut self,
+        mut path: Vec<(PageImpl, usize)>,
+        replaced_children: Range<usize>,
+        replacement_leaves: &[(PageNumber, Checksum, Vec<u8>)],
+        removed_pairs: u64,
+    ) -> Result {
+        assert!(!replaced_children.is_empty());
+        let length = self.root.expect("replace requires a root").length;
+        let (parent_page, _) = path
+            .pop()
+            .expect("leaf child replacement requires a parent branch");
+        let parent_page_number = parent_page.get_page_number();
+        let (mut result, removed_leaf_pages) = {
+            let accessor = BranchAccessor::new(&parent_page, K::fixed_width());
+            assert!(replaced_children.end <= accessor.count_children());
+            let removed_leaf_pages = replaced_children
+                .clone()
+                .map(|i| accessor.child_page(i).unwrap())
+                .collect::<Vec<_>>();
+
+            let old_children = accessor.count_children();
+            let new_children = old_children - replaced_children.len() + replacement_leaves.len();
+            let result = if new_children == 0 {
+                DeletedSubtree
+            } else {
+                let mut builder = BranchBuilder::new(
+                    &self.page_allocator,
+                    &self.allocated,
+                    new_children,
+                    K::fixed_width(),
+                );
+                // Branches store one separator key after every child except
+                // the last, so each push below is gated on `pushed`.
+                let mut pushed = 0;
+                for i in 0..replaced_children.start {
+                    builder.push_child(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    );
+                    pushed += 1;
+                    if pushed < new_children {
+                        builder.push_key(accessor.key(i).unwrap());
+                    }
+                }
+                for (page, checksum, upper_key) in replacement_leaves {
+                    builder.push_child(*page, *checksum);
+                    pushed += 1;
+                    if pushed < new_children {
+                        builder.push_key(upper_key);
+                    }
+                }
+                for i in replaced_children.end..old_children {
+                    builder.push_child(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    );
+                    pushed += 1;
+                    if pushed < new_children {
+                        builder.push_key(accessor.key(i).unwrap());
+                    }
+                }
+                debug_assert_eq!(pushed, new_children);
+                Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?
+            };
+            (result, removed_leaf_pages)
+        };
+        drop(parent_page);
+        self.conditional_free(parent_page_number);
+
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+
+        let new_length = length
+            .checked_sub(removed_pairs)
+            .expect("cursor removed more entries than the tree contains");
+        self.finish_deletion(result, new_length)?;
+        for page_number in removed_leaf_pages {
+            self.conditional_free(page_number);
+        }
+        Ok(())
     }
 
     #[allow(clippy::type_complexity)]
@@ -741,7 +831,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         }
 
         let result = match plan.disposition {
-            LeafDeleteDisposition::Delete => DeletedLeaf,
+            LeafDeleteDisposition::Delete => DeletedSubtree,
             LeafDeleteDisposition::Merge => PartialLeaf {
                 page: page.to_arc(),
                 deleted_pairs: DeletedPairs::One(position),
@@ -823,7 +913,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         }
 
         let result = match plan.disposition {
-            LeafDeleteDisposition::Delete => DeletedLeaf,
+            LeafDeleteDisposition::Delete => DeletedSubtree,
             LeafDeleteDisposition::Merge => PartialLeaf {
                 page: page.to_arc(),
                 deleted_pairs: DeletedPairs::Many(indexes.to_vec()),
@@ -996,7 +1086,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 // Handled in the if above
                 unreachable!();
             }
-            DeletedLeaf => {
+            DeletedSubtree => {
                 for i in 0..accessor.count_children() {
                     if i == child_index {
                         continue;
