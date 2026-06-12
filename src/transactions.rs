@@ -813,6 +813,12 @@ impl SavepointTransactionState {
         self.invalidated.contains(&id)
     }
 
+    // Persistent savepoints whose deletion is staged in this transaction. They are still
+    // present in the shared tracker until apply_on_commit() runs.
+    fn pending_deleted_ids(&self) -> BTreeSet<SavepointId> {
+        self.deleted_persistent.iter().map(|(id, _)| *id).collect()
+    }
+
     fn has_created_or_deleted(&self) -> bool {
         !self.created_persistent.is_empty() || !self.deleted_persistent.is_empty()
     }
@@ -1695,10 +1701,15 @@ impl WriteTransaction {
             data_allocated_pages,
         )?;
 
-        // Purge any transactions that are no longer referenced
+        // Purge any transactions that are no longer referenced. The horizon must reflect the
+        // savepoints that will exist after this commit: savepoints deleted in this transaction
+        // are still in the tracker (they are removed post-commit), but the pages they pinned
+        // may be freed by this commit's epilogue, and DATA_ALLOCATED_TABLE must never name a
+        // page that is no longer allocated.
+        let deleted_savepoints = self.savepoint_state.lock().unwrap().pending_deleted_ids();
         let oldest = self
             .transaction_tracker
-            .oldest_savepoint()
+            .oldest_savepoint_excluding(&deleted_savepoints)
             .map_or(u64::MAX, |(_, x)| x.raw_id());
         let key = TransactionIdWithPagination {
             transaction_id: oldest,

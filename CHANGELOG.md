@@ -31,6 +31,8 @@
 * `compact()` now returns `CompactionError::PersistentSavepointExists` or
   `CompactionError::EphemeralSavepointExists` instead of the misleading
   `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
+* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
+  in debug builds) after a persistent savepoint was deleted or restored.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

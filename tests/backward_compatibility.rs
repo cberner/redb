@@ -337,3 +337,81 @@ fn mixed_width() {
     test_helper::<u8, &[u8]>();
     test_helper::<&[u8; 5], &str>();
 }
+
+// Invariant: a persistent savepoint created by redb 2.6 (file format v3) must remain fully
+// usable in the current version: restoring and deleting it must leave the allocated-pages
+// bookkeeping referencing only allocated pages, so check_integrity() reports a clean database.
+#[test]
+fn restore_and_delete_redb2_6_persistent_savepoint() {
+    let table_def: redb::TableDefinition<u64, &[u8]> = redb::TableDefinition::new("table");
+    let table_def_26: redb2_6::TableDefinition<u64, &[u8]> = redb2_6::TableDefinition::new("table");
+    fn value_for(i: u64, len: usize) -> Vec<u8> {
+        vec![(i % 250) as u8 + 1; len]
+    }
+
+    let tmpfile = create_tempfile();
+    let savepoint_id;
+    {
+        let db = redb2_6::Database::builder()
+            .create_with_file_format_v3(true)
+            .create(tmpfile.path())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_def_26).unwrap();
+            for i in 0..100u64 {
+                table.insert(i, value_for(i, 100).as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        savepoint_id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+
+        // Modify the data after the savepoint (still in redb 2.6)
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_def_26).unwrap();
+            for i in 0..50u64 {
+                table.remove(i).unwrap();
+            }
+            for i in 100..200u64 {
+                table.insert(i, value_for(i, 100).as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let mut db = redb::Database::open(tmpfile.path()).unwrap();
+    let ids: Vec<u64> = {
+        let txn = db.begin_write().unwrap();
+        let ids = txn.list_persistent_savepoints().unwrap().collect();
+        txn.abort().unwrap();
+        ids
+    };
+    assert_eq!(ids, vec![savepoint_id]);
+
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    drop(savepoint);
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(txn.delete_persistent_savepoint(savepoint_id).unwrap());
+    txn.commit().unwrap();
+
+    // Must not panic
+    assert!(db.check_integrity().unwrap());
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(table_def).unwrap();
+    assert_eq!(table.len().unwrap(), 100);
+    for i in 0..100u64 {
+        assert_eq!(
+            table.get(i).unwrap().unwrap().value(),
+            value_for(i, 100).as_slice()
+        );
+    }
+}

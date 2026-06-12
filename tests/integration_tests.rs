@@ -1612,6 +1612,181 @@ fn regression19() {
     tx.open_table(table_def).unwrap();
 }
 
+fn savepoint_integrity_value(i: u64, len: usize) -> Vec<u8> {
+    vec![(i % 250) as u8 + 1; len]
+}
+
+// Invariant: DATA_ALLOCATED_TABLE entries must only reference allocated pages, and must be
+// purged once no savepoint needs them. Deleting a persistent savepoint must not leave entries
+// behind that name pages freed by the same commit's epilogue.
+#[test]
+fn check_integrity_after_persistent_savepoint_delete() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 0..1000u64 {
+            table
+                .insert(&k, savepoint_integrity_value(k, 60).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // While the savepoint exists, new allocations are recorded in the allocated-pages table
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 2000..2500u64 {
+            table
+                .insert(&k, savepoint_integrity_value(k, 60).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+    // ... and freeing them queues them in the freed table, but they stay allocated as long as
+    // the savepoint pins them
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 2000..2500u64 {
+            table.remove(&k).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    txn.delete_persistent_savepoint(savepoint_id).unwrap();
+    txn.commit().unwrap();
+
+    assert!(
+        db.check_integrity().unwrap(),
+        "false corruption report after deleting a persistent savepoint"
+    );
+}
+
+// Invariant: restoring and later deleting a persistent savepoint must leave the allocated-pages
+// bookkeeping referencing only allocated pages
+#[test]
+fn check_integrity_with_persistent_savepoint_then_restore() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 0..1000u64 {
+            table
+                .insert(&k, savepoint_integrity_value(k, 60).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let savepoint_id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 0..900u64 {
+            table.remove(&k).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    assert!(
+        db.check_integrity().unwrap(),
+        "false corruption report while a persistent savepoint exists"
+    );
+
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    drop(savepoint);
+    txn.commit().unwrap();
+
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(table_def).unwrap();
+    assert_eq!(table.len().unwrap(), 1000);
+    drop(table);
+    drop(read);
+
+    let txn = db.begin_write().unwrap();
+    txn.delete_persistent_savepoint(savepoint_id).unwrap();
+    txn.commit().unwrap();
+    assert!(db.check_integrity().unwrap());
+}
+
+// Invariant: restore_savepoint() queues pages from the allocated-pages table to be freed; once
+// the savepoint is deleted and those pages are actually freed, no entry may still name them
+#[test]
+fn check_integrity_after_persistent_savepoint_restore_and_delete() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..100u64 {
+            table
+                .insert(&i, savepoint_integrity_value(i, 100).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    // Allocate data pages after the savepoint; these get recorded in the allocated-pages table
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for i in 0..50u64 {
+            table.remove(&i).unwrap();
+        }
+        for i in 100..200u64 {
+            table
+                .insert(&i, savepoint_integrity_value(i, 100).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Restore the savepoint and then delete it
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(id).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    drop(savepoint);
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(txn.delete_persistent_savepoint(id).unwrap());
+    txn.commit().unwrap();
+
+    // Must not panic
+    assert!(db.check_integrity().unwrap());
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(table_def).unwrap();
+    assert_eq!(table.len().unwrap(), 100);
+    for i in 0..100u64 {
+        assert_eq!(
+            table.get(&i).unwrap().unwrap().value(),
+            savepoint_integrity_value(i, 100).as_slice()
+        );
+    }
+}
+
 #[test]
 fn regression20() {
     let tmpfile = create_tempfile();
