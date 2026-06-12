@@ -1094,6 +1094,8 @@ impl WriteTransaction {
         )?;
 
         savepoint.set_persistent();
+        self.transaction_tracker
+            .mark_savepoint_persistent(savepoint.get_id());
 
         self.savepoint_state
             .lock()
