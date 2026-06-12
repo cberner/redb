@@ -245,6 +245,10 @@ struct InMemoryState {
     // to readers until a durable commit promotes it to the primary slot on disk. Protected by the
     // enclosing Mutex so updates happen atomically with the header changes they describe.
     read_from_secondary: bool,
+    // True if grow() has extended the file (and the in-memory layout) since the last durable
+    // commit, so the in-memory layout is ahead of the durable header's layout. When false, the two
+    // layouts match, so a divergence indicates external corruption.
+    layout_grown_since_durable: bool,
 }
 
 impl InMemoryState {
@@ -253,6 +257,7 @@ impl InMemoryState {
             header,
             allocators: None,
             read_from_secondary: false,
+            layout_grown_since_durable: false,
         }
     }
 
@@ -538,6 +543,8 @@ impl TransactionalMemory {
             let mut state = self.state.lock().unwrap();
             state.header = header;
             state.read_from_secondary = false;
+            // The reloaded layout is the durable one, so the in-memory layout is no longer ahead.
+            state.layout_grown_since_durable = false;
             // Drop the previous allocator state -- it described the layout that was in memory
             // before the reload. The caller is required to repopulate it (via reset_allocator_state or
             // load_allocator_state) before any allocation/free path runs.
@@ -591,13 +598,26 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
+    // Marks a page allocated while rebuilding the allocator during repair. The page number may come
+    // from a corrupt freed tree, so it is bounds-checked against the layout and reported as
+    // corruption rather than panicking in `record_alloc`.
+    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result<(), StorageError> {
         let mut state = self.state.lock().unwrap();
         let region_index = page_number.region;
+        if region_index >= state.header.layout().num_regions()
+            || !state
+                .get_region(region_index)
+                .is_valid_page(page_number.page_index, page_number.page_order)
+        {
+            return Err(StorageError::Corrupted(format!(
+                "Page {page_number:?} is out of range for the database layout"
+            )));
+        }
         let allocator = state.get_region_mut(region_index);
         allocator.record_alloc(page_number.page_index, page_number.page_order);
         #[cfg(debug_assertions)]
         assert!(self.allocated_pages.lock().unwrap().insert(page_number));
+        Ok(())
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -833,6 +853,8 @@ impl TransactionalMemory {
         );
         state.header = header;
         state.read_from_secondary = false;
+        // This layout is now durable, so the in-memory layout is no longer ahead of it.
+        state.layout_grown_since_durable = false;
         drop(state);
 
         Ok(())
@@ -961,6 +983,30 @@ impl TransactionalMemory {
     pub(crate) fn get_last_durable_transaction_id(&self) -> Result<TransactionId> {
         let state = self.state.lock()?;
         Ok(state.header.primary_slot().transaction_id)
+    }
+
+    // True when a non-durable commit has been made visible to readers but not yet flushed to the
+    // durable primary slot.
+    pub(crate) fn pending_non_durable_commit(&self) -> bool {
+        self.state.lock().unwrap().read_from_secondary
+    }
+
+    // True if the on-disk header's durable primary commit still matches the in-memory copy. Used
+    // to detect external header modification before a commit would overwrite it.
+    pub(crate) fn durable_primary_unmodified(&self) -> Result<bool, DatabaseError> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        let file_len = self.storage.raw_file_len()?;
+        let state = self.state.lock().unwrap();
+        // The file must be at least as large as the in-memory layout: if an external writer
+        // truncated it (e.g. below a length that a pending non-durable commit had grown it to),
+        // flushing would commit a layout pointing past the end of the file. And unless grow() has
+        // moved the in-memory layout ahead of the durable header, the on-disk layout fields must
+        // still match the in-memory ones. A divergence in either is external corruption that the
+        // caller must not overwrite by flushing.
+        let layout_unmodified = file_len >= state.header.layout().len()
+            && (state.layout_grown_since_durable || disk_header.layout_matches(&state.header));
+        Ok(disk_header.primary_slot_unchanged(&state.header) && layout_unmodified)
     }
 
     pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
@@ -1263,6 +1309,8 @@ impl TransactionalMemory {
 
         state.allocators_mut().resize_to(new_layout);
         state.header.set_layout(new_layout);
+        // The in-memory layout is now ahead of the durable header until the next durable commit.
+        state.layout_grown_since_durable = true;
         Ok(())
     }
 

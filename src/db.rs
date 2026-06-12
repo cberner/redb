@@ -576,10 +576,20 @@ impl Database {
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired.
     ///
-    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
-    /// alive when this method is called.
+    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
+    /// ephemeral [`Savepoint`](crate::Savepoint), is still alive when this method is called.
+    ///
+    /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
+    /// been made durable are made durable if the check passes, or rolled back if the database must
+    /// be repaired.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
+            return Err(DatabaseError::TransactionInProgress);
+        }
+        // An ephemeral savepoint may pin a non-durable transaction whose pages the reload below
+        // discards; restoring it afterwards could corrupt the database. Persistent savepoints are
+        // durable, so they are unaffected.
+        if self.transaction_tracker.any_ephemeral_savepoint_exists() {
             return Err(DatabaseError::TransactionInProgress);
         }
 
@@ -602,6 +612,23 @@ impl Database {
             Ok(false) | Err(StorageError::Corrupted(_)) => false,
             Err(err) => return Err(err.into()),
         };
+
+        // The reload below would discard acknowledged non-durable commits, so make them durable
+        // first when the live state is clean. Skip the flush if the on-disk header was modified
+        // externally, since committing would overwrite it and hide that corruption from the
+        // checks below. If they can't be flushed safely, rolling them back is reported as unclean.
+        if self.mem.pending_non_durable_commit() {
+            if was_clean && self.mem.durable_primary_unmodified()? {
+                let mut txn = self
+                    .begin_write()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                txn.disable_post_commit_free();
+                txn.commit()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+            } else {
+                was_clean = false;
+            }
+        }
 
         let mem = Arc::get_mut(&mut self.mem).unwrap();
         if !mem.clear_cache_and_reload()? {
@@ -927,7 +954,7 @@ impl Database {
                 PageResolver::new(mem.clone()),
             )?;
             tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
@@ -949,17 +976,17 @@ impl Database {
                 PageResolver::new(mem.clone()),
             )?;
             system_tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
+                mem.mark_page_allocated(path.page_number())?;
                 Ok(())
             })?;
         }
 
         Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
             Ok(())
         })?;
         #[cfg(debug_assertions)]

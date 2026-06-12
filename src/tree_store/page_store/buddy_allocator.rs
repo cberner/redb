@@ -217,6 +217,13 @@ impl BuddyAllocator {
         self.len
     }
 
+    // True if `page_number` at `order` is in range for this region's allocator. Used to validate
+    // page numbers read from a possibly-corrupt freed tree during repair, before `record_alloc`
+    // (which assumes a valid page and would otherwise panic).
+    pub(crate) fn is_valid_page(&self, page_number: u32, order: u8) -> bool {
+        order <= self.max_order && page_number < self.get_order_free(order).len()
+    }
+
     pub(crate) fn resize(&mut self, new_size: u32) {
         self.debug_check_consistency();
         if new_size > self.len() {

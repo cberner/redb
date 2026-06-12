@@ -152,6 +152,28 @@ impl UnrepairedDatabaseHeader {
         self.inner.page_size
     }
 
+    // True if the durable primary commit still matches `current`: the primary slot bytes and
+    // checksum, the 2-phase flag, and the immutable metadata (page size, region geometry). The
+    // secondary slot, layout, and recovery flag are excluded, since non-durable commits and grow()
+    // change those only in memory.
+    pub(super) fn primary_slot_unchanged(&self, current: &DatabaseHeader) -> bool {
+        !self.primary_corrupted
+            && self.inner.primary_slot == current.primary_slot
+            && self.inner.two_phase_commit == current.two_phase_commit
+            && self.inner.page_size == current.page_size
+            && self.inner.region_header_pages == current.region_header_pages
+            && self.inner.region_max_data_pages == current.region_max_data_pages
+            && self.inner.primary_slot().to_bytes() == current.primary_slot().to_bytes()
+    }
+
+    // True if the on-disk layout fields (the region count and trailing-region size, which are not
+    // covered by the slot checksum) match `current`. Only meaningful when the in-memory layout has
+    // not grown ahead of the durable one; see `durable_primary_unmodified`.
+    pub(super) fn layout_matches(&self, current: &DatabaseHeader) -> bool {
+        self.inner.full_regions == current.full_regions
+            && self.inner.trailing_partial_region_pages == current.trailing_partial_region_pages
+    }
+
     // Returns true if the header needs to be repaired before use: either the recovery_required
     // flag is set on disk, or the stored layout no longer matches the current file length (e.g.
     // the file was truncated or extended externally). Callers must pass the actual file length

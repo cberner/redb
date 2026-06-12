@@ -40,6 +40,13 @@
   in debug builds) after a persistent savepoint was deleted or restored.
 * Fix a panic when opening a database file that was externally extended to an invalid size; such
   files are now rejected with `StorageError::Corrupted`.
+* Fix a bug where `Database::check_integrity()` silently rolled back transactions that were
+  committed with `Durability::None`. A clean check now makes pending non-durable commits durable
+  instead of discarding them. `check_integrity()` also now returns
+  `DatabaseError::TransactionInProgress` if a `Savepoint` exists, since restoring a savepoint
+  that survived the check could corrupt the database.
+* Fix a panic in `check_integrity()` when repairing a corrupt database whose freed-page list
+  references an out-of-range page; such corruption is now reported instead of panicking.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.
