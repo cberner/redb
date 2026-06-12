@@ -35,6 +35,11 @@
   `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
 * Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
   in debug builds) after a persistent savepoint was deleted or restored.
+* Fix a bug where `Database::check_integrity()` silently rolled back transactions that were
+  committed with `Durability::None`. A clean check now makes pending non-durable commits durable
+  instead of discarding them. `check_integrity()` also now returns
+  `DatabaseError::TransactionInProgress` if a `Savepoint` exists, since restoring a savepoint
+  that survived the check could corrupt the database.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

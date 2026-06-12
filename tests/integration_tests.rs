@@ -2152,6 +2152,179 @@ fn check_integrity_clean_after_delete() {
     assert!(db.check_integrity().unwrap());
 }
 
+// A non-durable commit is acknowledged to the application and visible to readers, so it is part
+// of the live state of the database. check_integrity() on a healthy database must not silently
+// roll it back; it makes it durable instead.
+#[test]
+fn check_integrity_preserves_non_durable_commit() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for k in 0..100u64 {
+            table.insert(&k, &(k * 10)).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&7777u64, &42u64).unwrap();
+        table.remove(&0u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // The non-durable commit is visible before the check
+    {
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.get(&7777u64).unwrap().unwrap().value(), 42);
+        assert!(table.get(&0u64).unwrap().is_none());
+    }
+
+    assert!(db.check_integrity().unwrap());
+
+    // ... and must still be visible afterwards
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        table.get(&7777u64).unwrap().map(|v| v.value()),
+        Some(42),
+        "check_integrity rolled back a non-durable commit (insert lost)"
+    );
+    assert!(
+        table.get(&0u64).unwrap().is_none(),
+        "check_integrity rolled back a non-durable commit (remove undone)"
+    );
+    drop(table);
+    drop(read);
+
+    // The check made the non-durable commit durable, so it must survive reopening
+    drop(db);
+    let db = Database::open(tmpfile.path()).unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(&7777u64).unwrap().unwrap().value(), 42);
+    assert!(table.get(&0u64).unwrap().is_none());
+}
+
+// The pre-flush header guard must also cover the immutable metadata fields (page size and
+// region geometry): if an external write corrupts them while a non-durable commit is pending,
+// check_integrity() must not flush the in-memory header over the corruption and report clean.
+#[test]
+fn check_integrity_detects_external_header_corruption_with_pending_commit() {
+    // A shared backend stands in for external file modification, since the OS file lock
+    // prevents writing to the database file from a second handle on some platforms
+    let backend = SharedInMemoryBackend::default();
+    let mut db = Database::builder()
+        .create_with_backend(backend.clone())
+        .unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for k in 0..100u64 {
+            table.insert(&k, &(k * 10)).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&7777u64, &42u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Externally corrupt the immutable region-geometry field in the header
+    // (region_max_data_pages, a u32 at byte offset 20)
+    let mut field = [0u8; 4];
+    backend.read(20, &mut field).unwrap();
+    let corrupted = (u32::from_le_bytes(field) ^ 1).to_le_bytes();
+    backend.write(20, &corrupted).unwrap();
+
+    // The corruption must be reported (Ok(false) or Err), never masked as clean
+    let result = db.check_integrity();
+    assert!(
+        !matches!(result, Ok(true)),
+        "externally corrupted header reported as clean: {result:?}"
+    );
+}
+
+// A savepoint references roots and allocator state that check_integrity() invalidates, so the
+// check must refuse to run while one exists: a savepoint that stayed "valid" across the check
+// could be restored after its pages were freed and reused, corrupting the database.
+#[test]
+fn check_integrity_with_live_savepoint_on_nondurable_commit() {
+    let table2: TableDefinition<u64, &[u8]> = TableDefinition::new("x2");
+
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    // Durable baseline
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(U64_TABLE).unwrap();
+        t.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Non-durable commit with real data
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut t = txn.open_table(U64_TABLE).unwrap();
+        for k in 1..100u64 {
+            t.insert(k, k * 10).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Ephemeral savepoint referencing the non-durable root
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.abort().unwrap();
+
+    // The check must refuse to run while the savepoint exists
+    assert!(matches!(
+        db.check_integrity(),
+        Err(DatabaseError::TransactionInProgress)
+    ));
+
+    // The savepoint must still be restorable
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+    drop(savepoint);
+
+    // Write a bunch of unrelated data, to reuse any pages the allocator thinks are free
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(table2).unwrap();
+        let big = vec![0xABu8; 4096];
+        for k in 0..100u64 {
+            t.insert(k, big.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // The restored data must be intact
+    let read = db.begin_read().unwrap();
+    let t = read.open_table(U64_TABLE).unwrap();
+    for k in 1..100u64 {
+        let v = t.get(k).unwrap();
+        assert_eq!(v.map(|x| x.value()), Some(k * 10), "key {k} corrupted");
+    }
+    drop(t);
+    drop(read);
+
+    // Once the savepoint is gone, the check runs and the database is healthy
+    assert!(db.check_integrity().unwrap());
+}
+
 #[test]
 fn multimap_stats() {
     let tmpfile = create_tempfile();
