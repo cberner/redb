@@ -151,6 +151,21 @@ impl UnrepairedDatabaseHeader {
         self.inner.page_size
     }
 
+    // Returns true if the durable primary commit in this on-disk header still matches `current`:
+    // the same primary slot index and 2-phase flag, a valid primary slot checksum, identical
+    // primary slot contents, and unchanged immutable metadata (page size and region geometry).
+    // The secondary slot, layout, and recovery flag are deliberately excluded, because
+    // non-durable commits and grow() update those only in memory.
+    pub(super) fn primary_slot_unchanged(&self, current: &DatabaseHeader) -> bool {
+        !self.primary_corrupted
+            && self.inner.primary_slot == current.primary_slot
+            && self.inner.two_phase_commit == current.two_phase_commit
+            && self.inner.page_size == current.page_size
+            && self.inner.region_header_pages == current.region_header_pages
+            && self.inner.region_max_data_pages == current.region_max_data_pages
+            && self.inner.primary_slot().to_bytes() == current.primary_slot().to_bytes()
+    }
+
     // Returns true if the header needs to be repaired before use: either the recovery_required
     // flag is set on disk, or the stored layout no longer matches the current file length (e.g.
     // the file was truncated or extended externally). Callers must pass the actual file length

@@ -273,6 +273,17 @@ impl TransactionTracker {
         !self.state.lock().unwrap().persistent_savepoints.is_empty()
     }
 
+    // True if a non-persistent (ephemeral) savepoint exists. Unlike persistent savepoints, which
+    // reference durable state, an ephemeral savepoint may pin a non-durable transaction whose pages
+    // a reload would discard.
+    pub(crate) fn any_ephemeral_savepoint_exists(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        state
+            .valid_savepoints
+            .keys()
+            .any(|id| !state.persistent_savepoints.contains(id))
+    }
+
     // Excludes internal read refs that only pin durable ancestors of pending
     // non-durable commits.
     pub(crate) fn any_user_read_reference_exists(&self) -> bool {

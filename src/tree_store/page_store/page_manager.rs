@@ -963,6 +963,22 @@ impl TransactionalMemory {
         Ok(state.header.primary_slot().transaction_id)
     }
 
+    // True when the live state served to readers is ahead of the durable state in the primary
+    // slot, i.e. at least one non-durable commit has not yet been made durable.
+    pub(crate) fn pending_non_durable_commit(&self) -> bool {
+        self.state.lock().unwrap().read_from_secondary
+    }
+
+    // True if the durable primary commit recorded in the file header on disk still matches the
+    // in-memory copy. Used to detect external modification of the header before committing
+    // in-memory state, which would overwrite it.
+    pub(crate) fn durable_primary_unmodified(&self) -> Result<bool, DatabaseError> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        let state = self.state.lock().unwrap();
+        Ok(disk_header.primary_slot_unchanged(&state.header))
+    }
+
     pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         self.free_helper(page, allocated);
     }

@@ -576,10 +576,24 @@ impl Database {
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired.
     ///
-    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
-    /// alive when this method is called.
+    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
+    /// ephemeral [`Savepoint`](crate::Savepoint), is still alive when this method is called. An
+    /// ephemeral savepoint references state that the check would otherwise invalidate, so it must
+    /// be dropped first; persistent savepoints reference durable state and are unaffected.
+    ///
+    /// If transactions were committed with [`Durability::None`](crate::Durability::None) and have
+    /// not yet been made durable, a clean check makes them durable rather than discarding them.
+    /// If corruption is detected, repair restores the last known-good durable state, which rolls
+    /// back any pending non-durable commits.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
+            return Err(DatabaseError::TransactionInProgress);
+        }
+        // An ephemeral savepoint may pin a non-durable transaction whose roots and pages the reload
+        // below would discard and the allocator rebuild would mark as free; a savepoint that
+        // survived this method could then be restored after its pages were reused, corrupting the
+        // database. Persistent savepoints reference durable state, so they are unaffected.
+        if self.transaction_tracker.any_ephemeral_savepoint_exists() {
             return Err(DatabaseError::TransactionInProgress);
         }
 
@@ -602,6 +616,27 @@ impl Database {
             Ok(false) | Err(StorageError::Corrupted(_)) => false,
             Err(err) => return Err(err.into()),
         };
+
+        // The reload below discards all non-durable state, but pending non-durable commits were
+        // acknowledged to the application and are visible to readers, so they must not be lost.
+        // If the live state verified clean, make it durable (like `Database::drop` does) before
+        // reloading. Flushing requires that the on-disk header has not been modified externally:
+        // committing would overwrite it, masking the corruption from the verification below and
+        // destroying the last known-good durable state that the repair restores from. If the
+        // pending commits cannot be flushed safely, the reload rolls them back, which must be
+        // reported as not clean.
+        if self.mem.pending_non_durable_commit() {
+            if was_clean && self.mem.durable_primary_unmodified()? {
+                let mut txn = self
+                    .begin_write()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                txn.disable_post_commit_free();
+                txn.commit()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+            } else {
+                was_clean = false;
+            }
+        }
 
         let mem = Arc::get_mut(&mut self.mem).unwrap();
         if !mem.clear_cache_and_reload()? {
