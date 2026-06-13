@@ -2,7 +2,7 @@ use rand::RngExt;
 use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
 use redb::{
-    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
+    AccessGuard, Builder, CompactionError, Database, Durability, Entry, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value, WriteTransaction,
@@ -951,6 +951,50 @@ fn value_too_large() {
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(SLICE_TABLE).unwrap();
     assert!(table.is_empty().unwrap());
+}
+
+// Entry API size validation follows the same rules as Table::insert: values exceeding
+// MAX_VALUE_LENGTH are rejected whether the entry is occupied or vacant.
+#[test]
+fn entry_value_too_large() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    let too_big = vec![0u8; 3 * 1024 * 1024 * 1024 + 1];
+    {
+        let mut table = txn.open_table(SLICE_TABLE).unwrap();
+        table
+            .insert(b"key".as_slice(), b"value".as_slice())
+            .unwrap();
+
+        // OccupiedEntry::insert rejects a value that exceeds MAX_VALUE_LENGTH.
+        match table.entry(b"key".as_slice()).unwrap() {
+            Entry::Occupied(mut occupied) => {
+                assert!(matches!(
+                    occupied.insert(too_big.as_slice()),
+                    Err(StorageError::ValueTooLarge(_))
+                ));
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+        // The existing value is untouched after a failed insert.
+        assert_eq!(
+            table.get(b"key".as_slice()).unwrap().unwrap().value(),
+            b"value".as_slice()
+        );
+
+        // VacantEntry::insert (via or_insert) rejects oversized values on new keys.
+        assert!(matches!(
+            table
+                .entry(b"new".as_slice())
+                .unwrap()
+                .or_insert(too_big.as_slice()),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+        // The key should not have been inserted.
+        assert!(table.get(b"new".as_slice()).unwrap().is_none());
+    }
+    txn.commit().unwrap();
 }
 
 #[test]
