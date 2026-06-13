@@ -423,6 +423,14 @@ impl PagedCachedFile {
         self.file.sync_data()
     }
 
+    // Make the backing file durable without flushing the in-memory write buffer. `set_len` is
+    // issued directly to the file (it is not buffered), so this is enough to make the current file
+    // length durable, and unlike `flush()` it is safe to call while writable pages are still
+    // outstanding (e.g. during `grow()`).
+    pub(super) fn sync_file(&self) -> Result {
+        self.file.sync_data()
+    }
+
     // Make writes visible to readers, but does not guarantee any durability
     pub(super) fn write_barrier(&self) -> Result {
         // TODO: non-durable commits would be much faster, if this did not issues writes to disk,

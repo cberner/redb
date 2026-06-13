@@ -1253,6 +1253,13 @@ impl TransactionalMemory {
         assert!(new_layout.len() >= layout.len());
 
         self.storage.resize(new_layout.len())?;
+        // Make the larger file durable before its layout can reach the on-disk header. A
+        // subsequent commit writes this layout into the header, whose layout fields are shared by
+        // both commit slots; if a crash persisted that header but not the file extension, every
+        // open would fail with "File truncated below stored layout" even though the previous
+        // durable state was intact. This mirrors the shrink path, which reduces the file only
+        // after the smaller layout is durable.
+        self.storage.sync_file()?;
 
         state.allocators_mut().resize_to(new_layout);
         state.header.set_layout(new_layout);
