@@ -102,8 +102,53 @@ fn table_stats() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();
     let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
-    assert_eq!(table.stats().unwrap().tree_height(), 1);
+    let stats = table.stats().unwrap();
+    assert_eq!(stats.tree_height(), 1);
+    assert_eq!(stats.branch_pages(), 0);
+    assert!(stats.metadata_bytes() > 0);
+    let _ = stats.fragmented_bytes();
     assert_eq!(untyped_table.stats().unwrap().tree_height(), 1);
+}
+
+#[test]
+fn table_debug_format() {
+    // Debug for Table and ReadOnlyTable uses separate paths for 0, 1, 2, and 3+ entries.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+
+        let s = format!("{table:?}");
+        assert!(s.contains("No entries"), "{s}");
+
+        table.insert(1u64, 100u64).unwrap();
+        let s = format!("{table:?}");
+        assert!(s.contains("One key-value"), "{s}");
+
+        table.insert(2u64, 200u64).unwrap();
+        // Exactly two entries: first and last shown, no interstitial "more" line
+        let s = format!("{table:?}");
+        assert!(
+            s.contains("first:") && s.contains("last:") && !s.contains("more"),
+            "{s}"
+        );
+
+        table.insert(3u64, 300u64).unwrap();
+        // Three entries: "...1 more entries..." appears between first and last
+        let s = format!("{table:?}");
+        assert!(
+            s.contains("first:") && s.contains("1 more") && s.contains("last:"),
+            "{s}"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable also delegates to debug_helper
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("first:") && s.contains("last:"), "{s}");
 }
 
 #[test]
