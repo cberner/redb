@@ -1021,6 +1021,34 @@ fn explicit_close() {
 }
 
 #[test]
+fn close_recovers_transaction_from_error() {
+    // Verifies that ReadTransactionStillInUse returns the original transaction so
+    // callers can retry close() after dropping any open tables or iterators.
+    let tmpfile = create_tempfile();
+    const TABLE: TableDefinition<u32, u32> = TableDefinition::new("TABLE");
+    let db = Database::create(tmpfile.path()).unwrap();
+    let wtx = db.begin_write().unwrap();
+    wtx.open_table(TABLE).unwrap();
+    wtx.commit().unwrap();
+
+    let tx = db.begin_read().unwrap();
+    let table = tx.open_table(TABLE).unwrap();
+
+    // close() fails while the table is still open; it returns the transaction
+    // so the caller is not forced to abandon it.
+    let err = tx.close().unwrap_err();
+    assert!(!err.to_string().is_empty());
+    let TransactionError::ReadTransactionStillInUse(tx) = err else {
+        panic!("unexpected error variant");
+    };
+
+    // After dropping the open table, the recovered transaction closes cleanly.
+    drop(table);
+    let inner = *tx;
+    inner.close().unwrap();
+}
+
+#[test]
 fn large_keys() {
     let tmpfile = create_tempfile();
 
