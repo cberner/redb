@@ -3148,6 +3148,63 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
     db.compact().unwrap();
 }
 
+// compact() must correctly rewrite page references inside SubtreeV2-backed
+// multimap collections when those subtree pages are relocated. Previously no
+// test exercised this path; a bug here would silently corrupt the subtree
+// pointers stored in the outer multimap leaf pages.
+#[test]
+fn compact_multimap_with_subtrees() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    const MULTIMAP: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("m");
+    const PADDING: TableDefinition<u32, &[u8]> = TableDefinition::new("pad");
+
+    // Write large padding rows so the file grows, then insert a multimap key
+    // with enough values to promote it from inline to a SubtreeV2 collection
+    // (~25 values is the threshold for u32->u32 at the default page size).
+    let big = vec![0u8; 100 * 1024];
+    let txn = db.begin_write().unwrap();
+    {
+        let mut pad = txn.open_table(PADDING).unwrap();
+        for i in 0..50u32 {
+            pad.insert(&i, big.as_slice()).unwrap();
+        }
+        let mut m = txn.open_multimap_table(MULTIMAP).unwrap();
+        for v in 0..50u32 {
+            m.insert(&0u32, &v).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Delete the padding to create fragmentation so compact() relocates pages.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut pad = txn.open_table(PADDING).unwrap();
+        for i in 0..50u32 {
+            pad.remove(&i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // compact() must relocate the subtree pages and rewrite their pointers.
+    assert!(db.compact().unwrap());
+
+    // The multimap data must be intact after compaction.
+    {
+        let read_txn = db.begin_read().unwrap();
+        let m = read_txn.open_multimap_table(MULTIMAP).unwrap();
+        assert_eq!(m.len().unwrap(), 50);
+        let mut iter = m.get(&0u32).unwrap();
+        for expected in 0..50u32 {
+            assert_eq!(iter.next().unwrap().unwrap().value(), expected);
+        }
+        assert!(iter.next().is_none());
+    }
+
+    assert!(db.check_integrity().unwrap());
+}
+
 fn require_send<T: Send>(_: &T) {}
 fn require_sync<T: Sync + Send>(_: &T) {}
 
