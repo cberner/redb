@@ -24,6 +24,9 @@
   additional transaction.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
+* Enforce the maximum value size limit when replacing a value in place via `Table::get_mut()`
+  or `Entry::and_modify()`. Previously these paths could bypass the limit that `Table::insert()`
+  and the `entry()` accessors enforce, returning `StorageError::ValueTooLarge` only inconsistently.
 * Fix a panic in `insert()` when a single leaf page accumulated 65536 entries via in-place
   appends, e.g. by inserting a large value and then many small values in ascending key order
   within the same transaction.

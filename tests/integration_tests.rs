@@ -939,6 +939,35 @@ fn value_too_large() {
             table.insert(too_big_value.as_slice(), too_big_value.as_slice()),
             Err(StorageError::ValueTooLarge(_))
         ));
+
+        // Replacing a value in place via get_mut() or and_modify() (which go through
+        // AccessGuardMut::insert, a separate path from insert() and the entry() accessors) must
+        // enforce the same limit. Insert a small value, attempt to grow it past the limit by both
+        // routes, and confirm the original value is left intact. Done in this test, reusing the
+        // already-allocated buffer, to avoid a second >3GiB allocation running in parallel.
+        table
+            .insert(small_value.as_slice(), small_value.as_slice())
+            .unwrap();
+        {
+            let mut guard = table.get_mut(small_value.as_slice()).unwrap().unwrap();
+            assert!(matches!(
+                guard.insert(too_big_value.as_slice()),
+                Err(StorageError::ValueTooLarge(_))
+            ));
+        }
+        assert!(matches!(
+            table
+                .entry(small_value.as_slice())
+                .unwrap()
+                .and_modify(|g| g.insert(too_big_value.as_slice())),
+            Err(StorageError::ValueTooLarge(_))
+        ));
+        assert_eq!(
+            table.get(small_value.as_slice()).unwrap().unwrap().value(),
+            small_value.as_slice()
+        );
+        table.remove(small_value.as_slice()).unwrap();
+
         drop(too_big_value);
         let almost_big_value = vec![0u8; 2 * 1024 * 1024 * 1024];
         assert!(matches!(

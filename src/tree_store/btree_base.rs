@@ -1,4 +1,6 @@
-use crate::tree_store::page_store::{Page, PageImpl, PageMut, xxh3_checksum};
+use crate::tree_store::page_store::{
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageImpl, PageMut, xxh3_checksum,
+};
 use crate::tree_store::{PageAllocator, PageNumber, PageTrackerPolicy};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
@@ -315,6 +317,20 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     /// Replace the stored value
     pub fn insert<'v>(&mut self, value: impl Borrow<V::SelfType<'v>>) -> Result<()> {
         let value_bytes = V::as_bytes(value.borrow());
+
+        // Enforce the same size limits as the other write paths (Table::insert, the entry() API).
+        // Without this, replacing a value via get_mut()/and_modify() could bypass the limit.
+        let value_len = value_bytes.as_ref().len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+        let key_len = {
+            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            accessor.entry(self.entry_index).unwrap().key().len()
+        };
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
 
         if LeafMutator::sufficient_replace_inplace_space(
             &self.page,
