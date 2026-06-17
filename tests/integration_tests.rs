@@ -2194,6 +2194,44 @@ fn multimap_stats() {
 }
 
 #[test]
+fn stats_full_api() {
+    // Verifies all TableStats and DatabaseStats accessors, including branch_pages,
+    // metadata_bytes, fragmented_bytes, and page_size, which require a multi-level B-tree.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0u64..1000 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Use a write transaction to access DatabaseStats (stats() is on WriteTransaction).
+    let txn = db.begin_write().unwrap();
+    {
+        let table = txn.open_table(U64_TABLE).unwrap();
+        let ts = table.stats().unwrap();
+        assert!(ts.leaf_pages() > 0);
+        assert!(ts.stored_bytes() > 0);
+        assert!(
+            ts.branch_pages() > 0,
+            "expected branch pages with 1000 entries"
+        );
+        assert!(ts.metadata_bytes() > 0);
+        let _ = ts.fragmented_bytes();
+    }
+    let ds = txn.stats().unwrap();
+    assert!(ds.branch_pages() > 0);
+    assert!(ds.metadata_bytes() > 0);
+    let _ = ds.fragmented_bytes();
+    assert_eq!(ds.page_size(), 4096);
+    txn.abort().unwrap();
+}
+
+#[test]
 fn no_downgrade_durability_with_savepoint() {
     let tmpfile = create_tempfile();
 
