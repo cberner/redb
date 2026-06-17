@@ -38,6 +38,8 @@
   `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
 * Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
   in debug builds) after a persistent savepoint was deleted or restored.
+* Fix a panic when opening a database file that was externally extended to an invalid size; such
+  files are now rejected with `StorageError::Corrupted`.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

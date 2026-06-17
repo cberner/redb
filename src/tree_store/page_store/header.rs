@@ -1,5 +1,6 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
+use crate::tree_store::page_store::base::MAX_REGIONS;
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
@@ -181,12 +182,34 @@ impl UnrepairedDatabaseHeader {
             let layout = self.inner.layout();
             let region_max_pages = layout.full_region_layout().num_pages();
             let region_header_pages = layout.full_region_layout().get_header_pages();
-            self.inner.set_layout(DatabaseLayout::recalculate(
+            // Reject a file needing more regions than the 20-bit region index can address (at most
+            // MAX_REGIONS); otherwise recalculate() would alias high regions onto low ones or
+            // overflow the u32 region count.
+            let full_region_size = (u64::from(region_header_pages) + u64::from(region_max_pages))
+                * u64::from(self.inner.page_size);
+            let max_addressable_len =
+                u64::from(self.inner.page_size) + u64::from(MAX_REGIONS) * full_region_size;
+            if file_len > max_addressable_len {
+                return Err(StorageError::Corrupted(format!(
+                    "File length requires more regions than are addressable: file_len={file_len}"
+                )));
+            }
+            let recalculated = DatabaseLayout::recalculate(
                 file_len,
                 region_header_pages,
                 region_max_pages,
                 self.inner.page_size,
-            ));
+            );
+            // redb only ever resizes the file to a length that maps exactly onto a region layout,
+            // so a file length that `recalculate` cannot reproduce means the file was extended or
+            // padded externally (e.g. by a copy/backup tool). Reject it as corruption rather than
+            // letting the `layout.len() == file_len` assertion in `TransactionalMemory::new` panic.
+            if recalculated.len() != file_len {
+                return Err(StorageError::Corrupted(format!(
+                    "File length does not correspond to a valid region layout: file_len={file_len}"
+                )));
+            }
+            self.inner.set_layout(recalculated);
         }
         let kept_primary = self.select_primary_slot()?;
         Ok((self.inner, kept_primary && !layout_stale))
@@ -437,9 +460,11 @@ impl TransactionHeader {
 mod test {
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
+    use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
-        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, PRIMARY_BIT, RECOVERY_REQUIRED,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT,
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE_OFFSET, PRIMARY_BIT,
+        RECOVERY_REQUIRED, REGION_HEADER_PAGES_OFFSET, REGION_MAX_DATA_PAGES_OFFSET,
+        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, get_u32,
     };
     use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
@@ -694,6 +719,130 @@ mod test {
             .unwrap();
 
         let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn externally_extended_file_is_rejected() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+            txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+            txn.commit().unwrap();
+        }
+        let original_len = tmpfile.as_file().metadata().unwrap().len();
+        drop(db);
+
+        // Pad the file by less than a page, as an external tool (copy/backup/transfer) might.
+        // The resulting length maps onto no valid region layout. Previously this panicked on the
+        // `layout.len() == file_len` assertion when opening; it must be a clean Corrupted error.
+        let file = OpenOptions::new().write(true).open(tmpfile.path()).unwrap();
+        file.set_len(original_len + 100).unwrap();
+
+        let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    // A backend that can report a `len()` larger than the data it actually holds, without
+    // allocating it -- used to simulate an externally created (e.g. sparse) file.
+    #[derive(Clone, Debug, Default)]
+    struct LenOverrideBackend {
+        data: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        fake_len: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl LenOverrideBackend {
+        fn set_fake_len(&self, len: u64) {
+            self.fake_len
+                .store(len, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl StorageBackend for LenOverrideBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            let fake = self.fake_len.load(std::sync::atomic::Ordering::Acquire);
+            if fake == 0 {
+                Ok(self.data.lock().unwrap().len() as u64)
+            } else {
+                Ok(fake)
+            }
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            let data = self.data.lock().unwrap();
+            let offset = usize::try_from(offset).unwrap();
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = data.get(offset + i).copied().unwrap_or(0);
+            }
+            Ok(())
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.data
+                .lock()
+                .unwrap()
+                .resize(usize::try_from(len).unwrap(), 0);
+            Ok(())
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, offset: u64, src: &[u8]) -> Result<(), std::io::Error> {
+            let mut data = self.data.lock().unwrap();
+            let offset = usize::try_from(offset).unwrap();
+            if offset + src.len() > data.len() {
+                data.resize(offset + src.len(), 0);
+            }
+            data[offset..offset + src.len()].copy_from_slice(src);
+            Ok(())
+        }
+    }
+
+    // A file whose length is valid arithmetically but implies more regions than the 20-bit region
+    // index can address must be rejected as corruption, not accepted (which would alias the high
+    // regions onto low ones). Uses a fake oversized length so no petabyte allocation is needed.
+    #[test]
+    fn oversized_region_count_file_is_rejected() {
+        let backend = LenOverrideBackend::default();
+        let db = Database::builder()
+            .create_with_backend(backend.clone())
+            .unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+            txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+
+        // Compute an *exact* region-aligned length that needs MAX_REGIONS + 1 regions, so the
+        // length itself maps onto a valid layout (the existing length-mismatch guard would not
+        // reject it) -- it must be rejected specifically for exceeding the addressable region
+        // count. Only len() reports this; no memory is actually allocated.
+        let (page_size, region_header_pages, region_max_data_pages) = {
+            let data = backend.data.lock().unwrap();
+            (
+                u64::from(get_u32(&data[PAGE_SIZE_OFFSET..])),
+                u64::from(get_u32(&data[REGION_HEADER_PAGES_OFFSET..])),
+                u64::from(get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..])),
+            )
+        };
+        let full_region_size = (region_header_pages + region_max_data_pages) * page_size;
+        let fake_len = page_size + (u64::from(MAX_REGIONS) + 1) * full_region_size;
+        backend.set_fake_len(fake_len);
+        let err = Database::builder()
+            .create_with_backend(backend)
+            .unwrap_err();
         assert!(
             matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
             "expected Corrupted, got {err:?}"
