@@ -2309,6 +2309,71 @@ fn no_downgrade_durability_with_savepoint() {
 }
 
 #[test]
+fn savepoint_api_error_cases() {
+    // Covers error paths in the savepoint API that arise in common usage patterns.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // ephemeral_savepoint() fails when the transaction is dirty (a table was already opened).
+    // Savepoints must be created before opening any tables.
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let _table = txn.open_table(U64_TABLE).unwrap();
+            assert!(matches!(
+                txn.ephemeral_savepoint(),
+                Err(SavepointError::InvalidSavepoint)
+            ));
+        }
+        txn.abort().unwrap();
+    }
+
+    // persistent_savepoint() requires Immediate durability.
+    {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None).unwrap();
+        assert!(matches!(
+            txn.persistent_savepoint(),
+            Err(SavepointError::ImmediateDurabilityRequired)
+        ));
+        txn.abort().unwrap();
+    }
+
+    // delete_persistent_savepoint() requires Immediate durability.
+    {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None).unwrap();
+        assert!(matches!(
+            txn.delete_persistent_savepoint(0),
+            Err(SavepointError::ImmediateDurabilityRequired)
+        ));
+        txn.abort().unwrap();
+    }
+
+    // get_persistent_savepoint() returns InvalidSavepoint for a non-existent ID.
+    {
+        let txn = db.begin_write().unwrap();
+        assert!(matches!(
+            txn.get_persistent_savepoint(999),
+            Err(SavepointError::InvalidSavepoint)
+        ));
+        txn.abort().unwrap();
+    }
+
+    // delete_persistent_savepoint() returns false when the savepoint doesn't exist
+    // but the savepoint table does (i.e., other savepoints have been created).
+    {
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        assert!(!txn.delete_persistent_savepoint(id + 1000).unwrap());
+        txn.abort().unwrap();
+    }
+}
+
+#[test]
 fn no_savepoint_resurrection() {
     let tmpfile = create_tempfile();
 
