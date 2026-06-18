@@ -963,6 +963,40 @@ impl TransactionalMemory {
         Ok(state.header.primary_slot().transaction_id)
     }
 
+    // True when a non-durable commit has been made visible to readers but not yet flushed to the
+    // durable primary slot.
+    pub(crate) fn pending_non_durable_commit(&self) -> bool {
+        self.state.lock().unwrap().read_from_secondary
+    }
+
+    // True if the backing file is exactly the size the in-memory layout expects. redb only ever
+    // sizes the file to a layout length, so an external truncation or extension makes them differ;
+    // a pending non-durable commit must not be promoted then, since committing the layout would
+    // leave it inconsistent with the file.
+    pub(crate) fn file_len_matches_layout(&self) -> Result<bool> {
+        let file_len = self.storage.raw_file_len()?;
+        let state = self.state.lock().unwrap();
+        Ok(file_len == state.header.layout().len())
+    }
+
+    // True if the on-disk durable primary slot's checksum is corrupt. Read from disk, since the
+    // in-memory copy of an originally-clean slot wouldn't show external/failed-commit corruption.
+    pub(crate) fn durable_primary_slot_corrupt(&self) -> Result<bool, DatabaseError> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        Ok(disk_header.primary_corrupted())
+    }
+
+    // The durable (primary slot) roots, regardless of any pending non-durable commit served from
+    // the secondary slot.
+    pub(crate) fn get_durable_data_root(&self) -> Option<BtreeHeader> {
+        self.state.lock().unwrap().header.primary_slot().user_root
+    }
+
+    pub(crate) fn get_durable_system_root(&self) -> Option<BtreeHeader> {
+        self.state.lock().unwrap().header.primary_slot().system_root
+    }
+
     pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
         self.free_helper(page, allocated);
     }

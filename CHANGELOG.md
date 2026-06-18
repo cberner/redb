@@ -43,6 +43,9 @@
 * `check_integrity()` now returns `DatabaseError::TransactionInProgress` when an ephemeral
   `Savepoint` is still alive. Previously the check could invalidate the pages such a savepoint
   referenced while leaving it marked valid, so restoring it afterward could corrupt the database.
+* Fix `Database::check_integrity()` silently discarding transactions committed with
+  `Durability::None` that had not yet been made durable by a later commit; a passing check now
+  preserves them (making them durable) instead of rolling them back.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

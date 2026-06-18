@@ -2181,6 +2181,65 @@ fn check_integrity_clean_after_delete() {
     assert!(db.check_integrity().unwrap());
 }
 
+// A non-durable commit is acknowledged to the application and visible to readers, so it is part
+// of the live state of the database. check_integrity() on a healthy database must not silently
+// roll it back; it makes it durable instead.
+#[test]
+fn check_integrity_preserves_non_durable_commit() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for k in 0..100u64 {
+            table.insert(&k, &(k * 10)).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&7777u64, &42u64).unwrap();
+        table.remove(&0u64).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // The non-durable commit is visible before the check
+    {
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.get(&7777u64).unwrap().unwrap().value(), 42);
+        assert!(table.get(&0u64).unwrap().is_none());
+    }
+
+    assert!(db.check_integrity().unwrap());
+
+    // ... and must still be visible afterwards
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        table.get(&7777u64).unwrap().map(|v| v.value()),
+        Some(42),
+        "check_integrity rolled back a non-durable commit (insert lost)"
+    );
+    assert!(
+        table.get(&0u64).unwrap().is_none(),
+        "check_integrity rolled back a non-durable commit (remove undone)"
+    );
+    drop(table);
+    drop(read);
+
+    // The check made the non-durable commit durable, so it must survive reopening
+    drop(db);
+    let db = Database::open(tmpfile.path()).unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(&7777u64).unwrap().unwrap().value(), 42);
+    assert!(table.get(&0u64).unwrap().is_none());
+}
+
 // A savepoint references roots and allocator state that check_integrity() invalidates, so the
 // check must refuse to run while an ephemeral one exists: a savepoint that stayed "valid" across
 // the check could be restored after its pages were freed and reused, corrupting the database.
