@@ -2181,6 +2181,77 @@ fn check_integrity_clean_after_delete() {
     assert!(db.check_integrity().unwrap());
 }
 
+// A savepoint references roots and allocator state that check_integrity() invalidates, so the
+// check must refuse to run while an ephemeral one exists: a savepoint that stayed "valid" across
+// the check could be restored after its pages were freed and reused, corrupting the database.
+#[test]
+fn check_integrity_with_live_savepoint_on_nondurable_commit() {
+    let table2: TableDefinition<u64, &[u8]> = TableDefinition::new("x2");
+
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    // Durable baseline
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(U64_TABLE).unwrap();
+        t.insert(0, 0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Non-durable commit with real data
+    let mut txn = db.begin_write().unwrap();
+    txn.set_durability(Durability::None).unwrap();
+    {
+        let mut t = txn.open_table(U64_TABLE).unwrap();
+        for k in 1..100u64 {
+            t.insert(k, k * 10).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Ephemeral savepoint referencing the non-durable root
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    txn.abort().unwrap();
+
+    // The check must refuse to run while the savepoint exists
+    assert!(matches!(
+        db.check_integrity(),
+        Err(DatabaseError::TransactionInProgress)
+    ));
+
+    // The savepoint must still be restorable
+    let mut txn = db.begin_write().unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+    drop(savepoint);
+
+    // Write a bunch of unrelated data, to reuse any pages the allocator thinks are free
+    let txn = db.begin_write().unwrap();
+    {
+        let mut t = txn.open_table(table2).unwrap();
+        let big = vec![0xABu8; 4096];
+        for k in 0..100u64 {
+            t.insert(k, big.as_slice()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // The restored data must be intact
+    let read = db.begin_read().unwrap();
+    let t = read.open_table(U64_TABLE).unwrap();
+    for k in 1..100u64 {
+        let v = t.get(k).unwrap();
+        assert_eq!(v.map(|x| x.value()), Some(k * 10), "key {k} corrupted");
+    }
+    drop(t);
+    drop(read);
+
+    // Once the savepoint is gone, the check runs and the database is healthy
+    assert!(db.check_integrity().unwrap());
+}
+
 #[test]
 fn multimap_stats() {
     let tmpfile = create_tempfile();

@@ -576,10 +576,16 @@ impl Database {
     /// Returns `Ok(true)` if the database passed integrity checks; `Ok(false)` if it failed but was repaired,
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired.
     ///
-    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction is still
-    /// alive when this method is called.
+    /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
+    /// ephemeral [`Savepoint`](crate::Savepoint), is still alive when this method is called.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
+            return Err(DatabaseError::TransactionInProgress);
+        }
+        // An ephemeral savepoint may pin a non-durable transaction whose pages the reload below
+        // discards; restoring it afterwards could corrupt the database. Persistent savepoints are
+        // durable, so they are unaffected.
+        if self.transaction_tracker.any_ephemeral_savepoint_exists() {
             return Err(DatabaseError::TransactionInProgress);
         }
 
