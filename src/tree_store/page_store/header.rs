@@ -152,6 +152,12 @@ impl UnrepairedDatabaseHeader {
         self.inner.page_size
     }
 
+    // True if the on-disk primary slot did not verify (its checksum is corrupt). The in-memory
+    // copy of a clean primary slot wouldn't reveal this, so it must be read from disk.
+    pub(super) fn primary_corrupted(&self) -> bool {
+        self.primary_corrupted
+    }
+
     // Returns true if the header needs to be repaired before use: either the recovery_required
     // flag is set on disk, or the stored layout no longer matches the current file length (e.g.
     // the file was truncated or extended externally). Callers must pass the actual file length

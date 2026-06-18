@@ -543,9 +543,21 @@ impl Database {
     }
 
     pub(crate) fn verify_primary_checksums(mem: Arc<TransactionalMemory>) -> Result<bool> {
+        let data_root = mem.get_data_root();
+        let system_root = mem.get_system_root();
+        Self::verify_checksums(mem, data_root, system_root)
+    }
+
+    // Verifies the checksums reachable from the given data and system roots, reading pages through
+    // `mem` (i.e. from disk if its cache was invalidated first).
+    fn verify_checksums(
+        mem: Arc<TransactionalMemory>,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+    ) -> Result<bool> {
         let resolver = PageResolver::new(mem.clone());
         let table_tree = TableTree::new(
-            mem.get_data_root(),
+            data_root,
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
             resolver.clone(),
@@ -554,7 +566,7 @@ impl Database {
             return Ok(false);
         }
         let system_table_tree = TableTree::new(
-            mem.get_system_root(),
+            system_root,
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
             resolver,
@@ -578,6 +590,10 @@ impl Database {
     ///
     /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
     /// ephemeral [`Savepoint`](crate::Savepoint), is still alive when this method is called.
+    ///
+    /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
+    /// been made durable are made durable if the check passes, or rolled back if the database must
+    /// be repaired.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
             return Err(DatabaseError::TransactionInProgress);
@@ -589,30 +605,42 @@ impl Database {
             return Err(DatabaseError::TransactionInProgress);
         }
 
-        // The live in-memory state may be ahead of the durable state, because durable commits
-        // process pending freed pages after committing and publish the result as a non-durable
-        // commit. The live allocator state corresponds to the live roots, so it must be checked
-        // against a rebuild from the live roots: comparing it against the rebuild from the
-        // durable roots (after the reload below) would falsely report corruption.
-        let mut was_clean = match Self::verify_primary_checksums(self.mem.clone()) {
-            Ok(true) => {
-                let live_allocator_hash = self.mem.allocator_hash();
-                match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
-                    Ok(_) => live_allocator_hash == self.mem.allocator_hash(),
-                    Err(DatabaseError::Storage(StorageError::Corrupted(_))) => false,
-                    Err(err) => return Err(err),
-                }
+        // A pending Durability::None commit is acknowledged, live data that the reload below would
+        // discard. If the live state verifies, promote it to durable rather than losing it -- even
+        // if the durable state it replaces turns out to be corrupt, in which case we recover from
+        // the live state and report not-clean.
+        let mut rolling_back_non_durable = false;
+        if self.mem.pending_non_durable_commit() {
+            // Verify from disk, not the page cache, so external modification is detected.
+            self.mem.clear_read_cache();
+            // Don't promote over a truncated or extended file -- the committed layout would be
+            // inconsistent with it. Fall through to reload + repair instead.
+            if self.mem.file_len_matches_layout()?
+                && let Some(live_allocator_clean) = self.repair_live_state()?
+            {
+                // The live tree is intact (its allocator state was rebuilt above if it was stale),
+                // so promote the acknowledged commit rather than rolling it back. The result is
+                // clean only if neither the allocator nor the durable state below needed repair.
+                let durable_clean = self.durable_state_clean()?;
+                let mut txn = self
+                    .begin_write()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                txn.disable_post_commit_free();
+                txn.commit()
+                    .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                return Ok(live_allocator_clean && durable_clean);
             }
-            // The live state is corrupted. The reload and repair below verify the durable state
-            // and repair from it.
-            Ok(false) | Err(StorageError::Corrupted(_)) => false,
-            Err(err) => return Err(err.into()),
-        };
-
-        let mem = Arc::get_mut(&mut self.mem).unwrap();
-        if !mem.clear_cache_and_reload()? {
-            was_clean = false;
+            // The live tree is corrupt (or the file size changed), so the reload rolls the commit
+            // back -- not clean, even if the durable state it falls back to is intact.
+            rolling_back_non_durable = true;
         }
+
+        // No pending commit, or fall-through: verify and repair the durable state. Capture the
+        // allocator hash to compare against the rebuild below; with the pending case handled above,
+        // the live and durable states are identical here, so this is a valid check.
+        let allocator_hash = self.mem.allocator_hash();
+        let mem = Arc::get_mut(&mut self.mem).unwrap();
+        let mut was_clean = mem.clear_cache_and_reload()?;
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 
@@ -621,7 +649,10 @@ impl Database {
             _ => unreachable!(),
         })?;
 
-        if old_roots != new_roots {
+        if old_roots != new_roots
+            || allocator_hash != self.mem.allocator_hash()
+            || rolling_back_non_durable
+        {
             was_clean = false;
         }
 
@@ -640,6 +671,54 @@ impl Database {
         self.mem.begin_writable()?;
 
         Ok(was_clean)
+    }
+
+    // Verifies, and repairs in memory, the live (possibly non-durable) state. Returns:
+    // - `None` if the live tree is corrupt and the commit must be rolled back;
+    // - `Some(true)` if the live state is fully clean;
+    // - `Some(false)` if the tree is intact but its allocator state was stale and has been rebuilt,
+    //   so promoting it repairs the allocator while the check reports not-clean.
+    // The allocator is rebuilt from the live roots -- a rebuild from the durable roots would
+    // falsely differ when the live state is ahead of durable (e.g. a durable commit's free-page
+    // epilogue).
+    fn repair_live_state(&mut self) -> Result<Option<bool>, DatabaseError> {
+        match Self::verify_primary_checksums(self.mem.clone()) {
+            Ok(true) => {
+                let live_allocator_hash = self.mem.allocator_hash();
+                match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
+                    Ok(_) => Ok(Some(live_allocator_hash == self.mem.allocator_hash())),
+                    Err(DatabaseError::Storage(StorageError::Corrupted(_))) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
+            Ok(false) | Err(StorageError::Corrupted(_)) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    // Whether the durable (primary slot) state is intact. Any corruption -- a bad primary slot
+    // checksum, a checksum mismatch, or an error raised while walking a malformed tree -- counts as
+    // not-clean: the caller promotes the verified live commit to recover from it, so corruption
+    // here must not abort the check. Only non-corruption errors (e.g. I/O) propagate.
+    fn durable_state_clean(&self) -> Result<bool, DatabaseError> {
+        match self.verify_durable_state() {
+            Ok(clean) => Ok(clean),
+            Err(DatabaseError::Storage(StorageError::Corrupted(_))) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn verify_durable_state(&self) -> Result<bool, DatabaseError> {
+        if self.mem.durable_primary_slot_corrupt()? {
+            return Ok(false);
+        }
+        let data_root = self.mem.get_durable_data_root();
+        let system_root = self.mem.get_durable_system_root();
+        Ok(Self::verify_checksums(
+            self.mem.clone(),
+            data_root,
+            system_root,
+        )?)
     }
 
     /// Compacts the database file
