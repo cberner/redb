@@ -3164,3 +3164,40 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn table_debug_format() {
+    // Exercises the Debug impl for Table and ReadOnlyTable across all branching paths:
+    // empty, single-entry, two-entry, and many-entry tables.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(format!("{table:?}"), "Table [ name: \"u64\", No entries ]");
+        table.insert(1u64, 10u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            "Table [ name: \"u64\", One key-value: 1 = 10 ]"
+        );
+        table.insert(2u64, 20u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            "Table [ name: \"u64\", first: 1 = 10, last: 2 = 20 ]"
+        );
+        table.insert(3u64, 30u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            "Table [ name: \"u64\", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        format!("{table:?}"),
+        "Table [ name: \"u64\", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"
+    );
+}
