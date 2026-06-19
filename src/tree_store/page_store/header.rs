@@ -1,6 +1,6 @@
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
-use crate::tree_store::page_store::base::MAX_REGIONS;
+use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, MAX_REGIONS};
 use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
 use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
@@ -106,7 +106,8 @@ pub(super) struct DatabaseHeader {
 }
 
 impl UnrepairedDatabaseHeader {
-    pub(super) fn from_bytes(data: &[u8]) -> Result<Self, DatabaseError> {
+    // `expected_page_size` is the page size this database was opened with.
+    pub(super) fn from_bytes(data: &[u8], expected_page_size: u32) -> Result<Self, DatabaseError> {
         if data[..MAGICNUMBER.len()] != MAGICNUMBER {
             return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
         }
@@ -119,6 +120,46 @@ impl UnrepairedDatabaseHeader {
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
+
+        // These layout fields aren't checksummed, so reject corrupt values before they reach the
+        // layout math below (which divides by / asserts on them). The page_size check also bounds
+        // every later region-size product, so none of that arithmetic can overflow.
+        if page_size != expected_page_size {
+            return Err(StorageError::Corrupted(format!(
+                "Database page size {page_size} does not match expected {expected_page_size}"
+            ))
+            .into());
+        }
+        // A region holds 1..=MAX_PAGE_INDEX + 1 pages (the page index is 20 bits); a larger count
+        // would alias high pages onto low ones.
+        if region_max_data_pages == 0 || region_max_data_pages > MAX_PAGE_INDEX + 1 {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid region data page count: {region_max_data_pages}"
+            ))
+            .into());
+        }
+        // 0 is valid (v3 has no region header); cap it to keep the region-size math from overflowing.
+        if region_header_pages > MAX_PAGE_INDEX + 1 {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid region header page count: {region_header_pages}"
+            ))
+            .into());
+        }
+        if trailing_data_pages > region_max_data_pages {
+            return Err(StorageError::Corrupted(format!(
+                "Trailing region data pages {trailing_data_pages} exceed region max {region_max_data_pages}"
+            ))
+            .into());
+        }
+        // A database has 1..=MAX_REGIONS regions (the region index is 20 bits); computed in u64 so
+        // the +1 can't overflow. Zero would underflow num_regions() - 1 in DatabaseLayout::len().
+        let num_regions = u64::from(full_regions) + u64::from(trailing_data_pages > 0);
+        if num_regions == 0 || num_regions > u64::from(MAX_REGIONS) {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid region count: full_regions={full_regions}, trailing_data_pages={trailing_data_pages}"
+            ))
+            .into());
+        }
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
         )?;
@@ -146,10 +187,6 @@ impl UnrepairedDatabaseHeader {
             primary_corrupted,
             secondary_corrupted,
         })
-    }
-
-    pub(super) fn page_size(&self) -> u32 {
-        self.inner.page_size
     }
 
     // True if the on-disk primary slot did not verify (its checksum is corrupt). The in-memory
@@ -468,9 +505,10 @@ mod test {
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
-        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, PAGE_SIZE_OFFSET, PRIMARY_BIT,
-        RECOVERY_REQUIRED, REGION_HEADER_PAGES_OFFSET, REGION_MAX_DATA_PAGES_OFFSET,
-        TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET, TWO_PHASE_COMMIT, get_u32,
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
+        PRIMARY_BIT, RECOVERY_REQUIRED, REGION_HEADER_PAGES_OFFSET, REGION_MAX_DATA_PAGES_OFFSET,
+        TRAILING_REGION_DATA_PAGES_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
+        TWO_PHASE_COMMIT, get_u32,
     };
     use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
@@ -852,6 +890,92 @@ mod test {
         assert!(
             matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
             "expected Corrupted, got {err:?}"
+        );
+    }
+
+    // A corrupted (but magic-valid) header layout field must open as Corrupted, not panic.
+    #[test]
+    fn corrupt_header_layout_fields_are_rejected() {
+        fn corrupt_field_and_open(offset: usize, value: u32) -> DatabaseError {
+            let tmpfile = crate::create_tempfile();
+            let db = Database::builder().create(tmpfile.path()).unwrap();
+            {
+                let txn = db.begin_write().unwrap();
+                let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+                txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+                txn.commit().unwrap();
+            }
+            drop(db);
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            file.write_all(&value.to_le_bytes()).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            Database::open(tmpfile.path()).unwrap_err()
+        }
+
+        // A different-but-structurally-valid page size (mismatch with this build).
+        let err = corrupt_field_and_open(PAGE_SIZE_OFFSET, 8192);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for mismatched page size, got {err:?}"
+        );
+
+        // Structurally invalid page sizes.
+        for bad_page_size in [0, 1, 3] {
+            let err = corrupt_field_and_open(PAGE_SIZE_OFFSET, bad_page_size);
+            assert!(
+                matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+                "expected Corrupted for page size {bad_page_size}, got {err:?}"
+            );
+        }
+
+        // A zero-page region would otherwise panic in RegionLayout::new.
+        let err = corrupt_field_and_open(REGION_MAX_DATA_PAGES_OFFSET, 0);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for zero region data pages, got {err:?}"
+        );
+
+        // Region larger than the 20-bit page index can address.
+        let err = corrupt_field_and_open(REGION_MAX_DATA_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region data pages, got {err:?}"
+        );
+
+        // A trailing region larger than a full region is structurally impossible.
+        let err = corrupt_field_and_open(TRAILING_REGION_DATA_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized trailing region, got {err:?}"
+        );
+
+        // Zero trailing count on a small db (full_regions == 0) describes zero regions.
+        let err = corrupt_field_and_open(TRAILING_REGION_DATA_PAGES_OFFSET, 0);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for zero-region layout, got {err:?}"
+        );
+
+        // Region count above MAX_REGIONS.
+        let err = corrupt_field_and_open(NUM_FULL_REGIONS_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region count, got {err:?}"
+        );
+
+        // An oversized region header page count overflows the region-size arithmetic.
+        let err = corrupt_field_and_open(REGION_HEADER_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region header pages, got {err:?}"
         );
     }
 
