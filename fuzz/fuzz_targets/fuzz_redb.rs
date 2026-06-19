@@ -773,6 +773,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
             txn.set_durability(Durability::None).unwrap();
         }
         txn.set_quick_repair(transaction.quick_repair);
+        txn.set_two_phase_commit(transaction.two_phase);
         let mut counter_table = txn.open_table(COUNTER_TABLE).unwrap();
         let uncommitted_id = txn_id as u64 + 1;
         counter_table.insert((), uncommitted_id)?;
