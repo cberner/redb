@@ -422,9 +422,8 @@ impl TransactionalMemory {
             storage.flush()?;
         }
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
-        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
-
-        assert_eq!(unrepaired.page_size() as usize, page_size);
+        let unrepaired =
+            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
         let needs_recovery = unrepaired.recovery_required(file_len);
         if needs_recovery && read_only {
@@ -524,7 +523,7 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         if !was_clean {
             self.storage
@@ -983,7 +982,7 @@ impl TransactionalMemory {
     // in-memory copy of an originally-clean slot wouldn't show external/failed-commit corruption.
     pub(crate) fn durable_primary_slot_corrupt(&self) -> Result<bool, DatabaseError> {
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes)?;
+        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         Ok(disk_header.primary_corrupted())
     }
 
