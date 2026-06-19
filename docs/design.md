@@ -325,7 +325,10 @@ Non-durable commits are implemented with an in-memory flag that directs readers 
 even though it is not yet promoted to the primary.
 In the event of a crash, the database will simply rollback to the primary page and the allocator state can be safely
 rebuilt via the normal repair process.
-Note that freeing pages during a non-durable commit is not permitted, because it could be rolled back at anytime.
+Note that a non-durable commit may only free pages that were themselves allocated by an earlier, not-yet-durable
+commit. Such pages cannot be referenced by the last durable commit, so reclaiming them is safe even if the
+non-durable commit is later rolled back. Pages that are durable must never be freed during a non-durable commit,
+since the commit could be rolled back at any time.
 
 ## 1-phase + checksum durable commits (1PC+C)
 A reduced latency commit strategy is used by default. A commit is performed with a single `fsync`.
