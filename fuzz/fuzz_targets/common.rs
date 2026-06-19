@@ -160,6 +160,7 @@ pub(crate) struct FuzzTransaction {
     pub ops: Vec<FuzzOperation>,
     pub durable: bool,
     pub quick_repair: bool,
+    pub two_phase: bool,
     pub commit: bool,
     pub close_db: bool,
     pub create_ephemeral_savepoint: bool,
