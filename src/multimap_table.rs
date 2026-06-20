@@ -490,7 +490,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         <() as Value>::fixed_width(),
                     );
 
-                    if required_inline_bytes < self.page_allocator.get_page_size() / 2 {
+                    // Keep the value-set inline only while it fits in half a page AND its entry
+                    // count stays within the u16 num_pairs field of an inline leaf; otherwise
+                    // convert to a subtree (RawLeafBuilder::new would panic on a u16 overflow).
+                    if required_inline_bytes < self.page_allocator.get_page_size() / 2
+                        && u16::try_from(new_pairs).is_ok()
+                    {
                         let mut data = vec![0; required_inline_bytes];
                         let mut builder = RawLeafBuilder::new(
                             &mut data,
