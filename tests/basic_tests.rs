@@ -3164,3 +3164,49 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+// cache_stats() is the primary API for monitoring page-cache efficiency. Exercises all
+// CacheStats accessors and verifies that reads generate non-zero hit+miss totals when
+// the cache_metrics feature is enabled.
+#[test]
+fn cache_stats() {
+    let tmpfile = create_tempfile();
+    let db = Database::builder()
+        .set_cache_size(1024 * 1024)
+        .create(tmpfile.path())
+        .unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..200u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..200u64 {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        }
+    }
+    drop(read_txn);
+
+    let stats = db.cache_stats();
+    let _evictions = stats.evictions();
+    let _read_hits = stats.read_hits();
+    let _read_misses = stats.read_misses();
+    let _write_hits = stats.write_hits();
+    let _write_misses = stats.write_misses();
+    let _used_bytes = stats.used_bytes();
+
+    // With the cache_metrics feature, reads must produce non-zero hit+miss totals and the
+    // read cache must hold at least one page after the read transaction.
+    #[cfg(feature = "cache_metrics")]
+    {
+        assert!(stats.read_hits() + stats.read_misses() > 0);
+        assert!(stats.used_bytes() > 0);
+    }
+}
