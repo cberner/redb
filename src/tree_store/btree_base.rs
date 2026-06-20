@@ -729,7 +729,12 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
-        required_size > self.page_allocator.get_page_size() && self.pairs.len() > 1
+        // num_pairs is stored as a u16, so a leaf must split once it would exceed u16::MAX pairs
+        // even if it still fits in a page (possible with large page sizes and tiny pairs);
+        // otherwise build() would panic in RawLeafBuilder::new. build_split() clamps each half.
+        let too_many_pairs = self.pairs.len() > usize::from(u16::MAX);
+        (required_size > self.page_allocator.get_page_size() || too_many_pairs)
+            && self.pairs.len() > 1
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
@@ -1777,7 +1782,10 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        size > self.page_allocator.get_page_size() && self.keys.len() >= 3
+        // num_keys is stored as a u16, so a branch must split once it would exceed u16::MAX keys
+        // even if it still fits in a page; otherwise build() would panic in RawBranchBuilder::new.
+        let too_many_keys = self.keys.len() > usize::from(u16::MAX);
+        (size > self.page_allocator.get_page_size() || too_many_keys) && self.keys.len() >= 3
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
@@ -2020,10 +2028,14 @@ mod tests {
     const MAX_PAIRS: usize = u16::MAX as usize;
 
     fn make_allocator() -> PageAllocator {
+        make_allocator_with_page_size(PAGE_SIZE)
+    }
+
+    fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
         let mem = TransactionalMemory::new(
             Box::new(InMemoryBackend::new()),
             true,
-            PAGE_SIZE,
+            page_size,
             None,
             0,
             false,
@@ -2138,5 +2150,70 @@ mod tests {
         assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
         assert!(accessor1.num_pairs() <= MAX_PAIRS);
         assert!(accessor2.num_pairs() <= MAX_PAIRS);
+    }
+
+    // With a large page, more than u16::MAX tiny pairs fit in one leaf without the byte-based split
+    // triggering. should_split must still split on the pair count; otherwise build() would panic in
+    // RawLeafBuilder::new (u16::try_from).
+    #[test]
+    fn leaf_split_respects_max_pairs_by_count() {
+        let page_allocator = make_allocator_with_page_size(2 * 1024 * 1024);
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let num_pairs = MAX_PAIRS + 1;
+        let keys = ascending_keys(num_pairs);
+        let mut builder = LeafBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_pairs,
+            u64::fixed_width(),
+            None,
+        );
+        for key in &keys {
+            builder.push(key, &[]);
+        }
+        // The pairs are tiny, so the leaf fits in the page by bytes; only the count forces a split.
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split().unwrap();
+
+        let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
+        let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
+        assert!(accessor1.num_pairs() <= MAX_PAIRS);
+        assert!(accessor2.num_pairs() <= MAX_PAIRS);
+    }
+
+    // The same count limit applies to branch nodes (num_keys is also a u16). The page must be large
+    // enough that u16::MAX + 1 children still fit by bytes, so only the count forces the split.
+    #[test]
+    fn branch_split_respects_max_keys_by_count() {
+        let page_allocator = make_allocator_with_page_size(4 * 1024 * 1024);
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        // One more key than u16::MAX, i.e. two more children.
+        let num_children = MAX_PAIRS + 2;
+        let keys = ascending_keys(num_children - 1);
+        let mut builder = BranchBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_children,
+            u64::fixed_width(),
+        );
+        for i in 0..num_children {
+            builder.push_child(PageNumber::new(0, u32::try_from(i).unwrap(), 0), 0);
+            if i < keys.len() {
+                builder.push_key(&keys[i]);
+            }
+        }
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split().unwrap();
+
+        let accessor1 = BranchAccessor::new(&page1, u64::fixed_width());
+        let accessor2 = BranchAccessor::new(&page2, u64::fixed_width());
+        assert_eq!(
+            accessor1.count_children() + accessor2.count_children(),
+            num_children
+        );
+        // num_keys == count_children - 1 must stay within u16.
+        assert!(accessor1.count_children() - 1 <= MAX_PAIRS);
+        assert!(accessor2.count_children() - 1 <= MAX_PAIRS);
     }
 }
