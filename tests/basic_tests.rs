@@ -3164,3 +3164,38 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+// Exercises debug_helper() and the Debug impls for Table and ReadOnlyTable across all
+// four size branches: empty, single-entry, two-entry, and multi-entry.
+#[test]
+fn table_debug_format() {
+    let tmpfile = create_tempfile();
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("debug_table");
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+
+        let s = format!("{:?}", table);
+        assert!(s.contains("debug_table") && s.contains("No entries"));
+
+        table.insert(1u64, 10u64).unwrap();
+        let s = format!("{:?}", table);
+        assert!(s.contains("One key-value"));
+
+        table.insert(2u64, 20u64).unwrap();
+        let s = format!("{:?}", table);
+        assert!(s.contains("first:") && s.contains("last:") && !s.contains("more entries"));
+
+        table.insert(3u64, 30u64).unwrap();
+        let s = format!("{:?}", table);
+        assert!(s.contains("more entries"));
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    let s = format!("{:?}", table);
+    assert!(s.contains("debug_table") && s.contains("first:") && s.contains("last:"));
+}
