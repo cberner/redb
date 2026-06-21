@@ -1048,6 +1048,14 @@ impl<'b> LeafMutator<'b> {
             .unwrap_or_default();
         let required_delta = isize::try_from(new_value.len()).unwrap()
             - isize::try_from(existing_value_len).unwrap();
+        // See sufficient_insert_inplace_space: leaf offsets are u32, so an in-place replace
+        // that grows the value must not push the leaf's total length past u32::MAX. Computed in
+        // u64 so it can't overflow or panic on 32-bit targets (where the bound is unreachable).
+        let new_total_length =
+            accessor.total_length() as u64 - existing_value_len as u64 + new_value.len() as u64;
+        if new_total_length > u64::from(u32::MAX) {
+            return false;
+        }
         required_delta <= isize::try_from(remaining).unwrap()
     }
 
@@ -1076,6 +1084,15 @@ impl<'b> LeafMutator<'b> {
         }
         if fixed_value_size.is_none() {
             required_delta += size_of::<u32>();
+        }
+        // key_end/value_end offsets within a leaf are stored as u32, so the leaf's total
+        // length must stay within u32::MAX. The in-place append path bypasses should_split,
+        // so on a large (oversized-span) page it could otherwise grow a leaf past 4GiB and
+        // overflow those offsets -- e.g. appending small pairs after a near-MAX_PAIR_LENGTH
+        // pair, whose buddy-allocated page rounds up to a ~4GiB span. Force a split instead.
+        // Computed in u64 so it can't overflow or panic on 32-bit targets (where it never trips).
+        if accessor.total_length() as u64 + required_delta as u64 > u64::from(u32::MAX) {
+            return false;
         }
         required_delta <= remaining
     }
