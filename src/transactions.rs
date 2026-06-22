@@ -1285,9 +1285,25 @@ impl WriteTransaction {
             };
             let mut system_tables = self.system_tables.lock().unwrap();
             let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
-            for entry in data_freed.extract_from_if(lower.., |_, _| true)? {
-                entry?;
+            let drain = || -> Result<(), StorageError> {
+                let mut iter = data_freed.extract_from_if(lower.., |_, _| true)?;
+                for entry in &mut iter {
+                    entry?;
+                }
+                // Defensive: exhaustion has already closed the iterator and
+                // surfaced any finalization error through the loop; this only
+                // keeps errors from being swallowed if the loop ever gains an
+                // early exit.
+                iter.close()
+            };
+            let result = drain();
+            if result.is_err() {
+                // The table tree root was already restored above, so a partial
+                // purge must not be committed. System-table extract iterators
+                // carry no poison target, so poison the transaction directly.
+                self.poison();
             }
+            result?;
             // No need to process the system freed table, because it only rolls forward
         }
 

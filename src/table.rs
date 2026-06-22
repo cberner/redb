@@ -148,6 +148,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     ///
     /// Note: values not read from the iterator will not be removed
     ///
+    /// If the iterator returns an error, later calls keep returning an error
+    /// (the failure is not recoverable). Entries already yielded stay
+    /// removed; if finalizing their removal fails too, the write transaction
+    /// is poisoned and cannot be committed.
+    ///
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
@@ -162,6 +167,11 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
     ///
     /// Note: values not read from the iterator will not be removed
+    ///
+    /// If the iterator returns an error, later calls keep returning an error
+    /// (the failure is not recoverable). Entries already yielded stay
+    /// removed; if finalizing their removal fails too, the write transaction
+    /// is poisoned and cannot be committed.
     ///
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
@@ -190,12 +200,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         predicate: F,
     ) -> Result {
         let mut panic_guard = RetainPanicGuard::new(self.transaction);
-        let mut lost_removals = false;
+        let mut poisoned = false;
         let result = self
             .tree
-            .retain_in::<K::SelfType<'_>, F>(predicate, .., &mut lost_removals);
+            .retain_in::<K::SelfType<'_>, F>(predicate, .., &mut poisoned);
         panic_guard.disarm();
-        if lost_removals {
+        if poisoned {
             self.transaction.poison();
         }
         result
@@ -217,10 +227,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         let mut panic_guard = RetainPanicGuard::new(self.transaction);
-        let mut lost_removals = false;
-        let result = self.tree.retain_in(predicate, range, &mut lost_removals);
+        let mut poisoned = false;
+        let result = self.tree.retain_in(predicate, range, &mut poisoned);
         panic_guard.disarm();
-        if lost_removals {
+        if poisoned {
             self.transaction.poison();
         }
         result
@@ -660,7 +670,8 @@ impl<
     /// Entries already returned by the iterator remain removed, and unread
     /// entries are not tested by the predicate or removed. Dropping the iterator
     /// also closes it, but this method returns any error encountered while
-    /// finalizing the iterator.
+    /// finalizing the iterator, including when the iterator already closed
+    /// itself after an iteration error.
     pub fn close(mut self) -> Result {
         self.inner.close()
     }
@@ -675,9 +686,11 @@ impl<
     fn drop(&mut self) {
         // Entries already yielded may have removals pending; if a flush
         // failed the table would silently keep them, so poison the
-        // transaction instead of letting it commit.
-        let close_failed = self.inner.close().is_err() || self.inner.close_failed();
-        if (close_failed || self.inner.predicate_panicked())
+        // transaction instead of letting it commit. An iteration error
+        // alone must not poison: close_failed reports lost removals, and
+        // close() also re-raises after a cleanly finalized error.
+        let _ = self.inner.close();
+        if (self.inner.close_failed() || self.inner.predicate_panicked())
             && let Some(transaction) = self.poison_target
         {
             transaction.poison();

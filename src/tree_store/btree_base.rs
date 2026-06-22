@@ -6,6 +6,7 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
@@ -659,6 +660,79 @@ pub(super) struct LeafBuilder<'a, 'b> {
     allocated_pages: &'b Mutex<PageTrackerPolicy>,
 }
 
+// Key-value pairs copied into owned memory, so they survive any tree mutation.
+// The buffer stays in ascending key order: `extend_from_leaf` appends leaves
+// that are entirely greater at the back and prepends smaller ones at the
+// front; `data` grows append-only since the pair ranges are absolute offsets
+// into it.
+#[derive(Default)]
+pub(super) struct OwnedEntryBuffer {
+    pairs: VecDeque<(Range<usize>, Range<usize>)>,
+    data: Vec<u8>,
+}
+
+impl OwnedEntryBuffer {
+    fn store(&mut self, key: &[u8], value: &[u8]) -> (Range<usize>, Range<usize>) {
+        let key_start = self.data.len();
+        self.data.extend_from_slice(key);
+        let key_end = self.data.len();
+        self.data.extend_from_slice(value);
+        let value_end = self.data.len();
+        (key_start..key_end, key_end..value_end)
+    }
+
+    // Copies all of the leaf's pairs except `removed_indexes` (which must be
+    // strictly ascending). The leaf must be entirely greater than the buffered
+    // entries when `back` is true, and entirely smaller otherwise, keeping the
+    // buffer in ascending key order.
+    pub(super) fn extend_from_leaf(
+        &mut self,
+        accessor: &LeafAccessor<'_>,
+        removed_indexes: &[usize],
+        back: bool,
+    ) {
+        debug_assert!(removed_indexes.windows(2).all(|pair| pair[0] < pair[1]));
+        let num_pairs = accessor.num_pairs();
+        self.pairs.reserve(num_pairs - removed_indexes.len());
+        self.data.reserve(accessor.length_of_pairs(0, num_pairs));
+
+        let mut retained = Vec::with_capacity(num_pairs - removed_indexes.len());
+        let mut next_removed = 0;
+        for index in 0..num_pairs {
+            if removed_indexes.get(next_removed) == Some(&index) {
+                next_removed += 1;
+                continue;
+            }
+            let entry = accessor.entry(index).unwrap();
+            retained.push(self.store(entry.key(), entry.value()));
+        }
+        debug_assert_eq!(next_removed, removed_indexes.len());
+        if back {
+            self.pairs.extend(retained);
+        } else {
+            // Prepending in reverse leaves the leaf's entries ascending at the
+            // front.
+            for pair in retained.into_iter().rev() {
+                self.pairs.push_front(pair);
+            }
+        }
+    }
+
+    pub(super) fn num_pairs(&self) -> usize {
+        self.pairs.len()
+    }
+
+    pub(super) fn total_bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.pairs
+            .iter()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+}
+
 impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn required_bytes(&self, num_pairs: usize, keys_values_bytes: usize) -> usize {
         RawLeafBuilder::required_bytes(
@@ -725,16 +799,13 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     }
 
     pub(super) fn should_split(&self) -> bool {
-        let required_size = self.required_bytes(
+        leaf_split_required(
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
-        );
-        // num_pairs is stored as a u16, so a leaf must split once it would exceed u16::MAX pairs
-        // even if it still fits in a page (possible with large page sizes and tiny pairs);
-        // otherwise build() would panic in RawLeafBuilder::new. build_split() clamps each half.
-        let too_many_pairs = self.pairs.len() > usize::from(u16::MAX);
-        (required_size > self.page_allocator.get_page_size() || too_many_pairs)
-            && self.pairs.len() > 1
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.page_allocator.get_page_size(),
+        )
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
@@ -827,6 +898,74 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         drop(builder);
         Ok(page)
     }
+}
+
+// The leaf split policy, for a hypothetical set of pairs. A leaf must split once it would
+// exceed the page size, or u16::MAX pairs even if they still fit in a page (possible with large
+// page sizes and tiny pairs); otherwise build() would panic in RawLeafBuilder::new.
+// build_split() clamps each half. A single pair never splits: it gets its own larger page,
+// matching the single-large-value handling elsewhere. Shared by LeafBuilder::should_split and
+// the mutator's run repacking (build_replacement_leaves), which must agree.
+pub(super) fn leaf_split_required(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
+    let required = RawLeafBuilder::required_bytes(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+    );
+    let too_many_pairs = num_pairs > usize::from(u16::MAX);
+    (required > page_size || too_many_pairs) && num_pairs > 1
+}
+
+// Merge a leaf when it is less than 33% full: splits occur when a page is full and produce two
+// 50% full pages, so 33% avoids merge/split oscillation. Shared by the mutator's delete
+// planning and splice policy (plan_leaf_delete, replace_leaf_children,
+// build_replacement_leaves) and the cursor's decision to coalesce sparse leaves into a run,
+// which must agree.
+pub(super) fn leaf_below_merge_threshold(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
+    let required = RawLeafBuilder::required_bytes(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+    );
+    required < page_size / 3
+}
+
+// A leaf holding a single pair at least a page in size is never merged with: absorbing it
+// would copy and rewrite the value without making its neighbor any healthier. Shared by the
+// mutator's insert fast path, merge planning, and splice absorption (replace_leaf_children),
+// which must agree.
+pub(super) fn is_single_large_value(accessor: &LeafAccessor<'_>, page_size: usize) -> bool {
+    accessor.num_pairs() == 1 && accessor.total_length() >= page_size
+}
+
+// The pair count and key-value bytes a leaf retains after removing `removed_indexes`. Shared
+// by the mutator's delete planning and the cursor's run-opening decision, which must agree on
+// the resulting disposition.
+pub(super) fn retained_after_removals(
+    accessor: &LeafAccessor<'_>,
+    removed_indexes: &[usize],
+) -> (usize, usize) {
+    let removed_bytes: usize = removed_indexes
+        .iter()
+        .map(|&index| accessor.length_of_pairs(index, index + 1))
+        .sum();
+    let retained_pairs = accessor.num_pairs() - removed_indexes.len();
+    let retained_bytes = accessor.length_of_pairs(0, accessor.num_pairs()) - removed_bytes;
+    (retained_pairs, retained_bytes)
 }
 
 // Note the caller is responsible for ensuring that the buffer is large enough

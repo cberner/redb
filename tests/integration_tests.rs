@@ -2,7 +2,7 @@ use rand::RngExt;
 use rand::prelude::SliceRandom;
 use redb::backends::FileBackend;
 use redb::{
-    AccessGuard, Builder, CompactionError, Database, Durability, Key, MultimapRange,
+    AccessGuard, Builder, CommitError, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value, WriteTransaction,
@@ -187,58 +187,61 @@ fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>
     pairs
 }
 
+// A file backend whose read or sync operations fail while the matching flag
+// is set.
+#[derive(Debug)]
+struct FailingBackend {
+    inner: FileBackend,
+    fail_reads: Arc<AtomicBool>,
+    fail_syncs: Arc<AtomicBool>,
+}
+
+impl FailingBackend {
+    fn new(backend: FileBackend) -> Self {
+        Self {
+            inner: backend,
+            fail_reads: Arc::new(AtomicBool::new(false)),
+            fail_syncs: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl StorageBackend for FailingBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        if self.fail_reads.load(Ordering::SeqCst) {
+            return Err(std::io::Error::from(ErrorKind::Other));
+        }
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        if self.fail_syncs.load(Ordering::SeqCst) {
+            return Err(std::io::Error::from(ErrorKind::Other));
+        }
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.inner.write(offset, data)
+    }
+}
+
 #[test]
 fn previous_io_error() {
-    #[derive(Debug)]
-    struct FailingBackend {
-        inner: FileBackend,
-        fail_flag: Arc<AtomicBool>,
-    }
-
-    impl FailingBackend {
-        fn new(backend: FileBackend, fail_flag: Arc<AtomicBool>) -> Self {
-            Self {
-                inner: backend,
-                fail_flag,
-            }
-        }
-    }
-
-    impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
-            self.inner.len()
-        }
-
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
-            self.inner.read(offset, out)
-        }
-
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
-            self.inner.set_len(len)
-        }
-
-        fn sync_data(&self) -> Result<(), std::io::Error> {
-            if self.fail_flag.load(Ordering::SeqCst) {
-                Err(std::io::Error::from(ErrorKind::Other))
-            } else {
-                self.inner.sync_data()
-            }
-        }
-
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
-            self.inner.write(offset, data)
-        }
-    }
-
     let tmpfile = create_tempfile();
 
-    let fail_flag = Arc::new(AtomicBool::new(false));
-    let backend = FailingBackend::new(
-        FileBackend::new(tmpfile.into_file()).unwrap(),
-        fail_flag.clone(),
-    );
+    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let fail_syncs = backend.fail_syncs.clone();
     let db = Database::builder().create_with_backend(backend).unwrap();
-    fail_flag.store(true, Ordering::SeqCst);
+    fail_syncs.store(true, Ordering::SeqCst);
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -249,6 +252,93 @@ fn previous_io_error() {
     assert!(matches!(
         db.begin_write().err().unwrap(),
         TransactionError::Storage(StorageError::PreviousIo)
+    ));
+}
+
+// After the extract iterator returns an error, later calls must keep
+// returning an error rather than None: the failure is not recoverable and
+// going quiet would look like successful exhaustion.
+#[test]
+fn extract_if_error_latches() {
+    let tmpfile = create_tempfile();
+    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let fail_reads = backend.fail_reads.clone();
+    // Zero cache so iteration must read leaves through the backend.
+    let db = Builder::new()
+        .set_cache_size(0)
+        .create_with_backend(backend)
+        .unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10_000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut iter = table.extract_if(|_, _| true).unwrap();
+        assert!(iter.next().unwrap().is_ok());
+        fail_reads.store(true, Ordering::SeqCst);
+        // The current leaf may drain from memory before a read is needed.
+        loop {
+            match iter.next() {
+                Some(Ok(_)) => {}
+                Some(Err(_)) => break,
+                None => panic!("iterator must not report exhaustion"),
+            }
+        }
+        // The error is latched: both ends re-raise instead of continuing.
+        assert!(matches!(iter.next(), Some(Err(StorageError::PreviousIo))));
+        assert!(matches!(
+            iter.next_back(),
+            Some(Err(StorageError::PreviousIo))
+        ));
+        fail_reads.store(false, Ordering::SeqCst);
+    }
+    drop(txn);
+}
+
+// After an extract iterator error, committing reports the underlying
+// storage failure; the iteration error alone does not poison the
+// transaction (no removals were lost).
+#[test]
+fn extract_if_error_commit_reports_storage_failure() {
+    let tmpfile = create_tempfile();
+    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let fail_reads = backend.fail_reads.clone();
+    let db = Builder::new()
+        .set_cache_size(0)
+        .create_with_backend(backend)
+        .unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..1000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        fail_reads.store(true, Ordering::SeqCst);
+        // The predicate never matches, so no removals are pending when the
+        // read error surfaces and finalization succeeds without I/O.
+        let mut iter = table.extract_if(|_, _| false).unwrap();
+        assert!(iter.next().unwrap().is_err());
+        fail_reads.store(false, Ordering::SeqCst);
+    }
+    let err = txn.commit().unwrap_err();
+    assert!(matches!(
+        err,
+        CommitError::Storage(StorageError::PreviousIo)
     ));
 }
 
