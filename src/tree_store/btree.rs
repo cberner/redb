@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
-    AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
+    AccessGuardMut, BRANCH, BranchAccessor, BranchBuilder, BranchMutator, BtreeHeader, Checksum,
+    DEFERRED, LEAF, LeafAccessor, LeafBuilder, LeafPageMut, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_cursor::{CursorMut, Position};
 use crate::tree_store::btree_iters::range_is_empty;
@@ -21,6 +21,18 @@ use std::collections::{Bound, HashMap};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
+
+// Result of descending to the leaf containing a key during get_mut(). `PageMut`s own their memory
+// (their lifetime is phantom), so these can be held across further `&mut self` calls and used to
+// build the guard without re-fetching.
+struct Descent<'p> {
+    leaf: PageMut<'p>,
+    parent: Option<(PageMut<'p>, usize)>,
+    entry_index: usize,
+    // True if the leaf is an oversized multi-entry leaf, i.e. growing one of its values could
+    // push the leaf past the u32 addressable limit. get_mut() splits these before returning.
+    oversized: bool,
+}
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,
@@ -551,93 +563,269 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         &mut self,
         key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuardMut<'_, V>>> {
-        if let Some(ref mut root) = self.root {
-            let key_bytes = K::as_bytes(key);
-            let query = key_bytes.as_ref();
-            let page_mut = if self.page_allocator.uncommitted(root.root) {
-                self.page_allocator.get_page_mut(root.root)?
-            } else {
-                let mut freed_pages = self.freed_pages.lock().unwrap();
-                let mut allocated = self.allocated_pages.lock().unwrap();
-                let required: usize = root
-                    .root
-                    .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
-                    .try_into()
-                    .unwrap();
-                let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
-                let old_page = self.page_allocator.get_page(root.root, PageHint::None)?;
-                new_page.memory_mut().copy_from_slice(old_page.memory());
-                drop(old_page);
-                freed_pages.push(root.root);
-
-                root.root = new_page.get_page_number();
-                root.checksum = DEFERRED;
-                new_page
-            };
-            self.get_mut_helper(None, page_mut, query)
-        } else {
-            Ok(None)
+        if self.root.is_none() {
+            return Ok(None);
         }
+        let key_bytes = K::as_bytes(key);
+        let query = key_bytes.as_ref();
+
+        let root_page = self.cow_page(self.root.as_ref().unwrap().root, None)?;
+        let Some(mut descent) = self.get_mut_descend(None, root_page, query)? else {
+            return Ok(None);
+        };
+
+        // If the target leaf is an oversized multi-entry leaf, growing one of its values could
+        // push it past the u32 addressable limit. Split such leaves first (rare). This keeps the
+        // common path above identical to a plain descent. Loop because one split may not be enough
+        // to bring the target's half back under the page size.
+        while descent.oversized {
+            drop(descent);
+            self.split_oversized_leaf(query)?;
+            let root_page = self.cow_page(self.root.as_ref().unwrap().root, None)?;
+            descent = self
+                .get_mut_descend(None, root_page, query)?
+                .expect("key present before split must remain present after split");
+        }
+
+        let Descent {
+            leaf,
+            parent,
+            entry_index,
+            ..
+        } = descent;
+        let (start, end) = {
+            let accessor = LeafAccessor::new(leaf.memory(), K::fixed_width(), V::fixed_width());
+            accessor.value_range(entry_index).unwrap()
+        };
+        let page_allocator = self.page_allocator.clone();
+        let allocated = self.allocated_pages.clone();
+        let key_width = K::fixed_width();
+        let root_ref = self.root.as_mut().unwrap();
+        Ok(Some(AccessGuardMut::new(
+            leaf,
+            start,
+            end - start,
+            entry_index,
+            parent,
+            page_allocator,
+            allocated,
+            root_ref,
+            key_width,
+        )))
     }
 
-    fn get_mut_helper<'txn>(
-        &'txn mut self,
-        parent: Option<(PageMut<'txn>, usize)>,
-        mut page: PageMut<'txn>,
+    // Return an uncommitted (copy-on-write) handle to `page_number`. If the page was committed it
+    // is copied to a freshly allocated page and the old one freed; the new page number is written
+    // back through `parent` (a branch page + child index) or, when `parent` is None, into the
+    // root header. `PageMut`'s lifetime is phantom, so the returned page does not borrow `self`.
+    fn cow_page<'p>(
+        &mut self,
+        page_number: PageNumber,
+        parent: Option<(&mut PageMut<'_>, usize)>,
+    ) -> Result<PageMut<'p>> {
+        if self.page_allocator.uncommitted(page_number) {
+            return self.page_allocator.get_page_mut(page_number);
+        }
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut allocated = self.allocated_pages.lock().unwrap();
+        let required: usize = page_number
+            .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
+            .try_into()
+            .unwrap();
+        let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
+        let old_page = self.page_allocator.get_page(page_number, PageHint::None)?;
+        new_page.memory_mut().copy_from_slice(old_page.memory());
+        drop(old_page);
+        freed_pages.push(page_number);
+        drop(allocated);
+        drop(freed_pages);
+
+        let new_page_number = new_page.get_page_number();
+        if let Some((parent_page, child_index)) = parent {
+            let mut mutator = BranchMutator::new(parent_page.memory_mut());
+            mutator.write_child_page(child_index, new_page_number, DEFERRED);
+        } else {
+            let header = self.root.as_mut().unwrap();
+            header.root = new_page_number;
+            header.checksum = DEFERRED;
+        }
+        Ok(new_page)
+    }
+
+    // Descend to the leaf containing `query`, copying each branch on the way so the whole path is
+    // uncommitted, and report whether that leaf is oversized. `PageMut`s are owned, so the returned
+    // `Descent` can outlive the `&mut self` borrow of this call.
+    fn get_mut_descend<'p>(
+        &mut self,
+        parent: Option<(PageMut<'p>, usize)>,
+        mut page: PageMut<'p>,
         query: &[u8],
-    ) -> Result<Option<AccessGuardMut<'txn, V>>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
+    ) -> Result<Option<Descent<'p>>> {
+        match page.memory()[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                if let Some(entry_index) = accessor.find_key::<K>(query) {
-                    let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuardMut::new(
-                        page,
-                        start,
-                        end - start,
-                        entry_index,
-                        parent,
-                        self.page_allocator.clone(),
-                        self.allocated_pages.clone(),
-                        self.root.as_mut().unwrap(),
-                        K::fixed_width(),
-                    );
-                    Ok(Some(guard))
-                } else {
-                    Ok(None)
-                }
+                let Some(entry_index) = accessor.find_key::<K>(query) else {
+                    return Ok(None);
+                };
+                let oversized = accessor.num_pairs() > 1
+                    && accessor.total_length() > self.page_allocator.get_page_size();
+                Ok(Some(Descent {
+                    leaf: page,
+                    parent,
+                    entry_index,
+                    oversized,
+                }))
             }
             BRANCH => {
                 let (child_index, child_page) = {
                     let accessor = BranchAccessor::new(&page, K::fixed_width());
                     accessor.child_for_key::<K>(query)
                 };
-                let child_page_mut = if self.page_allocator.uncommitted(child_page) {
-                    self.page_allocator.get_page_mut(child_page)?
-                } else {
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    let mut allocated = self.allocated_pages.lock().unwrap();
-                    let required: usize = child_page
-                        .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
-                        .try_into()
-                        .unwrap();
-                    let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
-                    let old_child_page =
-                        self.page_allocator.get_page(child_page, PageHint::None)?;
-                    new_page
-                        .memory_mut()
-                        .copy_from_slice(old_child_page.memory());
-                    drop(old_child_page);
-                    freed_pages.push(child_page);
-
-                    let mut mutator = BranchMutator::new(page.memory_mut());
-                    mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
-                    new_page
-                };
-                self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
+                let child_page_mut = self.cow_page(child_page, Some((&mut page, child_index)))?;
+                self.get_mut_descend(Some((page, child_index)), child_page_mut, query)
             }
             _ => unreachable!(),
+        }
+    }
+
+    // Split the (oversized, multi-entry) leaf containing `query`, propagating the new sibling up
+    // the branch path and growing a new root if necessary. The whole path is already uncommitted
+    // from the get_mut() descent that detected the oversized leaf.
+    fn split_oversized_leaf(&mut self, query: &[u8]) -> Result<()> {
+        let root = self.root.as_ref().unwrap().root;
+        let mut ancestors: Vec<(PageMut, usize)> = Vec::new();
+        let mut page = self.page_allocator.get_page_mut(root)?;
+        loop {
+            match page.memory()[0] {
+                BRANCH => {
+                    let (child_index, child_page) = {
+                        let accessor = BranchAccessor::new(&page, K::fixed_width());
+                        accessor.child_for_key::<K>(query)
+                    };
+                    let child = self.page_allocator.get_page_mut(child_page)?;
+                    ancestors.push((page, child_index));
+                    page = child;
+                }
+                LEAF => break,
+                _ => unreachable!(),
+            }
+        }
+
+        let old_leaf = page.get_page_number();
+        let key_width = K::fixed_width();
+        let value_width = V::fixed_width();
+        let (left_child, right_child, split_key) = {
+            let accessor = LeafAccessor::new(page.memory(), key_width, value_width);
+            let mut builder = LeafBuilder::new(
+                &self.page_allocator,
+                &self.allocated_pages,
+                accessor.num_pairs(),
+                key_width,
+                value_width,
+            );
+            builder.push_all_except(&accessor, None);
+            let (page1, key, page2) = builder.build_split()?;
+            (
+                page1.get_page_number(),
+                page2.get_page_number(),
+                key.to_vec(),
+            )
+        };
+        drop(page);
+        self.free_page(old_leaf);
+
+        self.propagate_branch_split(ancestors, left_child, Some((split_key, right_child)))
+    }
+
+    // Install `child` at the descended-into slot of the deepest ancestor and, if `sibling` is
+    // present, insert it just after, rebuilding and splitting branches up the path as needed.
+    fn propagate_branch_split(
+        &mut self,
+        mut ancestors: Vec<(PageMut, usize)>,
+        mut child: PageNumber,
+        mut sibling: Option<(Vec<u8>, PageNumber)>,
+    ) -> Result<()> {
+        let key_width = K::fixed_width();
+        while let Some((mut branch_page, child_index)) = ancestors.pop() {
+            let Some((split_key, right_child)) = sibling.take() else {
+                // Only a child-pointer change; the branch is uncommitted so update it in place,
+                // leaving its page number (and the ancestors above) untouched.
+                let mut mutator = BranchMutator::new(branch_page.memory_mut());
+                mutator.write_child_page(child_index, child, DEFERRED);
+                return Ok(());
+            };
+
+            let old_branch = branch_page.get_page_number();
+            let (new_child, new_sibling) = {
+                let accessor = BranchAccessor::new(&branch_page, key_width);
+                let num_children = accessor.count_children();
+                let mut builder = BranchBuilder::new(
+                    &self.page_allocator,
+                    &self.allocated_pages,
+                    num_children + 1,
+                    key_width,
+                );
+                if child_index == 0 {
+                    builder.push_child(child, DEFERRED);
+                    builder.push_key(&split_key);
+                    builder.push_child(right_child, DEFERRED);
+                } else {
+                    builder.push_child(
+                        accessor.child_page(0).unwrap(),
+                        accessor.child_checksum(0).unwrap(),
+                    );
+                }
+                for i in 1..num_children {
+                    builder.push_key(accessor.key(i - 1).unwrap());
+                    if i == child_index {
+                        builder.push_child(child, DEFERRED);
+                        builder.push_key(&split_key);
+                        builder.push_child(right_child, DEFERRED);
+                    } else {
+                        builder.push_child(
+                            accessor.child_page(i).unwrap(),
+                            accessor.child_checksum(i).unwrap(),
+                        );
+                    }
+                }
+                if builder.should_split() {
+                    let (b1, branch_split_key, b2) = builder.build_split()?;
+                    (
+                        b1.get_page_number(),
+                        Some((branch_split_key.to_vec(), b2.get_page_number())),
+                    )
+                } else {
+                    (builder.build()?.get_page_number(), None)
+                }
+            };
+            child = new_child;
+            sibling = new_sibling;
+            drop(branch_page);
+            self.free_page(old_branch);
+        }
+
+        let header = self.root.as_mut().unwrap();
+        if let Some((split_key, right_child)) = sibling {
+            let mut builder =
+                BranchBuilder::new(&self.page_allocator, &self.allocated_pages, 2, key_width);
+            builder.push_child(child, DEFERRED);
+            builder.push_key(&split_key);
+            builder.push_child(right_child, DEFERRED);
+            header.root = builder.build()?.get_page_number();
+        } else {
+            header.root = child;
+        }
+        header.checksum = DEFERRED;
+        Ok(())
+    }
+
+    fn free_page(&self, page_number: PageNumber) {
+        let mut allocated = self.allocated_pages.lock().unwrap();
+        if !self
+            .page_allocator
+            .free_if_uncommitted(page_number, &mut allocated)
+        {
+            self.freed_pages.lock().unwrap().push(page_number);
         }
     }
 

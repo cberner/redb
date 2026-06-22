@@ -270,6 +270,11 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     offset: usize,
     len: usize,
     entry_index: usize,
+    // The leaf's immediate parent branch (with the child index followed into the leaf). The leaf
+    // and parent were CoW'd to uncommitted by get_mut, so a value that no longer fits in place can
+    // rebuild the leaf and repoint the parent. get_mut guarantees the leaf is never an oversized
+    // multi-entry leaf (it splits those before handing out the guard), so rebuilding here can never
+    // need to split/cascade for realistic page sizes; the u32 check in insert() backstops the rest.
     parent: Option<(PageMut<'a>, usize)>,
     page_allocator: PageAllocator,
     allocated: Arc<Mutex<PageTrackerPolicy>>,
@@ -343,22 +348,33 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
                 LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
             mutator.replace(self.entry_index, value_bytes.as_ref());
         } else {
+            let new_value = value_bytes.as_ref();
             let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            let num_pairs = accessor.num_pairs();
             let mut builder = LeafBuilder::new(
                 &self.page_allocator,
                 &self.allocated,
-                accessor.num_pairs(),
+                num_pairs,
                 self.key_width,
                 V::fixed_width(),
             );
-
-            for i in 0..accessor.num_pairs() {
+            let mut keys_values_bytes = 0;
+            for i in 0..num_pairs {
                 let entry = accessor.entry(i).unwrap();
-                if i == self.entry_index {
-                    builder.push(entry.key(), value_bytes.as_ref());
+                let value = if i == self.entry_index {
+                    new_value
                 } else {
-                    builder.push(entry.key(), entry.value());
-                }
+                    entry.value()
+                };
+                keys_values_bytes += entry.key().len() + value.len();
+                builder.push(entry.key(), value);
+            }
+
+            // Backstop: leaf offsets are u32, so the rebuilt leaf must stay under u32::MAX bytes.
+            // get_mut already splits oversized multi-entry leaves, so this is only reachable with
+            // pathologically large page sizes (> ~256MiB); error rather than panicking in build().
+            if builder.required_bytes(num_pairs, keys_values_bytes) > u32::MAX as usize {
+                return Err(StorageError::ValueTooLarge(value_len + key_len));
             }
 
             let new_page = builder.build()?;

@@ -1437,13 +1437,134 @@ impl std::fmt::Debug for Database {
 mod test {
     use crate::backends::FileBackend;
     use crate::{
-        CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
-        StorageError, TableDefinition, TransactionError,
+        CommitError, Database, DatabaseError, Durability, ReadableDatabase, ReadableTable,
+        ReadableTableMetadata, StorageBackend, StorageError, TableDefinition, TransactionError,
     };
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+
+    // Growing a value via get_mut() can leave a leaf oversized (still < 4GiB, so safe). The next
+    // get_mut() that descends into that oversized multi-entry leaf must proactively split it, so a
+    // later grow can never push a single leaf past the u32 (4GiB) addressable limit. Run at a small
+    // page size so this is reachable without gigabytes of data.
+    #[test]
+    fn get_mut_splits_oversized_leaf() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = Database::builder()
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("t");
+
+        // Two small entries share one leaf.
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table.insert(0, [0u8; 4].as_slice()).unwrap();
+            table.insert(1, [1u8; 4].as_slice()).unwrap();
+        }
+        tx.commit().unwrap();
+
+        // Grow entry 0 well past the page size. The guard builds a single oversized leaf
+        // ([big0, small1]); it does not split here.
+        let big = vec![0xABu8; 1024];
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table
+                .get_mut(0)
+                .unwrap()
+                .unwrap()
+                .insert(big.as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        {
+            let read = db.begin_read().unwrap();
+            let table = read.open_table(table_def).unwrap();
+            assert_eq!(
+                table.stats().unwrap().leaf_pages(),
+                1,
+                "should be one oversized leaf"
+            );
+        }
+
+        // Touching the oversized leaf again must proactively split it.
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            table
+                .get_mut(1)
+                .unwrap()
+                .unwrap()
+                .insert([2u8; 4].as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(table_def).unwrap();
+        assert!(
+            table.stats().unwrap().leaf_pages() >= 2,
+            "oversized leaf was not split"
+        );
+        assert_eq!(table.get(0).unwrap().unwrap().value(), big.as_slice());
+        assert_eq!(table.get(1).unwrap().unwrap().value(), [2u8; 4].as_slice());
+        drop(table);
+        drop(read);
+        assert!(db.check_integrity().unwrap());
+    }
+
+    // Same, but on a multi-level tree so the leaf split must cascade up through branch pages.
+    #[test]
+    fn get_mut_grow_splits_deep_tree() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = Database::builder()
+            .set_page_size(512)
+            .create(tmpfile.path())
+            .unwrap();
+        let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("t");
+
+        let n = 2000u64;
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            for i in 0..n {
+                table.insert(i, i.to_le_bytes().as_slice()).unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        // Grow several values (spread across the tree) large enough to split their leaves.
+        let big = vec![0xCDu8; 2048];
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(table_def).unwrap();
+            for k in [1u64, 750, 1999] {
+                let mut v = table.get_mut(k).unwrap().unwrap();
+                v.insert(big.as_slice()).unwrap();
+                assert_eq!(v.value(), big.as_slice());
+            }
+        }
+        tx.commit().unwrap();
+
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(table_def).unwrap();
+        for i in 0..n {
+            let got = table.get(i).unwrap().unwrap();
+            if i == 1 || i == 750 || i == 1999 {
+                assert_eq!(got.value(), big.as_slice());
+            } else {
+                assert_eq!(got.value(), i.to_le_bytes().as_slice());
+            }
+        }
+        drop(table);
+        drop(read);
+        assert!(db.check_integrity().unwrap());
+    }
 
     #[derive(Debug)]
     struct FailingBackend {
