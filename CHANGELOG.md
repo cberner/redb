@@ -52,6 +52,7 @@
 * Add `Database.begin_write()`, which returns a `WriteTransaction`
   context manager. Exiting the `with` block commits the transaction on success
   and aborts it if an exception propagates out of the block.
+* The minimum supported Python version is now 3.8 (Python 3.7 is end-of-life).
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
