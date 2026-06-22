@@ -3,9 +3,9 @@
 ## 4.2.0 - 2026-XX-XX
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
-* Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a 25x speedup.
+* Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a 25-50x speedup.
 * Optimize `Table::extract_if()` and `Table::extract_from_if()`. Benchmarks on large tables show
-  a 1.6-4x speedup, depending on the fraction of entries extracted, and iterating the extract
+  a 2-4x speedup, depending on the fraction of entries extracted, and iterating the extract
   iterator from both ends no longer degrades the removal batching.
 * Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
   types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
