@@ -107,6 +107,37 @@ fn table_stats() {
 }
 
 #[test]
+fn stats_with_branch_pages() {
+    // Verifies the TableStats and DatabaseStats accessors that require a multi-level B-tree
+    // (branch_pages, stored_bytes, metadata_bytes, fragmented_bytes on TableStats and
+    // branch_pages, leaf_pages, page_size on DatabaseStats). A small table only ever has a
+    // single leaf page with no branch pages, so those accessors would otherwise go untested.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0u64..10_000 {
+            table.insert(i, i).unwrap();
+        }
+        let stats = table.stats().unwrap();
+        assert!(stats.branch_pages() > 0);
+        assert!(stats.stored_bytes() > 0);
+        assert!(stats.metadata_bytes() > 0);
+        let _ = stats.fragmented_bytes();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn2 = db.begin_write().unwrap();
+    let db_stats = write_txn2.stats().unwrap();
+    assert!(db_stats.branch_pages() > 0);
+    assert!(db_stats.leaf_pages() > 0);
+    assert!(db_stats.page_size() > 0);
+    write_txn2.abort().unwrap();
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
