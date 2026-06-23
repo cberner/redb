@@ -2790,6 +2790,64 @@ fn open_multimap_table_as_regular() {
 
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
+fn table_debug_format() {
+    // Tests Debug formatting for Table and ReadOnlyTable: empty, single entry,
+    // exactly two entries, and more than two entries.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(
+            format!("{:?}", table),
+            "Table [ name: \"u64\", No entries ]"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        assert_eq!(
+            format!("{:?}", table),
+            "Table [ name: \"u64\", One key-value: 1 = 10 ]"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(2u64, 20u64).unwrap();
+        assert_eq!(
+            format!("{:?}", table),
+            "Table [ name: \"u64\", first: 1 = 10, last: 2 = 20 ]"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        assert_eq!(
+            format!("{:?}", table),
+            "Table [ name: \"u64\", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"
+        );
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        format!("{:?}", table),
+        "Table [ name: \"u64\", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"
+    );
+}
+
+#[test]
 fn u8_array_serialization() {
     assert_eq!(
         <&[u8; 7] as Value>::type_name(),
