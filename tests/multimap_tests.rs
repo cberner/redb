@@ -543,3 +543,36 @@ fn multimap_remove_subtree_backed_key() {
     assert_eq!(iter.next().unwrap().unwrap().value(), 999);
     assert!(iter.next().is_none());
 }
+
+#[test]
+fn multimap_stats_branch_and_subtree() {
+    // stats() on a multimap table with branch pages in the outer B-tree (many distinct keys)
+    // and a subtree-backed value collection (one key with many values) exercises the branch-page
+    // and SubtreeV2 paths in multimap_stats_helper, and covers TableStats accessor methods that
+    // are only reachable when the caller inspects all fields.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough distinct keys that the outer B-tree requires branch pages.
+        for i in 0..5_000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Enough extra values for key 0 to promote its collection to a subtree.
+        for v in 5_000..5_500u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let stats = table.stats().unwrap();
+    assert!(stats.branch_pages() > 0);
+    assert!(stats.leaf_pages() > 0);
+    assert!(stats.stored_bytes() > 0);
+    assert!(stats.metadata_bytes() > 0);
+    let _ = stats.fragmented_bytes();
+}
