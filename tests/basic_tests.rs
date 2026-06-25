@@ -107,6 +107,30 @@ fn table_stats() {
 }
 
 #[test]
+fn table_stats_all_getters() {
+    // branch_pages, metadata_bytes, and fragmented_bytes round-trip through TableStats alongside
+    // the already-exercised tree_height, leaf_pages, and stored_bytes.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    let stats = table.stats().unwrap();
+    // A single-entry table fits in one leaf page with no branch pages required.
+    assert_eq!(stats.branch_pages(), 0);
+    // metadata_bytes covers internal indexing overhead; fragmented_bytes may be zero for a
+    // freshly written table but the getters must be reachable.
+    let _meta = stats.metadata_bytes();
+    let _frag = stats.fragmented_bytes();
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
@@ -1855,6 +1879,54 @@ fn entry_vacant_into_key() {
             }
             Entry::Occupied(_) => panic!("expected Vacant"),
         }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn entry_or_insert_with_occupied() {
+    // or_insert_with and or_insert_with_key must not invoke the closure when the entry is
+    // already occupied, matching the lazy semantics of std::collections::BTreeMap::entry.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 42u64).unwrap();
+
+        let mut closure_ran = false;
+        {
+            let val = table
+                .entry(1)
+                .unwrap()
+                .or_insert_with(|| {
+                    closure_ran = true;
+                    999u64
+                })
+                .unwrap();
+            assert_eq!(val.value(), 42);
+        }
+        assert!(
+            !closure_ran,
+            "or_insert_with invoked closure on occupied entry"
+        );
+
+        let mut closure_ran = false;
+        {
+            let val = table
+                .entry(1)
+                .unwrap()
+                .or_insert_with_key(|_k| {
+                    closure_ran = true;
+                    999u64
+                })
+                .unwrap();
+            assert_eq!(val.value(), 42);
+        }
+        assert!(
+            !closure_ran,
+            "or_insert_with_key invoked closure on occupied entry"
+        );
     }
     write_txn.commit().unwrap();
 }
