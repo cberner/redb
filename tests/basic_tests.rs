@@ -3139,6 +3139,51 @@ fn open_multimap_table_as_regular() {
     ));
 }
 
+// Debug formatting for Table and ReadOnlyTable covers four display branches:
+// 0 entries, 1 entry, exactly 2 entries, and 3+ entries with the middle-count ellipsis.
+#[test]
+fn table_debug_format() {
+    let db = Database::builder()
+        .create_with_backend(redb::backends::InMemoryBackend::new())
+        .unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(format!("{table:?}"), r#"Table [ name: "u64", No entries ]"#);
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 10u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            r#"Table [ name: "u64", One key-value: 1 = 10 ]"#
+        );
+        table.insert(2u64, 20u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            r#"Table [ name: "u64", first: 1 = 10, last: 2 = 20 ]"#
+        );
+        table.insert(3u64, 30u64).unwrap();
+        assert_eq!(
+            format!("{table:?}"),
+            r#"Table [ name: "u64", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"#
+        );
+    }
+    write_txn.commit().unwrap();
+
+    // ReadOnlyTable uses the same debug_helper path.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        format!("{table:?}"),
+        r#"Table [ name: "u64", first: 1 = 10, ...1 more entries..., last: 3 = 30 ]"#
+    );
+}
+
 // Test that &[u8; N] and [u8; N] are effectively the same
 #[test]
 fn u8_array_serialization() {
