@@ -102,7 +102,14 @@ fn table_stats() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();
     let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
-    assert_eq!(table.stats().unwrap().tree_height(), 1);
+    let stats = table.stats().unwrap();
+    assert_eq!(stats.tree_height(), 1);
+    // Three entries fit on a single leaf page, so there are no branch pages.
+    assert_eq!(stats.branch_pages(), 0);
+    assert!(stats.stored_bytes() > 0);
+    // The page has internal metadata overhead and unused (fragmented) space.
+    assert!(stats.metadata_bytes() > 0);
+    assert!(stats.fragmented_bytes() > 0);
     assert_eq!(untyped_table.stats().unwrap().tree_height(), 1);
 }
 
@@ -1711,6 +1718,38 @@ fn entry_or_insert_with() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(U64_TABLE).unwrap();
     assert_eq!(table.get(3).unwrap().unwrap().value(), 6);
+}
+
+#[test]
+fn entry_or_insert_occupied_skips_default() {
+    // Occupied entries must return the existing value without invoking the default closure.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1u64, 100u64).unwrap();
+        table.insert(2u64, 200u64).unwrap();
+
+        let guard = table
+            .entry(1)
+            .unwrap()
+            .or_insert_with(|| -> u64 { panic!("closure must not be called for occupied entry") })
+            .unwrap();
+        assert_eq!(guard.value(), 100);
+        drop(guard);
+
+        let guard = table
+            .entry(2)
+            .unwrap()
+            .or_insert_with_key(|_| -> u64 {
+                panic!("closure must not be called for occupied entry")
+            })
+            .unwrap();
+        assert_eq!(guard.value(), 200);
+    }
+    write_txn.commit().unwrap();
 }
 
 #[test]
