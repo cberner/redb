@@ -107,6 +107,61 @@ fn table_stats() {
 }
 
 #[test]
+fn table_stats_all_accessors() {
+    // Exercises the branch_pages, metadata_bytes, and fragmented_bytes accessors on TableStats,
+    // and the page_size accessor on DatabaseStats.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("a", "alpha").unwrap();
+        table.insert("b", "beta").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let stats = write_txn.open_table(STR_TABLE).unwrap().stats().unwrap();
+    let _ = stats.branch_pages();
+    let _ = stats.metadata_bytes();
+    let _ = stats.fragmented_bytes();
+    let db_stats = write_txn.stats().unwrap();
+    assert!(db_stats.page_size() > 0);
+    write_txn.abort().unwrap();
+}
+
+#[test]
+fn table_debug_format() {
+    // Exercises the Debug impl for Table and ReadOnlyTable across all entry-count branches
+    // (zero, one, and multiple entries) in the shared debug_helper function.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let empty = format!("{table:?}");
+        assert!(empty.contains("No entries"), "empty: {empty}");
+
+        table.insert(1u64, 10u64).unwrap();
+        let one = format!("{table:?}");
+        assert!(one.contains("One key-value"), "one: {one}");
+
+        table.insert(2u64, 20u64).unwrap();
+        table.insert(3u64, 30u64).unwrap();
+        let multi = format!("{table:?}");
+        assert!(multi.contains("first:"), "multi: {multi}");
+        assert!(multi.contains("last:"), "multi: {multi}");
+        assert!(multi.contains("1 more entries"), "multi: {multi}");
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let s = format!("{table:?}");
+    assert!(s.contains("first:"), "read_only: {s}");
+}
+
+#[test]
 fn in_memory() {
     let db = Database::builder()
         .create_with_backend(InMemoryBackend::new())
