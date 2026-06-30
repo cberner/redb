@@ -4183,3 +4183,49 @@ fn multimap_table_definition_new_panics_on_empty_name() {
     let name = String::new();
     let _def: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new(&name);
 }
+
+// Covers savepoint API error paths that require specific transaction state to trigger.
+// ephemeral_savepoint() rejects dirty transactions; persistent_savepoint() and
+// delete_persistent_savepoint() require Durability::Immediate; delete_persistent_savepoint()
+// returns false rather than an error when the given id is not found.
+#[test]
+fn savepoint_error_cases() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // ephemeral_savepoint() is invalid once any table has been opened in the transaction.
+    {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let _table = write_txn.open_table(STR_TABLE).unwrap();
+            assert!(matches!(
+                write_txn.ephemeral_savepoint(),
+                Err(SavepointError::InvalidSavepoint)
+            ));
+        }
+        write_txn.abort().unwrap();
+    }
+
+    // persistent_savepoint() and delete_persistent_savepoint() require Durability::Immediate.
+    {
+        let mut write_txn = db.begin_write().unwrap();
+        write_txn.set_durability(Durability::None).unwrap();
+        assert!(matches!(
+            write_txn.persistent_savepoint(),
+            Err(SavepointError::ImmediateDurabilityRequired)
+        ));
+        assert!(matches!(
+            write_txn.delete_persistent_savepoint(0),
+            Err(SavepointError::ImmediateDurabilityRequired)
+        ));
+        write_txn.abort().unwrap();
+    }
+
+    // delete_persistent_savepoint() returns false when the given id is not in the savepoint table.
+    {
+        let write_txn = db.begin_write().unwrap();
+        let id = write_txn.persistent_savepoint().unwrap();
+        assert!(!write_txn.delete_persistent_savepoint(id + 1).unwrap());
+        write_txn.abort().unwrap();
+    }
+}
