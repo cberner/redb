@@ -2710,6 +2710,91 @@ fn retain_variable_sized_sparse_survivors_terminates() {
     write_txn.commit().unwrap();
 }
 
+// A sparse leaf at the end of a retain's scan must merge into a sibling, the
+// same as single deletes; otherwise repeated retains accumulate permanently
+// under-filled leaves that nothing re-merges.
+#[test]
+fn retain_merges_sparse_boundary_leaf() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 100];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..60 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        assert!(table.stats().unwrap().leaf_pages() >= 2);
+
+        // Keep the low half untouched and gut the tail, so the scan closes on
+        // a leaf left far below the merge threshold.
+        table.retain(|key, _| key < 30 || key == 59).unwrap();
+        assert_eq!(table.len().unwrap(), 31);
+        assert!(table.stats().unwrap().leaf_pages() <= 2);
+        for i in 0u64..60 {
+            assert_eq!(table.get(i).unwrap().is_some(), i < 30 || i == 59);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+// Removal patterns that never carry a run across a leaf boundary (here:
+// single-key ranges in descending order) must still leave a packed tree.
+#[test]
+fn retain_descending_removals_stay_merged() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 8];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..5_000 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        for key in (0u64..5_000).rev() {
+            if key % 100 != 0 {
+                table.retain_in(key..key + 1, |_, _| false).unwrap();
+            }
+        }
+        assert_eq!(table.len().unwrap(), 50);
+        let leaves = table.stats().unwrap().leaf_pages();
+        assert!(leaves <= 3, "sparse survivors spread over {leaves} leaves");
+    }
+    write_txn.commit().unwrap();
+}
+
+// A run over oversized-value leaves splices early instead of buffering the
+// parent's entire dense tail, so a small removal cannot make the transient
+// buffer grow with fanout x value size.
+#[test]
+fn retain_large_values_bounded_run() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 256 * 1024];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..32 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        table.retain(|key, _| key != 0).unwrap();
+        assert_eq!(table.len().unwrap(), 31);
+        for i in 1u64..32 {
+            assert_eq!(table.get(i).unwrap().unwrap().value(), value.as_slice());
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
 #[cfg(not(target_os = "wasi"))]
 #[test]
 fn retain_predicate_panic_poisons_transaction() {

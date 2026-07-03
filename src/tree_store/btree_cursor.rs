@@ -1,11 +1,14 @@
 use crate::AccessGuard;
-use crate::Result;
-use crate::tree_store::btree_base::{BRANCH, BranchAccessor, LEAF, LeafAccessor};
+use crate::tree_store::btree_base::{
+    BRANCH, BranchAccessor, Checksum, DEFERRED, LEAF, LeafAccessor, LeafBuilder, OwnedEntryBuffer,
+    leaf_below_merge_threshold, leaf_split_required,
+};
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTrackerPolicy};
 use crate::types::{Key, Value};
+use crate::{Result, StorageError};
 use std::cmp::Ordering;
 use std::collections::Bound;
 use std::collections::Bound::{Excluded, Included, Unbounded};
@@ -26,6 +29,25 @@ impl Branch {
 
     fn into_parts(self) -> (PageImpl, usize) {
         (self.page, self.child_index)
+    }
+
+    // The index and page of the child adjacent to `child_index` in `direction`,
+    // if the branch has one. Shared by the stepping code and the run machinery,
+    // whose "the step stays under this parent" invariant requires they agree.
+    fn adjacent_child(
+        &self,
+        direction: Direction,
+        fixed_key_width: Option<usize>,
+    ) -> Option<(usize, PageNumber)> {
+        let accessor = BranchAccessor::new(&self.page, fixed_key_width);
+        let child_index = match direction {
+            Direction::Next => {
+                let next = self.child_index + 1;
+                (next < accessor.count_children()).then_some(next)?
+            }
+            Direction::Previous => self.child_index.checked_sub(1)?,
+        };
+        Some((child_index, accessor.child_page(child_index).unwrap()))
     }
 }
 
@@ -132,22 +154,9 @@ where
     F: FnMut(PageNumber) -> Result<PageImpl>,
 {
     for index in (0..path.len()).rev() {
-        let next_child = {
-            let frame = &path[index];
-            let accessor = BranchAccessor::new(&frame.page, K::fixed_width());
-            if direction.is_next() {
-                let child_index = frame.child_index + 1;
-                (child_index < accessor.count_children())
-                    .then(|| (child_index, accessor.child_page(child_index).unwrap()))
-            } else {
-                frame
-                    .child_index
-                    .checked_sub(1)
-                    .map(|child_index| (child_index, accessor.child_page(child_index).unwrap()))
-            }
-        };
-
-        if let Some((child_index, child_page)) = next_child {
+        if let Some((child_index, child_page)) =
+            path[index].adjacent_child(direction, K::fixed_width())
+        {
             path[index].child_index = child_index;
             path.truncate(index + 1);
             let page = get_page(child_page)?;
@@ -219,11 +228,180 @@ fn key_data<K: Key + 'static, V: Value + 'static>(leaf: &Leaf, position: usize) 
         .to_vec()
 }
 
+// The key a scan reseeks past after this leaf is flushed or spliced away: the
+// leaf's key furthest in the scan direction.
+fn scan_boundary_key<K: Key + 'static, V: Value + 'static>(
+    leaf: &Leaf,
+    direction: Direction,
+) -> Vec<u8> {
+    match direction {
+        Direction::Next => key_data::<K, V>(leaf, leaf.len - 1),
+        Direction::Previous => key_data::<K, V>(leaf, 0),
+    }
+}
+
 #[derive(Clone)]
 struct Leaf {
     page: PageImpl,
     position: usize,
     len: usize,
+}
+
+// A contiguous run of leaf children under one parent branch. When deleting
+// from a leaf would leave it sparse, the cursor buffers the run's retained
+// entries and replaces the originals with packed leaves in one parent update,
+// instead of merging each sparse leaf into its neighbor one rewrite at a time.
+//
+// While a run is open the tree is never mutated, so cursor paths stay valid.
+// The buffered entries hold no page references, so an open run also survives
+// foreign mutations; only the parent path captured at splice time must be
+// current. Runs grow in either scan direction.
+struct LeafRunRewrite {
+    parent_page: PageNumber,
+    direction: Direction,
+    // The parent's children consumed so far: a contiguous range extended
+    // upward by forward scans and downward by backward scans.
+    replaced_children: Range<usize>,
+    // All retained entries of the run, kept in ascending key order: forward
+    // scans append at the back, backward scans prepend at the front.
+    entries: OwnedEntryBuffer,
+    removed_pairs: u64,
+}
+
+impl LeafRunRewrite {
+    fn new(parent_page: PageNumber, child_index: usize, direction: Direction) -> Self {
+        let origin = match direction {
+            Direction::Next => child_index,
+            Direction::Previous => child_index + 1,
+        };
+        let replaced_children = origin..origin;
+        Self {
+            parent_page,
+            direction,
+            replaced_children,
+            entries: OwnedEntryBuffer::default(),
+            removed_pairs: 0,
+        }
+    }
+
+    fn append_entries_from<K: Key, V: Value>(
+        &mut self,
+        page: PageImpl,
+        child_index: usize,
+        removed_indexes: &[usize],
+    ) {
+        debug_assert!(removed_indexes.windows(2).all(|pair| pair[0] < pair[1]));
+        // Hard asserts: a violation would splice the wrong children out of
+        // the parent, so it must not be compiled out of release builds.
+        match self.direction {
+            Direction::Next => {
+                assert_eq!(child_index, self.replaced_children.end);
+                self.replaced_children.end += 1;
+            }
+            Direction::Previous => {
+                assert_eq!(child_index + 1, self.replaced_children.start);
+                self.replaced_children.start -= 1;
+            }
+        }
+        self.removed_pairs += removed_indexes.len() as u64;
+
+        // A forward scan's leaf is entirely greater than the run so far, and a
+        // backward scan's entirely smaller.
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        self.entries
+            .extend_from_leaf(&accessor, removed_indexes, self.direction.is_next());
+    }
+
+    // Packs the buffered entries into full replacement leaves, in key order.
+    // On error, pages already built are reclaimed when the poisoned
+    // transaction rolls back, like any other allocation of a failed mutation.
+    fn build_replacement_leaves<K: Key, V: Value>(
+        &self,
+        page_allocator: PageAllocator,
+        allocated: Arc<Mutex<PageTrackerPolicy>>,
+    ) -> Result<Vec<(PageNumber, Checksum, Vec<u8>)>> {
+        let mut leaves = vec![];
+        let fixed_key = K::fixed_width();
+        let fixed_value = V::fixed_width();
+        let page_size = page_allocator.get_page_size();
+        let entries: Vec<(&[u8], &[u8])> = self.entries.entries().collect();
+        let pair_bytes = |(key, value): &(&[u8], &[u8])| key.len() + value.len();
+
+        // Greedy packing: cut a page whenever the next entry would require a
+        // split, so every page except the last is packed full.
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        let mut bytes = 0;
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_bytes = pair_bytes(entry);
+            if leaf_split_required(
+                index - start + 1,
+                bytes + entry_bytes,
+                fixed_key,
+                fixed_value,
+                page_size,
+            ) {
+                plan.push(start..index);
+                start = index;
+                bytes = 0;
+            }
+            bytes += entry_bytes;
+        }
+        if start < entries.len() {
+            plan.push(start..entries.len());
+        }
+
+        // Greedy packing can strand an arbitrarily sparse trailing page, which
+        // nothing would ever re-merge; rebalance the last two pages at their
+        // byte midpoint (like build_split) so the tail stays above the merge
+        // threshold.
+        if plan.len() >= 2 {
+            let last = plan.pop().unwrap();
+            let last_bytes: usize = entries[last.clone()].iter().map(pair_bytes).sum();
+            if leaf_below_merge_threshold(last.len(), last_bytes, fixed_key, fixed_value, page_size)
+            {
+                let prev = plan.pop().unwrap();
+                let combined = prev.start..last.end;
+                let total: usize = entries[combined.clone()].iter().map(pair_bytes).sum();
+                let mut division = 0;
+                let mut first_bytes = 0;
+                for entry in &entries[combined.start..combined.end - 1] {
+                    first_bytes += pair_bytes(entry);
+                    division += 1;
+                    if first_bytes >= total / 2 {
+                        break;
+                    }
+                }
+                // Neither half may exceed u16::MAX pairs (see leaf_split_required).
+                let max_pairs = usize::from(u16::MAX);
+                let len = combined.len();
+                division =
+                    division.clamp(len.saturating_sub(max_pairs).max(1), max_pairs.min(len - 1));
+                plan.push(combined.start..combined.start + division);
+                plan.push(combined.start + division..combined.end);
+            } else {
+                plan.push(last);
+            }
+        }
+
+        // Build the planned pages; each separator key is its page's greatest key.
+        for range in plan {
+            let mut builder = LeafBuilder::new(
+                &page_allocator,
+                &allocated,
+                range.len(),
+                fixed_key,
+                fixed_value,
+            );
+            for (key, value) in &entries[range.clone()] {
+                builder.push(key, value);
+            }
+            let page = builder.build()?;
+            let upper_key = entries[range.end - 1].0.to_vec();
+            leaves.push((page.get_page_number(), DEFERRED, upper_key));
+        }
+        Ok(leaves)
+    }
 }
 
 pub(super) struct EntryRef<'a, K: Key + 'static, V: Value + 'static> {
@@ -406,10 +584,26 @@ pub(super) struct CursorState {
     // True when guards backed by the current leaf's memory were handed out for
     // pending removals: the flush must not modify the leaf memory in place.
     detached_guards: bool,
-    // True when a flush consumed pending removals but failed to apply them.
-    // The caller must not let the transaction commit, since entries already
-    // reported as removed may remain in the tree.
-    lost_removals: bool,
+    // Set when an error interrupted removals that were already reported to
+    // the caller: they may remain in the tree, so the transaction must not
+    // commit. Every cursor operation re-raises instead of touching the tree,
+    // since the position and run were discarded at the point of failure.
+    poisoned: bool,
+    // An in-progress sparse-leaf coalescing run. It holds no page references,
+    // so it may outlive the position; it is spliced before the tree is
+    // observed.
+    leaf_run_rewrite: Option<LeafRunRewrite>,
+}
+
+enum LeafCloseOutcome {
+    // The leaf had no pending removals and remains the current cursor leaf.
+    Unchanged,
+    // The tree was rewritten and the cursor position consumed; resume the
+    // scan from `resume_key`.
+    Flushed { resume_key: Vec<u8> },
+    // The leaf was absorbed into the open run. The tree is untouched, so the
+    // cursor position (still on the absorbed leaf) remains valid.
+    AbsorbedIntoRun,
 }
 
 pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
@@ -494,6 +688,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     pub(super) fn seek_to(&mut self, target: Position<'_>) -> Result {
+        self.check_not_poisoned()?;
+        assert!(self.state.leaf_run_rewrite.is_none());
         assert!(self.state.removed_indexes.is_empty());
         self.state.position = None;
         let Some(header) = *self.root else {
@@ -535,6 +731,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // entry on that side or the cursor reaches the tree edge. Leaving a leaf
     // flushes its pending removals and reseeks past it in the updated tree.
     fn ensure_has_entry(&mut self, direction: Direction) -> Result<bool> {
+        self.check_not_poisoned()?;
         self.check_pending_removals(direction);
         loop {
             let Some(position) = self.state.position.as_ref() else {
@@ -543,19 +740,84 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             if position.has_entry(direction) {
                 return Ok(true);
             }
-            if !self.state.removed_indexes.is_empty() {
-                let resume_key = self
-                    .flush_removed_entries(direction)?
-                    .expect("pending removals exist");
-                let resume = match direction {
-                    Direction::Next => Position::After(resume_key.as_slice()),
-                    Direction::Previous => Position::Before(resume_key.as_slice()),
-                };
-                self.seek_to(resume)?;
-                continue;
+            if !self.advance_past_closed_leaf(direction)? {
+                return Ok(false);
             }
-            return self.step_to_adjacent_leaf(direction);
         }
+    }
+
+    // Closes the exhausted leaf (flushing its pending removals directly or
+    // into a coalescing run) and positions the cursor at the adjacent leaf.
+    // Returns false at the edge of the tree, leaving the cursor parked on the
+    // edge leaf so that `park_bound` still describes the consumed position.
+    fn advance_past_closed_leaf(&mut self, direction: Direction) -> Result<bool> {
+        match self.close_current_leaf(direction)? {
+            LeafCloseOutcome::Unchanged => self.step_to_adjacent_leaf(direction),
+            LeafCloseOutcome::Flushed { resume_key } => {
+                self.resume_after_rewrite(direction, &resume_key)?;
+                Ok(self.state.position.is_some())
+            }
+            LeafCloseOutcome::AbsorbedIntoRun => {
+                if self.run_parent_has_more_children(direction) && self.run_buffer_within_cap(0) {
+                    // The immediate parent has an adjacent child, so the
+                    // ordinary step is guaranteed to stay under it. A failed
+                    // step may leave the path partially updated, so the open
+                    // run's removals can no longer be applied.
+                    let stepped = self
+                        .step_to_adjacent_leaf(direction)
+                        .inspect_err(|_| self.poison())?;
+                    debug_assert!(stepped);
+                    Ok(stepped)
+                } else {
+                    // The position still names the just-absorbed leaf, whose
+                    // furthest key bounds everything the run consumed.
+                    let position = self.state.position.as_ref().expect("just absorbed");
+                    let resume_key = scan_boundary_key::<K, V>(&position.leaf, direction);
+                    self.splice_open_run()?;
+                    self.resume_after_rewrite(direction, &resume_key)?;
+                    Ok(self.state.position.is_some())
+                }
+            }
+        }
+    }
+
+    // Whether the run's parent branch has another child to consume in the
+    // scan direction.
+    fn run_parent_has_more_children(&self, direction: Direction) -> bool {
+        let position = self
+            .state
+            .position
+            .as_ref()
+            .expect("cursor must be positioned");
+        let frame = position
+            .path
+            .last()
+            .expect("leaf runs require a parent branch");
+        frame.adjacent_child(direction, K::fixed_width()).is_some()
+    }
+
+    // Whether the run's buffer, grown by `additional` bytes, stays within
+    // roughly one parent's worth of packed pages. Oversized-value children
+    // would otherwise grow the buffer with fanout x value size; splicing
+    // early bounds the transient memory, and the next sparse leaf simply
+    // opens a fresh run.
+    fn run_buffer_within_cap(&self, additional: usize) -> bool {
+        let run = self
+            .state
+            .leaf_run_rewrite
+            .as_ref()
+            .expect("requires an open run");
+        let position = self
+            .state
+            .position
+            .as_ref()
+            .expect("cursor must be positioned");
+        let frame = position
+            .path
+            .last()
+            .expect("leaf runs require a parent branch");
+        let children = BranchAccessor::new(&frame.page, K::fixed_width()).count_children();
+        run.entries.total_bytes() + additional <= children * self.page_allocator.get_page_size()
     }
 
     fn step_to_adjacent_leaf(&mut self, direction: Direction) -> Result<bool> {
@@ -750,21 +1012,76 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     pub(super) fn finish_pending_removals(&mut self) -> Result {
-        // The flush direction only affects the resume key, which is unused here.
-        let _ = self.flush_removed_entries(Direction::Next)?;
+        self.check_not_poisoned()?;
+        let direction = self
+            .state
+            .leaf_run_rewrite
+            .as_ref()
+            .map_or(Direction::Next, |run| run.direction);
+        if self.state.position.is_some() {
+            self.close_current_leaf(direction)?;
+        }
+        // Splices the run left open when the scan stopped partway through
+        // its parent.
+        self.splice_open_run()
+    }
+
+    /// True if an error interrupted removals that were already reported to
+    /// the caller: they may remain in the tree, so the transaction must not
+    /// commit.
+    pub(super) fn poisoned(&self) -> bool {
+        self.state.poisoned
+    }
+
+    // Extends the run over one preserved sibling under its parent, preferring
+    // the left one like the mutator's merge planning. No-op when the run
+    // already covers the whole parent; the underfull parent then merges
+    // upward through finalize_branch_builder.
+    fn absorb_adjacent_sibling(&mut self, run: &mut LeafRunRewrite, path: &[Branch]) -> Result {
+        let frame = path.last().expect("leaf runs require a parent branch");
+        let accessor = BranchAccessor::new(&frame.page, K::fixed_width());
+        let (neighbor_index, at_back) = if run.replaced_children.start > 0 {
+            (run.replaced_children.start - 1, false)
+        } else if run.replaced_children.end < accessor.count_children() {
+            (run.replaced_children.end, true)
+        } else {
+            return Ok(());
+        };
+        let page = self
+            .page_allocator
+            .get_page(accessor.child_page(neighbor_index).unwrap(), PageHint::None)?;
+        let neighbor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        run.entries.extend_from_leaf(&neighbor, &[], at_back);
+        if at_back {
+            run.replaced_children.end += 1;
+        } else {
+            run.replaced_children.start -= 1;
+        }
         Ok(())
     }
 
-    /// True if a failed flush may have left entries in the tree that the
-    /// caller was told were removed. The transaction must not commit.
-    pub(super) fn lost_removals(&self) -> bool {
-        self.state.lost_removals
+    // Marks the removals already reported to the caller as unappliable, after
+    // an error consumed them or broke the paths needed to apply them. Safety
+    // comes from `check_not_poisoned` re-raising at every entry point; the
+    // discards below just release page references and buffers early.
+    fn poison(&mut self) {
+        self.state.poisoned = true;
+        self.state.position = None;
+        self.state.removed_indexes.clear();
+        self.state.leaf_run_rewrite = None;
     }
 
-    fn flush_removed_entries(&mut self, direction: Direction) -> Result<Option<Vec<u8>>> {
-        if self.state.removed_indexes.is_empty() {
-            return Ok(None);
+    fn check_not_poisoned(&self) -> Result {
+        if self.state.poisoned {
+            return Err(StorageError::PreviousIo);
         }
+        Ok(())
+    }
+
+    // Applies the pending removals, returning the key past which the scan
+    // resumes.
+    fn flush_removed_entries(&mut self, direction: Direction) -> Result<Vec<u8>> {
+        assert!(!self.state.removed_indexes.is_empty());
 
         let position = self
             .state
@@ -774,10 +1091,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         // Tree mutation invalidates the cursor path. Callers that continue
         // iteration reseek to the first entry past the original leaf in the
         // scan direction.
-        let resume_key = match direction {
-            Direction::Next => key_data::<K, V>(&position.leaf, position.leaf.len - 1),
-            Direction::Previous => key_data::<K, V>(&position.leaf, 0),
-        };
+        let resume_key = scan_boundary_key::<K, V>(&position.leaf, direction);
         let (path, leaf) = position.into_parts();
         let mut removed_indexes = std::mem::take(&mut self.state.removed_indexes);
         // Backward scans record indexes in decreasing order.
@@ -786,22 +1100,211 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         }
         let allow_in_place = !self.state.detached_guards;
         self.state.detached_guards = false;
-        let mut helper: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-            &mut *self.root,
-            (*self.page_allocator).clone(),
-            &mut *self.freed,
-            Arc::clone(self.allocated),
+        let result = self.mutate_helper().delete_leaf_entries(
+            leaf.page,
+            path,
+            &removed_indexes,
+            allow_in_place,
         );
-        let result = helper.delete_leaf_entries(leaf.page, path, &removed_indexes, allow_in_place);
         if result.is_err() {
             // The batch was consumed, so the removals can no longer be applied.
-            self.state.lost_removals = true;
+            self.poison();
         }
         result?;
         removed_indexes.clear();
         self.state.removed_indexes = removed_indexes;
 
-        Ok(Some(resume_key))
+        Ok(resume_key)
+    }
+
+    // Flushes the current leaf's pending removals, either directly or into a
+    // coalescing run. Only a direct flush mutates the tree and consumes the
+    // cursor position; absorbing into a run leaves both untouched.
+    fn close_current_leaf(&mut self, direction: Direction) -> Result<LeafCloseOutcome> {
+        assert!(self.state.position.is_some(), "cursor must be positioned");
+
+        // The short-circuit order matters: `leaf_would_underfill` may only be
+        // consulted for a leaf with pending removals, so a merely-iterated
+        // sparse leaf cannot open a run. A leaf that kept everything still
+        // joins an already-open run, since the splice replaces a contiguous
+        // range of the parent's children.
+        let join_run = self.state.leaf_run_rewrite.is_some()
+            || (!self.state.removed_indexes.is_empty() && {
+                let position = self.state.position.as_ref().unwrap();
+                self.leaf_would_underfill(&position.leaf) && !position.path.is_empty()
+            });
+        if join_run {
+            // A leaf that kept everything is only absorbed while the buffer
+            // stays within the cap; past it the run is spliced and the leaf
+            // left in place.
+            if self.state.removed_indexes.is_empty() {
+                let position = self.state.position.as_ref().unwrap();
+                let accessor = LeafAccessor::new(
+                    position.leaf.page.memory(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
+                if !self.run_buffer_within_cap(leaf_bytes) {
+                    let position = self.state.position.as_ref().unwrap();
+                    let resume_key = scan_boundary_key::<K, V>(&position.leaf, direction);
+                    self.splice_open_run()?;
+                    return Ok(LeafCloseOutcome::Flushed { resume_key });
+                }
+            }
+            let mut removed_indexes = std::mem::take(&mut self.state.removed_indexes);
+            // Backward scans record their batch in decreasing order.
+            if removed_indexes.first() > removed_indexes.last() {
+                removed_indexes.reverse();
+            }
+            self.append_leaf_to_run(direction, &removed_indexes);
+            removed_indexes.clear();
+            self.state.removed_indexes = removed_indexes;
+            // The batch is consumed, so it no longer constrains flushes.
+            self.state.detached_guards = false;
+            return Ok(LeafCloseOutcome::AbsorbedIntoRun);
+        }
+        if self.state.removed_indexes.is_empty() {
+            return Ok(LeafCloseOutcome::Unchanged);
+        }
+
+        let resume_key = self.flush_removed_entries(direction)?;
+        Ok(LeafCloseOutcome::Flushed { resume_key })
+    }
+
+    fn resume_after_rewrite(&mut self, direction: Direction, key: &[u8]) -> Result {
+        match direction {
+            Direction::Next => self.seek_to(Position::After(key)),
+            Direction::Previous => self.seek_to(Position::Before(key)),
+        }
+    }
+
+    // Absorbs the current leaf into the run, opening one if necessary. The
+    // tree and the cursor position are left untouched.
+    fn append_leaf_to_run(&mut self, direction: Direction, removed_indexes: &[usize]) {
+        let (page, parent_page, child_index) = {
+            let position = self
+                .state
+                .position
+                .as_ref()
+                .expect("cursor must be positioned");
+            let frame = position
+                .path
+                .last()
+                .expect("leaf runs require a parent branch");
+            (
+                position.leaf.page.clone(),
+                frame.page.get_page_number(),
+                frame.child_index,
+            )
+        };
+        let run = self
+            .state
+            .leaf_run_rewrite
+            .get_or_insert_with(|| LeafRunRewrite::new(parent_page, child_index, direction));
+        // Hard asserts: a stale parent or mixed scan direction would splice
+        // the wrong children, so they must hold in release builds too.
+        assert_eq!(run.parent_page, parent_page);
+        assert!(run.direction == direction);
+        run.append_entries_from::<K, V>(page, child_index, removed_indexes);
+    }
+
+    // Replaces the run's children in the parent with packed leaves built from
+    // the buffered entries, while the cursor path is still valid. The cursor
+    // position is consumed; callers reseek from the run's boundary key. On
+    // error the cursor is poisoned: the run's removals were lost.
+    pub(super) fn splice_open_run(&mut self) -> Result {
+        self.check_not_poisoned()?;
+        let Some(mut run) = self.state.leaf_run_rewrite.take() else {
+            return Ok(());
+        };
+        let position = self
+            .state
+            .position
+            .take()
+            .expect("open run requires a position");
+        // The leaf is one of the pages the splice frees, so its page reference
+        // must be released first; only the parent path is needed below.
+        let CursorPosition { path, leaf } = position;
+        drop(leaf);
+        // A run that packs below the merge threshold would strand a sparse
+        // leaf that nothing later re-merges (inserts only split), so absorb
+        // one adjacent preserved sibling, keeping parity with
+        // plan_leaf_delete's Merge disposition. A run that retained nothing
+        // just removes its children, matching the Delete disposition.
+        if run.entries.num_pairs() > 0
+            && leaf_below_merge_threshold(
+                run.entries.num_pairs(),
+                run.entries.total_bytes(),
+                K::fixed_width(),
+                V::fixed_width(),
+                self.page_allocator.get_page_size(),
+            )
+            && let Err(err) = self.absorb_adjacent_sibling(&mut run, &path)
+        {
+            self.poison();
+            return Err(err);
+        }
+        let leaves = match run.build_replacement_leaves::<K, V>(
+            (*self.page_allocator).clone(),
+            Arc::clone(self.allocated),
+        ) {
+            Ok(leaves) => leaves,
+            Err(err) => {
+                self.poison();
+                return Err(err);
+            }
+        };
+        let result = {
+            let mut helper = self.mutate_helper();
+            helper.replace_leaf_children(
+                path.into_iter().map(Branch::into_parts).collect(),
+                run.replaced_children.clone(),
+                &leaves,
+                run.removed_pairs,
+            )
+        };
+        if result.is_err() {
+            self.poison();
+        }
+        result
+    }
+
+    // Whether removing the pending entries would leave the leaf below the merge
+    // threshold, matching `MutateHelper::plan_leaf_delete`'s Merge disposition.
+    fn leaf_would_underfill(&self, leaf: &Leaf) -> bool {
+        let accessor = LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width());
+        let remaining = accessor.num_pairs() - self.state.removed_indexes.len();
+        if remaining == 0 {
+            return true;
+        }
+        let removed_bytes: usize = self
+            .state
+            .removed_indexes
+            .iter()
+            .map(|&index| accessor.length_of_pairs(index, index + 1))
+            .sum();
+        let new_kv_bytes = accessor.length_of_pairs(0, accessor.num_pairs()) - removed_bytes;
+        leaf_below_merge_threshold(
+            remaining,
+            new_kv_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+            self.page_allocator.get_page_size(),
+        )
+    }
+
+    // All tree mutations flow through here. Mutating invalidates saved paths,
+    // so any open run must have been spliced first; a hard assert because a
+    // violation would later splice through a stale path.
+    fn mutate_helper<'c>(&'c mut self) -> MutateHelper<'a, 'c, K, V> {
+        assert!(self.state.leaf_run_rewrite.is_none());
+        MutateHelper::new(
+            &mut *self.root,
+            (*self.page_allocator).clone(),
+            &mut *self.freed,
+            Arc::clone(self.allocated),
+        )
     }
 
     fn remove_leaf_entry(
@@ -812,13 +1315,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     ) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
         assert!(self.state.removed_indexes.is_empty());
         let path = path.into_iter().map(Branch::into_parts).collect();
-        let mut helper = MutateHelper::new(
-            &mut *self.root,
-            (*self.page_allocator).clone(),
-            &mut *self.freed,
-            Arc::clone(self.allocated),
-        );
-        let entry = helper.pop_leaf_entry(leaf, path, index)?;
+        let entry = self.mutate_helper().pop_leaf_entry(leaf, path, index)?;
         Ok(Some(entry))
     }
 }
@@ -870,10 +1367,10 @@ pub(super) struct RangeMut<'a, K: Key + 'static, V: Value + 'static> {
     // Which end, if any, is known to be live and positioned at an in-range
     // entry. Cleared whenever the gap moves or the tree is mutated.
     settled: Option<Direction>,
-    // Set when a flush consumed pending removals but failed to apply them:
-    // entries already yielded as removed may remain in the tree, so the
-    // caller must not let the transaction commit.
-    lost_removals: bool,
+    // Set when an error interrupted removals that were already yielded to the
+    // caller: they may remain in the tree, so the transaction must not
+    // commit. Every range operation re-raises instead of touching the tree.
+    poisoned: bool,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -896,7 +1393,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             front: EndState::Parked(lower_bound),
             back: EndState::Parked(upper_bound),
             settled: None,
-            lost_removals: false,
+            poisoned: false,
             _key_type: PhantomData,
             _value_type: PhantomData,
         }
@@ -944,19 +1441,27 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         front.and(back)
     }
 
-    /// True if a failed flush may have left entries in the tree that were
-    /// already yielded as removed. The transaction must not commit.
-    pub(super) fn lost_removals(&self) -> bool {
-        self.lost_removals
+    /// True if an error interrupted removals that were already yielded to the
+    /// caller: they may remain in the tree, so the transaction must not
+    /// commit.
+    pub(super) fn poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    fn check_not_poisoned(&self) -> Result {
+        if self.poisoned {
+            return Err(StorageError::PreviousIo);
+        }
+        Ok(())
     }
 
     // Applies an end's pending removals to the tree, leaving it parked.
     fn flush_end(&mut self, direction: Direction) -> Result {
+        self.check_not_poisoned()?;
         if matches!(self.end_ref(direction), EndState::Live(_)) {
             let result =
                 self.with_live_cursor(direction, |cursor| cursor.finish_pending_removals());
-            self.park(direction);
-            result
+            result.and(self.park(direction))
         } else {
             self.apply_pending(direction)
         }
@@ -1010,6 +1515,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
     // Ensures the cursor for `direction` is live and positioned at an entry,
     // and that the entry is within the range left between the two ends.
     fn settle(&mut self, direction: Direction) -> Result<bool> {
+        self.check_not_poisoned()?;
         if self.settled == Some(direction) {
             return Ok(true);
         }
@@ -1034,7 +1540,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         if matches!(self.end_ref(direction), EndState::Live(_)) {
             return Ok(());
         }
-        self.park(direction.opposite());
+        self.park(direction.opposite())?;
         let mut state = self.seek_end(direction)?;
         if matches!(self.end_ref(direction), EndState::Pending(_)) {
             let EndState::Pending(batch) =
@@ -1052,7 +1558,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
                 // and reseek. Both steps require this end to hold no pages.
                 drop(state);
                 *self.end_mut(direction) = EndState::Parked(batch.bound.clone());
-                self.resolve_batch(direction, batch)?;
+                self.resolve_batch(batch)?;
                 state = self.seek_end(direction)?;
             }
         }
@@ -1087,14 +1593,18 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         Ok(state)
     }
 
-    // Reduces a live end to a parked form. This never mutates the tree:
-    // pending removals are snapshotted and applied later.
-    fn park(&mut self, direction: Direction) {
+    // Reduces a live end to a parked form. An open coalescing run is spliced
+    // first, while the cursor path is still valid; mid-leaf pending removals
+    // are snapshotted and applied later.
+    fn park(&mut self, direction: Direction) -> Result {
         self.settled = None;
         let end = self.end_mut(direction);
         let EndState::Live(state) = end else {
-            return;
+            return Ok(());
         };
+        // Capture the parked form before the splice consumes the position.
+        // The splice rewrites the parent, but not this leaf's memory, so the
+        // snapshot stays valid.
         let bound = park_bound::<K, V>(state, direction);
         let parked = if state.removed_indexes.is_empty() {
             EndState::Parked(bound)
@@ -1110,7 +1620,14 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
                 removed_indexes: std::mem::take(&mut state.removed_indexes),
             })
         };
-        *end = parked;
+        let result = if state.leaf_run_rewrite.is_some() {
+            self.with_live_cursor(direction, |cursor| cursor.splice_open_run())
+        } else {
+            Ok(())
+        };
+        *self.end_mut(direction) = parked;
+        self.drain_freed();
+        result
     }
 
     // Applies a parked end's pending removals to the tree.
@@ -1120,14 +1637,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         }
         self.activate(direction)?;
         self.with_live_cursor(direction, |cursor| cursor.finish_pending_removals())?;
-        self.park(direction);
-        Ok(())
+        self.park(direction)
     }
 
     // Applies a snapshotted batch whose leaf was rewritten by the other end:
-    // the pending entries are deleted by key, recovered from the snapshot.
-    fn resolve_batch(&mut self, direction: Direction, mut batch: ParkedBatch) -> Result {
-        while let Some(index) = batch.removed_indexes.pop() {
+    // the pending entries are deleted by key, recovered from the snapshot. On
+    // error the range is poisoned: the batch was consumed, so its removals
+    // can no longer be applied.
+    fn resolve_batch(&mut self, batch: ParkedBatch) -> Result {
+        for &index in &batch.removed_indexes {
             let key = LeafAccessor::new(&batch.leaf_bytes, K::fixed_width(), V::fixed_width())
                 .entry(index)
                 .expect("snapshot entry must exist")
@@ -1146,9 +1664,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             match result {
                 Ok(removed) => debug_assert!(removed.is_some()),
                 Err(err) => {
-                    // Keep the unapplied removals so that close() retries them.
-                    batch.removed_indexes.push(index);
-                    *self.end_mut(direction) = EndState::Pending(batch);
+                    self.poisoned = true;
                     return Err(err);
                 }
             }
@@ -1168,8 +1684,8 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         let mut cursor = self.cursor(state);
         let result = operation(&mut cursor);
         let state = cursor.into_state();
-        if state.lost_removals {
-            self.lost_removals = true;
+        if state.poisoned {
+            self.poisoned = true;
         }
         *self.end_mut(direction) = EndState::Live(state);
         self.drain_freed();
@@ -1294,7 +1810,7 @@ mod tests {
         AllocationPolicy, InMemoryBackend, PAGE_SIZE, PageTrackerPolicy, TransactionalMemory,
     };
 
-    fn cursor_with_entries(entries: &[u64]) -> Cursor<u64, u64> {
+    fn leaf_root_with_entries(entries: &[u64]) -> (PageAllocator, PageNumber) {
         let mem = TransactionalMemory::new(
             Box::new(InMemoryBackend::new()),
             true,
@@ -1331,6 +1847,11 @@ mod tests {
         let root = page.get_page_number();
         drop(page);
 
+        (page_allocator, root)
+    }
+
+    fn cursor_with_entries(entries: &[u64]) -> Cursor<u64, u64> {
+        let (page_allocator, root) = leaf_root_with_entries(entries);
         let mut cursor = Cursor::<u64, u64>::new(root, page_allocator.resolver(), PageHint::None);
         cursor.seek_to(Position::Start).unwrap();
         cursor
@@ -1357,5 +1878,76 @@ mod tests {
 
         assert_eq!(cursor.next().unwrap().unwrap().key(), 1);
         assert_eq!(cursor.next().unwrap().unwrap().key(), 2);
+    }
+
+    // An exhausted mutable cursor must stay parked on the edge leaf: park_bound
+    // relies on the position to bound the other end of a RangeMut, and an
+    // unpositioned cursor would park as Unbounded, un-consuming the entries.
+    #[test]
+    fn cursor_mut_stays_parked_at_tree_edge() {
+        let (page_allocator, root_page) = leaf_root_with_entries(&[1, 2, 3]);
+        let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
+        let mut freed = vec![];
+        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let mut cursor: CursorMut<'_, '_, u64, u64> =
+            CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+
+        cursor.seek_to(Position::Start).unwrap();
+        for _ in 0..3 {
+            assert!(cursor.next().unwrap());
+        }
+        assert!(cursor.peek_next().unwrap().is_none());
+        assert!(cursor.state.position.is_some());
+        assert!(matches!(
+            park_bound::<u64, u64>(&cursor.state, Direction::Next),
+            Excluded(_)
+        ));
+
+        cursor.seek_to(Position::End).unwrap();
+        for _ in 0..3 {
+            assert!(cursor.peek_prev().unwrap().is_some());
+            cursor
+                .state
+                .position
+                .as_mut()
+                .unwrap()
+                .move_once(Direction::Previous);
+        }
+        assert!(cursor.peek_prev().unwrap().is_none());
+        assert!(cursor.state.position.is_some());
+        assert!(matches!(
+            park_bound::<u64, u64>(&cursor.state, Direction::Previous),
+            Excluded(_)
+        ));
+    }
+
+    // Once poisoned, every cursor operation re-raises instead of touching the
+    // tree, so removals stranded by the original error can never be observed
+    // as applied.
+    #[test]
+    fn poisoned_cursor_mut_re_raises() {
+        let (page_allocator, root_page) = leaf_root_with_entries(&[1, 2, 3]);
+        let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
+        let mut freed = vec![];
+        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let mut cursor: CursorMut<'_, '_, u64, u64> =
+            CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+
+        cursor.seek_to(Position::Start).unwrap();
+        cursor.poison();
+        assert!(cursor.poisoned());
+        assert!(matches!(cursor.peek_next(), Err(StorageError::PreviousIo)));
+        assert!(matches!(
+            cursor.seek_to(Position::Start),
+            Err(StorageError::PreviousIo)
+        ));
+        assert!(matches!(
+            cursor.finish_pending_removals(),
+            Err(StorageError::PreviousIo)
+        ));
+        assert!(matches!(
+            cursor.splice_open_run(),
+            Err(StorageError::PreviousIo)
+        ));
     }
 }

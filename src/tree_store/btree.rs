@@ -697,14 +697,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         Ok(result)
     }
 
-    // Sets `lost_removals` if an error left entries in the tree that the
+    // Sets `poisoned` if an error left entries in the tree that the
     // predicate had already rejected; the caller must then poison the
     // transaction so they cannot be committed.
     pub(crate) fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         mut predicate: F,
         range: impl RangeBounds<KR> + 'a,
-        lost_removals: &mut bool,
+        poisoned: &mut bool,
     ) -> Result
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
@@ -725,7 +725,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             upper_bound.as_ref().map(Vec::as_slice),
             &mut predicate,
             &mut freed,
-            lost_removals,
+            poisoned,
         );
 
         // The cursor updates the root incrementally, so pages queued before an
@@ -742,7 +742,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         upper_bound: Bound<&[u8]>,
         predicate: &mut F,
         freed: &mut Vec<PageNumber>,
-        lost_removals: &mut bool,
+        poisoned: &mut bool,
     ) -> Result
     where
         F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
@@ -756,10 +756,11 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         let result = Self::retain_scan(&mut cursor, lower_bound, upper_bound, predicate);
         if result.is_err() {
             // Best effort: apply any pending removals so the failure does not
-            // silently drop entries the predicate already rejected.
+            // silently drop entries the predicate already rejected. If the
+            // cursor is poisoned this re-raises without touching the tree.
             let _ = cursor.finish_pending_removals();
         }
-        *lost_removals = cursor.lost_removals();
+        *poisoned = cursor.poisoned();
         result
     }
 

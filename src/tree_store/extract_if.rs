@@ -59,7 +59,7 @@ where
         }
         self.done = true;
         let result = self.range.close();
-        if result.is_err() || self.range.lost_removals() {
+        if result.is_err() || self.range.poisoned() {
             self.close_failed = true;
         }
         result
@@ -71,6 +71,14 @@ where
     // this is not implied by an explicit close() returning an error.
     pub(crate) fn close_failed(&self) -> bool {
         self.close_failed
+    }
+
+    // Fuses the iterator after an error: an end whose position was lost may
+    // otherwise park with a bound that un-consumes entries it already
+    // yielded or tested, letting the other end see them again. close()
+    // applies both ends' pending work while their state is still coherent.
+    fn fuse_on_error(&mut self) {
+        let _ = self.close();
     }
 
     fn next_inner(&mut self) -> Result<Option<ExtractItem<'a, K, V>>> {
@@ -136,7 +144,11 @@ where
         if self.done {
             return None;
         }
-        self.next_inner().transpose()
+        let result = self.next_inner();
+        if result.is_err() {
+            self.fuse_on_error();
+        }
+        result.transpose()
     }
 }
 
@@ -148,7 +160,11 @@ where
         if self.done {
             return None;
         }
-        self.next_back_inner().transpose()
+        let result = self.next_back_inner();
+        if result.is_err() {
+            self.fuse_on_error();
+        }
+        result.transpose()
     }
 }
 

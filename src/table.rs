@@ -190,12 +190,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         predicate: F,
     ) -> Result {
         let mut panic_guard = RetainPanicGuard::new(self.transaction);
-        let mut lost_removals = false;
+        let mut poisoned = false;
         let result = self
             .tree
-            .retain_in::<K::SelfType<'_>, F>(predicate, .., &mut lost_removals);
+            .retain_in::<K::SelfType<'_>, F>(predicate, .., &mut poisoned);
         panic_guard.disarm();
-        if lost_removals {
+        if poisoned {
             self.transaction.poison();
         }
         result
@@ -217,10 +217,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
         let mut panic_guard = RetainPanicGuard::new(self.transaction);
-        let mut lost_removals = false;
-        let result = self.tree.retain_in(predicate, range, &mut lost_removals);
+        let mut poisoned = false;
+        let result = self.tree.retain_in(predicate, range, &mut poisoned);
         panic_guard.disarm();
-        if lost_removals {
+        if poisoned {
             self.transaction.poison();
         }
         result

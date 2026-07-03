@@ -207,6 +207,19 @@ impl PageAllocator {
         }
     }
 
+    // Frees the page immediately if it was allocated in this transaction;
+    // otherwise defers it to `freed` for release at commit.
+    pub(crate) fn conditional_free(
+        &self,
+        page: PageNumber,
+        allocated: &mut PageTrackerPolicy,
+        freed: &mut Vec<PageNumber>,
+    ) {
+        if !self.free_if_uncommitted(page, allocated) {
+            freed.push(page);
+        }
+    }
+
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
         self.allocated_since_commit.lock().unwrap().contains(page)
     }
