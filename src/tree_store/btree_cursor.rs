@@ -1211,6 +1211,12 @@ pub(super) struct RangeMut<'a, K: Key + 'static, V: Value + 'static> {
     // Which end, if any, is known to be live and positioned at an in-range
     // entry. Cleared whenever the gap moves or the tree is mutated.
     settled: Option<Direction>,
+    // Fast-path settle state: how many consecutive entries ahead of the live
+    // end's gap (within its current leaf) are known to be in range, so their
+    // settles skip the cursor activation and bound comparison. Only advancing
+    // the gap by one entry may decrement this; every other reposition (leaf
+    // flushes, parking, errors) must clear it.
+    in_range_run: Option<(Direction, usize)>,
     // Set when an error interrupted removals that were already yielded to the
     // caller: they may remain in the tree, so the transaction must not
     // commit. Every range operation re-raises instead of touching the tree.
@@ -1237,6 +1243,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             front: EndState::Parked(lower_bound),
             back: EndState::Parked(upper_bound),
             settled: None,
+            in_range_run: None,
             poisoned: false,
             _key_type: PhantomData,
             _value_type: PhantomData,
@@ -1335,6 +1342,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             return Ok(false);
         }
         self.settled = None;
+        self.consume_in_range_run(direction);
         let EndState::Live(state) = self.end_mut(direction) else {
             unreachable!("settled end must be live");
         };
@@ -1354,6 +1362,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             return Ok(None);
         }
         self.settled = None;
+        self.consume_in_range_run(direction);
         let result = self.with_live_cursor(direction, |cursor| match direction {
             Direction::Next => cursor.remove_next_deferred(),
             Direction::Previous => cursor.remove_prev_deferred(),
@@ -1368,6 +1377,16 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         if self.settled == Some(direction) {
             return Ok(true);
         }
+        // Entries covered by the in-range run need no cursor work: the gap
+        // has only moved within the leaf since the run was computed.
+        if let Some((run_direction, remaining)) = self.in_range_run
+            && run_direction == direction
+            && remaining > 0
+        {
+            self.settled = Some(direction);
+            return Ok(true);
+        }
+        self.in_range_run = None;
         self.activate(direction)?;
         let has_entry = self.with_live_cursor(direction, |cursor| match direction {
             Direction::Next => Ok(cursor.peek_next()?.is_some()),
@@ -1380,7 +1399,67 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             return Ok(false);
         }
         self.settled = Some(direction);
+        self.in_range_run = Some((direction, self.settled_leaf_in_range_run(direction)));
         Ok(true)
+    }
+
+    // The number of consecutive entries ahead of the live end's gap, within
+    // its current leaf, known to be in range: the whole rest of the leaf when
+    // the leaf's furthest key satisfies the other end's bound (keys within a
+    // leaf are ordered, so every nearer key does too), otherwise just the
+    // already-checked current entry.
+    fn settled_leaf_in_range_run(&self, direction: Direction) -> usize {
+        let EndState::Live(state) = self.end_ref(direction) else {
+            unreachable!("end must be live");
+        };
+        let position = state.position.as_ref().expect("end is positioned");
+        let remaining_in_leaf = match direction {
+            Direction::Next => position.leaf.len - position.leaf.position,
+            Direction::Previous => position.leaf.position,
+        };
+        if remaining_in_leaf <= 1 {
+            return remaining_in_leaf;
+        }
+        let bound = match self.end_ref(direction.opposite()) {
+            EndState::Parked(bound) => bound,
+            EndState::Pending(batch) => &batch.bound,
+            EndState::Live(_) => unreachable!("peer end must be parked while this end is live"),
+        };
+        let furthest_key = match bound {
+            Unbounded => return remaining_in_leaf,
+            Included(_) | Excluded(_) => {
+                let index = match direction {
+                    Direction::Next => position.leaf.len - 1,
+                    Direction::Previous => 0,
+                };
+                entry_ref::<K, V>(&position.leaf, index)
+            }
+        };
+        let key = furthest_key.key_bytes();
+        let leaf_in_range = match direction {
+            Direction::Next => match bound {
+                Included(bound) => K::compare(key, bound).is_le(),
+                Excluded(bound) => K::compare(key, bound).is_lt(),
+                Unbounded => unreachable!(),
+            },
+            Direction::Previous => match bound {
+                Included(bound) => K::compare(key, bound).is_ge(),
+                Excluded(bound) => K::compare(key, bound).is_gt(),
+                Unbounded => unreachable!(),
+            },
+        };
+        if leaf_in_range { remaining_in_leaf } else { 1 }
+    }
+
+    // Consumes one entry from the in-range run as the gap moves by one, if
+    // the run tracks `direction`.
+    fn consume_in_range_run(&mut self, direction: Direction) {
+        match &mut self.in_range_run {
+            Some((run_direction, remaining)) if *run_direction == direction => {
+                *remaining = remaining.saturating_sub(1);
+            }
+            _ => self.in_range_run = None,
+        }
     }
 
     // Makes `direction`'s end live, parking the other end first so that only
@@ -1447,6 +1526,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
     // are snapshotted and applied later.
     fn park(&mut self, direction: Direction) -> Result {
         self.settled = None;
+        self.in_range_run = None;
         let end = self.end_mut(direction);
         let EndState::Live(state) = end else {
             return Ok(());
