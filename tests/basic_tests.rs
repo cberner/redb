@@ -2659,6 +2659,65 @@ fn retain_in_upper_boundary_does_not_duplicate_subtrees() {
     write_txn.commit().unwrap();
 }
 
+// A leaf left below the merge threshold opens a replacement run, and every
+// following leaf that also has removals extends it, so moderate-density
+// removals (here: a third of each leaf) pack into full leaves instead of
+// leaving one partially-empty leaf per original.
+#[test]
+fn retain_packs_moderate_density_survivors() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    const ELEMENTS: u64 = 20_000;
+    // Scattered key order builds ~70%-full leaves, so dropping a third of a
+    // leaf leaves it above the merge threshold: healthy, but rewritten. An odd
+    // multiplier permutes the key space, keeping all keys distinct.
+    let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    // In scan order: gut every 16th stripe of 32 entries so each parent branch
+    // sees underfilling leaves that seed runs, and drop a third of everything
+    // else so the remaining leaves stay healthy but dirty.
+    let keeps = |position: u64| (position / 32) % 16 != 15 && position % 3 != 2;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(key(i), &[0u8; 200]).unwrap();
+        }
+        let before = table.stats().unwrap().leaf_pages();
+
+        let mut position = 0u64;
+        table
+            .retain(|_, _| {
+                let keep = keeps(position);
+                position += 1;
+                keep
+            })
+            .unwrap();
+
+        assert_eq!(position, ELEMENTS);
+        let expected = (0..ELEMENTS).filter(|i| keeps(*i)).count() as u64;
+        assert_eq!(table.len().unwrap(), expected);
+        let mut iterated = 0u64;
+        for entry in table.iter().unwrap() {
+            entry.unwrap();
+            iterated += 1;
+        }
+        assert_eq!(iterated, expected);
+        // Survivors are 62.5% of the entries. Ending runs at the first healthy
+        // leaf leaves them spread over roughly one leaf per original; chaining
+        // packs them into well under three quarters as many.
+        let after = table.stats().unwrap().leaf_pages();
+        assert!(
+            after < before * 3 / 4,
+            "moderate-density survivors spread over {after} of originally {before} leaves"
+        );
+    }
+    write_txn.commit().unwrap();
+}
+
 #[test]
 fn retain_coalesces_sparse_survivors() {
     let tmpfile = create_tempfile();
