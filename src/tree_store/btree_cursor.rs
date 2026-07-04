@@ -1,7 +1,7 @@
 use crate::AccessGuard;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, LEAF, LeafAccessor, OwnedEntryBuffer, leaf_below_merge_threshold,
-    retained_after_removals,
+    leaf_fits_one_page, retained_after_removals,
 };
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -263,10 +263,10 @@ struct LeafRunRewrite {
     // upward by forward scans and downward by backward scans.
     replaced_children: Range<usize>,
     // All retained entries of the run, kept in ascending key order: forward
-    // scans append at the back, backward scans prepend at the front. Only
-    // leaves left below the merge threshold accumulate (each retaining less
-    // than a third of a page) plus at most one run-ending leaf, so the buffer
-    // is bounded by roughly fanout x page_size / 3.
+    // scans append at the back, backward scans prepend at the front. A run
+    // opens at a leaf left below the merge threshold and extends across every
+    // later leaf with removals under the same parent, so the buffer is
+    // bounded by fanout x page_size.
     entries: OwnedEntryBuffer,
     removed_pairs: u64,
 }
@@ -975,40 +975,75 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // Flushes the current leaf's pending removals, either directly or into a
     // coalescing run. Only a direct flush mutates the tree and consumes the
     // cursor position; absorbing into a run leaves both untouched.
+    //
+    // Run policy: only an underfilling leaf opens a run, but once one is open
+    // any leaf that is being rewritten anyway extends it, so a stretch of
+    // moderate removals packs into full replacements instead of one
+    // half-empty leaf per original. A leaf with no removals ends the run and
+    // is left in place, so rewrites never spread past the region the scan is
+    // already dirtying. One whose survivors exceed a page (a large value with
+    // small neighbors) rides the splice but also ends the run, keeping the
+    // buffer bounded by fanout x page_size plus one such leaf.
     fn close_current_leaf(&mut self, direction: Direction) -> Result<LeafCloseOutcome> {
         assert!(self.state.position.is_some(), "cursor must be positioned");
+        let run_open = self.state.leaf_run_rewrite.is_some();
 
-        // The short-circuit order matters: `leaf_would_underfill` may only be
-        // consulted for a leaf with pending removals, so a merely-iterated
-        // sparse leaf cannot open a run.
-        let has_removals = !self.state.removed_indexes.is_empty();
-        let underfilling = has_removals && {
-            let position = self.state.position.as_ref().unwrap();
-            self.leaf_would_underfill(&position.leaf) && !position.path.is_empty()
-        };
-        if underfilling {
+        if self.state.removed_indexes.is_empty() {
+            if !run_open {
+                return Ok(LeafCloseOutcome::Unchanged);
+            }
+            // A leaf with no removals is not one of the run's replaced
+            // children: the splice below leaves it in place, so its entries
+            // must not join the buffer or they would be duplicated. If the
+            // packed run falls below the merge threshold, the splice's
+            // neighbor absorption consumes this leaf's page and extends the
+            // replaced range over it instead.
+        } else {
+            // The survivor accounting must precede `take_removals_ascending`,
+            // which drains the pending batch it reads. A merely-iterated
+            // sparse leaf never gets here, so it cannot open a run.
+            let (underfilling, packs, has_parent) = {
+                let position = self.state.position.as_ref().unwrap();
+                let accessor = LeafAccessor::new(
+                    position.leaf.page.memory(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                let (retained_pairs, retained_bytes) =
+                    retained_after_removals(&accessor, &self.state.removed_indexes);
+                let page_size = self.page_allocator.get_page_size();
+                // Matches `MutateHelper::plan_leaf_delete`'s Merge disposition.
+                let underfilling = retained_pairs == 0
+                    || leaf_below_merge_threshold(
+                        retained_pairs,
+                        retained_bytes,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                        page_size,
+                    );
+                // An underfilling leaf's survivors trivially share a page.
+                let packs = underfilling
+                    || leaf_fits_one_page(
+                        retained_pairs,
+                        retained_bytes,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                        page_size,
+                    );
+                (underfilling, packs, !position.path.is_empty())
+            };
+            if !(underfilling || run_open) || !has_parent {
+                let resume_key = self.flush_removed_entries(direction)?;
+                return Ok(LeafCloseOutcome::Flushed { resume_key });
+            }
+            let keeps_run_open = packs && self.run_parent_has_more_children(direction);
             let removed_indexes = self.take_removals_ascending();
             self.append_leaf_to_run(direction, &removed_indexes);
-            if self.run_parent_has_more_children(direction) {
+            if keeps_run_open {
                 return Ok(LeafCloseOutcome::AbsorbedIntoRun);
             }
-            // The run consumed its parent's last child in the scan direction,
-            // so nothing more can join it; fall through to the splice.
-        } else if self.state.leaf_run_rewrite.is_some() {
-            // A leaf that stays healthy on its own ends the run, so a run's
-            // rewrites stay proportional to the sparse region. Its pending
-            // removals ride the splice; a fully retained leaf is left in
-            // place, though a run that packs below the merge threshold may
-            // still merge with it when the splice absorbs an adjacent child.
-            if has_removals {
-                let removed_indexes = self.take_removals_ascending();
-                self.append_leaf_to_run(direction, &removed_indexes);
-            }
-        } else if has_removals {
-            let resume_key = self.flush_removed_entries(direction)?;
-            return Ok(LeafCloseOutcome::Flushed { resume_key });
-        } else {
-            return Ok(LeafCloseOutcome::Unchanged);
+            // Either the run consumed its parent's last child in the scan
+            // direction or this leaf cannot pack; fall through to the splice.
         }
         // Every remaining path ends the run: splice it and resume past this
         // leaf, whose furthest key bounds everything the run consumed.
@@ -1101,22 +1136,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             run.entries,
             run.removed_pairs,
         )
-    }
-
-    // Whether removing the pending entries would leave the leaf below the merge
-    // threshold, matching `MutateHelper::plan_leaf_delete`'s Merge disposition.
-    fn leaf_would_underfill(&self, leaf: &Leaf) -> bool {
-        let accessor = LeafAccessor::new(leaf.page.memory(), K::fixed_width(), V::fixed_width());
-        let (retained_pairs, retained_bytes) =
-            retained_after_removals(&accessor, &self.state.removed_indexes);
-        retained_pairs == 0
-            || leaf_below_merge_threshold(
-                retained_pairs,
-                retained_bytes,
-                K::fixed_width(),
-                V::fixed_width(),
-                self.page_allocator.get_page_size(),
-            )
     }
 
     // All tree mutations flow through here. Mutating invalidates saved paths,

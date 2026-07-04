@@ -913,14 +913,30 @@ pub(super) fn leaf_split_required(
     fixed_value_size: Option<usize>,
     page_size: usize,
 ) -> bool {
+    !leaf_fits_one_page(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+        page_size,
+    ) && num_pairs > 1
+}
+
+// True when a leaf holding these pairs fits into a single order zero page.
+pub(super) fn leaf_fits_one_page(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
     let required = RawLeafBuilder::required_bytes(
         num_pairs,
         keys_values_bytes,
         fixed_key_size,
         fixed_value_size,
     );
-    let too_many_pairs = num_pairs > usize::from(u16::MAX);
-    (required > page_size || too_many_pairs) && num_pairs > 1
+    required <= page_size && u16::try_from(num_pairs).is_ok()
 }
 
 // Merge a leaf when it is less than 33% full: splits occur when a page is full and produce two
