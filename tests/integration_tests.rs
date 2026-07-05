@@ -1930,6 +1930,77 @@ fn check_integrity_after_persistent_savepoint_restore_and_delete() {
     }
 }
 
+// Invariant: an ephemeral Savepoint dropped concurrently with a durable commit -- legal since
+// WriteTransaction is Sync -- must not leave DATA_ALLOCATED_TABLE naming freed pages. The drop
+// can land between the allocated-pages purge (which keeps the entries the savepoint pins) and the
+// post-commit free epilogue (which computes its horizon from the live read transactions). If the
+// drop advances that horizon past the savepoint, the epilogue would free pages the surviving
+// entries still name.
+#[test]
+fn check_integrity_ephemeral_savepoint_drop_racing_commit() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let sync_state = Arc::new(BlockingSyncState::new());
+    let backend = BlockingSyncBackend {
+        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        state: sync_state.clone(),
+    };
+    let mut db = Database::builder().create_with_backend(backend).unwrap();
+
+    // Transaction T0: initial data. The ephemeral savepoint created below pins T0.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 0..1000u64 {
+            table
+                .insert(&k, savepoint_integrity_value(k, 60).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Transaction T1: create the ephemeral savepoint before opening any table so it pins T0 and
+    // keeps allocation tracking enabled. The pages allocated here are recorded in
+    // DATA_ALLOCATED_TABLE because the savepoint is live.
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.ephemeral_savepoint().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 2000..2500u64 {
+            table
+                .insert(&k, savepoint_integrity_value(k, 60).as_slice())
+                .unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    // Transaction T2: free those pages. They are queued in DATA_FREED_TABLE rather than freed,
+    // because the savepoint still pins them.
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        for k in 2000..2500u64 {
+            table.remove(&k).unwrap();
+        }
+    }
+
+    // Block the commit's fsync, which happens after the DATA_ALLOCATED_TABLE purge but before the
+    // post-commit free epilogue, and drop the savepoint inside that window.
+    sync_state.block_next_sync();
+    let commit_handle = thread::spawn(move || txn.commit().unwrap());
+    sync_state.wait_until_blocked();
+    drop(savepoint);
+    sync_state.release();
+    commit_handle.join().unwrap();
+
+    // In debug builds, check_integrity() asserts every DATA_ALLOCATED_TABLE page is still
+    // allocated. Before the fix, the epilogue freed pages that surviving entries still named.
+    assert!(
+        db.check_integrity().unwrap(),
+        "false corruption after an ephemeral savepoint was dropped during commit"
+    );
+}
+
 #[test]
 fn regression20() {
     let tmpfile = create_tempfile();

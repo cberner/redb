@@ -51,6 +51,9 @@
   `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
 * Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
   in debug builds) after a persistent savepoint was deleted or restored.
+* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
+  in debug builds) when an ephemeral `Savepoint` was dropped from another thread while the same
+  write transaction was committing.
 * Fix a panic when opening a database file that was externally extended to an invalid size; such
   files are now rejected with `StorageError::Corrupted`.
 * Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the
