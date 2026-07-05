@@ -33,6 +33,8 @@
   additional transaction.
 * Fix a bug where calling `compact()` on a database could cause the file to grow
   rather than shrink in some cases.
+* Fix a bug where the database file could grow unnecessarily instead of reusing freed space, and
+  where `compact()` could stop before fully shrinking the file.
 * Enforce the maximum value size limit when replacing a value in place via `Table::get_mut()`
   or `Entry::and_modify()`. Previously these paths could bypass the limit that `Table::insert()`
   and the `entry()` accessors enforce, returning `StorageError::ValueTooLarge` only inconsistently.
