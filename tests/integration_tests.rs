@@ -255,6 +255,30 @@ fn previous_io_error() {
     ));
 }
 
+// Reading past the end of the file must return an error rather than hang. On
+// Windows seek_read returns Ok(0) at EOF, which previously caused the read
+// loop to spin forever when opening a truncated or corrupt file.
+#[test]
+fn read_past_eof_errors() {
+    let mut tmpfile = create_tempfile();
+    tmpfile.write_all(&[1u8; 8]).unwrap();
+    tmpfile.flush().unwrap();
+    let backend = FileBackend::new(tmpfile.into_file()).unwrap();
+
+    // Entirely past EOF.
+    let mut buf = [0u8; 16];
+    assert_eq!(
+        backend.read(64, &mut buf).unwrap_err().kind(),
+        ErrorKind::UnexpectedEof
+    );
+
+    // Starts within the file but extends past EOF (a truncated header).
+    assert_eq!(
+        backend.read(0, &mut buf).unwrap_err().kind(),
+        ErrorKind::UnexpectedEof
+    );
+}
+
 // After the extract iterator returns an error, later calls must keep
 // returning an error rather than None: the failure is not recoverable and
 // going quiet would look like successful exhaustion.
