@@ -2001,6 +2001,81 @@ fn check_integrity_ephemeral_savepoint_drop_racing_commit() {
     );
 }
 
+// Invariant: ephemeral_savepoint() racing the first table-open of the same transaction (legal
+// since WriteTransaction is Sync) must never register a live savepoint while the racing open
+// disables allocation tracking. If it does, the pages allocated after the savepoint are not
+// tracked, so restore_savepoint() cannot free them and they leak. This exercises the race in a
+// loop; check_integrity()'s allocator rebuild reports any leaked (allocated but unreachable) page.
+#[test]
+fn ephemeral_savepoint_racing_first_open_no_leak() {
+    let tmpfile = create_tempfile();
+    let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(table_def).unwrap();
+        table
+            .insert(&0, savepoint_integrity_value(0, 100).as_slice())
+            .unwrap();
+    }
+    txn.commit().unwrap();
+
+    // Several savepoint-creating threads race one table-opening thread. Multiple creators widen
+    // the window on the tracker's lock in which the open can observe "no savepoint" and disable
+    // allocation tracking just before a savepoint is registered.
+    const CREATORS: usize = 6;
+    for i in 0..600u64 {
+        let mut txn = db.begin_write().unwrap();
+        let barrier = std::sync::Barrier::new(CREATORS + 1);
+        let savepoints = thread::scope(|s| {
+            let handles: Vec<_> = (0..CREATORS)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        txn.ephemeral_savepoint()
+                    })
+                })
+                .collect();
+            barrier.wait();
+            {
+                let mut table = txn.open_table(table_def).unwrap();
+                table
+                    .insert(&(1000 + i), savepoint_integrity_value(i, 200).as_slice())
+                    .unwrap();
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        // All created savepoints pin the same (last committed) transaction, so restoring any one
+        // of them must free every page allocated by this transaction.
+        let created: Vec<_> = savepoints.into_iter().flatten().collect();
+        if let Some(savepoint) = created.first() {
+            {
+                let mut table = txn.open_table(table_def).unwrap();
+                for k in 3000..3100u64 {
+                    table
+                        .insert(&k, savepoint_integrity_value(k, 200).as_slice())
+                        .unwrap();
+                }
+            }
+            txn.restore_savepoint(savepoint).unwrap();
+            txn.commit().unwrap();
+        } else {
+            // The open won the race and dirtied the transaction first; no savepoint created.
+            txn.abort().unwrap();
+        }
+    }
+
+    assert!(
+        db.check_integrity().unwrap(),
+        "ephemeral savepoint racing the first table-open leaked pages"
+    );
+}
+
 #[test]
 fn regression20() {
     let tmpfile = create_tempfile();
