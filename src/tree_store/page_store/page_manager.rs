@@ -806,10 +806,7 @@ impl TransactionalMemory {
         drop(state);
 
         let old_transaction_id = header.secondary_slot().transaction_id;
-        let secondary = header.secondary_slot_mut();
-        secondary.transaction_id = transaction_id;
-        secondary.user_root = data_root;
-        secondary.system_root = system_root;
+        header.write_secondary_slot(transaction_id, data_root, system_root);
 
         self.write_header(&header)?;
 
@@ -870,10 +867,9 @@ impl TransactionalMemory {
         self.storage.write_barrier()?;
 
         let mut state = self.state.lock().unwrap();
-        let secondary = state.header.secondary_slot_mut();
-        secondary.transaction_id = transaction_id;
-        secondary.user_root = data_root;
-        secondary.system_root = system_root;
+        state
+            .header
+            .write_secondary_slot(transaction_id, data_root, system_root);
         state.read_from_secondary = true;
 
         Ok(())

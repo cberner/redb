@@ -365,8 +365,18 @@ impl DatabaseHeader {
         &self.transaction_slots[self.primary_slot ^ 1]
     }
 
-    pub(super) fn secondary_slot_mut(&mut self) -> &mut TransactionHeader {
-        &mut self.transaction_slots[self.primary_slot ^ 1]
+    // Overwrite the secondary slot with a newly committed transaction.
+    pub(super) fn write_secondary_slot(
+        &mut self,
+        transaction_id: TransactionId,
+        user_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+    ) {
+        let slot = &mut self.transaction_slots[self.primary_slot ^ 1];
+        slot.transaction_id = transaction_id;
+        slot.user_root = user_root;
+        slot.system_root = system_root;
+        slot.corrupt_bytes = None;
     }
 
     pub(super) fn swap_primary_slot(&mut self) {
@@ -411,6 +421,10 @@ pub(super) struct TransactionHeader {
     pub(super) user_root: Option<BtreeHeader>,
     pub(super) system_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
+    // When present, the original on-disk bytes of a slot whose checksum did not verify. They are
+    // written back verbatim, so a slot that failed verification keeps its invalid checksum instead
+    // of being re-serialized as if it were valid. `None` once the slot holds a new commit.
+    corrupt_bytes: Option<[u8; TRANSACTION_SIZE]>,
 }
 
 impl TransactionHeader {
@@ -420,6 +434,7 @@ impl TransactionHeader {
             user_root: None,
             system_root: None,
             transaction_id,
+            corrupt_bytes: None,
         }
     }
 
@@ -470,12 +485,21 @@ impl TransactionHeader {
             user_root,
             system_root,
             transaction_id,
+            corrupt_bytes: if corrupted {
+                Some(data[..TRANSACTION_SIZE].try_into().unwrap())
+            } else {
+                None
+            },
         };
 
         Ok((result, corrupted))
     }
 
     pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
+        // A slot that failed checksum verification is written back verbatim (see `corrupt_bytes`).
+        if let Some(bytes) = self.corrupt_bytes {
+            return bytes;
+        }
         assert_eq!(self.version, FILE_FORMAT_VERSION3);
         let mut result = [0; TRANSACTION_SIZE];
         result[VERSION_OFFSET] = self.version;
@@ -745,6 +769,85 @@ mod test {
             db2.check_integrity().unwrap_err(),
             DatabaseError::Storage(StorageError::Corrupted(_))
         ));
+    }
+
+    // A commit slot with an invalid checksum must survive the recovery header rewrite with its
+    // checksum still invalid. Recomputing a valid checksum for it would let a later open promote a
+    // partially written transaction as if it were a genuine commit.
+    #[test]
+    fn recovery_does_not_launder_torn_slot() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        {
+            let write_txn = db.begin_write().unwrap();
+            write_txn.open_table(X).unwrap().insert("k", "v").unwrap();
+            write_txn.commit().unwrap();
+        }
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let primary_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let secondary_offset = if primary_offset == TRANSACTION_0_OFFSET {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+
+        // Fabricate a torn 1-phase commit in the secondary slot: copy the valid primary slot, give
+        // it a newer transaction id, then corrupt its checksum so it fails verification.
+        let primary_slot: [u8; super::TRANSACTION_SIZE] = header
+            [primary_offset..primary_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+        header[secondary_offset..secondary_offset + super::TRANSACTION_SIZE]
+            .copy_from_slice(&primary_slot);
+        let primary_txn_id =
+            super::get_u64(&header[primary_offset + super::TRANSACTION_ID_OFFSET..]);
+        let id_offset = secondary_offset + super::TRANSACTION_ID_OFFSET;
+        header[id_offset..id_offset + std::mem::size_of::<u64>()]
+            .copy_from_slice(&(primary_txn_id + 1).to_le_bytes());
+        corrupt_slot_checksum(&mut header, secondary_offset);
+
+        // Require recovery, and mark it non-2PC so the full repair path (not quick-repair) runs.
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+
+        let torn_secondary: [u8; super::TRANSACTION_SIZE] = header
+            [secondary_offset..secondary_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Open, but abort the repair before it commits a fresh secondary slot. This freezes the
+        // header in the exact state recovery leaves it in: after the header rewrite, but before any
+        // genuine commit could overwrite the torn slot.
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
+
+        // The torn secondary must be byte-for-byte unchanged -- in particular its checksum must not
+        // have been recomputed into a valid one.
+        let mut file = OpenOptions::new().read(true).open(tmpfile.path()).unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        assert_eq!(
+            &header[secondary_offset..secondary_offset + super::TRANSACTION_SIZE],
+            &torn_secondary,
+            "recovery laundered the torn secondary slot into a valid one"
+        );
     }
 
     // If the file is externally truncated below the stored layout, both open and check_integrity

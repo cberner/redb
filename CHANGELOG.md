@@ -49,6 +49,10 @@
 * Fix `Database::check_integrity()` silently discarding transactions committed with
   `Durability::None` that had not yet been made durable by a later commit; a passing check now
   preserves them (making them durable) instead of rolling them back.
+* Fix a bug that could silently roll back or corrupt durably committed transactions if a crash
+  occurred while recovering from an earlier crash. Triggering it required two crashes -- one
+  interrupting a commit and another during the subsequent repair on the next open -- and it did
+  not affect transactions committed with two-phase commit.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.
