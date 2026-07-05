@@ -417,28 +417,32 @@ impl BuddyAllocator {
     }
 
     /// data must have been initialized by `Self::init_new()`
-    pub(crate) fn free(&mut self, page_number: u32, order: u8) {
+    ///
+    /// Returns the order of the resulting free block, which is `>= order` when buddies merge.
+    pub(crate) fn free(&mut self, page_number: u32, order: u8) -> u8 {
         debug_assert!(self.get_order_free_mut(order).get(page_number));
 
         // Update the free index and merge free pages
-        self.free_inner(page_number, order);
+        self.free_inner(page_number, order)
     }
 
-    pub(crate) fn free_inner(&mut self, page_number: u32, order: u8) {
+    // Returns the order of the resulting free block, i.e. the order at which merging stopped.
+    pub(crate) fn free_inner(&mut self, page_number: u32, order: u8) -> u8 {
         if order == self.max_order {
             let allocator = self.get_order_free_mut(order);
             allocator.clear(page_number);
-            return;
+            return order;
         }
 
         let allocator = self.get_order_free_mut(order);
         let buddy = buddy_page(page_number);
         if buddy >= allocator.len() || allocator.get(buddy) {
             allocator.clear(page_number);
+            order
         } else {
             // Merge into higher order page
             allocator.set(buddy);
-            self.free_inner(next_higher_order(page_number), order + 1);
+            self.free_inner(next_higher_order(page_number), order + 1)
         }
     }
 

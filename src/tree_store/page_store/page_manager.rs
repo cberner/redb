@@ -1048,14 +1048,16 @@ impl TransactionalMemory {
         allocated.remove(page);
         let mut state = self.state.lock().unwrap();
         let region_index = page.region;
-        // Free in the regional allocator
-        state
+        // Free in the regional allocator. free() returns the order of the resulting block, which is
+        // larger than page_order when buddies merged.
+        let freed_order = state
             .get_region_mut(region_index)
             .free(page.page_index, page.page_order);
-        // Ensure that the region is marked as having free space
+        // Mark the region free at the merged order, not just page_order: leaving the tracker's
+        // higher-order bits stale after a merge would hide the reclaimed space from find_free.
         state
             .get_region_tracker_mut()
-            .mark_free(page.page_order, region_index);
+            .mark_free(freed_order, region_index);
 
         let address_range = page.address_range(
             self.page_size.into(),
@@ -1431,5 +1433,69 @@ mod test {
 
         let mut db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
+    }
+
+    // Freeing pages that buddy-merge into a higher order must re-mark the region tracker at the
+    // merged order. Otherwise the tracker stays marked full at that order, find_free skips the
+    // region even though a free block exists, and the file grows (and compact() stalls) instead of
+    // reusing the space.
+    #[test]
+    fn free_merge_remarks_region_tracker() {
+        use super::TransactionalMemory;
+        use crate::tree_store::{InMemoryBackend, Page, PageTrackerPolicy};
+
+        // Small pages and regions keep the reproduction cheap to set up.
+        let page_size = 128 * 1024;
+        let region_size = 16 * page_size as u64;
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            Some(region_size),
+            0,
+            false,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+
+        let mut ignore = PageTrackerPolicy::Ignore;
+
+        // Fill region 0 with order-0 pages. The allocation that spills past region 0 fails on it
+        // first, which marks region 0 full at every order.
+        let mut region0_pages = vec![];
+        loop {
+            let page = mem.allocate_helper(1, false).unwrap();
+            let number = page.get_page_number();
+            drop(page);
+            if number.region == 0 {
+                region0_pages.push(number);
+            } else {
+                // First page past region 0: it has done its job of forcing region 0 full. Give it
+                // back so the spilled-into region is left entirely free.
+                mem.free(number, &mut ignore);
+                break;
+            }
+        }
+        assert!(
+            region0_pages.len() >= 2,
+            "test needs at least two pages in region 0, got {}",
+            region0_pages.len()
+        );
+
+        // Free everything in region 0. The order-0 pages buddy-merge back into larger blocks, so
+        // region 0 regains free space above order 0.
+        for page in region0_pages {
+            mem.free(page, &mut ignore);
+        }
+
+        // An order-1 allocation must reuse region 0's merged free block. Before the fix the tracker
+        // still marked region 0 full above order 0, so find_free skipped it and this landed in a
+        // higher region.
+        let reused = mem.allocate_helper(2 * page_size, false).unwrap();
+        assert_eq!(
+            reused.get_page_number().region,
+            0,
+            "order-1 allocation should reuse the merged free block in region 0"
+        );
     }
 }
