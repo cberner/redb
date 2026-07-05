@@ -7,6 +7,8 @@ const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::
 const SLICE_U64_TABLE: MultimapTableDefinition<&[u8], u64> =
     MultimapTableDefinition::new("slice_to_u64");
 const U64_TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("u64");
+const U64_SLICE_TABLE: MultimapTableDefinition<u64, &[u8]> =
+    MultimapTableDefinition::new("u64_to_slice");
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -542,4 +544,53 @@ fn multimap_remove_subtree_backed_key() {
     let mut iter = table.get(&0u64).unwrap();
     assert_eq!(iter.next().unwrap().unwrap().value(), 999);
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn multimap_remove_collapses_committed_subtree_to_inline() {
+    // A subtree whose branch root collapses to a *committed* leaf drives
+    // MultimapTable::remove()'s subtree->inline conversion down the path that frees a
+    // committed page. Two small values plus one large value build a subtree with a branch
+    // (small values in one leaf, the large value in another); after committing, removing the
+    // large value collapses the branch and leaves the untouched committed small-value leaf as
+    // the new root, which is below half a page and so is rewritten back to inline storage.
+    let small_a = [0x00u8; 300];
+    let small_b = [0x01u8; 300];
+    // Sorts last (0xFF), so the split keeps both small values together in the first leaf.
+    let large = [0xFFu8; 3700];
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_SLICE_TABLE).unwrap();
+        table.insert(&0u64, small_a.as_slice()).unwrap();
+        table.insert(&0u64, small_b.as_slice()).unwrap();
+        table.insert(&0u64, large.as_slice()).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_SLICE_TABLE).unwrap();
+        assert!(table.remove(&0u64, large.as_slice()).unwrap());
+        let values: Vec<Vec<u8>> = table
+            .get(&0u64)
+            .unwrap()
+            .map(|v| v.unwrap().value().to_vec())
+            .collect();
+        assert_eq!(values, vec![small_a.to_vec(), small_b.to_vec()]);
+    }
+    write_txn.commit().unwrap();
+
+    // The two small values survive and the large value is gone after the collapse.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_SLICE_TABLE).unwrap();
+    let values: Vec<Vec<u8>> = table
+        .get(&0u64)
+        .unwrap()
+        .map(|v| v.unwrap().value().to_vec())
+        .collect();
+    assert_eq!(values, vec![small_a.to_vec(), small_b.to_vec()]);
 }

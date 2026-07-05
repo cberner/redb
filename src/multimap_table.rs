@@ -709,13 +709,17 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 self.tree
                                     .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                                 drop(page);
+                                // Lock freed_pages before allocated_pages, matching the ordering
+                                // used everywhere else. Two tables of one WriteTransaction share
+                                // these mutexes and may be used from different threads, so the
+                                // reverse order risks an ABBA deadlock with a concurrent insert.
+                                let mut freed_pages = self.freed_pages.lock().unwrap();
                                 let mut allocated_pages = self.allocated_pages.lock().unwrap();
-                                if !self
-                                    .page_allocator
-                                    .free_if_uncommitted(new_root, &mut allocated_pages)
-                                {
-                                    (*self.freed_pages).lock().unwrap().push(new_root);
-                                }
+                                self.page_allocator.conditional_free(
+                                    new_root,
+                                    &mut allocated_pages,
+                                    &mut freed_pages,
+                                );
                             } else {
                                 let subtree_data =
                                     DynamicCollection::<V>::make_subtree_data(BtreeHeader::new(

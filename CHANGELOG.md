@@ -3,6 +3,9 @@
 ## 4.2.0 - 2026-XX-XX
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
+* Fix a potential deadlock when removing a value from a multimap table causes its value-set to
+  shrink from a subtree back to inline storage, while another table of the same write transaction
+  is used concurrently from a different thread.
 * Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a
   30-100x speedup, depending on the fraction of entries retained.
 * Optimize `Table::extract_if()` and `Table::extract_from_if()`. Benchmarks on large tables show
