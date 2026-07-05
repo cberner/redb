@@ -121,9 +121,10 @@ impl UnrepairedDatabaseHeader {
         let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
         let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
 
-        // These layout fields aren't checksummed, so reject corrupt values before they reach the
-        // layout math below (which divides by / asserts on them). The page_size check also bounds
-        // every later region-size product, so none of that arithmetic can overflow.
+        // The region geometry (page size and region sizes) is fixed at creation and never
+        // rewritten, so a partial write can't tear it. Validate it unconditionally, before the
+        // layout math below divides by / asserts on it; the page_size check also bounds every later
+        // region-size product so none of that arithmetic can overflow.
         if page_size != expected_page_size {
             return Err(StorageError::Corrupted(format!(
                 "Database page size {page_size} does not match expected {expected_page_size}"
@@ -145,20 +146,27 @@ impl UnrepairedDatabaseHeader {
             ))
             .into());
         }
-        if trailing_data_pages > region_max_data_pages {
-            return Err(StorageError::Corrupted(format!(
-                "Trailing region data pages {trailing_data_pages} exceed region max {region_max_data_pages}"
-            ))
-            .into());
-        }
-        // A database has 1..=MAX_REGIONS regions (the region index is 20 bits); computed in u64 so
-        // the +1 can't overflow. Zero would underflow num_regions() - 1 in DatabaseLayout::len().
-        let num_regions = u64::from(full_regions) + u64::from(trailing_data_pages > 0);
-        if num_regions == 0 || num_regions > u64::from(MAX_REGIONS) {
-            return Err(StorageError::Corrupted(format!(
-                "Invalid region count: full_regions={full_regions}, trailing_data_pages={trailing_data_pages}"
-            ))
-            .into());
+        // The region counts are rewritten on every resize and aren't checksummed, so a crash
+        // mid-resize can tear them. finalize() recomputes them from the file length when recovery
+        // is required, so only validate them for a cleanly shut down database -- otherwise a torn
+        // value would reject a database that is still fully recoverable from its length.
+        if !recovery_required {
+            if trailing_data_pages > region_max_data_pages {
+                return Err(StorageError::Corrupted(format!(
+                    "Trailing region data pages {trailing_data_pages} exceed region max {region_max_data_pages}"
+                ))
+                .into());
+            }
+            // A database has 1..=MAX_REGIONS regions (the region index is 20 bits); computed in u64
+            // so the +1 can't overflow. Zero would underflow num_regions() - 1 in
+            // DatabaseLayout::len().
+            let num_regions = u64::from(full_regions) + u64::from(trailing_data_pages > 0);
+            if num_regions == 0 || num_regions > u64::from(MAX_REGIONS) {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid region count: full_regions={full_regions}, trailing_data_pages={trailing_data_pages}"
+                ))
+                .into());
+            }
         }
         let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
@@ -208,12 +216,30 @@ impl UnrepairedDatabaseHeader {
     // true only when nothing had to be reconciled: the primary was kept and the stored layout
     // already matched `file_len`.
     pub(super) fn finalize(mut self, file_len: u64) -> Result<(DatabaseHeader, bool)> {
-        // The backing file may have been truncated or extended since the header was last written
-        // (e.g. externally, or by a prior crashed resize). Re-derive the layout from the actual
-        // file length so callers always see a layout consistent with the file. Truncation below
-        // the stored layout is always corruption -- redb shrinks the file only after writing a
-        // smaller layout -- and must be rejected before `recalculate` runs, since its arithmetic
-        // assumes at least one page of file length.
+        if self.inner.recovery_required {
+            // The region counts are unchecksummed and rewritten on every resize, so a crash
+            // mid-resize can tear them. Recovery is required, so rebuild the layout from the file
+            // length and the immutable region geometry (which can't tear) rather than trusting the
+            // stored counts. The file length is set by a single truncate or extend, so it maps onto
+            // a real layout even when a resize was interrupted; a mangled length is rejected below.
+            let recalculated = self.layout_from_file_len(file_len)?;
+            // Report clean only if the stored counts already matched the file; a corrected value
+            // means the on-disk header must be rewritten before use.
+            let trailing_pages = recalculated
+                .trailing_region_layout()
+                .map(RegionLayout::num_pages)
+                .unwrap_or_default();
+            let layout_matched = recalculated.num_full_regions() == self.inner.full_regions
+                && trailing_pages == self.inner.trailing_partial_region_pages;
+            self.inner.set_layout(recalculated);
+            let kept_primary = self.select_primary_slot()?;
+            return Ok((self.inner, kept_primary && layout_matched));
+        }
+
+        // Recovery isn't required, so the stored layout was written by a clean shutdown and is
+        // trustworthy. The file may still have been truncated or extended out from under us (e.g.
+        // externally, or by a copy/backup tool). Truncation below the stored layout is always
+        // corruption -- redb shrinks the file only after writing a smaller layout.
         let stored_len = self.inner.layout().len();
         if file_len < stored_len {
             return Err(StorageError::Corrupted(format!(
@@ -222,40 +248,52 @@ impl UnrepairedDatabaseHeader {
         }
         let layout_stale = stored_len != file_len;
         if layout_stale {
-            let layout = self.inner.layout();
-            let region_max_pages = layout.full_region_layout().num_pages();
-            let region_header_pages = layout.full_region_layout().get_header_pages();
-            // Reject a file needing more regions than the 20-bit region index can address (at most
-            // MAX_REGIONS); otherwise recalculate() would alias high regions onto low ones or
-            // overflow the u32 region count.
-            let full_region_size = (u64::from(region_header_pages) + u64::from(region_max_pages))
-                * u64::from(self.inner.page_size);
-            let max_addressable_len =
-                u64::from(self.inner.page_size) + u64::from(MAX_REGIONS) * full_region_size;
-            if file_len > max_addressable_len {
-                return Err(StorageError::Corrupted(format!(
-                    "File length requires more regions than are addressable: file_len={file_len}"
-                )));
-            }
-            let recalculated = DatabaseLayout::recalculate(
-                file_len,
-                region_header_pages,
-                region_max_pages,
-                self.inner.page_size,
-            );
-            // redb only ever resizes the file to a length that maps exactly onto a region layout,
-            // so a file length that `recalculate` cannot reproduce means the file was extended or
-            // padded externally (e.g. by a copy/backup tool). Reject it as corruption rather than
-            // letting the `layout.len() == file_len` assertion in `TransactionalMemory::new` panic.
-            if recalculated.len() != file_len {
-                return Err(StorageError::Corrupted(format!(
-                    "File length does not correspond to a valid region layout: file_len={file_len}"
-                )));
-            }
+            let recalculated = self.layout_from_file_len(file_len)?;
             self.inner.set_layout(recalculated);
         }
         let kept_primary = self.select_primary_slot()?;
         Ok((self.inner, kept_primary && !layout_stale))
+    }
+
+    // Rebuild the database layout from the actual file length, trusting only the immutable region
+    // geometry. Rejects any length no valid layout can produce: too short to hold a region, more
+    // regions than the 20-bit region index can address, or a length that doesn't fall on a region
+    // boundary (e.g. a file padded or truncated by an external tool).
+    fn layout_from_file_len(&self, file_len: u64) -> Result<DatabaseLayout> {
+        let page_size = self.inner.page_size;
+        let region_header_pages = self.inner.region_header_pages;
+        let region_max_pages = self.inner.region_max_data_pages;
+        let full_region_size =
+            (u64::from(region_header_pages) + u64::from(region_max_pages)) * u64::from(page_size);
+        // At most MAX_REGIONS regions are addressable; a longer file would alias high regions onto
+        // low ones or overflow the u32 region count.
+        let max_addressable_len = u64::from(page_size) + u64::from(MAX_REGIONS) * full_region_size;
+        if file_len > max_addressable_len {
+            return Err(StorageError::Corrupted(format!(
+                "File length requires more regions than are addressable: file_len={file_len}"
+            )));
+        }
+        // The smallest layout is the super-header page plus a trailing region holding its header and
+        // one data page; a shorter file maps to zero regions, which no layout can represent and
+        // which underflows recalculate()'s arithmetic.
+        let min_len = u64::from(page_size) * (u64::from(region_header_pages) + 2);
+        if file_len < min_len {
+            return Err(StorageError::Corrupted(format!(
+                "File truncated below the minimum layout: file_len={file_len}"
+            )));
+        }
+        let recalculated =
+            DatabaseLayout::recalculate(file_len, region_header_pages, region_max_pages, page_size);
+        // redb only ever resizes the file to a length that maps exactly onto a region layout, so a
+        // length recalculate() cannot reproduce means the file was extended or padded externally.
+        // Reject it rather than letting the `layout.len() == file_len` assertion in
+        // `TransactionalMemory::new` panic.
+        if recalculated.len() != file_len {
+            return Err(StorageError::Corrupted(format!(
+                "File length does not correspond to a valid region layout: file_len={file_len}"
+            )));
+        }
+        Ok(recalculated)
     }
 
     fn select_primary_slot(&mut self) -> Result<bool> {
@@ -538,6 +576,7 @@ mod test {
     use crate::{ReadableDatabase, StorageError};
     use std::fs::OpenOptions;
     use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+    use std::mem::size_of;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -1080,6 +1119,66 @@ mod test {
             matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
             "expected Corrupted for oversized region header pages, got {err:?}"
         );
+    }
+
+    // A resize rewrites the unchecksummed region-count fields, so a crash mid-resize can tear them
+    // while both commit slots stay intact. When recovery is required the layout is recomputed from
+    // the file length, so a torn count must not make a database that is otherwise fully recoverable
+    // from its length permanently unopenable.
+    #[test]
+    fn torn_layout_fields_recover_from_file_length() {
+        fn recover_after_tearing(torn: impl Fn(u32, u32) -> (u32, u32)) {
+            let tmpfile = crate::create_tempfile();
+            let db = Database::builder().create(tmpfile.path()).unwrap();
+            {
+                let write_txn = db.begin_write().unwrap();
+                {
+                    let mut table = write_txn.open_table(X).unwrap();
+                    table.insert("hello", "world").unwrap();
+                }
+                write_txn.commit().unwrap();
+            }
+            drop(db);
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let mut header = [0u8; DB_HEADER_SIZE];
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.read_exact(&mut header).unwrap();
+
+            let (full_regions, trailing_pages) = torn(
+                get_u32(&header[NUM_FULL_REGIONS_OFFSET..]),
+                get_u32(&header[TRAILING_REGION_DATA_PAGES_OFFSET..]),
+            );
+            // Flag recovery required and overwrite the region counts with the torn values, leaving
+            // the commit slots (and their checksums) untouched so both slots still verify.
+            header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+            header[NUM_FULL_REGIONS_OFFSET..NUM_FULL_REGIONS_OFFSET + size_of::<u32>()]
+                .copy_from_slice(&full_regions.to_le_bytes());
+            header[TRAILING_REGION_DATA_PAGES_OFFSET
+                ..TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>()]
+                .copy_from_slice(&trailing_pages.to_le_bytes());
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&header).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            // The database must open and preserve the committed data.
+            let db = Database::open(tmpfile.path()).unwrap();
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+        }
+
+        // Both counts torn to zero describes zero regions: previously rejected as
+        // "Invalid region count" before recovery could run.
+        recover_after_tearing(|_full, _trailing| (0, 0));
+        // A trailing count torn above the true file length: previously rejected as
+        // "File truncated below stored layout".
+        recover_after_tearing(|full, trailing| (full, trailing + 8));
     }
 
     #[test]
