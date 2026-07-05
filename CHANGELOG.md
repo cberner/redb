@@ -43,6 +43,8 @@
   in debug builds) after a persistent savepoint was deleted or restored.
 * Fix a panic when opening a database file that was externally extended to an invalid size; such
   files are now rejected with `StorageError::Corrupted`.
+* Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the
+  file now return an error instead of looping forever.
 * `check_integrity()` now returns `DatabaseError::TransactionInProgress` when an ephemeral
   `Savepoint` is still alive. Previously the check could invalidate the pages such a savepoint
   referenced while leaving it marked valid, so restoring it afterward could corrupt the database.

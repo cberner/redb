@@ -75,6 +75,14 @@ impl StorageBackend for FileBackend {
         let mut data_offset = 0;
         while data_offset < out.len() {
             let read = self.file.seek_read(&mut out[data_offset..], offset)?;
+            // seek_read returns Ok(0) at EOF; treat a short read as an error so that reading
+            // past the end of the file fails instead of looping forever.
+            if read == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "failed to fill whole buffer",
+                ));
+            }
             offset += read as u64;
             data_offset += read;
         }
