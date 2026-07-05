@@ -1683,7 +1683,12 @@ impl WriteTransaction {
     // previously unpersisted allocations that are now becoming durable. Must be called AFTER
     // `process_freed_pages` so that pages reclaimed during this commit are already dropped from
     // the in-memory `unpersisted_allocations` map and not written to disk as stale records.
-    fn flush_data_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result {
+    //
+    // Returns the purge horizon (the oldest savepoint transaction id kept, or `u64::MAX` if no
+    // savepoint survives this commit). `process_data_freed_pages_after_commit()` clamps its free
+    // horizon to this value so that a savepoint dropped concurrently after the purge cannot cause
+    // the epilogue to free a page that a surviving DATA_ALLOCATED_TABLE entry still names.
+    fn flush_data_allocated_pages(&self, data_allocated_pages: Vec<PageNumber>) -> Result<u64> {
         // Catch scenarios like a page getting allocated and then deallocated within the same
         // transaction, but errantly left in the allocated pages list.
         #[cfg(debug_assertions)]
@@ -1735,7 +1740,7 @@ impl WriteTransaction {
             entry?;
         }
 
-        Ok(())
+        Ok(oldest)
     }
 
     fn write_allocated_pages_entry(
@@ -1809,7 +1814,7 @@ impl WriteTransaction {
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
         // already been dropped from the in-memory `unpersisted_allocations` map.
-        self.flush_data_allocated_pages(allocated_pages)?;
+        let savepoint_horizon = self.flush_data_allocated_pages(allocated_pages)?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
         let system_freed_pages = system_tables.system_freed_pages();
@@ -1884,7 +1889,11 @@ impl WriteTransaction {
         self.apply_savepoint_state_on_commit();
 
         if self.post_commit_free == PostCommitFree::Enabled {
-            self.process_data_freed_pages_after_commit(user_root, &page_allocator)?;
+            self.process_data_freed_pages_after_commit(
+                user_root,
+                &page_allocator,
+                savepoint_horizon,
+            )?;
         }
 
         Ok(())
@@ -1894,12 +1903,23 @@ impl WriteTransaction {
         &self,
         user_root: Option<BtreeHeader>,
         page_allocator: &PageAllocator,
+        savepoint_horizon: u64,
     ) -> Result {
         let epilogue_transaction = self.transaction_id.next();
-        let free_until = self
+        let mut free_until = self
             .transaction_tracker
             .oldest_live_read_transaction()
             .map_or(epilogue_transaction, |x| x.next());
+        // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
+        // is also a live read, so absent concurrency `oldest_live_read_transaction()` never
+        // exceeds it and this is a no-op. But an ephemeral `Savepoint::drop` racing this commit
+        // (legal since `WriteTransaction: Sync`) can land between the purge and here, advancing
+        // the oldest live read past the savepoint the purge kept entries for. Freeing those pages
+        // would leave DATA_ALLOCATED_TABLE naming freed pages; the dropped savepoint's entries are
+        // instead re-purged by the next durable commit.
+        if savepoint_horizon != u64::MAX {
+            free_until = free_until.min(TransactionId::new(savepoint_horizon).next());
+        }
 
         let mut freed_any = false;
         let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
