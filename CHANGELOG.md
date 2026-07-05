@@ -54,6 +54,9 @@
 * Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
   in debug builds) when an ephemeral `Savepoint` was dropped from another thread while the same
   write transaction was committing.
+* Fix a leak of database space when an ephemeral `Savepoint` was created from one thread while the
+  same write transaction was first accessing a table from another thread, and that savepoint was
+  later restored. The leaked space was only reclaimed by a full repair.
 * Fix a panic when opening a database file that was externally extended to an invalid size; such
   files are now rejected with `StorageError::Corrupted`.
 * Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the

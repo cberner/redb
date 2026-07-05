@@ -1201,11 +1201,20 @@ impl WriteTransaction {
     ///
     /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
-        if self.dirty.load(Ordering::Acquire) {
-            return Err(SavepointError::InvalidSavepoint);
-        }
-
-        let (id, transaction_id) = self.allocate_savepoint()?;
+        // Serialize the dirty check and savepoint registration against
+        // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
+        // a concurrent first table-open (legal since `WriteTransaction: Sync`) can read the
+        // dirty flag and `any_savepoint_exists()` in between, observe no savepoint, and disable
+        // allocation tracking -- leaving a live savepoint with tracking `Ignore`d. A later
+        // `restore_savepoint()` would then fail to free this transaction's pages, leaking them
+        // (reclaimed only by a full repair).
+        let (id, transaction_id) = {
+            let _tables = self.tables.lock().unwrap();
+            if self.dirty.load(Ordering::Acquire) {
+                return Err(SavepointError::InvalidSavepoint);
+            }
+            self.allocate_savepoint()?
+        };
         #[cfg(feature = "logging")]
         debug!("Creating savepoint id={id:?}, txn_id={transaction_id:?}");
 
