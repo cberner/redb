@@ -686,7 +686,12 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.allocated_pages.clone(),
                 );
                 drop(guard);
-                let existed = subtree.remove(value.borrow())?.is_some();
+                if subtree.remove(value.borrow())?.is_none() {
+                    // The value wasn't present, so the subtree is unmodified. Return early to
+                    // avoid needlessly copy-on-writing the parent tree (write amplification) and
+                    // to avoid flipping the subtree back to inline storage on a logical no-op.
+                    return Ok(false);
+                }
 
                 if let Some(BtreeHeader {
                     root: new_root,
@@ -744,7 +749,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                     self.tree.remove(key.borrow())?;
                 }
 
-                existed
+                true
             }
         };
 
