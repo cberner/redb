@@ -109,11 +109,15 @@ macro_rules! type_name_impl {
             )+
             result.push(')');
 
-            if Self::fixed_width().is_some() {
+            let any_user_defined = <$head>::type_name().is_user_defined()
+                $(|| <$tail>::type_name().is_user_defined())+;
+
+            let natural = if Self::fixed_width().is_some() {
                 TypeName::internal(&result)
             } else {
                 TypeName::internal2(&result)
-            }
+            };
+            natural.into_user_defined_if(any_user_defined)
         }
     };
 }
@@ -302,7 +306,9 @@ impl<T: Value> Value for (T,) {
     }
 
     fn type_name() -> TypeName {
-        TypeName::internal(&format!("({},)", T::type_name().name()))
+        let inner = T::type_name();
+        TypeName::internal(&format!("({},)", inner.name()))
+            .into_user_defined_if(inner.is_user_defined())
     }
 }
 

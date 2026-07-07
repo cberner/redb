@@ -154,12 +154,20 @@ impl InternalTableDefinition {
     ) -> Result<(), TableError> {
         self.check_match_untyped(table_type, name)?;
 
-        if self.private_key_type() != K::type_name() || self.private_value_type() != V::type_name()
-        {
+        let stored_key = self.private_key_type();
+        let stored_value = self.private_value_type();
+        // Accept the current type name, or the spelling an older redb version may have stored for
+        // the same type (see `TypeName::matches_legacy`).
+        let expected_key = K::type_name();
+        let expected_value = V::type_name();
+        let key_matches = stored_key == expected_key || expected_key.matches_legacy(&stored_key);
+        let value_matches =
+            stored_value == expected_value || expected_value.matches_legacy(&stored_value);
+        if !key_matches || !value_matches {
             return Err(TableError::TableTypeMismatch {
                 table: name.to_string(),
-                key: self.private_key_type(),
-                value: self.private_value_type(),
+                key: stored_key,
+                value: stored_value,
             });
         }
         if self.private_get_fixed_key_size() != K::fixed_width() {

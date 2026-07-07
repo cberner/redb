@@ -88,6 +88,8 @@ impl<T: Value> Value for Vec<T> {
     }
 
     fn type_name() -> TypeName {
-        TypeName::internal(&format!("Vec<{}>", T::type_name().name()))
+        let inner = T::type_name();
+        TypeName::internal(&format!("Vec<{}>", inner.name()))
+            .into_user_defined_if(inner.is_user_defined())
     }
 }

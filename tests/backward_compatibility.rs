@@ -2,6 +2,67 @@ use redb::{ReadableDatabase, ReadableTableMetadata};
 
 const ELEMENTS: usize = 3;
 
+// A user-defined value type whose type name deliberately collides with the built-in `u32` and
+// whose width and encoding match it. It implements both the current and the redb 2.6 `Value`
+// trait so the same table can be written by one version and read by the other.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct CollidingUserType;
+
+impl redb::Value for CollidingUserType {
+    type SelfType<'a> = u32;
+    type AsBytes<'a> = [u8; 4];
+
+    fn fixed_width() -> Option<usize> {
+        Some(4)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> u32
+    where
+        Self: 'a,
+    {
+        u32::from_le_bytes(data.try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a u32) -> [u8; 4]
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> redb::TypeName {
+        redb::TypeName::new("u32")
+    }
+}
+
+impl redb2_6::Value for CollidingUserType {
+    type SelfType<'a> = u32;
+    type AsBytes<'a> = [u8; 4];
+
+    fn fixed_width() -> Option<usize> {
+        Some(4)
+    }
+
+    fn from_bytes<'a>(data: &'a [u8]) -> u32
+    where
+        Self: 'a,
+    {
+        u32::from_le_bytes(data.try_into().unwrap())
+    }
+
+    fn as_bytes<'a, 'b: 'a>(value: &'a u32) -> [u8; 4]
+    where
+        Self: 'b,
+    {
+        value.to_le_bytes()
+    }
+
+    fn type_name() -> redb2_6::TypeName {
+        redb2_6::TypeName::new("u32")
+    }
+}
+
 trait TestData: redb::Value + redb2_6::Value {
     fn make_data_v2_6<'a>() -> [<Self as redb2_6::Value>::SelfType<'a>; ELEMENTS]
     where
@@ -414,4 +475,63 @@ fn restore_and_delete_redb2_6_persistent_savepoint() {
             value_for(i, 100).as_slice()
         );
     }
+}
+
+// A composite (`Option<T>`) of a user-defined type written by redb 2.6 stored its type name with
+// the `Internal` classification. The current version bubbles the inner user-defined classification
+// up to the composite, so opening such a table must succeed via the legacy `Internal` spelling.
+#[test]
+fn composite_of_user_type_created_by_redb2_6_still_opens() {
+    let tmpfile = create_tempfile();
+    {
+        let db = redb2_6::Database::builder()
+            .create_with_file_format_v3(true)
+            .create(tmpfile.path())
+            .unwrap();
+        let def: redb2_6::TableDefinition<u64, Option<CollidingUserType>> =
+            redb2_6::TableDefinition::new("table");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(def).unwrap();
+            table.insert(&1u64, &Some(7u32)).unwrap();
+            table.insert(&2u64, &None).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let db = redb::Database::open(tmpfile.path()).unwrap();
+    let def: redb::TableDefinition<u64, Option<CollidingUserType>> =
+        redb::TableDefinition::new("table");
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(def).unwrap();
+    assert_eq!(table.len().unwrap(), 2);
+    assert_eq!(table.get(&1u64).unwrap().unwrap().value(), Some(7u32));
+    assert_eq!(table.get(&2u64).unwrap().unwrap().value(), None);
+}
+
+// The bug this guards against: a composite of a user-defined type must never silently alias the
+// built-in composite with the same name string. Opening an `Option<user "u32">` table under the
+// built-in `Option<u32>` must now fail with a type mismatch rather than misinterpreting the data.
+#[test]
+fn composite_of_user_type_does_not_alias_builtin() {
+    let tmpfile = create_tempfile();
+    let db = redb::Database::create(tmpfile.path()).unwrap();
+    {
+        let def: redb::TableDefinition<u64, Option<CollidingUserType>> =
+            redb::TableDefinition::new("table");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(def).unwrap();
+            table.insert(&1u64, &Some(7u32)).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let builtin_def: redb::TableDefinition<u64, Option<u32>> = redb::TableDefinition::new("table");
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_table(builtin_def),
+        Err(redb::TableError::TableTypeMismatch { .. })
+    ));
+    txn.abort().unwrap();
 }
