@@ -6,6 +6,8 @@
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to
   shrink from a subtree back to inline storage, while another table of the same write transaction
   is used concurrently from a different thread.
+* Avoid unnecessary write amplification when removing a value that is not present from a multimap
+  table. Such a removal is now a no-op.
 * Fix a crash during a commit that resizes the database file leaving the database permanently
   unopenable, and reporting corruption on subsequent opens, even though every committed transaction
   was intact and fully recoverable.

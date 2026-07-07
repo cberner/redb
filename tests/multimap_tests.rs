@@ -594,3 +594,56 @@ fn multimap_remove_collapses_committed_subtree_to_inline() {
         .collect();
     assert_eq!(values, vec![small_a.to_vec(), small_b.to_vec()]);
 }
+
+#[test]
+fn multimap_remove_nonexistent_value_from_subtree_does_not_churn() {
+    // Removing a value that isn't present from a subtree-backed key is a logical no-op and must
+    // not rewrite the parent tree. There was a bug where MultimapTable::remove() re-inserted the
+    // unchanged collection into the parent tree unconditionally, copy-on-writing the root->leaf
+    // path and queuing the old pages to be freed even though nothing changed.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough values for key 0 to be promoted from inline storage to a subtree.
+        for v in 0..1000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Finalize the cleanup of the freed pages from the setup so the baseline is at steady state.
+    db.begin_write().unwrap().commit().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+
+    // Remove a value that was never inserted. This returns false and, with the fix, leaves the
+    // tree entirely untouched. Without the fix the parent tree is copy-on-written, so the old
+    // pages linger as not-yet-reclaimed frees and inflate the allocated page count.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        assert!(!table.remove(&0u64, &123_456u64).unwrap());
+        assert_eq!(table.len().unwrap(), 1000);
+    }
+    write_txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+    assert_eq!(
+        baseline, after,
+        "removing a nonexistent value from a subtree-backed key must not allocate or free pages"
+    );
+
+    // The contents are unchanged and still fully readable.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 1000);
+    assert_eq!(table.get(&0u64).unwrap().len(), 1000);
+}
