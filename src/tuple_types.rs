@@ -117,7 +117,7 @@ macro_rules! type_name_impl {
             } else {
                 TypeName::internal2(&result)
             };
-            natural.into_user_defined_if(any_user_defined)
+            natural.into_composite(any_user_defined)
         }
     };
 }
@@ -307,8 +307,7 @@ impl<T: Value> Value for (T,) {
 
     fn type_name() -> TypeName {
         let inner = T::type_name();
-        TypeName::internal(&format!("({},)", inner.name()))
-            .into_user_defined_if(inner.is_user_defined())
+        TypeName::internal(&format!("({},)", inner.name())).into_composite(inner.is_user_defined())
     }
 }
 
