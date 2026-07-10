@@ -509,6 +509,38 @@ fn composite_of_user_type_created_by_redb2_6_still_opens() {
     assert_eq!(table.get(&2u64).unwrap().unwrap().value(), None);
 }
 
+// redb 2.6 wrote `Option<u32>` and `Option<user "u32">` with the same stored type name:
+// `Internal + Option<u32>`. Current redb accepts that legacy spelling for built-in composites so
+// old built-in tables remain readable, which means this already-ambiguous legacy table also opens
+// under the built-in spelling.
+#[test]
+fn legacy_colliding_user_composite_can_still_open_as_builtin() {
+    let tmpfile = create_tempfile();
+    {
+        let db = redb2_6::Database::builder()
+            .create_with_file_format_v3(true)
+            .create(tmpfile.path())
+            .unwrap();
+        let def: redb2_6::TableDefinition<u64, Option<CollidingUserType>> =
+            redb2_6::TableDefinition::new("table");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(def).unwrap();
+            table.insert(&1u64, &Some(7u32)).unwrap();
+            table.insert(&2u64, &None).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let db = redb::Database::open(tmpfile.path()).unwrap();
+    let def: redb::TableDefinition<u64, Option<u32>> = redb::TableDefinition::new("table");
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(def).unwrap();
+    assert_eq!(table.len().unwrap(), 2);
+    assert_eq!(table.get(&1u64).unwrap().unwrap().value(), Some(7u32));
+    assert_eq!(table.get(&2u64).unwrap().unwrap().value(), None);
+}
+
 // The bug this guards against: a composite of a user-defined type must never silently alias the
 // built-in composite with the same name string. Opening an `Option<user "u32">` table under the
 // built-in `Option<u32>` must now fail with a type mismatch rather than misinterpreting the data.
@@ -531,6 +563,32 @@ fn composite_of_user_type_does_not_alias_builtin() {
     let txn = db.begin_write().unwrap();
     assert!(matches!(
         txn.open_table(builtin_def),
+        Err(redb::TableError::TableTypeMismatch { .. })
+    ));
+    txn.abort().unwrap();
+}
+
+// Built-in composites use the new Internal3 classification, so the legacy compatibility rule for
+// a user composite must not allow it to open a newly created built-in composite in reverse.
+#[test]
+fn builtin_composite_does_not_alias_user_type() {
+    let tmpfile = create_tempfile();
+    let db = redb::Database::create(tmpfile.path()).unwrap();
+    {
+        let def: redb::TableDefinition<u64, Option<u32>> = redb::TableDefinition::new("table");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(def).unwrap();
+            table.insert(&1u64, &Some(7u32)).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let user_def: redb::TableDefinition<u64, Option<CollidingUserType>> =
+        redb::TableDefinition::new("table");
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_table(user_def),
         Err(redb::TableError::TableTypeMismatch { .. })
     ));
     txn.abort().unwrap();

@@ -14,6 +14,8 @@ enum TypeClassification {
     // Used by variable width tuple encoding in version 3.0 and newer. This differentiates the encoding
     // from the old encoding used previously
     Internal2,
+    // Used by composite types written by version 4.2 and newer
+    Internal3,
 }
 
 impl TypeClassification {
@@ -22,6 +24,7 @@ impl TypeClassification {
             TypeClassification::Internal => 1,
             TypeClassification::UserDefined => 2,
             TypeClassification::Internal2 => 3,
+            TypeClassification::Internal3 => 4,
         }
     }
 
@@ -30,6 +33,7 @@ impl TypeClassification {
             1 => TypeClassification::Internal,
             2 => TypeClassification::UserDefined,
             3 => TypeClassification::Internal2,
+            4 => TypeClassification::Internal3,
             _ => unreachable!(),
         }
     }
@@ -39,10 +43,10 @@ impl TypeClassification {
 pub struct TypeName {
     classification: TypeClassification,
     name: String,
-    // In-memory only; never serialized. For a composite (`Option`, `Vec`, tuple, array) of a
-    // user-defined type, whose classification is bubbled up to user-defined, this records the
-    // classification that older redb versions stored, so that their tables still match on open.
-    // `None` for leaf types, flat user-defined types, and every deserialized name.
+    // In-memory only; never serialized. For a composite (`Option`, `Vec`, tuple, array), this
+    // records the classification that older redb versions stored, so that their tables still
+    // match on open. That old spelling is ambiguous for colliding user and built-in composites.
+    // `None` for leaf types, flat user-defined types, and deserialized names.
     legacy_classification: Option<TypeClassification>,
 }
 
@@ -109,24 +113,27 @@ impl TypeName {
         matches!(self.classification, TypeClassification::UserDefined)
     }
 
-    // Reclassify this (composite) type name as user-defined when it wraps a user-defined type.
-    // A composite such as `Option<T>` builds its name only from the inner type's name string,
-    // which would let `Option<u32>` (built-in) collide with `Option<MyType>` where `MyType` is a
-    // user type named "u32". Bubbling the user-defined classification up keeps them distinct, and
-    // the classification being replaced is remembered so that older databases still match on open.
-    pub(crate) fn into_user_defined_if(mut self, user_defined: bool) -> Self {
+    // Classify a composite as user-defined when it wraps a user-defined type, and Internal3
+    // otherwise. The previous natural classification is retained so older databases still match.
+    pub(crate) fn into_composite(mut self, user_defined: bool) -> Self {
+        debug_assert!(matches!(
+            &self.classification,
+            TypeClassification::Internal | TypeClassification::Internal2
+        ));
+        self.legacy_classification = Some(self.classification.clone());
         if user_defined {
-            self.legacy_classification = Some(self.classification.clone());
             self.classification = TypeClassification::UserDefined;
+        } else {
+            self.classification = TypeClassification::Internal3;
         }
         self
     }
 
     // Whether `stored` (read from an existing database) is the spelling an older redb version
-    // wrote for this same type. Before composites of a user-defined type were bubbled up, they
-    // were classified `Internal` (or `Internal2` for variable width tuples); accepting that
-    // spelling keeps those databases readable, while a flat user-defined type -- which has no
-    // recorded legacy classification -- never matches a differently classified stored name.
+    // wrote for this same composite. Composites were classified `Internal` (or `Internal2` for
+    // variable-width tuples); accepting that spelling keeps those databases readable, but cannot
+    // distinguish legacy colliding user composites from built-in composites. A flat user-defined
+    // type has no recorded legacy classification.
     pub(crate) fn matches_legacy(&self, stored: &TypeName) -> bool {
         if let Some(natural) = &self.legacy_classification {
             *natural == stored.classification && self.name == stored.name
@@ -337,7 +344,7 @@ impl<T: Value> Value for Option<T> {
     fn type_name() -> TypeName {
         let inner = T::type_name();
         TypeName::internal(&format!("Option<{}>", inner.name()))
-            .into_user_defined_if(inner.is_user_defined())
+            .into_composite(inner.is_user_defined())
     }
 }
 
@@ -428,7 +435,7 @@ impl<const N: usize> Value for &[u8; N] {
     }
 
     fn type_name() -> TypeName {
-        TypeName::internal(&format!("[u8;{N}]"))
+        TypeName::internal(&format!("[u8;{N}]")).into_composite(false)
     }
 }
 
@@ -502,7 +509,7 @@ impl<const N: usize, T: Value> Value for [T; N] {
         // This requires that the binary encoding be the same
         let inner = T::type_name();
         TypeName::internal(&format!("[{};{N}]", inner.name()))
-            .into_user_defined_if(inner.is_user_defined())
+            .into_composite(inner.is_user_defined())
     }
 }
 
@@ -761,34 +768,39 @@ mod tests {
     }
 
     #[test]
-    fn builtin_composites_are_unchanged() {
-        // Composites of only built-in types must keep their exact classification (and therefore
-        // their on-disk bytes), so existing databases open unchanged.
-        assert!(!<Option<u32> as Value>::type_name().is_user_defined());
-        assert!(!<Vec<u32> as Value>::type_name().is_user_defined());
-        assert!(!<[u32; 3] as Value>::type_name().is_user_defined());
-        assert!(!<(u32,) as Value>::type_name().is_user_defined());
-        // Fixed-width tuple -> Internal; variable-width tuple -> Internal2. Neither is user-defined.
-        assert!(!<(u32, u64) as Value>::type_name().is_user_defined());
-        assert!(!<(u32, &str) as Value>::type_name().is_user_defined());
-        assert_eq!(
-            <(u32, u64) as Value>::type_name(),
-            TypeName::internal("(u32,u64)")
-        );
-        assert_eq!(
-            <(u32, &str) as Value>::type_name(),
-            TypeName::internal2("(u32,&str)")
-        );
-        // Nesting only built-in types never bubbles.
-        assert!(!<Vec<Option<u32>> as Value>::type_name().is_user_defined());
+    fn builtin_composites_use_internal3_and_match_legacy() {
+        fn assert_internal3(name: TypeName) {
+            assert!(matches!(name.classification, TypeClassification::Internal3));
+        }
 
-        // A built-in composite records no legacy classification, so it never legacy-matches a
-        // differently classified stored name.
+        assert_internal3(<Option<u32> as Value>::type_name());
+        assert_internal3(<Vec<u32> as Value>::type_name());
+        assert_internal3(<[u32; 3] as Value>::type_name());
+        assert_internal3(<&[u8; 3] as Value>::type_name());
+        assert_internal3(<(u32,) as Value>::type_name());
+        assert_internal3(<(u32, u64) as Value>::type_name());
+        assert_internal3(<(u32, &str) as Value>::type_name());
+        assert_internal3(<Vec<Option<u32>> as Value>::type_name());
+
+        // The owned and borrowed byte-array types remain compatible.
+        assert_eq!(
+            <[u8; 3] as Value>::type_name(),
+            <&[u8; 3] as Value>::type_name()
+        );
+
+        // Built-in composites accept their pre-4.2 classifications. Variable-width tuples only
+        // accept Internal2, preserving the encoding distinction introduced in version 3.0.
         assert!(
-            !<Option<u32> as Value>::type_name().matches_legacy(&TypeName::internal("Option<u32>"))
+            <Option<u32> as Value>::type_name().matches_legacy(&TypeName::internal("Option<u32>"))
         );
         assert!(
-            !<(u32, u64) as Value>::type_name().matches_legacy(&TypeName::internal("(u32,u64)"))
+            <(u32, u64) as Value>::type_name().matches_legacy(&TypeName::internal("(u32,u64)"))
+        );
+        assert!(
+            <(u32, &str) as Value>::type_name().matches_legacy(&TypeName::internal2("(u32,&str)"))
+        );
+        assert!(
+            !<(u32, &str) as Value>::type_name().matches_legacy(&TypeName::internal("(u32,&str)"))
         );
     }
 
@@ -817,7 +829,7 @@ mod tests {
         );
 
         // Only the classification differs; the human-readable name string is unchanged, and the
-        // user composite is now classified user-defined.
+        // user composite is classified user-defined.
         assert_eq!(
             <Option<u32> as Value>::type_name().name(),
             <Option<FakeU32> as Value>::type_name().name()

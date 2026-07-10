@@ -71,11 +71,13 @@
   occurred while recovering from an earlier crash. Triggering it required two crashes -- one
   interrupting a commit and another during the subsequent repair on the next open -- and it did
   not affect transactions committed with two-phase commit.
-* Fix composite types (`Option`, `Vec`, tuples, and arrays) of a user-defined type sharing a
+* Fix new composite types (`Option`, `Vec`, tuples, and arrays) of a user-defined type sharing a
   type identity with the same composite of a built-in type when the two happened to have the same
   name. A table using such a composite of a user type can no longer be silently opened under the
   built-in composite (and vice versa); the mismatch is now reported as `TableError::TableTypeMismatch`.
-  Existing databases created by older versions remain readable.
+  Existing databases created by older versions remain readable. If an older database already used
+  such a colliding composite name, its stored type identity remains ambiguous and may still open
+  under either spelling.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.
