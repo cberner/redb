@@ -70,19 +70,6 @@ fn main() {
         benchmark(table, tmpfile.path())
     };
 
-    let sled_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
-
-        let db = sled::Config::new()
-            .path(tmpfile.path())
-            .cache_capacity(CACHE_SIZE as u64)
-            .open()
-            .unwrap();
-
-        let table = SledBenchDatabase::new(&db, tmpfile.path());
-        benchmark(table, tmpfile.path())
-    };
-
     let fjall_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
@@ -113,7 +100,6 @@ fn main() {
         redb_results,
         lmdb_results,
         rocksdb_results,
-        sled_results,
         fjall_results,
         sqlite_results,
     ];
@@ -146,7 +132,7 @@ fn main() {
     let mut table = comfy_table::Table::new();
     table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled", "fjall", "sqlite"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb", "fjall", "sqlite"]);
     for row in rows {
         table.add_row(row);
     }
