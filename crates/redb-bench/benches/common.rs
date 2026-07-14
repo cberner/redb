@@ -1980,7 +1980,7 @@ impl BenchReader for FjallBenchReader<'_> {
 }
 
 pub struct FjallBenchIterator {
-    iter: Box<(dyn DoubleEndedIterator<Item = fjall::Result<fjall::KvPair>> + 'static)>,
+    iter: Box<dyn DoubleEndedIterator<Item = fjall::Result<fjall::KvPair>> + 'static>,
 }
 
 impl BenchIterator for FjallBenchIterator {
