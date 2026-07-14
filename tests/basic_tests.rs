@@ -738,7 +738,7 @@ fn extract_if_mostly_forward_occasional_next_back() {
             let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
             let mut i = 0u64;
             loop {
-                let entry = if i % 50 == 0 {
+                let entry = if i.is_multiple_of(50) {
                     extracted.next_back()
                 } else {
                     extracted.next()
