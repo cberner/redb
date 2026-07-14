@@ -112,25 +112,13 @@ fn main() {
         benchmark(table)
     };
 
-    let sled_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
-        let db = sled::Config::new().path(tmpfile.path()).open().unwrap();
-        let table = SledBenchDatabase::new(&db, tmpfile.path());
-        benchmark(table)
-    };
-
     let mut rows = Vec::new();
 
     for (benchmark, _duration) in &redb_latency_results {
         rows.push(vec![benchmark.to_string()]);
     }
 
-    for results in [
-        redb_latency_results,
-        lmdb_results,
-        rocksdb_results,
-        sled_results,
-    ] {
+    for results in [redb_latency_results, lmdb_results, rocksdb_results] {
         for (i, (_benchmark, duration)) in results.iter().enumerate() {
             rows[i].push(format!("{}ms", duration.as_millis()));
         }
@@ -138,7 +126,7 @@ fn main() {
 
     let mut table = comfy_table::Table::new();
     table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "sled"]);
+    table.set_header(["", "redb", "lmdb", "rocksdb"]);
     for row in rows {
         table.add_row(row);
     }
