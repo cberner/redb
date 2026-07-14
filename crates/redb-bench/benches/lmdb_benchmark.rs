@@ -86,9 +86,9 @@ fn main() {
     let fjall_results = {
         let tmpfile: TempDir = tempfile::tempdir_in(&tmpdir).unwrap();
 
-        let mut db = fjall::Config::new(tmpfile.path())
+        let mut db = fjall::SingleWriterTxDatabase::builder(tmpfile.path())
             .cache_size(CACHE_SIZE.try_into().unwrap())
-            .open_transactional()
+            .open()
             .unwrap();
 
         let table = FjallBenchDatabase::new(&mut db);

@@ -1,3 +1,4 @@
+use fjall::Readable as _;
 use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode};
 use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
 use rocksdb::{
@@ -1861,12 +1862,12 @@ impl BenchIterator for RocksdbBenchIterator<'_> {
 }
 
 pub struct FjallBenchDatabase<'a> {
-    db: &'a mut fjall::TxKeyspace,
+    db: &'a mut fjall::SingleWriterTxDatabase,
 }
 
 impl<'a> FjallBenchDatabase<'a> {
     #[allow(dead_code)]
-    pub fn new(db: &'a mut fjall::TxKeyspace) -> Self {
+    pub fn new(db: &'a mut fjall::SingleWriterTxDatabase) -> Self {
         FjallBenchDatabase { db }
     }
 }
@@ -1894,7 +1895,7 @@ impl BenchDatabase for FjallBenchDatabase<'_> {
 }
 
 pub struct FjallBenchDatabaseConnection<'a> {
-    db: &'a fjall::TxKeyspace,
+    db: &'a fjall::SingleWriterTxDatabase,
     sync: bool,
 }
 
@@ -1914,7 +1915,7 @@ impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
     }
 
     fn write_transaction(&self) -> Self::W<'_> {
-        let part = self.db.open_partition("test", Default::default()).unwrap();
+        let part = self.db.keyspace("test", Default::default).unwrap();
         let txn = self.db.write_tx();
         FjallBenchWriteTransaction {
             txn,
@@ -1925,15 +1926,15 @@ impl BenchDatabaseConnection for FjallBenchDatabaseConnection<'_> {
     }
 
     fn read_transaction(&self) -> Self::R<'_> {
-        let part = self.db.open_partition("test", Default::default()).unwrap();
+        let part = self.db.keyspace("test", Default::default).unwrap();
         let txn = self.db.read_tx();
         FjallBenchReadTransaction { txn, part }
     }
 }
 
 pub struct FjallBenchReadTransaction {
-    part: fjall::TxPartitionHandle,
-    txn: fjall::ReadTransaction,
+    part: fjall::SingleWriterTxKeyspace,
+    txn: fjall::Snapshot,
 }
 
 impl BenchReadTransaction for FjallBenchReadTransaction {
@@ -1949,8 +1950,8 @@ impl BenchReadTransaction for FjallBenchReadTransaction {
 }
 
 pub struct FjallBenchReader<'a> {
-    part: &'a fjall::TxPartitionHandle,
-    txn: &'a fjall::ReadTransaction,
+    part: &'a fjall::SingleWriterTxKeyspace,
+    txn: &'a fjall::Snapshot,
 }
 
 impl BenchReader for FjallBenchReader<'_> {
@@ -1969,9 +1970,7 @@ impl BenchReader for FjallBenchReader<'_> {
 
     fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
         let iter = self.txn.range(self.part, key..);
-        FjallBenchIterator {
-            iter: Box::new(iter),
-        }
+        FjallBenchIterator { iter }
     }
 
     fn len(&mut self) -> u64 {
@@ -1980,7 +1979,7 @@ impl BenchReader for FjallBenchReader<'_> {
 }
 
 pub struct FjallBenchIterator {
-    iter: Box<dyn DoubleEndedIterator<Item = fjall::Result<fjall::KvPair>> + 'static>,
+    iter: fjall::Iter,
 }
 
 impl BenchIterator for FjallBenchIterator {
@@ -1990,14 +1989,14 @@ impl BenchIterator for FjallBenchIterator {
         Self: 'a;
 
     fn next(&mut self) -> Option<(Self::Output<'_>, Self::Output<'_>)> {
-        self.iter.next().map(|item| item.unwrap())
+        self.iter.next().map(|item| item.into_inner().unwrap())
     }
 }
 
 pub struct FjallBenchWriteTransaction<'db> {
-    keyspace: &'db fjall::TxKeyspace,
-    part: fjall::TxPartitionHandle,
-    txn: fjall::WriteTransaction<'db>,
+    keyspace: &'db fjall::SingleWriterTxDatabase,
+    part: fjall::SingleWriterTxKeyspace,
+    txn: fjall::SingleWriterWriteTx<'db>,
     sync: bool,
 }
 
@@ -2029,8 +2028,8 @@ impl<'db> BenchWriteTransaction for FjallBenchWriteTransaction<'db> {
 }
 
 pub struct FjallBenchInserter<'txn, 'db> {
-    part: &'txn fjall::TxPartitionHandle,
-    txn: &'txn mut fjall::WriteTransaction<'db>,
+    part: &'txn fjall::SingleWriterTxKeyspace,
+    txn: &'txn mut fjall::SingleWriterWriteTx<'db>,
 }
 
 impl BenchInserter for FjallBenchInserter<'_, '_> {
@@ -2059,6 +2058,7 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
             .txn
             .iter(self.part)
             .next()
+            .map(fjall::Guard::into_inner)
             .transpose()
             .map_err(|_| ())?;
         if let Some((key, _)) = &entry {
@@ -2072,6 +2072,7 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
             .txn
             .iter(self.part)
             .next_back()
+            .map(fjall::Guard::into_inner)
             .transpose()
             .map_err(|_| ())?;
         if let Some((key, _)) = &entry {
@@ -2085,7 +2086,7 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         {
             let iter = self.txn.iter(self.part);
             for entry in iter {
-                let (k, v) = entry.map_err(|_| ())?;
+                let (k, v) = entry.into_inner().map_err(|_| ())?;
                 if !predicate(&k, &v) {
                     keys.push(k);
                 }
@@ -2112,7 +2113,7 @@ impl BenchInserter for FjallBenchInserter<'_, '_> {
         {
             let iter = self.txn.range::<&[u8], _>(self.part, range);
             for entry in iter {
-                let (k, v) = entry.map_err(|_| ())?;
+                let (k, v) = entry.into_inner().map_err(|_| ())?;
                 if predicate(&k, &v) {
                     entries.push((k, v));
                 }
