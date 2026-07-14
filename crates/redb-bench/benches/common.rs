@@ -339,7 +339,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         let mut counter: u64 = 0;
         let removed = inserter
             .retain(|_, _| {
-                let keep = counter % 2 == 0;
+                let keep = counter.is_multiple_of(2);
                 counter += 1;
                 keep
             })
