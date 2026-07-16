@@ -116,6 +116,11 @@ impl UntypedBtree {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
+                    if path.parents().contains(&child_page) || path.page_number() == child_page {
+                        return Err(crate::StorageError::Corrupted(
+                            "Cycle detected in Btree pages".to_string(),
+                        ));
+                    }
                     let child_path = path.with_child(child_page);
                     self.visit_pages_helper(child_path, visitor)?;
                 }
@@ -877,7 +882,8 @@ impl RawBtree {
 
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some(header) = self.root {
-            self.verify_checksum_helper(header.root, header.checksum)
+            let mut visited = Vec::new();
+            self.verify_checksum_helper(header.root, header.checksum, &mut visited)
         } else {
             Ok(true)
         }
@@ -887,10 +893,16 @@ impl RawBtree {
         &self,
         page_number: PageNumber,
         expected_checksum: Checksum,
+        visited: &mut Vec<PageNumber>,
     ) -> Result<bool> {
+        if visited.contains(&page_number) {
+            return Ok(false);
+        }
+        visited.push(page_number);
+
         let page = self.mem.get_page(page_number, self.hint)?;
         let node_mem = page.memory();
-        Ok(match node_mem[0] {
+        let result = Ok(match node_mem[0] {
             LEAF => {
                 if let Ok(computed) =
                     leaf_checksum(&page, self.fixed_key_size, self.fixed_value_size)
@@ -913,6 +925,7 @@ impl RawBtree {
                     if !self.verify_checksum_helper(
                         accessor.child_page(i).unwrap(),
                         accessor.child_checksum(i).unwrap(),
+                        visited,
                     )? {
                         return Ok(false);
                     }
@@ -920,7 +933,10 @@ impl RawBtree {
                 true
             }
             _ => false,
-        })
+        });
+
+        visited.pop();
+        result
     }
 }
 
@@ -1239,3 +1255,47 @@ fn stats_helper(
         _ => unreachable!(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_page_path_cycle_detection() {
+        let p1 = PageNumber { region: 0, page_index: 1, page_order: 0 };
+        let p2 = PageNumber { region: 0, page_index: 2, page_order: 0 };
+        let p3 = PageNumber { region: 0, page_index: 3, page_order: 0 };
+
+        let path = PagePath::new_root(p1);
+        // No cycle yet: children p2 and p3 are clean
+        assert!(!(path.parents().contains(&p2) || path.page_number() == p2));
+
+        let path = path.with_child(p2);
+        assert!(!(path.parents().contains(&p3) || path.page_number() == p3));
+
+        // Self-loop on current page (p2)
+        assert!(path.parents().contains(&p2) || path.page_number() == p2);
+
+        // Loop back to ancestor (p1)
+        assert!(path.parents().contains(&p1) || path.page_number() == p1);
+    }
+
+    #[test]
+    fn test_verify_checksum_cycle_detection() {
+        let p1 = PageNumber { region: 0, page_index: 1, page_order: 0 };
+        let p2 = PageNumber { region: 0, page_index: 2, page_order: 0 };
+
+        let mut visited = Vec::new();
+        visited.push(p1);
+        visited.push(p2);
+
+        // p1 and p2 are in the active path, so they should be detected as cycles
+        assert!(visited.contains(&p1));
+        assert!(visited.contains(&p2));
+
+        // p3 is not in the active path, so no cycle
+        let p3 = PageNumber { region: 0, page_index: 3, page_order: 0 };
+        assert!(!visited.contains(&p3));
+    }
+}
+
