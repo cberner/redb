@@ -40,6 +40,7 @@ podman run --rm \
     --user="$(id -u):$(id -g)" \
     --http-proxy=false \
     --tmpfs=/tmp:rw,nodev,nosuid,size=2g \
+    --volume=/scratch \
     --volume="$TARGET_VOLUME:/target:rw" \
     --env=CARGO_BUILD_JOBS=4 \
     --env=CARGO_HOME=/tmp/cargo \

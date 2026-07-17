@@ -1,8 +1,10 @@
 use tempfile::{NamedTempFile, TempDir};
 
+mod benchmark_dir;
+use benchmark_dir::benchmark_dir;
+
 use rand::RngExt;
 use rand::prelude::SliceRandom;
-use std::env::current_dir;
 use std::fs::OpenOptions;
 use std::io::{IoSlice, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -462,21 +464,21 @@ fn vec_bench() {
 fn main() {
     // Benchmark lmdb against raw read()/write() performance
     {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(benchmark_dir()).unwrap();
         lmdb_bench(tmpfile.path());
     }
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         readwrite_bench(tmpfile.path());
     }
     #[cfg(target_os = "linux")]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         uring_bench(tmpfile.path());
     }
     #[cfg(unix)]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         mmap_bench(tmpfile.path());
         mmap_anon_bench();
     }

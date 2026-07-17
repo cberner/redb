@@ -1,6 +1,8 @@
-use std::env::current_dir;
 use std::{fs, process, thread};
 use tempfile::NamedTempFile;
+
+mod benchmark_dir;
+use benchmark_dir::benchmark_dir;
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -17,7 +19,7 @@ fn benchmark(values: &[u128], num_threads: usize) {
     assert_eq!(ELEMENTS % num_threads as u64, 0);
     let elements_per_thread = (ELEMENTS / num_threads as u64) as usize;
 
-    let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
     let db = Database::builder().create(tmpfile.path()).unwrap();
 
     let table_names: Vec<String> = (0..num_threads).map(|i| format!("table_{i}")).collect();
@@ -69,7 +71,7 @@ fn main() {
         values.push(rng.random());
     }
 
-    let tmpdir = current_dir().unwrap().join(".benchmark");
+    let tmpdir = benchmark_dir().join(".benchmark");
     fs::create_dir(&tmpdir).unwrap();
 
     let tmpdir2 = tmpdir.clone();

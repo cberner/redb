@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use std::env::current_dir;
 use tempfile::{NamedTempFile, TempDir};
+
+mod benchmark_dir;
+use benchmark_dir::benchmark_dir;
 
 mod common;
 use common::*;
@@ -61,14 +63,14 @@ fn main() {
     let _ = env_logger::try_init();
 
     let redb_results = {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         let mut db = redb::Database::create(tmpfile.path()).unwrap();
         let table = RedbBenchDatabase::new(&mut db);
         benchmark(table)
     };
 
     let lmdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(benchmark_dir()).unwrap();
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .map_size(10 * 4096 * 1024 * 1024)
@@ -80,7 +82,7 @@ fn main() {
     };
 
     let rocksdb_results = {
-        let tmpfile: TempDir = tempfile::tempdir_in(current_dir().unwrap()).unwrap();
+        let tmpfile: TempDir = tempfile::tempdir_in(benchmark_dir()).unwrap();
 
         let mut bb = rocksdb::BlockBasedOptions::default();
         bb.set_block_cache(&rocksdb::Cache::new_lru_cache(4 * 1_024 * 1_024 * 1_024));
