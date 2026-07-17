@@ -1262,9 +1262,21 @@ mod tests {
 
     #[test]
     fn test_page_path_cycle_detection() {
-        let p1 = PageNumber { region: 0, page_index: 1, page_order: 0 };
-        let p2 = PageNumber { region: 0, page_index: 2, page_order: 0 };
-        let p3 = PageNumber { region: 0, page_index: 3, page_order: 0 };
+        let p1 = PageNumber {
+            region: 0,
+            page_index: 1,
+            page_order: 0,
+        };
+        let p2 = PageNumber {
+            region: 0,
+            page_index: 2,
+            page_order: 0,
+        };
+        let p3 = PageNumber {
+            region: 0,
+            page_index: 3,
+            page_order: 0,
+        };
 
         let path = PagePath::new_root(p1);
         // No cycle yet: children p2 and p3 are clean
@@ -1282,20 +1294,118 @@ mod tests {
 
     #[test]
     fn test_verify_checksum_cycle_detection() {
-        let p1 = PageNumber { region: 0, page_index: 1, page_order: 0 };
-        let p2 = PageNumber { region: 0, page_index: 2, page_order: 0 };
+        let p1 = PageNumber {
+            region: 0,
+            page_index: 1,
+            page_order: 0,
+        };
+        let p2 = PageNumber {
+            region: 0,
+            page_index: 2,
+            page_order: 0,
+        };
 
-        let mut visited = Vec::new();
-        visited.push(p1);
-        visited.push(p2);
+        let visited = [p1, p2];
 
         // p1 and p2 are in the active path, so they should be detected as cycles
         assert!(visited.contains(&p1));
         assert!(visited.contains(&p2));
 
         // p3 is not in the active path, so no cycle
-        let p3 = PageNumber { region: 0, page_index: 3, page_order: 0 };
+        let p3 = PageNumber {
+            region: 0,
+            page_index: 3,
+            page_order: 0,
+        };
         assert!(!visited.contains(&p3));
     }
-}
 
+    #[test]
+    fn test_cycle_detection_in_btree() {
+        use crate::tree_store::btree_base::RawBranchBuilder;
+        use crate::tree_store::{
+            AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+        };
+
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+        let mem = Arc::new(mem);
+        let page_allocator = PageAllocator::new(mem.clone(), AllocationPolicy::Default);
+        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let mut allocated_guard = allocated_pages.lock().unwrap();
+
+        let mut p1_mut = page_allocator
+            .allocate(PAGE_SIZE, &mut allocated_guard)
+            .unwrap();
+        let mut p2_mut = page_allocator
+            .allocate(PAGE_SIZE, &mut allocated_guard)
+            .unwrap();
+
+        let p1 = p1_mut.get_page_number();
+        let p2 = p2_mut.get_page_number();
+
+        // Write p2 first, pointing to p1 with a dummy checksum (e.g. 0)
+        {
+            let mut builder2 = RawBranchBuilder::new(p2_mut.memory_mut(), 1, Some(8));
+            builder2.write_first_page(p1, 0);
+            builder2.write_nth_key(b"key12345", p1, 0, 0);
+        }
+
+        // Compute checksum of p2
+        let p2_checksum = branch_checksum(&p2_mut, Some(8)).unwrap();
+
+        // Write p1 pointing to p2 with p2_checksum
+        {
+            let mut builder1 = RawBranchBuilder::new(p1_mut.memory_mut(), 1, Some(8));
+            builder1.write_first_page(p2, p2_checksum);
+            builder1.write_nth_key(b"key12345", p2, p2_checksum, 0);
+        }
+
+        // Compute checksum of p1
+        let p1_checksum = branch_checksum(&p1_mut, Some(8)).unwrap();
+
+        drop(p1_mut);
+        drop(p2_mut);
+        drop(allocated_guard);
+
+        // Construct the UntypedBtree and RawBtree
+        let header = BtreeHeader {
+            root: p1,
+            checksum: p1_checksum,
+            length: 1,
+        };
+
+        let resolver = PageResolver::new(mem);
+        let raw_btree = RawBtree::new(
+            Some(header),
+            Some(8),
+            Some(8),
+            resolver.clone(),
+            PageHint::None,
+        );
+        let untyped_btree =
+            UntypedBtree::new(Some(header), resolver, PageHint::None, Some(8), Some(8));
+
+        // Test RawBtree verify_checksum cycle detection: should return Ok(false) due to cycle
+        let verify_res = raw_btree.verify_checksum();
+        assert!(verify_res.is_ok());
+        assert!(!verify_res.unwrap());
+
+        // Test UntypedBtree visit_all_pages cycle detection: should return Err containing "Cycle detected"
+        let visit_res = untyped_btree.visit_all_pages(|_| Ok(()));
+        assert!(visit_res.is_err());
+        let err_str = format!("{:?}", visit_res.err().unwrap());
+        assert!(
+            err_str.contains("Cycle detected in Btree pages"),
+            "Expected cycle error, got: {err_str}"
+        );
+    }
+}
