@@ -47,10 +47,13 @@ are any future changes to it.
 * Savepoints and rollbacks
 
 ## Development
-To run all the tests and benchmarks a few extra dependencies are required:
-* `cargo install cargo-deny --locked`
-* `cargo install cargo-fuzz --locked`
-* `apt install libclang-dev`
+
+[`just`](https://github.com/casey/just) and rootless
+[`podman`](https://podman.io/) are required.
+Toolchain setup, dependency vendoring, and `cargo-deny` checks may use network access without
+compiling project dependencies. Other development recipes continue to run on
+the host. Cargo build artifacts are cached in the `redb-sandbox-target` Podman
+volume; remove that volume to force a clean sandbox build.
 
 ## Benchmarks
 redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb

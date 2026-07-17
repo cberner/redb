@@ -130,7 +130,7 @@ jobs:
         run: just fuzz_ci
 
       - name: Run tests
-        run: just test_all
+        run: just test_all_no_sandbox
 
       - name: Run CPython wrapper tests
         if: runner.os != 'Windows'

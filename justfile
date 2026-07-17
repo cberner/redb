@@ -1,23 +1,34 @@
 build: pre
-    cargo build --all-targets --all-features
-    cargo doc
+    ./scripts/podman-sandbox.sh 'cargo build --frozen --all-targets --all-features'
+    ./scripts/podman-sandbox.sh 'cargo doc --frozen'
 
 build_all: pre_all
-    cargo build --all --all-targets --all-features
-    cargo doc --all --no-deps
+    ./scripts/podman-sandbox.sh 'cargo build --frozen --all --all-targets --all-features'
+    ./scripts/podman-sandbox.sh 'cargo doc --frozen --all --no-deps'
 
-pre:
+pre: _audit _checks
+
+pre_no_sandbox: _audit _checks_no_sandbox
+
+_audit:
     cargo deny --workspace --all-features check licenses advisories
     cargo fmt --all -- --check
+
+_checks:
+    ./scripts/podman-sandbox.sh 'just _checks_no_sandbox'
+
+_checks_no_sandbox:
     cargo clippy --all-targets --all-features
 
-pre_all:
-    cargo deny --workspace --all-features check licenses advisories
-    cargo fmt --all -- --check
-    cargo clippy --all --all-targets --all-features
+pre_all: _audit _checks_all
 
-release: pre
-    cargo build --release
+pre_all_no_sandbox: _audit _checks_all_no_sandbox
+
+_checks_all:
+    ./scripts/podman-sandbox.sh 'just _checks_all_no_sandbox'
+
+_checks_all_no_sandbox:
+    cargo clippy --all --all-targets --all-features
 
 flamegraph:
     cargo flamegraph -p redb-bench --bench redb_benchmark
@@ -30,15 +41,23 @@ publish_py: test_py
 test_py: install_py
     python3 -m pytest ./crates/redb-python/test
 
-install_py: pre
+install_py: pre_no_sandbox
     maturin develop --manifest-path=./crates/redb-python/Cargo.toml
     python3 -m pip install pytest hypothesis
 
 test: pre
-    RUST_BACKTRACE=1 cargo test --all-features
+    ./scripts/podman-sandbox.sh 'RUST_BACKTRACE=1 cargo test --frozen --all-features'
 
 test_all: build_all
-    RUST_BACKTRACE=1 cargo test --all --all-features
+    ./scripts/podman-sandbox.sh 'RUST_BACKTRACE=1 cargo test --frozen --all --all-features'
+
+test_all_no_sandbox: pre_all_no_sandbox
+    cargo build --frozen --all --all-targets --all-features
+    cargo doc --frozen --all --no-deps
+    RUST_BACKTRACE=1 cargo test --frozen --all --all-features
+
+clear_podman_cache:
+    podman volume rm --force redb-sandbox-target
 
 test_wasi:
     rustup install nightly-2025-07-26 --target wasm32-wasip1-threads
@@ -72,7 +91,7 @@ fuzz: pre
 fuzz_cmin:
     cargo fuzz cmin --sanitizer=none fuzz_redb -- -max_len=10000
 
-fuzz_ci: pre_all
+fuzz_ci: pre_all_no_sandbox
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=60
 
 fuzz_coverage: pre
