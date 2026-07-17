@@ -73,7 +73,7 @@ coverage:
     RUST_BACKTRACE=1 cargo llvm-cov --all-features
 
 bench bench='redb_benchmark': pre
-    cargo bench -p redb-bench --bench {{bench}}
+    ./scripts/podman-sandbox.sh 'REDB_BENCHMARK_DIR=/scratch cargo bench --frozen -p redb-bench --bench {{bench}}'
 
 build_bench_container:
     docker build -t redb-bench:latest -f Dockerfile.bench .

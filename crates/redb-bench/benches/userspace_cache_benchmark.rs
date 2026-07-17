@@ -1,7 +1,10 @@
 #[cfg(target_os = "linux")]
-use std::env::current_dir;
-#[cfg(target_os = "linux")]
 use tempfile::NamedTempFile;
+
+#[cfg(target_os = "linux")]
+mod benchmark_dir;
+#[cfg(target_os = "linux")]
+use benchmark_dir::benchmark_dir;
 
 #[cfg(target_os = "linux")]
 mod unix {
@@ -650,22 +653,22 @@ mod unix {
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         unix::mmap_bench(tmpfile.path(), 1);
     }
     #[cfg(target_os = "linux")]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         unix::mmap_bench(tmpfile.path(), 8);
     }
     #[cfg(target_os = "linux")]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         unix::userspace_page_cache(tmpfile.path(), 1);
     }
     #[cfg(target_os = "linux")]
     {
-        let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+        let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
         unix::userspace_page_cache(tmpfile.path(), 8);
     }
 }

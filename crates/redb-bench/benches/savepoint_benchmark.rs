@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use std::env::current_dir;
 use tempfile::NamedTempFile;
+
+mod benchmark_dir;
+use benchmark_dir::benchmark_dir;
 
 use rand::RngExt;
 use redb::{Database, TableDefinition};
@@ -91,7 +93,7 @@ fn benchmark(db: &Database, insertions: usize) -> Timing {
 }
 
 fn main() {
-    let tmpfile: NamedTempFile = NamedTempFile::new_in(current_dir().unwrap()).unwrap();
+    let tmpfile: NamedTempFile = NamedTempFile::new_in(benchmark_dir()).unwrap();
     let db = Database::builder().create(tmpfile.path()).unwrap();
 
     let mut table = comfy_table::Table::new();

@@ -1,6 +1,8 @@
-use std::env::current_dir;
 use std::{fs, process};
 use tempfile::NamedTempFile;
+
+mod benchmark_dir;
+use benchmark_dir::benchmark_dir;
 
 #[expect(dead_code)]
 mod common;
@@ -8,7 +10,7 @@ use common::*;
 
 fn main() {
     let _ = env_logger::try_init();
-    let tmpdir = current_dir().unwrap().join(".benchmark");
+    let tmpdir = benchmark_dir().join(".benchmark");
     fs::create_dir(&tmpdir).unwrap();
 
     let tmpdir2 = tmpdir.clone();
