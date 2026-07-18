@@ -112,4 +112,50 @@ mod multithreading_test {
         let table = read_txn.open_table(DEF3).unwrap();
         assert_eq!(table.len().unwrap(), 1);
     }
+
+    #[test]
+    // Concurrent lookups on a single shared table, racing to fill the read
+    // transaction's page cache, and on tables from separate transactions
+    fn multithreaded_reads() {
+        const TABLE: TableDefinition<u32, u64> = TableDefinition::new("multithreaded_reads");
+        const ELEMENTS: u32 = 10_000;
+        const THREADS: usize = 4;
+
+        let tmpfile = create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                table.insert(i, u64::from(i) * 7).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table = Arc::new(read_txn.open_table(TABLE).unwrap());
+        thread::scope(|s| {
+            for _ in 0..THREADS {
+                let table = table.clone();
+                s.spawn(move || {
+                    for i in 0..ELEMENTS {
+                        assert_eq!(table.get(i).unwrap().unwrap().value(), u64::from(i) * 7);
+                    }
+                });
+            }
+        });
+
+        thread::scope(|s| {
+            for _ in 0..THREADS {
+                let db = &db;
+                s.spawn(move || {
+                    let read_txn = db.begin_read().unwrap();
+                    let table = read_txn.open_table(TABLE).unwrap();
+                    for i in 0..ELEMENTS {
+                        assert_eq!(table.get(i).unwrap().unwrap().value(), u64::from(i) * 7);
+                    }
+                });
+            }
+        });
+    }
 }

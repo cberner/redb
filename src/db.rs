@@ -1,7 +1,8 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageResolver, ReadOnlyBackend, ReadTransactionPageCache, ShrinkPolicy, TableTree, TableType,
+    TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -275,6 +276,7 @@ pub(crate) enum TransactionGuard {
     Read {
         tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
+        page_cache: ReadTransactionPageCache,
     },
     Write {
         tracker: Arc<TransactionTracker>,
@@ -293,6 +295,7 @@ impl TransactionGuard {
         Self::Read {
             tracker,
             transaction_id,
+            page_cache: ReadTransactionPageCache::new(),
         }
     }
 
@@ -328,6 +331,16 @@ impl TransactionGuard {
             }
         }
     }
+
+    // This transaction's page cache. Only read transactions have one: they read from an
+    // immutable snapshot, whereas write transactions may free and reallocate pages
+    // within the transaction, which would make cached pages stale.
+    pub(crate) fn page_cache(&self) -> Option<&ReadTransactionPageCache> {
+        match self {
+            Self::Read { page_cache, .. } => Some(page_cache),
+            Self::Write { .. } | Self::Untracked => None,
+        }
+    }
 }
 
 impl Drop for TransactionGuard {
@@ -336,7 +349,13 @@ impl Drop for TransactionGuard {
             Self::Read {
                 tracker,
                 transaction_id,
-            } => tracker.deallocate_read_transaction(*transaction_id),
+                page_cache,
+            } => {
+                // Release the cached pages before releasing this transaction's snapshot,
+                // like Btree does for its root page reference
+                page_cache.clear();
+                tracker.deallocate_read_transaction(*transaction_id);
+            }
             Self::Write {
                 tracker,
                 transaction_id,

@@ -3308,3 +3308,60 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+// The read transaction's page cache holds pages of the snapshot for the duration of the
+// transaction. Verify that a long-lived reader keeps seeing its own snapshot while later
+// write transactions rewrite the whole tree, and that the pages pinned by the cache are
+// released when the transaction ends.
+fn read_snapshot_stable_while_writes_proceed() {
+    const TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("snapshot");
+    // Enough entries for a tree with several branch pages, so lookups populate the
+    // read transaction's page cache
+    const ELEMENTS: u32 = 20_000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(i, [0u8; 50].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [0u8; 50]);
+    }
+
+    // Rewrite every entry several times to copy-on-write the entire tree and free all
+    // pages of the reader's snapshot
+    for round in 1..=3u8 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                table.insert(i, [round; 50].as_slice()).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    // The reader still sees its snapshot, including through its cached pages
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [0u8; 50]);
+    }
+
+    drop(table);
+    read_txn.close().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [3u8; 50]);
+    }
+}

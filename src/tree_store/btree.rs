@@ -940,6 +940,24 @@ impl RawBtree {
     }
 }
 
+// A page borrowed from the transaction's `ReadTransactionPageCache`, or one loaded
+// from the shared page cache. Cached pages are borrowed rather than cloned, because a
+// clone would increment the shared `Arc` refcount that the cache exists to avoid
+// touching.
+enum MaybeCachedPage<'a> {
+    Cached(&'a PageImpl),
+    Loaded(PageImpl),
+}
+
+impl MaybeCachedPage<'_> {
+    fn as_page(&self) -> &PageImpl {
+        match self {
+            Self::Cached(page) => page,
+            Self::Loaded(page) => page,
+        }
+    }
+}
+
 pub(crate) struct Btree<K: Key + 'static, V: Value + 'static> {
     mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
@@ -1013,14 +1031,20 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn get(&self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'static, V>>> {
         if let Some(ref root_page) = self.cached_root {
-            self.get_helper(root_page, K::as_bytes(key).as_ref())
+            self.get_helper(root_page, K::as_bytes(key).as_ref(), 1)
         } else {
             Ok(None)
         }
     }
 
-    // Returns the value for the queried key, if present
-    fn get_helper(&self, page: &PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
+    // Returns the value for the queried key, if present. `child_depth` is the depth of
+    // `page`'s children, counting the root's children as depth 1.
+    fn get_helper(
+        &self,
+        page: &PageImpl,
+        query: &[u8],
+        child_depth: u32,
+    ) -> Result<Option<AccessGuard<'static, V>>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -1036,11 +1060,46 @@ impl<K: Key, V: Value> Btree<K, V> {
             BRANCH => {
                 let accessor = BranchAccessor::new(page, K::fixed_width());
                 let (_, child_page) = accessor.child_for_key::<K>(query);
-                let child_page = self.mem.get_page(child_page, self.hint)?;
-                self.get_helper(&child_page, query)
+                let child_page = self.get_page_for_read(child_page, child_depth)?;
+                self.get_helper(child_page.as_page(), query, child_depth + 1)
             }
             _ => unreachable!(),
         }
+    }
+
+    // The tree depth down to which lookups go through the transaction's page cache.
+    // The top two levels below the root of a large tree are a few pages plus roughly
+    // one page per branching-factor entries, which fits the cache; deeper levels are
+    // too numerous to cache and individually too cold to need it.
+    const MAX_CACHED_DEPTH: u32 = 2;
+
+    // Fetches a page of the tree during a lookup. On read transactions, the top levels
+    // of the tree are served from the transaction's page cache: after the root, which
+    // is already served from `cached_root`, they are the hottest pages of the tree.
+    // Cache hits are borrows and perform no writes to shared memory, unlike reads
+    // through the shared page cache, whose lock stripe, LRU flag, and `Arc` refcount
+    // updates all cause cache-line contention when many threads read the same hot page.
+    fn get_page_for_read(
+        &self,
+        page_number: PageNumber,
+        depth: u32,
+    ) -> Result<MaybeCachedPage<'_>> {
+        if depth <= Self::MAX_CACHED_DEPTH
+            && page_number.page_order == 0
+            && let Some(cache) = self.transaction_guard.page_cache()
+        {
+            if let Some(page) = cache.get(page_number) {
+                return Ok(MaybeCachedPage::Cached(page));
+            }
+            let page = self.mem.get_page(page_number, self.hint)?;
+            return Ok(match cache.insert(page_number, page) {
+                Ok(cached) => MaybeCachedPage::Cached(cached),
+                Err(page) => MaybeCachedPage::Loaded(page),
+            });
+        }
+        Ok(MaybeCachedPage::Loaded(
+            self.mem.get_page(page_number, self.hint)?,
+        ))
     }
 
     pub(crate) fn first(
