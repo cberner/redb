@@ -10,13 +10,6 @@ pub struct LRUCache<T> {
 }
 
 impl<T> LRUCache<T> {
-    pub(crate) fn new() -> Self {
-        Self {
-            cache: FastHashMapU64::default(),
-            lru_queue: VecDeque::default(),
-        }
-    }
-
     pub(crate) fn len(&self) -> usize {
         self.cache.len()
     }

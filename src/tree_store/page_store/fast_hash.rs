@@ -5,6 +5,13 @@ use std::hash::{BuildHasherDefault, Hasher};
 // See "Computationally easy, spectrally good multipliers for congruential pseudorandom number generators" by Steele & Vigna
 const K: u64 = 0xf135_7aea_2e62_a9c5;
 
+// Hashes a single u64 key with the same mixing as `FastHasher64`
+pub(crate) fn fast_hash64(x: u64) -> u64 {
+    let mut hasher = FastHasher64::default();
+    hasher.write_u64(x);
+    hasher.finish()
+}
+
 pub(crate) type FastHashMapU64<V> = HashMap<u64, V, BuildHasherDefault<FastHasher64>>;
 pub(crate) type PageNumberHashMap<V> = HashMap<PageNumber, V, BuildHasherDefault<FastHasher64>>;
 pub(crate) type PageNumberHashSet = HashSet<PageNumber, BuildHasherDefault<FastHasher64>>;

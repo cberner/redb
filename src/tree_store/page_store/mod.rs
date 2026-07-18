@@ -9,6 +9,7 @@ mod header;
 mod layout;
 mod lru_cache;
 mod page_manager;
+mod read_cache;
 mod region;
 mod savepoint;
 #[allow(clippy::pedantic, dead_code)]

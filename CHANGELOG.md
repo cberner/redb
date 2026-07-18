@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Improve read throughput scaling with the number of reader threads. The userspace page cache now
+  uses a lock-free read path, removing the lock and cache-line contention between concurrent
+  readers that previously prevented `get()` from scaling on multicore machines.
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to
