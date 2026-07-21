@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
-use crate::table::{ReadableTableMetadata, TableStats};
+use crate::table::{PinnedAccessGuard, ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
@@ -382,6 +382,99 @@ impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'
             }
             Err(err) => Some(Err(err)),
         }
+    }
+}
+
+/// A [`MultimapValue`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyMultimapTable::get_pinned()`]. The iterator and the [`PinnedAccessGuard`]s it
+/// yields keep the read transaction alive until they are dropped.
+pub struct PinnedMultimapValue<V: Key + 'static> {
+    inner: MultimapValue<'static, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<V: Key + 'static> PinnedMultimapValue<V> {
+    fn new(inner: MultimapValue<'static, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+
+    /// Returns the number of times this iterator will return `Some(Ok(_))`
+    ///
+    /// Note that `Some` may be returned from `next()` more than `len()` times if `Some(Err(_))` is returned
+    pub fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+impl<V: Key + 'static> Iterator for PinnedMultimapValue<V> {
+    type Item = Result<PinnedAccessGuard<V>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|x| x.map(|value| PinnedAccessGuard::new(value, self.transaction_guard.clone())))
+    }
+}
+
+impl<V: Key + 'static> DoubleEndedIterator for PinnedMultimapValue<V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_back()
+            .map(|x| x.map(|value| PinnedAccessGuard::new(value, self.transaction_guard.clone())))
+    }
+}
+
+/// A [`MultimapRange`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyMultimapTable::range_pinned()`]. The iterator and the entries it yields keep
+/// the read transaction alive until they are dropped.
+pub struct PinnedMultimapRange<K: Key + 'static, V: Key + 'static> {
+    inner: MultimapRange<'static, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<K: Key + 'static, V: Key + 'static> PinnedMultimapRange<K, V> {
+    fn new(inner: MultimapRange<'static, K, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static> Iterator for PinnedMultimapRange<K, V> {
+    type Item = Result<(PinnedAccessGuard<K>, PinnedMultimapValue<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|x| {
+            x.map(|(key, values)| {
+                (
+                    PinnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    PinnedMultimapValue::new(values, self.transaction_guard.clone()),
+                )
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for PinnedMultimapRange<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|x| {
+            x.map(|(key, values)| {
+                (
+                    PinnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    PinnedMultimapValue::new(values, self.transaction_guard.clone()),
+                )
+            })
+        })
     }
 }
 
@@ -1005,9 +1098,24 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the guards yielded by the returned
+    /// iterator do not keep the transaction alive. If they outlive the
+    /// [`crate::ReadTransaction`], concurrent writers may reclaim the pages they reference,
+    /// which panics in debug builds. Use [`Self::get_pinned()`] instead.
+    #[deprecated(
+        since = "4.2.0",
+        note = "the yielded guards do not keep the transaction alive, and can crash debug builds if they outlive the transaction; use get_pinned() instead"
+    )]
     pub fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'static, V>> {
+        self.get_inner(key)
+    }
+
+    fn get_inner<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<MultimapValue<'static, V>> {
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             MultimapValue::from_collection(
                 collection,
@@ -1030,9 +1138,40 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         Ok(iter)
     }
 
-    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableMultimapTable::get()`], but the returned iterator is
+    /// reference counted and keeps the transaction alive until it is dropped, as do the
+    /// [`PinnedAccessGuard`]s it yields.
+    pub fn get_pinned<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<PinnedMultimapValue<V>> {
+        Ok(PinnedMultimapValue::new(
+            self.get_inner(key)?,
+            self.transaction_guard.clone(),
+        ))
+    }
+
+    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the entries yielded by the returned
+    /// iterator do not keep the transaction alive. If they outlive the
+    /// [`crate::ReadTransaction`], concurrent writers may reclaim the pages they reference,
+    /// which panics in debug builds. Use [`Self::range_pinned()`] instead.
+    #[deprecated(
+        since = "4.2.0",
+        note = "the yielded entries do not keep the transaction alive, and can crash debug builds if they outlive the transaction; use range_pinned() instead"
+    )]
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<MultimapRange<'static, K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        self.range_inner(range)
+    }
+
+    fn range_inner<'a, KR>(
+        &self,
+        range: impl RangeBounds<KR>,
+    ) -> Result<MultimapRange<'static, K, V>>
     where
         KR: Borrow<K::SelfType<'a>>,
     {
@@ -1041,6 +1180,22 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             inner,
             self.transaction_guard.clone(),
             self.mem.clone(),
+        ))
+    }
+
+    /// This method is like [`ReadableMultimapTable::range()`], but the returned iterator is
+    /// reference counted and keeps the transaction alive until it is dropped, as do the entries
+    /// it yields.
+    pub fn range_pinned<'a, KR>(
+        &self,
+        range: impl RangeBounds<KR>,
+    ) -> Result<PinnedMultimapRange<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        Ok(PinnedMultimapRange::new(
+            self.range_inner(range)?,
+            self.transaction_guard.clone(),
         ))
     }
 }

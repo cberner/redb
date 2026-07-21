@@ -30,7 +30,7 @@ fn main() -> Result<(), Error> {
                 let read_txn = db.begin_read()?;
                 // Print every (key, value) pair in the table
                 let table = read_txn.open_table(definition)?;
-                for (k, v) in table.range("0"..)?.flatten() {
+                for (k, v) in table.range_pinned("0"..)?.flatten() {
                     println!("From read_thread #{}: {:?}, {:?}", i, k.value(), v.value());
                 }
             }
@@ -76,7 +76,7 @@ fn main() -> Result<(), Error> {
 
     // Print every (key, value) pair in the table
     let table = read_txn.open_table(definition)?;
-    for (k, v) in table.range("0"..)?.flatten() {
+    for (k, v) in table.range_pinned("0"..)?.flatten() {
         println!("{:?}, {:?}", k.value(), v.value());
     }
 

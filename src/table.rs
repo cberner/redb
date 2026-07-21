@@ -567,8 +567,16 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
-    /// and keeps the transaction alive until it is dropped.
+    /// This method is like [`ReadableTable::get()`], but the guard is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the returned guard does not keep the
+    /// transaction alive. If the guard outlives the [`crate::ReadTransaction`], concurrent
+    /// writers may reclaim the pages it references, which panics in debug builds. Use
+    /// [`Self::get_pinned()`] instead.
+    #[deprecated(
+        since = "4.2.0",
+        note = "the returned guard does not keep the transaction alive, and can crash debug builds if it outlives the transaction; use get_pinned() instead"
+    )]
     pub fn get<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -576,8 +584,28 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         self.tree.get(key.borrow())
     }
 
-    /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableTable::get()`], but the returned [`PinnedAccessGuard`] is
+    /// reference counted and keeps the transaction alive until it is dropped.
+    pub fn get_pinned<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<Option<PinnedAccessGuard<V>>> {
+        Ok(self
+            .tree
+            .get(key.borrow())?
+            .map(|x| PinnedAccessGuard::new(x, self.transaction_guard.clone())))
+    }
+
+    /// This method is like [`ReadableTable::range()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, neither the returned iterator nor the
+    /// guards it yields keep the transaction alive. If they outlive the
+    /// [`crate::ReadTransaction`], concurrent writers may reclaim the pages they reference,
+    /// which panics in debug builds. Use [`Self::range_pinned()`] instead.
+    #[deprecated(
+        since = "4.2.0",
+        note = "the iterator and its guards do not keep the transaction alive, and can crash debug builds if they outlive the transaction; use range_pinned() instead"
+    )]
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
     where
         KR: Borrow<K::SelfType<'a>>,
@@ -585,6 +613,21 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         self.tree
             .range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
+    }
+
+    /// This method is like [`ReadableTable::range()`], but the returned iterator is reference
+    /// counted and keeps the transaction alive until it is dropped, as do the
+    /// [`PinnedAccessGuard`]s it yields.
+    pub fn range_pinned<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<PinnedRange<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        self.tree.range(&range).map(|x| {
+            PinnedRange::new(
+                Range::new(x, self.transaction_guard.clone()),
+                self.transaction_guard.clone(),
+            )
+        })
     }
 }
 
@@ -764,6 +807,82 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, 
                 let key = AccessGuard::with_page(page.clone(), key_range);
                 let value = AccessGuard::with_page(page, value_range);
                 (key, value)
+            })
+        })
+    }
+}
+
+/// An [`AccessGuard`] which also keeps the transaction alive
+///
+/// Returned by the reference-counted accessors of [`ReadOnlyTable`] and
+/// [`crate::ReadOnlyMultimapTable`], such as [`ReadOnlyTable::get_pinned()`]: in addition to
+/// providing access to the data, it keeps the read transaction alive until it is dropped.
+///
+/// This is a separate type, rather than a field of every [`AccessGuard`], so that the
+/// lifetime-bound accessors do not pay for the reference counting.
+pub struct PinnedAccessGuard<V: Value + 'static> {
+    // Declared before the transaction guard so the page reference is released before the
+    // transaction is deallocated
+    inner: AccessGuard<'static, V>,
+    _transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<V: Value + 'static> PinnedAccessGuard<V> {
+    pub(crate) fn new(inner: AccessGuard<'static, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            _transaction_guard: guard,
+        }
+    }
+
+    /// Access the stored value
+    pub fn value(&self) -> V::SelfType<'_> {
+        self.inner.value()
+    }
+}
+
+/// A [`Range`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyTable::range_pinned()`]. The iterator and the [`PinnedAccessGuard`]s it
+/// yields keep the read transaction alive until they are dropped.
+#[derive(Clone)]
+pub struct PinnedRange<K: Key + 'static, V: Value + 'static> {
+    inner: Range<'static, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> PinnedRange<K, V> {
+    pub(super) fn new(inner: Range<'static, K, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> Iterator for PinnedRange<K, V> {
+    type Item = Result<(PinnedAccessGuard<K>, PinnedAccessGuard<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|x| {
+            x.map(|(key, value)| {
+                (
+                    PinnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    PinnedAccessGuard::new(value, self.transaction_guard.clone()),
+                )
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for PinnedRange<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|x| {
+            x.map(|(key, value)| {
+                (
+                    PinnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    PinnedAccessGuard::new(value, self.transaction_guard.clone()),
+                )
             })
         })
     }

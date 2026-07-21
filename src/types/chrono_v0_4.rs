@@ -460,7 +460,7 @@ mod tests {
         {
             let table = read_txn.open_table(FIXED_OFFSET_TABLE).unwrap();
             let offset = FixedOffset::east_opt(3600).unwrap(); // +01:00
-            let value = table.get(&offset).unwrap().unwrap();
+            let value = table.get_pinned(&offset).unwrap().unwrap();
             assert_eq!(value.value(), 1);
         }
     }
@@ -479,7 +479,7 @@ mod tests {
         {
             let table = read_txn.open_table(NAIVE_DATE_TABLE).unwrap();
             let date = NaiveDate::from_ymd_opt(2023, 10, 5).unwrap();
-            let value = table.get(&date).unwrap().unwrap();
+            let value = table.get_pinned(&date).unwrap().unwrap();
             assert_eq!(value.value(), 1);
         }
     }
@@ -498,7 +498,7 @@ mod tests {
         {
             let table = read_txn.open_table(NAIVE_TIME_TABLE).unwrap();
             let time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
-            let value = table.get(&time).unwrap().unwrap();
+            let value = table.get_pinned(&time).unwrap().unwrap();
             assert_eq!(value.value(), 1);
         }
     }
@@ -522,7 +522,7 @@ mod tests {
             let date = NaiveDate::from_ymd_opt(2023, 10, 5).unwrap();
             let time = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
             let datetime = NaiveDateTime::new(date, time);
-            let value = table.get(&datetime).unwrap().unwrap();
+            let value = table.get_pinned(&datetime).unwrap().unwrap();
             assert_eq!(value.value(), 1);
         }
     }
@@ -540,7 +540,7 @@ mod tests {
         let read_txn = db.begin_read().unwrap();
         {
             let table = read_txn.open_table(DATETIME_FIXED_OFFSET_TABLE).unwrap();
-            let value = table.get(&now).unwrap().unwrap();
+            let value = table.get_pinned(&now).unwrap().unwrap();
             assert_eq!(value.value(), 1);
         }
     }

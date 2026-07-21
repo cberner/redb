@@ -5,7 +5,8 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{
-    CompactionError, DatabaseError, Error, ReadOnlyTable, SavepointError, StorageError, TableError,
+    CompactionError, DatabaseError, Error, ReadOnlyTable, ReadableTable, SavepointError,
+    StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
@@ -832,7 +833,7 @@ impl Database {
                 Arc::new(TransactionGuard::untracked()),
                 resolver,
             )?;
-            for result in table.range::<TransactionIdWithPagination>(..)? {
+            for result in ReadableTable::range::<TransactionIdWithPagination>(&table, ..)? {
                 let (_, pages) = result?;
                 for i in 0..pages.value().len() {
                     assert!(mem.is_allocated(pages.value().get(i)));
@@ -889,7 +890,7 @@ impl Database {
                     Arc::new(TransactionGuard::untracked()),
                     resolver,
                 )?;
-            for result in table.range::<TransactionIdWithPagination>(..)? {
+            for result in ReadableTable::range::<TransactionIdWithPagination>(&table, ..)? {
                 let (_, page_list) = result?;
                 for i in 0..page_list.value().len() {
                     visitor(page_list.value().get(i))?;

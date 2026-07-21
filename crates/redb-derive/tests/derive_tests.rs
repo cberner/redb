@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable accessors are exercised in these tests; they remain covered
+// until they are removed.
+#![allow(deprecated)]
+
 use redb::{Database, Key, ReadableDatabase, TableDefinition, Value};
 use redb_derive::{Key, Value};
 use std::fmt::Debug;

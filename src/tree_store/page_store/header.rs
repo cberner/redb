@@ -777,7 +777,7 @@ mod test {
         {
             let read_txn = db2.begin_read().unwrap();
             let table = read_txn.open_table(X).unwrap();
-            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+            assert_eq!(table.get_pinned("hello").unwrap().unwrap().value(), "world");
         }
         let write_txn = db2.begin_write().unwrap();
         {
@@ -799,8 +799,11 @@ mod test {
         {
             let read_txn = db2.begin_read().unwrap();
             let table = read_txn.open_table(X).unwrap();
-            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
-            assert_eq!(table.get("hello2").unwrap().unwrap().value(), "world2");
+            assert_eq!(table.get_pinned("hello").unwrap().unwrap().value(), "world");
+            assert_eq!(
+                table.get_pinned("hello2").unwrap().unwrap().value(),
+                "world2"
+            );
         }
 
         db2_backend_control.corrupt_all_slot_checksums().unwrap();
@@ -1170,7 +1173,7 @@ mod test {
             let db = Database::open(tmpfile.path()).unwrap();
             let read_txn = db.begin_read().unwrap();
             let table = read_txn.open_table(X).unwrap();
-            assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+            assert_eq!(table.get_pinned("hello").unwrap().unwrap().value(), "world");
         }
 
         // Both counts torn to zero describes zero regions: previously rejected as

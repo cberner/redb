@@ -76,7 +76,7 @@ mod tests {
         let read_txn = db.begin_read().unwrap();
         {
             let table = read_txn.open_table(UUID_TABLE).unwrap();
-            let value = table.get(&uuid1).unwrap().unwrap();
+            let value = table.get_pinned(&uuid1).unwrap().unwrap();
             assert_eq!(value.value(), uuid2);
         }
     }

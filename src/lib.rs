@@ -51,7 +51,7 @@
 //!
 //!     let read_txn = db.begin_read()?;
 //!     let table = read_txn.open_table(TABLE)?;
-//!     assert_eq!(table.get("my_key")?.unwrap().value(), 123);
+//!     assert_eq!(table.get_pinned("my_key")?.unwrap().value(), 123);
 //!
 //!     Ok(())
 //! }
@@ -70,12 +70,12 @@ pub use error::{
     StorageError, TableError, TransactionError,
 };
 pub use multimap_table::{
-    MultimapRange, MultimapTable, MultimapValue, ReadOnlyMultimapTable,
-    ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
+    MultimapRange, MultimapTable, MultimapValue, PinnedMultimapRange, PinnedMultimapValue,
+    ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
 pub use table::{
-    Entry, ExtractIf, OccupiedEntry, Range, ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable,
-    ReadableTableMetadata, Table, TableStats, VacantEntry,
+    Entry, ExtractIf, OccupiedEntry, PinnedAccessGuard, PinnedRange, Range, ReadOnlyTable,
+    ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats, VacantEntry,
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace, Savepoint};

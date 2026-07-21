@@ -14,7 +14,7 @@ fn main() -> Result<(), Error> {
 
     let read_txn = db.begin_read()?;
     let table = read_txn.open_table(TABLE)?;
-    assert_eq!(table.get(0)?.unwrap().value(), 0);
+    assert_eq!(table.get_pinned(0)?.unwrap().value(), 0);
 
     Ok(())
 }

@@ -1,6 +1,10 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed.
+#![allow(deprecated)]
+
 use redb::{
     Database, MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable,
-    ReadableTableMetadata, TableError,
+    ReadableTableMetadata, TableError, TransactionError,
 };
 
 const STR_TABLE: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("str_to_str");
@@ -646,4 +650,83 @@ fn multimap_remove_nonexistent_value_from_subtree_does_not_churn() {
     let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 1000);
     assert_eq!(table.get(&0u64).unwrap().len(), 1000);
+}
+
+fn overwrite_multimap_10_times(db: &Database) {
+    for _ in 0..10 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+            table.remove_all(&0u64).unwrap();
+            // Enough values for key 0 to be promoted from inline storage to a subtree
+            for v in 0..1000u64 {
+                table.insert(&0u64, &v).unwrap();
+            }
+            table.remove_all(&1u64).unwrap();
+            // Few enough values for key 1 to stay inline
+            for v in 0..3u64 {
+                table.insert(&1u64, &v).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+}
+
+#[test]
+fn read_only_get_value_guards_keep_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    overwrite_multimap_10_times(&db);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let mut subtree_values = table.get_pinned(&0u64).unwrap();
+    let subtree_value = subtree_values.next().unwrap().unwrap();
+    let mut inline_values = table.get_pinned(&1u64).unwrap();
+    let inline_value = inline_values.next().unwrap().unwrap();
+
+    // The yielded guards alone must keep the transaction registered
+    drop(subtree_values);
+    drop(inline_values);
+    drop(table);
+    assert!(matches!(
+        read_txn.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+
+    // Concurrent writers must not reclaim the pages referenced by the guards, even though
+    // every other object referencing the read transaction has been dropped
+    overwrite_multimap_10_times(&db);
+
+    assert_eq!(subtree_value.value(), 0);
+    assert_eq!(inline_value.value(), 0);
+}
+
+#[test]
+fn read_only_range_entries_keep_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    overwrite_multimap_10_times(&db);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    let mut range = table.range_pinned(0u64..).unwrap();
+    let (key, mut values) = range.next().unwrap().unwrap();
+    let value = values.next().unwrap().unwrap();
+
+    // The yielded guards alone must keep the transaction registered
+    drop(values);
+    drop(range);
+    drop(table);
+    assert!(matches!(
+        read_txn.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+
+    // Concurrent writers must not reclaim the pages referenced by the guards, even though
+    // every other object referencing the read transaction has been dropped
+    overwrite_multimap_10_times(&db);
+
+    assert_eq!(key.value(), 0);
+    assert_eq!(value.value(), 0);
 }
