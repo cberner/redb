@@ -685,7 +685,11 @@ impl Database {
         match Self::verify_primary_checksums(self.mem.clone()) {
             Ok(true) => {
                 let live_allocator_hash = self.mem.allocator_hash();
+                let live_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
                 match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
+                    // Only a durable root can be rewritten from here, so a live root whose table
+                    // count was recomputed must be rolled back and repaired by the reload below
+                    Ok(roots) if roots != live_roots => Ok(None),
                     Ok(_) => Ok(Some(live_allocator_hash == self.mem.allocator_hash())),
                     Err(DatabaseError::Storage(StorageError::Corrupted(_))) => Ok(None),
                     Err(err) => Err(err),
@@ -996,17 +1000,21 @@ impl Database {
     // Rebuilds the in-memory allocator state by marking every page reachable from the current
     // roots (including the pages referenced by the freed-page tables) as allocated. Operates
     // purely on in-memory state and does not modify the file.
+    //
+    // The returned roots carry table counts recounted from the trees that were walked. These
+    // counts are stored in the commit slot rather than in a page, so no page checksum covers
+    // them; recounting here is what lets the rest of the codebase trust them.
     fn rebuild_allocator_state(
         mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
         mem.reset_allocator_state()?;
 
-        let data_root = mem.get_data_root();
-        {
+        let data_root = {
+            let root = mem.get_data_root();
             let untracked = Arc::new(TransactionGuard::untracked());
             let tables = TableTree::new(
-                data_root,
+                root,
                 PageHint::None,
                 untracked,
                 PageResolver::new(mem.clone()),
@@ -1015,7 +1023,8 @@ impl Database {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
             })?;
-        }
+            Self::with_recounted_length(root, tables.count_tables()?)
+        };
 
         // 0.9 because the repair takes 3 full scans and the third is done now. There is just some system tables left
         let mut handle = RepairSession::new(0.9);
@@ -1024,11 +1033,11 @@ impl Database {
             return Err(DatabaseError::RepairAborted);
         }
 
-        let system_root = mem.get_system_root();
-        {
+        let system_root = {
+            let root = mem.get_system_root();
             let untracked = Arc::new(TransactionGuard::untracked());
             let system_tables = TableTree::new(
-                system_root,
+                root,
                 PageHint::None,
                 untracked,
                 PageResolver::new(mem.clone()),
@@ -1037,7 +1046,8 @@ impl Database {
                 mem.mark_page_allocated(path.page_number());
                 Ok(())
             })?;
-        }
+            Self::with_recounted_length(root, system_tables.count_tables()?)
+        };
 
         Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
             mem.mark_page_allocated(page);
@@ -1053,6 +1063,10 @@ impl Database {
         }
 
         Ok([data_root, system_root])
+    }
+
+    fn with_recounted_length(root: Option<BtreeHeader>, length: u64) -> Option<BtreeHeader> {
+        root.map(|header| BtreeHeader::new(header.root, header.checksum, length))
     }
 
     fn new(

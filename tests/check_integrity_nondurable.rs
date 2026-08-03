@@ -174,6 +174,41 @@ fn check_integrity_preserves_growing_nondurable_commit() {
     );
 }
 
+// A non-durable commit that creates a table changes the number of tables in the live state. A
+// passing check must promote such a commit like any other.
+#[test]
+fn check_integrity_preserves_nondurable_commit_that_creates_a_table() {
+    const OTHER: TableDefinition<u64, &[u8]> = TableDefinition::new("other");
+
+    let backend = PatchBackend::default();
+    let mut db = make_db(backend.clone(), 1);
+    {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None).unwrap();
+        txn.open_table(OTHER)
+            .unwrap()
+            .insert(&7u64, [0xCDu8; 8].as_slice())
+            .unwrap();
+        txn.commit().unwrap();
+    }
+
+    assert!(db.check_integrity().unwrap());
+
+    drop(db);
+    let db = Database::builder().create_with_backend(backend).unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(read.list_tables().unwrap().count(), 2);
+    assert_eq!(
+        read.open_table(OTHER)
+            .unwrap()
+            .get(&7u64)
+            .unwrap()
+            .unwrap()
+            .value(),
+        [0xCDu8; 8]
+    );
+}
+
 // If an external writer extends the file while a non-durable commit is pending, the file is longer
 // than the in-memory layout. check_integrity() must not promote the commit then (a layout
 // inconsistent with the file would corrupt subsequent opens). It must detect the mismatch and leave

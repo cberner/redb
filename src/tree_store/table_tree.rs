@@ -137,6 +137,16 @@ impl TableTree {
         Ok(true)
     }
 
+    // Counts the tables present, rather than returning the count stored in the tree's header
+    pub(crate) fn count_tables(&self) -> Result<u64> {
+        let mut count = 0;
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            entry?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     // root_page: the root of the master table
     pub(crate) fn list_tables(&self, table_type: TableType) -> Result<Vec<String>> {
         let iter = self.tree.range::<RangeFull, &str>(&(..))?;

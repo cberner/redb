@@ -937,6 +937,96 @@ mod test {
         );
     }
 
+    fn read_root_length(path: &std::path::Path, root_offset: usize) -> u64 {
+        let mut header = [0u8; DB_HEADER_SIZE];
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .unwrap()
+            .read_exact(&mut header)
+            .unwrap();
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        // The count is the last field of the serialized BtreeHeader
+        super::get_u64(
+            &header
+                [slot + root_offset + super::BtreeHeader::serialized_size() - size_of::<u64>()..],
+        )
+    }
+
+    // Re-checksums the slot, so the count is indistinguishable from one redb wrote itself
+    fn overwrite_root_length(path: &std::path::Path, root_offset: usize, length: u64) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let offset = slot + root_offset + super::BtreeHeader::serialized_size() - size_of::<u64>();
+        header[offset..offset + size_of::<u64>()].copy_from_slice(&length.to_le_bytes());
+        let checksum = super::xxh3_checksum(&header[slot..slot + super::SLOT_CHECKSUM_OFFSET]);
+        let checksum_offset = slot + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset..checksum_offset + size_of::<super::Checksum>()]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn create_database_with_one_table(path: &std::path::Path) {
+        let db = Database::create(path).unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(X).unwrap().insert("k", "v").unwrap();
+        txn.commit().unwrap();
+    }
+
+    // A root's table count is not covered by any page checksum, so repair has to recount it. Left
+    // wrong, it reaches the assertion in MutateHelper::finish_deletion -- for the system root, via
+    // the commit every Database::drop makes. See https://github.com/cberner/redb/issues/1303
+    #[test]
+    fn check_integrity_recomputes_root_lengths() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        let data_length = read_root_length(tmpfile.path(), super::USER_ROOT_OFFSET);
+        let system_length = read_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET);
+        overwrite_root_length(tmpfile.path(), super::USER_ROOT_OFFSET, u64::MAX);
+        overwrite_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, u64::MAX);
+
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        // Repaired, so not clean, even though every checksum in the file verifies
+        assert!(!db.check_integrity().unwrap());
+        {
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(X).unwrap();
+            assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
+        }
+        // Deletes the allocator state table from the system tree, which asserts on a bad count
+        drop(db);
+
+        assert_eq!(
+            read_root_length(tmpfile.path(), super::USER_ROOT_OFFSET),
+            data_length
+        );
+        assert_eq!(
+            read_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET),
+            system_length
+        );
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert_eq!(
+            txn.open_table(X)
+                .unwrap()
+                .get("k")
+                .unwrap()
+                .unwrap()
+                .value(),
+            "v"
+        );
+    }
+
     // A backend that can report a `len()` larger than the data it actually holds, without
     // allocating it -- used to simulate an externally created (e.g. sparse) file.
     #[derive(Clone, Debug, Default)]
