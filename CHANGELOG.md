@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* `check_integrity()` now recomputes the table counts stored alongside the data and system roots,
+  repairing a file whose counts disagree with its trees. Such a file previously passed the check
+  and then panicked, including from `Database::drop`.
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to
