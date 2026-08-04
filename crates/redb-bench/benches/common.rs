@@ -1,6 +1,9 @@
 use fjall::Readable as _;
 use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode};
-use redb::{AccessGuard, Durability, ReadableDatabase, ReadableTableMetadata, TableDefinition};
+use redb::{
+    AccessGuard, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
+    TableDefinition,
+};
 use rocksdb::{
     Direction, IteratorMode, OptimisticTransactionDB, OptimisticTransactionOptions, WriteOptions,
 };
@@ -828,11 +831,17 @@ impl BenchReader for RedbBenchReader {
         Self: 'out;
 
     fn get<'a>(&'a mut self, key: &[u8]) -> Option<Self::Output<'a>> {
-        self.table.get(key).unwrap().map(RedbAccessGuard::new)
+        // Explicit trait call, so that the benchmark measures the lifetime-bound accessor
+        // rather than the inherent reference-counted one that shadows it
+        ReadableTable::get(&self.table, key)
+            .unwrap()
+            .map(RedbAccessGuard::new)
     }
 
     fn range_from<'a>(&'a mut self, key: &'a [u8]) -> Self::Iterator<'a> {
-        let iter = self.table.range(key..).unwrap();
+        // Explicit trait call, so that the benchmark measures the lifetime-bound accessor
+        // rather than the inherent reference-counted one that shadows it
+        let iter = ReadableTable::range(&self.table, key..).unwrap();
         RedbBenchIterator { iter }
     }
 

@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
-use crate::table::{ReadableTableMetadata, TableStats};
+use crate::table::{OwnedAccessGuard, ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
@@ -382,6 +382,99 @@ impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for MultimapRange<'
             }
             Err(err) => Some(Err(err)),
         }
+    }
+}
+
+/// A [`MultimapValue`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyMultimapTable::get_owned()`]. The iterator and the [`OwnedAccessGuard`]s it
+/// yields keep the read transaction alive until they are dropped.
+pub struct OwnedMultimapValue<V: Key + 'static> {
+    inner: MultimapValue<'static, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<V: Key + 'static> OwnedMultimapValue<V> {
+    fn new(inner: MultimapValue<'static, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+
+    /// Returns the number of times this iterator will return `Some(Ok(_))`
+    ///
+    /// Note that `Some` may be returned from `next()` more than `len()` times if `Some(Err(_))` is returned
+    pub fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+impl<V: Key + 'static> Iterator for OwnedMultimapValue<V> {
+    type Item = Result<OwnedAccessGuard<V>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next()
+            .map(|x| x.map(|value| OwnedAccessGuard::new(value, self.transaction_guard.clone())))
+    }
+}
+
+impl<V: Key + 'static> DoubleEndedIterator for OwnedMultimapValue<V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_back()
+            .map(|x| x.map(|value| OwnedAccessGuard::new(value, self.transaction_guard.clone())))
+    }
+}
+
+/// A [`MultimapRange`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyMultimapTable::range_owned()`]. The iterator and the entries it yields keep
+/// the read transaction alive until they are dropped.
+pub struct OwnedMultimapRange<K: Key + 'static, V: Key + 'static> {
+    inner: MultimapRange<'static, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<K: Key + 'static, V: Key + 'static> OwnedMultimapRange<K, V> {
+    fn new(inner: MultimapRange<'static, K, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static> Iterator for OwnedMultimapRange<K, V> {
+    type Item = Result<(OwnedAccessGuard<K>, OwnedMultimapValue<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|x| {
+            x.map(|(key, values)| {
+                (
+                    OwnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    OwnedMultimapValue::new(values, self.transaction_guard.clone()),
+                )
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static> DoubleEndedIterator for OwnedMultimapRange<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|x| {
+            x.map(|(key, values)| {
+                (
+                    OwnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    OwnedMultimapValue::new(values, self.transaction_guard.clone()),
+                )
+            })
+        })
     }
 }
 
@@ -1030,6 +1123,19 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         Ok(iter)
     }
 
+    /// This method is like [`ReadableMultimapTable::get()`], but the returned iterator is
+    /// reference counted and keeps the transaction alive until it is dropped, as do the
+    /// [`OwnedAccessGuard`]s it yields.
+    pub fn get_owned<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<OwnedMultimapValue<V>> {
+        Ok(OwnedMultimapValue::new(
+            self.get(key)?,
+            self.transaction_guard.clone(),
+        ))
+    }
+
     /// This method is like [`ReadableMultimapTable::range()`], but the iterator is reference counted and keeps the transaction
     /// alive until it is dropped.
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<MultimapRange<'static, K, V>>
@@ -1041,6 +1147,22 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             inner,
             self.transaction_guard.clone(),
             self.mem.clone(),
+        ))
+    }
+
+    /// This method is like [`ReadableMultimapTable::range()`], but the returned iterator is
+    /// reference counted and keeps the transaction alive until it is dropped, as do the entries
+    /// it yields.
+    pub fn range_owned<'a, KR>(
+        &self,
+        range: impl RangeBounds<KR>,
+    ) -> Result<OwnedMultimapRange<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        Ok(OwnedMultimapRange::new(
+            self.range(range)?,
+            self.transaction_guard.clone(),
         ))
     }
 }

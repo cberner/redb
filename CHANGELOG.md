@@ -4,6 +4,12 @@
 * `check_integrity()` now recomputes the table counts stored alongside the data and system roots,
   repairing a file whose counts disagree with its trees. Such a file previously passed the check
   and then panicked, including from `Database::drop`.
+* Add `ReadOnlyTable::get_owned()`, `ReadOnlyTable::range_owned()`,
+  `ReadOnlyMultimapTable::get_owned()`, and `ReadOnlyMultimapTable::range_owned()`, which
+  return the new `OwnedAccessGuard`, `OwnedRange`, `OwnedMultimapValue`, and
+  `OwnedMultimapRange` types. These keep the read transaction alive until they are dropped,
+  including the guards yielded by the iterators, which may outlive the iterator that produced
+  them.
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to
