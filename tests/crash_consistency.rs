@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed.
+#![allow(deprecated)]
+
 //! Regression test for a crash during a transaction that grows the database file.
 //!
 //! `grow()` extends the file with `set_len` and a subsequent commit writes the grown layout into

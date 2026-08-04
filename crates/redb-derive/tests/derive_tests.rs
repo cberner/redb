@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable accessors are exercised in these tests; they remain covered
+// until they are removed.
+#![allow(deprecated)]
+
 #[allow(unused_imports)]
 use redb::ReadableTable;
 use redb::{Database, Key, ReadableDatabase, TableDefinition, TableError, TypeName, Value};

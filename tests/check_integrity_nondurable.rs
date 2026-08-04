@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed.
+#![allow(deprecated)]
+
 //! Tests for `check_integrity()` with a pending `Durability::None` commit. The check promotes such
 //! a commit to durable when the live state verifies (so acknowledged data is not lost), verifying
 //! the live state from disk; it refuses to promote when the backing file was externally truncated

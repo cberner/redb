@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed.
+#![allow(deprecated)]
+
 use rand::RngExt;
 use rand::prelude::SliceRandom;
 #[cfg(feature = "experimental-api-5")]
