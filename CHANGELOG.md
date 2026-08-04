@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Fix a panic, including one raised while dropping a `Database`, after `check_integrity()` returned
+  an error. Such a database now refuses to begin a write transaction or to re-run the check,
+  returning `StorageError::Corrupted`, and is no longer recorded as cleanly shut down.
 * `check_integrity()` now recomputes the table counts stored alongside the data and system roots,
   repairing a file whose counts disagree with its trees. Such a file previously passed the check
   and then panicked, including from `Database::drop`.
