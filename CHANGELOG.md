@@ -46,6 +46,15 @@
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
 
+## 4.X - Unreleased
+* Deprecate `ReadOnlyTable::get()`, `ReadOnlyTable::range()`, `ReadOnlyMultimapTable::get()`,
+  and `ReadOnlyMultimapTable::range()` in favor of the `_owned` variants. Contrary to their
+  documentation, the `'static` access guards they return, or yield, do not keep the transaction
+  alive on their own: holding one after the table and iterator it came from have been dropped
+  allows concurrent writers to reclaim the referenced pages, which panics the writer's
+  `commit()` in debug builds. The deprecation warnings are gated behind the
+  `experimental-pre-api-5-deprecations` feature flag.
+
 ## 4.3.0 - 2026-XX-XX
 * Add `Key::separator()`, which returns a short byte string that separates two keys, as a
   `Cow` so it can also be synthesized rather than borrowed from the inputs. Internal btree

@@ -88,6 +88,8 @@ fn opens_cleanly(path: &Path) -> bool {
 // seeding its allocator assertions, and rejects the cycle there. This test is about the descent
 // itself, which the read-only open reaches without that walk.
 #[test]
+// Reads through the deprecated inherent ReadOnlyTable::get() and range()
+#[allow(deprecated)]
 fn cyclic_branch_pointer_is_reported_rather_than_overflowing_the_stack() {
     let tmpfile = create_tempfile();
     {

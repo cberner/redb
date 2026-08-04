@@ -71,6 +71,9 @@ const OLD3_TABLE: redb3_0::TableDefinition<u32, Old3Value> = redb3_0::TableDefin
 const NEW_TABLE: redb::TableDefinition<u32, NewValue> = redb::TableDefinition::new("new");
 
 #[test]
+// Reads through the inherent ReadOnlyTable::get(), which redb deprecates behind a feature flag.
+// This crate cannot see that flag, so the allowance is unconditional.
+#[allow(deprecated)]
 fn derives_for_both_redb_versions() {
     let old_file = create_tempfile();
     let old_db = redb2_6::Database::create(old_file.path()).unwrap();

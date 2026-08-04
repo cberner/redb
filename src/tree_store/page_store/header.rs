@@ -994,6 +994,7 @@ mod test {
     // wrong, it reaches the assertion in MutateHelper::finish_deletion -- for the system root, via
     // the commit every Database::drop makes. See https://github.com/cberner/redb/issues/1303
     #[test]
+    #[allow(deprecated)] // reads through the deprecated inherent ReadOnlyTable::get()
     fn check_integrity_recomputes_root_lengths() {
         let tmpfile = crate::create_tempfile();
         create_database_with_one_table(tmpfile.path());
@@ -1096,6 +1097,7 @@ mod test {
     // A torn commit slot can carry an invalid page number. Repair must treat that as a bad primary
     // and fall back to the secondary, as it does for a checksum mismatch.
     #[test]
+    #[allow(deprecated)] // reads through the deprecated inherent ReadOnlyTable::get()
     fn repair_falls_back_to_secondary_on_invalid_primary_root() {
         let tmpfile = crate::create_tempfile();
         {

@@ -75,6 +75,7 @@ mod multithreading_test {
     // allocate and dirty pages concurrently, and removals of committed entries queue pages on the
     // transaction's shared freed list from multiple threads.
     #[test]
+    #[allow(deprecated)] // reads through the deprecated inherent ReadOnlyTable::get()
     fn multithreaded_insert_and_remove() {
         let tmpfile = create_tempfile();
         let db = Database::create(tmpfile.path()).unwrap();
