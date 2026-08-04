@@ -576,6 +576,17 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         self.tree.get(key.borrow())
     }
 
+    /// This method is like [`ReadableTable::get()`], but the returned [`OwnedAccessGuard`] is
+    /// reference counted and keeps the transaction alive until it is dropped.
+    pub fn get_owned<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<Option<OwnedAccessGuard<V>>> {
+        Ok(self
+            .get(key)?
+            .map(|x| OwnedAccessGuard::new(x, self.transaction_guard.clone())))
+    }
+
     /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
     /// alive until it is dropped.
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
@@ -585,6 +596,19 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         self.tree
             .range(&range)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
+    }
+
+    /// This method is like [`ReadableTable::range()`], but the returned iterator is reference
+    /// counted and keeps the transaction alive until it is dropped, as do the
+    /// [`OwnedAccessGuard`]s it yields.
+    pub fn range_owned<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<OwnedRange<K, V>>
+    where
+        KR: Borrow<K::SelfType<'a>>,
+    {
+        Ok(OwnedRange::new(
+            self.range(range)?,
+            self.transaction_guard.clone(),
+        ))
     }
 }
 
@@ -764,6 +788,79 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for Range<'_, K, 
                 let key = AccessGuard::with_page(page.clone(), key_range);
                 let value = AccessGuard::with_page(page, value_range);
                 (key, value)
+            })
+        })
+    }
+}
+
+/// An [`AccessGuard`] which also keeps the transaction alive
+///
+/// Returned by the reference-counted accessors of [`ReadOnlyTable`] and
+/// [`crate::ReadOnlyMultimapTable`], such as [`ReadOnlyTable::get_owned()`]: in addition to
+/// providing access to the data, it keeps the read transaction alive until it is dropped.
+pub struct OwnedAccessGuard<V: Value + 'static> {
+    // Declared before the transaction guard so the page reference is released before the
+    // transaction is deallocated
+    inner: AccessGuard<'static, V>,
+    _transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<V: Value + 'static> OwnedAccessGuard<V> {
+    pub(crate) fn new(inner: AccessGuard<'static, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            _transaction_guard: guard,
+        }
+    }
+
+    /// Access the stored value
+    pub fn value(&self) -> V::SelfType<'_> {
+        self.inner.value()
+    }
+}
+
+/// A [`Range`] which also keeps the transaction alive
+///
+/// Returned by [`ReadOnlyTable::range_owned()`]. The iterator and the [`OwnedAccessGuard`]s it
+/// yields keep the read transaction alive until they are dropped.
+#[derive(Clone)]
+pub struct OwnedRange<K: Key + 'static, V: Value + 'static> {
+    inner: Range<'static, K, V>,
+    transaction_guard: Arc<TransactionGuard>,
+}
+
+impl<K: Key + 'static, V: Value + 'static> OwnedRange<K, V> {
+    pub(super) fn new(inner: Range<'static, K, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            transaction_guard: guard,
+        }
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> Iterator for OwnedRange<K, V> {
+    type Item = Result<(OwnedAccessGuard<K>, OwnedAccessGuard<V>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next().map(|x| {
+            x.map(|(key, value)| {
+                (
+                    OwnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    OwnedAccessGuard::new(value, self.transaction_guard.clone()),
+                )
+            })
+        })
+    }
+}
+
+impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for OwnedRange<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back().map(|x| {
+            x.map(|(key, value)| {
+                (
+                    OwnedAccessGuard::new(key, self.transaction_guard.clone()),
+                    OwnedAccessGuard::new(value, self.transaction_guard.clone()),
+                )
             })
         })
     }

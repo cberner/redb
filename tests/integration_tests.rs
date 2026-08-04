@@ -1164,6 +1164,94 @@ fn explicit_close() {
 }
 
 #[test]
+fn read_only_get_guard_keeps_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let guard = table.get_owned(&5).unwrap().unwrap();
+
+    // The guard alone must keep the transaction registered
+    drop(table);
+    assert!(matches!(
+        read_txn.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+
+    // Concurrent writers must not reclaim the pages referenced by the guard, even though
+    // every other object referencing the read transaction has been dropped
+    for _ in 0..10 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(U64_TABLE).unwrap();
+            for i in 0..100 {
+                table.insert(i, i + 1).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    assert_eq!(guard.value(), 5);
+}
+
+#[test]
+fn read_only_range_guards_keep_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let mut range = table.range_owned(5..).unwrap();
+    let (key, value) = range.next().unwrap().unwrap();
+    let (back_key, back_value) = range.next_back().unwrap().unwrap();
+
+    // The yielded guards alone must keep the transaction registered
+    drop(range);
+    drop(table);
+    assert!(matches!(
+        read_txn.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+
+    // Concurrent writers must not reclaim the pages referenced by the guards, even though
+    // every other object referencing the read transaction has been dropped
+    for _ in 0..10 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(U64_TABLE).unwrap();
+            for i in 0..100 {
+                table.insert(i, i + 1).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    assert_eq!(key.value(), 5);
+    assert_eq!(value.value(), 5);
+    assert_eq!(back_key.value(), 99);
+    assert_eq!(back_value.value(), 99);
+}
+
+#[test]
 fn large_keys() {
     let tmpfile = create_tempfile();
 
