@@ -603,6 +603,19 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    // Discards an allocator state that no longer describes the file. Callers that allocate or free
+    // must check for one first, since those paths have no way to work without it.
+    pub(crate) fn invalidate_allocator_state(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.allocators = None;
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
+    }
+
+    pub(crate) fn allocator_state_loaded(&self) -> bool {
+        self.state.lock().unwrap().allocators.is_some()
+    }
+
     pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
         let mut state = self.state.lock().unwrap();
         let region_index = page_number.region;
@@ -1369,7 +1382,9 @@ impl TransactionalMemory {
     fn flush_shutdown_header(&self) -> Result {
         if self.storage.check_io_errors().is_ok() && !thread::panicking() {
             let mut state = self.state.lock()?;
-            if self.storage.flush().is_ok() {
+            // Clearing the flag asserts that this process left the file consistent, which requires
+            // an allocator state describing what it wrote. Without one there is nothing to assert.
+            if state.allocators.is_some() && self.storage.flush().is_ok() {
                 state.header.recovery_required = false;
                 self.write_header(&state.header)?;
                 self.storage.flush()?;

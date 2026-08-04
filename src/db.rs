@@ -605,6 +605,26 @@ impl Database {
             return Err(DatabaseError::TransactionInProgress);
         }
 
+        // Rebuilding the allocator state is what this does, so there is nothing to retry once a
+        // previous call has failed at it
+        if !self.mem.allocator_state_loaded() {
+            return Err(StorageError::Corrupted(
+                "Allocator state was discarded by a failed integrity check".to_string(),
+            )
+            .into());
+        }
+
+        // Repairing rebuilds the allocator state, so a failure part way through leaves one that
+        // describes neither the file nor anything else. Holding an allocator state must continue
+        // to mean it describes the file.
+        let result = self.check_integrity_inner();
+        if result.is_err() {
+            self.mem.invalidate_allocator_state();
+        }
+        result
+    }
+
+    fn check_integrity_inner(&mut self) -> Result<bool, DatabaseError> {
         // A pending Durability::None commit is acknowledged, live data that the reload below would
         // discard. If the live state verifies, promote it to durable rather than losing it -- even
         // if the durable state it replaces turns out to be corrupt, in which case we recover from
@@ -1214,6 +1234,13 @@ impl Database {
     ) -> Result<WriteTransaction, TransactionError> {
         // Fail early if there has been an I/O error -- nothing can be committed in that case
         self.mem.check_io_errors()?;
+        // Every durable commit allocates and frees pages, which requires an allocator state
+        if !self.mem.allocator_state_loaded() {
+            return Err(StorageError::Corrupted(
+                "Allocator state was discarded by a failed integrity check".to_string(),
+            )
+            .into());
+        }
         let guard = TransactionGuard::new_write(
             self.transaction_tracker.start_write_transaction(),
             self.transaction_tracker.clone(),
