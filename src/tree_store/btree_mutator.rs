@@ -1,3 +1,4 @@
+use crate::table::InsertHint;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, OwnedEntryBuffer, is_single_large_value, leaf_below_merge_threshold,
@@ -461,6 +462,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         &mut self,
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
+        hint: Option<InsertHint>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
         let (new_root, old_value, guard) = if let Some(BtreeHeader {
             root: p,
@@ -473,6 +475,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 checksum,
                 K::as_bytes(key).as_ref(),
                 V::as_bytes(value).as_ref(),
+                hint,
             )?;
 
             let new_length = if result.old_value.is_some() {
@@ -525,6 +528,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         page_checksum: Checksum,
         key: &[u8],
         value: &[u8],
+        hint: Option<InsertHint>,
     ) -> Result<InsertionResult<'a, V>> {
         let node_mem = page.memory();
         Ok(match node_mem[0] {
@@ -678,7 +682,14 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         old_value: existing_value,
                     }
                 } else {
-                    let (new_page1, split_key, new_page2) = builder.build_split()?;
+                    let appending = hint == Some(InsertHint::Append)
+                        && !found
+                        && position == accessor.num_pairs();
+                    let (new_page1, split_key, new_page2) = if appending {
+                        builder.build_split_appending()?
+                    } else {
+                        builder.build_split()?
+                    };
                     let split_key = split_key.to_vec();
                     let page_number = page.get_page_number();
                     let existing_value = if found {
@@ -740,6 +751,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     child_checksum,
                     key,
                     value,
+                    hint,
                 )?;
 
                 // Skip-path: if child page number and checksum haven't changed,

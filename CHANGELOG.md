@@ -97,6 +97,10 @@
   Existing databases created by older versions remain readable. If an older database already used
   such a colliding composite name, its stored type identity remains ambiguous and may still open
   under either spelling.
+* Add `Table::insert_with_hint()` and `InsertHint`. `InsertHint::Append` packs a leaf fully
+  instead of splitting it evenly when an insert past the leaf's last key forces a split. This
+  reduces free space left behind when loading data in ascending key order, at the cost of
+  leaves needing to split again to accept a later key that falls inside them.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.
