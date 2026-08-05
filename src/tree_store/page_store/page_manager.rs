@@ -605,11 +605,20 @@ impl TransactionalMemory {
 
     // Discards an allocator state that no longer describes the file. Callers that allocate or free
     // must check for one first, since those paths have no way to work without it.
+    //
+    // Runs during panic unwinding, so it must tolerate poisoned locks rather than double-panic.
+    // The poison is deliberately left set: subsequent lock users fail rather than trusting state
+    // touched by a panicking thread.
     pub(crate) fn invalidate_allocator_state(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.allocators = None;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .allocators = None;
         #[cfg(debug_assertions)]
-        self.allocated_pages.lock().unwrap().clear();
+        self.allocated_pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     pub(crate) fn allocator_state_loaded(&self) -> bool {
@@ -1448,6 +1457,39 @@ mod test {
 
         let mut db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
+    }
+
+    // A panic raised while the state mutex is held (e.g. an allocator assertion) poisons it.
+    // invalidate_allocator_state() runs while unwinding from such a panic, so it must recover
+    // the lock rather than double-panic; the poison itself is left set.
+    #[test]
+    #[cfg(panic = "unwind")]
+    fn invalidate_allocator_state_tolerates_poison() {
+        use super::TransactionalMemory;
+        use crate::tree_store::InMemoryBackend;
+
+        let mem =
+            TransactionalMemory::new(Box::new(InMemoryBackend::new()), true, 4096, None, 0, false)
+                .unwrap();
+        mem.reset_allocator_state().unwrap();
+
+        std::thread::scope(|s| {
+            let result = s
+                .spawn(|| {
+                    let _guard = mem.state.lock().unwrap();
+                    panic!("poison the state mutex");
+                })
+                .join();
+            assert!(result.is_err());
+        });
+        assert!(mem.state.is_poisoned());
+
+        // Must not panic, despite the poisoned lock
+        mem.invalidate_allocator_state();
+
+        // The poison stays set, so later accesses fail rather than trust the state
+        assert!(mem.state.is_poisoned());
+        assert!(mem.get_last_committed_transaction_id().is_err());
     }
 
     // Freeing pages that buddy-merge into a higher order must re-mark the region tracker at the
