@@ -624,11 +624,13 @@ impl Database {
             return Err(DatabaseError::TransactionInProgress);
         }
 
-        // Rebuilding the allocator state is what this does, so there is nothing to retry once a
-        // previous call has failed at it
+        // Report a latched I/O failure as such, not as the discarded allocator state it also causes
+        self.mem.check_io_errors()?;
+        // Once the allocator state has been discarded (by a failed commit or integrity check),
+        // the database must be reopened to rebuild it; this check requires one to compare against
         if !self.mem.allocator_state_loaded() {
             return Err(StorageError::Corrupted(
-                "Allocator state was discarded by a failed integrity check".to_string(),
+                "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
             )
             .into());
         }
@@ -1263,17 +1265,21 @@ fn begin_write_with_allocation_policy(
 ) -> Result<WriteTransaction, TransactionError> {
     // Fail early if there has been an I/O error -- nothing can be committed in that case
     mem.check_io_errors()?;
-    // Every durable commit allocates and frees pages, which requires an allocator state
-    if !mem.allocator_state_loaded() {
-        return Err(StorageError::Corrupted(
-            "Allocator state was discarded by a failed integrity check".to_string(),
-        )
-        .into());
-    }
     let guard = TransactionGuard::new_write(
         transaction_tracker.start_write_transaction(),
         transaction_tracker.clone(),
     );
+    // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
+    // commit, latching an I/O error and discarding the allocator state. The I/O check comes
+    // first so a backend failure is not misreported as corruption. Returning drops the guard,
+    // releasing the slot.
+    mem.check_io_errors()?;
+    if !mem.allocator_state_loaded() {
+        return Err(StorageError::Corrupted(
+            "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
+        )
+        .into());
+    }
     WriteTransaction::new(
         guard,
         transaction_tracker.clone(),

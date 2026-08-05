@@ -856,6 +856,32 @@ impl SavepointTransactionState {
     }
 }
 
+// Discards the in-memory allocator state on drop, unless disarmed. An incomplete commit may
+// have returned pages to the allocator that the durable roots still reference through the
+// freed tables; such an allocator state must never be used, or persisted by a clean
+// shutdown, again.
+struct AllocatorStateLatch {
+    mem: Option<Arc<TransactionalMemory>>,
+}
+
+impl AllocatorStateLatch {
+    fn arm(mem: Arc<TransactionalMemory>) -> Self {
+        Self { mem: Some(mem) }
+    }
+
+    fn disarm(mut self) {
+        self.mem = None;
+    }
+}
+
+impl Drop for AllocatorStateLatch {
+    fn drop(&mut self) {
+        if let Some(mem) = self.mem.take() {
+            mem.invalidate_allocator_state();
+        }
+    }
+}
+
 /// A read/write transaction
 ///
 /// Only a single [`WriteTransaction`] may exist at a time
@@ -1583,7 +1609,13 @@ impl WriteTransaction {
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     ///
     /// Returns [`CommitError::TransactionPoisoned`] if a previous operation panicked and left the
-    /// transaction unable to commit.
+    /// transaction unable to commit. In that case the transaction is rolled back and the database
+    /// remains usable.
+    ///
+    /// On any other error the commit did not complete cleanly: the transaction's changes are
+    /// applied atomically -- fully or not at all -- but may already have become durable, so they
+    /// must not be assumed rolled back. The database refuses further write transactions; closing
+    /// and reopening it repairs any internal state left by the failed commit.
     pub fn commit(mut self) -> Result<(), CommitError> {
         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
         self.completed = true;
@@ -1595,6 +1627,17 @@ impl WriteTransaction {
     }
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
+        // Covers both the error and the panic-unwind path. Without an allocator state,
+        // begin_write() refuses new write transactions and the next open repairs.
+        let latch = AllocatorStateLatch::arm(self.mem.clone());
+        let result = self.commit_inner_helper();
+        if result.is_ok() {
+            latch.disarm();
+        }
+        result
+    }
+
+    fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -2630,10 +2673,77 @@ impl Debug for ReadTransaction {
 
 #[cfg(test)]
 mod test {
-    use crate::{Database, TableDefinition};
+    use crate::{Database, ReadableDatabase, StorageError, TableDefinition, TransactionError};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
     const BIG_VALUE: TableDefinition<u64, &[u8]> = TableDefinition::new("big_value");
+
+    // A commit that stops part way may leave pages returned to the allocator while the durable
+    // freed tables still reference them, so commit_inner() discards the allocator state unless
+    // it completes. Verify the resulting contract: writes are refused, reads keep working, the
+    // shutdown is not recorded as clean, and reopening repairs the database.
+    #[test]
+    fn discarded_allocator_state_poisons_database() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            for i in 0..100u32 {
+                table.insert(format!("key{i}").as_str(), "value").unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        // Leave freed-table entries pending, so the repair below must handle them
+        let mut txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            for i in 0..50u32 {
+                table.remove(format!("key{i}").as_str()).unwrap();
+            }
+        }
+        txn.disable_post_commit_free();
+        txn.commit().unwrap();
+
+        // The state a failed commit leaves behind
+        db.get_memory().invalidate_allocator_state();
+
+        // Twice: a refused attempt must release the write slot
+        for _ in 0..2 {
+            match db.begin_write() {
+                Err(TransactionError::Storage(StorageError::Corrupted(_))) => {}
+                Err(err) => panic!("unexpected error: {err}"),
+                Ok(_) => panic!("begin_write() must fail"),
+            }
+        }
+
+        // Reads still work and see the last committed state
+        {
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert!(table.get("key0").unwrap().is_none());
+            assert_eq!(table.get("key99").unwrap().unwrap().value(), "value");
+        }
+
+        // Closing must not record a clean shutdown, so reopening repairs the database
+        drop(db);
+        let mut db = Database::open(tmpfile.path()).unwrap();
+        assert!(db.check_integrity().unwrap());
+        {
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get("key99").unwrap().unwrap().value(), "value");
+        }
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("after-repair", "value").unwrap();
+        }
+        txn.commit().unwrap();
+    }
 
     #[test]
     fn transaction_id_persistence() {
