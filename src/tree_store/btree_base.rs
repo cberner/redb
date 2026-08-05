@@ -811,28 +811,41 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
-        let mut first_split_key_bytes = 0;
-        let mut first_split_value_bytes = 0;
+        let mut split_bytes = 0;
         for (key, value) in self.pairs.iter().take(self.pairs.len() - 1) {
-            first_split_key_bytes += key.len();
-            first_split_value_bytes += value.len();
+            split_bytes += key.len() + value.len();
             division += 1;
-            if first_split_key_bytes + first_split_value_bytes >= total_size / 2 {
+            if split_bytes >= total_size / 2 {
                 break;
             }
         }
+        self.build_split_at(division)
+    }
 
+    // Divides after the second to last pair, rather than evenly, so that the
+    // leading page stays full. An ascending insert splits the rightmost leaf and
+    // never returns to it, so an even division strands it at half capacity.
+    pub(super) fn build_split_appending<'txn>(
+        self,
+    ) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
+        let division = self.pairs.len() - 1;
+        self.build_split_at(division)
+    }
+
+    fn build_split_at<'txn>(
+        self,
+        division: usize,
+    ) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
         // num_pairs is stored as a u16, so neither half may exceed u16::MAX pairs. The
         // byte-based division above can be arbitrarily lopsided when pair sizes are skewed
         // (e.g. merging a leaf full of tiny pairs with one containing a huge value)
         let max_pairs = usize::from(u16::MAX);
         assert!(self.pairs.len() <= 2 * max_pairs);
-        let clamped = division.clamp(self.pairs.len().saturating_sub(max_pairs), max_pairs);
-        if clamped != division {
-            division = clamped;
-            first_split_key_bytes = self.pairs[..division].iter().map(|(k, _)| k.len()).sum();
-            first_split_value_bytes = self.pairs[..division].iter().map(|(_, v)| v.len()).sum();
-        }
+        let division = division.clamp(self.pairs.len().saturating_sub(max_pairs), max_pairs);
+        let first_split_key_bytes: usize =
+            self.pairs[..division].iter().map(|(k, _)| k.len()).sum();
+        let first_split_value_bytes: usize =
+            self.pairs[..division].iter().map(|(_, v)| v.len()).sum();
 
         let required_size =
             self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);

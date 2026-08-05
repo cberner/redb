@@ -74,8 +74,9 @@ pub use multimap_table::{
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
 pub use table::{
-    Entry, ExtractIf, OccupiedEntry, OwnedAccessGuard, OwnedRange, Range, ReadOnlyTable,
-    ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats, VacantEntry,
+    Entry, ExtractIf, InsertHint, OccupiedEntry, OwnedAccessGuard, OwnedRange, Range,
+    ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats,
+    VacantEntry,
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace, Savepoint};
