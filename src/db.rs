@@ -53,7 +53,8 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Release any resources held by the backend
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
-    /// once when the [`Database`] is dropped
+    /// once when the database is closed: when the [`Database`] is dropped, or, if a
+    /// [`WriteTransaction`] was live at that point, when that transaction completes
     fn close(&self) -> std::result::Result<(), io::Error> {
         Ok(())
     }
@@ -341,7 +342,13 @@ impl Drop for TransactionGuard {
             Self::Write {
                 tracker,
                 transaction_id,
-            } => tracker.end_write_transaction(*transaction_id),
+            } => {
+                if let Some(mem) = tracker.end_write_transaction(*transaction_id) {
+                    // The Database was dropped while this transaction was live, deferring
+                    // the database close to the end of this transaction
+                    close_database(tracker, &mem);
+                }
+            }
             Self::Untracked => {}
         }
     }
@@ -481,6 +488,17 @@ impl ReadOnlyDatabase {
 ///
 /// Multiple reads may be performed concurrently, with each other, and with writes. Only a single write
 /// may be in progress at a time.
+///
+/// # Close semantics
+///
+/// Dropping the [`Database`] closes the database: buffered data is flushed, the file lock is
+/// released, and outstanding [`ReadTransaction`]s are invalidated (their operations will return
+/// [`StorageError::DatabaseClosed`]).
+///
+/// A live [`WriteTransaction`] keeps the database open, however: if one exists when the
+/// [`Database`] is dropped, the transaction remains fully usable and the close described above
+/// is deferred until the transaction commits, aborts, or is dropped. Until then the database
+/// file remains locked, so re-opening it fails with [`DatabaseError::DatabaseAlreadyOpen`].
 ///
 /// # Examples
 ///
@@ -1223,67 +1241,105 @@ impl Database {
     /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a single
     /// write may be in progress at a time. If a write is in progress, this function will block
     /// until it completes.
+    ///
+    /// The returned transaction is not lifetime-bound to this [`Database`] and keeps the
+    /// database open: if the [`Database`] is dropped while the transaction is live, the
+    /// transaction remains usable and the database closes when the transaction completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
-        self.begin_write_with_allocation_policy(AllocationPolicy::Default)
-    }
-
-    // The allocation policy is fixed for the lifetime of the transaction; every page allocation
-    // this transaction makes goes through it.
-    pub(crate) fn begin_write_with_allocation_policy(
-        &self,
-        allocation_policy: AllocationPolicy,
-    ) -> Result<WriteTransaction, TransactionError> {
-        // Fail early if there has been an I/O error -- nothing can be committed in that case
-        self.mem.check_io_errors()?;
-        // Every durable commit allocates and frees pages, which requires an allocator state
-        if !self.mem.allocator_state_loaded() {
-            return Err(StorageError::Corrupted(
-                "Allocator state was discarded by a failed integrity check".to_string(),
-            )
-            .into());
-        }
-        let guard = TransactionGuard::new_write(
-            self.transaction_tracker.start_write_transaction(),
-            self.transaction_tracker.clone(),
-        );
-        WriteTransaction::new(
-            guard,
-            self.transaction_tracker.clone(),
-            self.mem.clone(),
-            allocation_policy,
+        begin_write_with_allocation_policy(
+            &self.transaction_tracker,
+            &self.mem,
+            AllocationPolicy::Default,
         )
-        .map_err(|e| e.into())
+    }
+}
+
+// The allocation policy is fixed for the lifetime of the transaction; every page allocation
+// this transaction makes goes through it.
+fn begin_write_with_allocation_policy(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+    allocation_policy: AllocationPolicy,
+) -> Result<WriteTransaction, TransactionError> {
+    // Fail early if there has been an I/O error -- nothing can be committed in that case
+    mem.check_io_errors()?;
+    // Every durable commit allocates and frees pages, which requires an allocator state
+    if !mem.allocator_state_loaded() {
+        return Err(StorageError::Corrupted(
+            "Allocator state was discarded by a failed integrity check".to_string(),
+        )
+        .into());
+    }
+    let guard = TransactionGuard::new_write(
+        transaction_tracker.start_write_transaction(),
+        transaction_tracker.clone(),
+    );
+    WriteTransaction::new(
+        guard,
+        transaction_tracker.clone(),
+        mem.clone(),
+        allocation_policy,
+    )
+    .map_err(|e| e.into())
+}
+
+fn ensure_allocator_state_table_and_trim(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+) -> Result<(), Error> {
+    // Make a new quick-repair commit to update the allocator state table
+    #[cfg(feature = "logging")]
+    debug!("Writing allocator state table");
+    // If compact() left no free pages, the default allocator lands this
+    // commit's writes at high page indices (see AllocationPolicy::Lowest)
+    // and try_shrink can't reclaim the growth. See
+    // https://github.com/cberner/redb/issues/1165
+    let mut tx =
+        begin_write_with_allocation_policy(transaction_tracker, mem, AllocationPolicy::Lowest)?;
+    tx.set_quick_repair(true);
+    tx.disable_post_commit_free();
+    tx.set_shrink_policy(ShrinkPolicy::Maximum);
+    tx.commit()?;
+
+    Ok(())
+}
+
+// Closes the database: persists the allocator state table, so that the next open does not
+// require a repair, and closes the storage backend. Runs exactly once, when the database
+// closes: from Database::drop, or from the end of the write transaction that was live at
+// that point. In both cases the Database is being, or has been, dropped, so no new write
+// transaction can be started concurrently and the commit in here cannot block on the
+// write-transaction slot.
+fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
+    if !thread::panicking()
+        && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
+    {
+        #[cfg(feature = "logging")]
+        warn!("Failed to write allocator state table. Repair may be required at restart.");
     }
 
-    fn ensure_allocator_state_table_and_trim(&self) -> Result<(), Error> {
-        // Make a new quick-repair commit to update the allocator state table
+    if mem.close().is_err() {
         #[cfg(feature = "logging")]
-        debug!("Writing allocator state table");
-        // If compact() left no free pages, the default allocator lands this
-        // commit's writes at high page indices (see AllocationPolicy::Lowest)
-        // and try_shrink can't reclaim the growth. See
-        // https://github.com/cberner/redb/issues/1165
-        let mut tx = self.begin_write_with_allocation_policy(AllocationPolicy::Lowest)?;
-        tx.set_quick_repair(true);
-        tx.disable_post_commit_free();
-        tx.set_shrink_policy(ShrinkPolicy::Maximum);
-        tx.commit()?;
-
-        Ok(())
+        warn!("Failed to flush database file. Repair may be required at restart.");
     }
 }
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if !thread::panicking() && self.ensure_allocator_state_table_and_trim().is_err() {
+        if self
+            .transaction_tracker
+            .defer_close_if_write_transaction_live(&self.mem)
+        {
+            // The write transaction holds the memory and tracker alive, so it remains fully
+            // usable; TransactionGuard::drop performs the deferred close when it ends
             #[cfg(feature = "logging")]
-            warn!("Failed to write allocator state table. Repair may be required at restart.");
+            warn!(
+                "Database dropped while a write transaction is in progress. The database will remain open until the write transaction completes."
+            );
+            return;
         }
 
-        if self.mem.close().is_err() {
-            #[cfg(feature = "logging")]
-            warn!("Failed to flush database file. Repair may be required at restart.");
-        }
+        close_database(&self.transaction_tracker, &self.mem);
     }
 }
 

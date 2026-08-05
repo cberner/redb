@@ -6,8 +6,8 @@ use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
     Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition, TableError,
-    TableHandle, TypeName, Value,
+    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
+    TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
 #[cfg(not(target_os = "wasi"))]
@@ -84,6 +84,103 @@ fn read_only() {
     ));
     drop(db);
     drop(db2);
+}
+
+#[test]
+fn write_transaction_keeps_database_open() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    // The live write transaction keeps the database open and remains usable
+    drop(db);
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+
+    // The file stays locked until the transaction completes
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    assert!(matches!(
+        Database::open(tmpfile.path()),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    write_txn.commit().unwrap();
+
+    // The deferred close ran when the transaction completed, so re-opening succeeds and
+    // does not require a repair
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn drop_database_then_drop_write_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    drop(db);
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    // Dropping the transaction aborts it and performs the deferred close
+    drop(write_txn);
+
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(STR_TABLE),
+        Err(TableError::TableDoesNotExist(_))
+    ));
+}
+
+#[test]
+fn deferred_close_invalidates_read_transactions() {
+    let tmpfile = create_tempfile();
+    let db = Database::builder()
+        .set_cache_size(0)
+        .create(tmpfile.path())
+        .unwrap();
+    let setup_txn = db.begin_write().unwrap();
+    {
+        let mut table = setup_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    setup_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let read_txn = db.begin_read().unwrap();
+    drop(db);
+    // The database is still open, so the read transaction remains usable
+    assert!(read_txn.list_tables().is_ok());
+    write_txn.commit().unwrap();
+    // The write transaction's completion closed the database
+    assert!(matches!(
+        read_txn.list_tables().err().unwrap(),
+        StorageError::DatabaseClosed
+    ));
+}
+
+// Regression test for https://github.com/cberner/redb/issues/1072
+#[test]
+fn return_write_transaction_from_function() {
+    fn make_txn(path: &std::path::Path) -> WriteTransaction {
+        let db = Database::create(path).unwrap();
+        db.begin_write().unwrap()
+    }
+
+    let tmpfile = create_tempfile();
+    let txn = make_txn(tmpfile.path());
+    txn.commit().unwrap();
+    Database::open(tmpfile.path()).unwrap();
 }
 
 #[test]

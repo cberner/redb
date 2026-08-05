@@ -859,6 +859,10 @@ impl SavepointTransactionState {
 /// A read/write transaction
 ///
 /// Only a single [`WriteTransaction`] may exist at a time
+///
+/// A live [`WriteTransaction`] keeps the database open: if the [`Database`](crate::Database) is
+/// dropped while this transaction is live, the transaction remains usable and the database
+/// closes when the transaction commits, aborts, or is dropped
 pub struct WriteTransaction {
     transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
