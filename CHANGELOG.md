@@ -1,6 +1,10 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
+  `WriteTransaction` now keeps the database open: the transaction remains usable after the
+  `Database` is dropped, and the database closes when the transaction commits, aborts, or is
+  dropped.
 * Fix a panic, including one raised while dropping a `Database`, after `check_integrity()` returned
   an error. Such a database now refuses to begin a write transaction or to re-run the check,
   returning `StorageError::Corrupted`, and is no longer recorded as cleanly shut down.
