@@ -7,7 +7,6 @@
 
 mod old {
     use redb_derive::{Key, Value};
-    use redb2_6::Value as _;
 
     #[derive(Value, Key, Debug, PartialEq, Eq, PartialOrd, Ord)]
     #[redb(crate = "redb2_6")]
@@ -15,7 +14,6 @@ mod old {
 }
 
 mod new {
-    use redb::Value as _;
     use redb_derive::{Key, Value};
 
     #[derive(Value, Key, Debug, PartialEq, Eq, PartialOrd, Ord)]

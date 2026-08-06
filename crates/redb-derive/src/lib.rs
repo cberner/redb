@@ -10,6 +10,13 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, GenericParam, Ident, parse_macro_input};
 
+// All paths in the generated code must be fully qualified (`::std::...`, `#redb::...`, and
+// `<T as #redb::Value>::...` for trait methods, where `#redb` is the path returned by
+// `redb_crate_path_for()`). Method-call syntax and bare paths resolve inherent items before
+// trait items, so a field type with an inherent `from_bytes` or `as_bytes` (e.g. `uuid::Uuid`)
+// would otherwise hijack the generated encoding, and names shadowed at the derive site would
+// change what the code means.
+
 // The path of the redb crate in generated code: `::redb`, unless an explicit
 // `#[redb(crate = "path")]` on the deriving struct names it otherwise, as when the dependency
 // is renamed (`my_redb = { package = "redb" }`) or the implementations are derived against one
@@ -64,10 +71,13 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 
     Ok(quote! {
         impl #impl_generics #redb::Key for #name #ty_generics #where_clause {
-            fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
-                let value1 = #name::from_bytes(data1);
-                let value2 = #name::from_bytes(data2);
-                Ord::cmp(&value1, &value2)
+            fn compare(
+                data1: &[::std::primitive::u8],
+                data2: &[::std::primitive::u8],
+            ) -> ::std::cmp::Ordering {
+                let value1 = <Self as #redb::Value>::from_bytes(data1);
+                let value2 = <Self as #redb::Value>::from_bytes(data2);
+                ::std::cmp::Ord::cmp(&value1, &value2)
             }
         }
     })
@@ -105,24 +115,24 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let redb = redb_crate_path_for(input)?;
 
     let type_name_impl = generate_type_name(name, &data_struct.fields, &redb);
-    let as_bytes_impl = generate_as_bytes(&data_struct.fields);
-    let from_bytes_impl = generate_from_bytes(name, &data_struct.fields);
-    let fixed_width_impl = generate_fixed_width(&data_struct.fields);
+    let as_bytes_impl = generate_as_bytes(&data_struct.fields, &redb);
+    let from_bytes_impl = generate_from_bytes(name, &data_struct.fields, &redb);
+    let fixed_width_impl = generate_fixed_width(&data_struct.fields, &redb);
 
     Ok(quote! {
         impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
             type SelfType<'a> = #self_type
             where
                 Self: 'a;
-            type AsBytes<'a> = Vec<u8>
+            type AsBytes<'a> = ::std::vec::Vec<::std::primitive::u8>
             where
                 Self: 'a;
 
-            fn fixed_width() -> Option<usize> {
+            fn fixed_width() -> ::std::option::Option<::std::primitive::usize> {
                 #fixed_width_impl
             }
 
-            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+            fn from_bytes<'a>(data: &'a [::std::primitive::u8]) -> Self::SelfType<'a>
             where
                 Self: 'a,
             {
@@ -187,21 +197,25 @@ fn generate_type_name(
                     let field_name = field.ident.as_ref().unwrap();
                     let field_type = &field.ty;
                     quote! {
-                        format!("{}: {}", stringify!(#field_name), <#field_type>::type_name().name())
+                        ::std::format!(
+                            "{}: {}",
+                            ::std::stringify!(#field_name),
+                            <#field_type as #redb::Value>::type_name().name(),
+                        )
                     }
                 })
                 .collect();
 
             if field_strings.is_empty() {
                 quote! {
-                    #redb::TypeName::new(&format!("{} {{}}",
-                        stringify!(#struct_name),
+                    #redb::TypeName::new(&::std::format!("{} {{}}",
+                        ::std::stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    #redb::TypeName::new(&format!("{} {{{}}}",
-                        stringify!(#struct_name),
+                    #redb::TypeName::new(&::std::format!("{} {{{}}}",
+                        ::std::stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
                 }
@@ -214,21 +228,21 @@ fn generate_type_name(
                 .map(|field| {
                     let field_type = &field.ty;
                     quote! {
-                        <#field_type>::type_name().name()
+                        <#field_type as #redb::Value>::type_name().name()
                     }
                 })
                 .collect();
 
             if field_strings.is_empty() {
                 quote! {
-                    #redb::TypeName::new(&format!("{}()",
-                        stringify!(#struct_name),
+                    #redb::TypeName::new(&::std::format!("{}()",
+                        ::std::stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    #redb::TypeName::new(&format!("{}({})",
-                        stringify!(#struct_name),
+                    #redb::TypeName::new(&::std::format!("{}({})",
+                        ::std::stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
                 }
@@ -236,7 +250,7 @@ fn generate_type_name(
         }
         Fields::Unit => {
             quote! {
-                #redb::TypeName::new(stringify!(#struct_name))
+                #redb::TypeName::new(::std::stringify!(#struct_name))
             }
         }
     }
@@ -260,18 +274,21 @@ fn get_field_types(fields: &Fields) -> Vec<syn::Type> {
     }
 }
 
-fn generate_fixed_width(fields: &Fields) -> proc_macro2::TokenStream {
+fn generate_fixed_width(
+    fields: &Fields,
+    redb: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let field_types = get_field_types(fields);
     quote! {
         let mut total_width = 0usize;
         #(
-            total_width += <#field_types>::fixed_width()?;
+            total_width += <#field_types as #redb::Value>::fixed_width()?;
         )*
-        Some(total_width)
+        ::std::option::Option::Some(total_width)
     }
 }
 
-fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
+fn generate_as_bytes(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     let field_types = get_field_types(fields);
     let field_accessors = match fields {
         Fields::Named(fields_named) => fields_named
@@ -294,14 +311,15 @@ fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
     let num_fields = field_types.len();
 
     if num_fields == 0 {
-        quote! { Vec::new() }
+        quote! { ::std::vec::Vec::new() }
     } else if num_fields == 1 {
         let field_accessor = &field_accessors[0];
         let field_type = &field_types[0];
         quote! {
             {
-                let field_bytes = <#field_type>::as_bytes(&value.#field_accessor);
-                field_bytes.as_ref().to_vec()
+                let field_bytes = <#field_type as #redb::Value>::as_bytes(&value.#field_accessor);
+                let bytes: &[::std::primitive::u8] = ::std::convert::AsRef::as_ref(&field_bytes);
+                bytes.to_vec()
             }
         }
     } else {
@@ -310,20 +328,35 @@ fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
 
         quote! {
             {
-                let mut result = Vec::new();
+                let mut result = ::std::vec::Vec::new();
 
                 #(
-                    if <#field_types_except_last>::fixed_width().is_none() {
-                        let field_bytes = <#field_types_except_last>::as_bytes(&value.#field_accessors_except_last);
-                        let bytes: &[u8] = field_bytes.as_ref();
+                    if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
+                        let field_bytes = <#field_types_except_last as #redb::Value>::as_bytes(
+                            &value.#field_accessors_except_last,
+                        );
+                        let bytes: &[::std::primitive::u8] =
+                            ::std::convert::AsRef::as_ref(&field_bytes);
                         let len = bytes.len();
                         if len < 254 {
-                            result.push(len.try_into().unwrap());
-                        } else if let Ok(u16_len) = u16::try_from(len) {
+                            result.push(
+                                <::std::primitive::u8 as ::std::convert::TryFrom<
+                                    ::std::primitive::usize,
+                                >>::try_from(len)
+                                .unwrap(),
+                            );
+                        } else if let ::std::result::Result::Ok(u16_len) =
+                            <::std::primitive::u16 as ::std::convert::TryFrom<
+                                ::std::primitive::usize,
+                            >>::try_from(len)
+                        {
                             result.push(254u8);
                             result.extend_from_slice(&u16_len.to_le_bytes());
                         } else {
-                            let u32_len: u32 = len.try_into().unwrap();
+                            let u32_len = <::std::primitive::u32 as ::std::convert::TryFrom<
+                                ::std::primitive::usize,
+                            >>::try_from(len)
+                            .unwrap();
                             result.push(255u8);
                             result.extend_from_slice(&u32_len.to_le_bytes());
                         }
@@ -332,8 +365,12 @@ fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
 
                 #(
                     {
-                        let field_bytes = <#field_types>::as_bytes(&value.#field_accessors);
-                        result.extend_from_slice(field_bytes.as_ref());
+                        let field_bytes = <#field_types as #redb::Value>::as_bytes(
+                            &value.#field_accessors,
+                        );
+                        let bytes: &[::std::primitive::u8] =
+                            ::std::convert::AsRef::as_ref(&field_bytes);
+                        result.extend_from_slice(bytes);
                     }
                 )*
 
@@ -343,7 +380,11 @@ fn generate_as_bytes(fields: &Fields) -> proc_macro2::TokenStream {
     }
 }
 
-fn generate_from_bytes(name: &Ident, fields: &Fields) -> proc_macro2::TokenStream {
+fn generate_from_bytes(
+    name: &Ident,
+    fields: &Fields,
+    redb: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let field_types = get_field_types(fields);
     let field_vars: Vec<_> = (0..field_types.len())
         .map(|i| quote::format_ident!("field_{}", i))
@@ -356,7 +397,7 @@ fn generate_from_bytes(name: &Ident, fields: &Fields) -> proc_macro2::TokenStrea
         let field_var = &field_vars[0];
         let field_type = &field_types[0];
         quote! {
-            let #field_var = <#field_type>::from_bytes(data);
+            let #field_var = <#field_type as #redb::Value>::from_bytes(data);
         }
     } else {
         let field_types_except_last = &field_types[..num_fields - 1];
@@ -366,18 +407,26 @@ fn generate_from_bytes(name: &Ident, fields: &Fields) -> proc_macro2::TokenStrea
 
         quote! {
             let mut offset = 0usize;
-            let mut var_lengths = Vec::new();
+            let mut var_lengths = ::std::vec::Vec::new();
 
             #(
-                if <#field_types_except_last>::fixed_width().is_none() {
+                if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
                     let (len, bytes_read) = match data[offset] {
-                        0u8..=253u8 => (data[offset] as usize, 1usize),
+                        0u8..=253u8 => (data[offset] as ::std::primitive::usize, 1usize),
                         254u8 => (
-                            u16::from_le_bytes(data[offset + 1..offset + 3].try_into().unwrap()) as usize,
+                            ::std::primitive::u16::from_le_bytes([
+                                data[offset + 1],
+                                data[offset + 2],
+                            ]) as ::std::primitive::usize,
                             3usize,
                         ),
                         255u8 => (
-                            u32::from_le_bytes(data[offset + 1..offset + 5].try_into().unwrap()) as usize,
+                            ::std::primitive::u32::from_le_bytes([
+                                data[offset + 1],
+                                data[offset + 2],
+                                data[offset + 3],
+                                data[offset + 4],
+                            ]) as ::std::primitive::usize,
                             5usize,
                         ),
                     };
@@ -386,26 +435,30 @@ fn generate_from_bytes(name: &Ident, fields: &Fields) -> proc_macro2::TokenStrea
                 }
             )*
 
-            let mut var_index = 0;
+            let mut var_index = 0usize;
             #(
-                let #field_vars_except_last = if let Some(fixed_width) = <#field_types_except_last>::fixed_width() {
+                let #field_vars_except_last = if let ::std::option::Option::Some(fixed_width) =
+                    <#field_types_except_last as #redb::Value>::fixed_width()
+                {
                     let field_data = &data[offset..offset + fixed_width];
                     offset += fixed_width;
-                    <#field_types_except_last>::from_bytes(field_data)
+                    <#field_types_except_last as #redb::Value>::from_bytes(field_data)
                 } else {
                     let len = var_lengths[var_index];
                     let field_data = &data[offset..offset + len];
                     offset += len;
                     var_index += 1;
-                    <#field_types_except_last>::from_bytes(field_data)
+                    <#field_types_except_last as #redb::Value>::from_bytes(field_data)
                 };
             )*
 
-            let #last_field_var = if let Some(fixed_width) = <#last_field_type>::fixed_width() {
+            let #last_field_var = if let ::std::option::Option::Some(fixed_width) =
+                <#last_field_type as #redb::Value>::fixed_width()
+            {
                 let field_data = &data[offset..offset + fixed_width];
-                <#last_field_type>::from_bytes(field_data)
+                <#last_field_type as #redb::Value>::from_bytes(field_data)
             } else {
-                <#last_field_type>::from_bytes(&data[offset..])
+                <#last_field_type as #redb::Value>::from_bytes(&data[offset..])
             };
         }
     };
