@@ -1,7 +1,9 @@
 //! Tests for `check_integrity()` with a pending `Durability::None` commit. The check promotes such
-//! a commit to durable when the live state verifies (so acknowledged data is not lost), verifying
-//! the live state from disk; it refuses to promote when the backing file was externally truncated
-//! or extended, falling back to repairing the durable state instead.
+//! a commit to durable when the live state verifies (so acknowledged data is not lost); it refuses
+//! to promote when the backing file was externally truncated or extended, falling back to
+//! repairing the durable state instead. Live pages already written to the file are verified from
+//! disk, so external modification is detected; pages still in the write buffer are authoritative
+//! in memory and are written out by the promoting commit.
 
 #[cfg(feature = "experimental-api-5")]
 use redb::ReadableTable;
@@ -96,14 +98,28 @@ fn make_db(backend: PatchBackend, n: u64) -> Database {
     db
 }
 
-// The live state must be verified from disk, not the page cache, before promoting a non-durable
-// commit. Here a page reachable only from the non-durable commit is corrupt on disk but still
-// cached as its good version; promoting it would make a state that is corrupt on disk durable. The
-// check must detect it from disk and roll back to the durable state instead.
+// On-disk pages of the live state must be verified from disk, not the page cache, before a
+// non-durable commit is promoted. Here a page reachable only from that commit was spilled to the
+// file (a zero-size cache spills every page) and then corrupted, so promoting it would make a
+// state that is corrupt on disk durable. The check must roll back to the durable state instead.
 #[test]
 fn check_integrity_does_not_promote_disk_corrupt_nondurable_commit() {
     let backend = PatchBackend::default();
-    let mut db = make_db(backend.clone(), 5);
+    let mut db = Database::builder()
+        .set_cache_size(0)
+        .create_with_backend(backend.clone())
+        .unwrap();
+    {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TABLE).unwrap();
+            for k in 0..5u64 {
+                let v = vec![(k as u8).wrapping_add(0xA0); 64];
+                table.insert(&k, v.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
 
     // A pending non-durable commit that writes a uniquely-tagged page.
     let marker = vec![0xC7u8; 2000];
@@ -117,7 +133,7 @@ fn check_integrity_does_not_promote_disk_corrupt_nondurable_commit() {
         txn.commit().unwrap();
     }
 
-    // Corrupt that page on disk; redb's cache still holds the good copy.
+    // Corrupt that page on disk, where the write buffer spilled it
     assert!(
         backend.corrupt_first_occurrence(&marker),
         "could not locate the value on disk to corrupt"

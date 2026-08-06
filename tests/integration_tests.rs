@@ -2,7 +2,7 @@ use rand::RngExt;
 use rand::prelude::SliceRandom;
 #[cfg(feature = "experimental-api-5")]
 use redb::KeyRange;
-use redb::backends::FileBackend;
+use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
     AccessGuard, Builder, CommitError, CompactionError, Database, Durability, Key, MultimapRange,
     MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
@@ -16,7 +16,7 @@ use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
 #[cfg(not(feature = "experimental-api-5"))]
 use std::ops::RangeBounds;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -533,6 +533,85 @@ fn non_durable_commit_persistence() {
             assert_eq!(table.get(key.as_slice()).unwrap().unwrap().value(), value);
         }
     }
+}
+
+// A Durability::None commit must not write to the storage backend: its dirty pages are retained
+// in the in-memory cache, visible to readers, and only written out by a later durable commit
+#[test]
+fn non_durable_commit_issues_no_backend_writes() {
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: InMemoryBackend,
+        writes: Arc<AtomicU64>,
+    }
+
+    impl StorageBackend for CountingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.write(offset, data)
+        }
+    }
+
+    let writes = Arc::new(AtomicU64::new(0));
+    let backend = CountingBackend {
+        inner: InMemoryBackend::new(),
+        writes: writes.clone(),
+    };
+    let db = Database::builder().create_with_backend(backend).unwrap();
+
+    // Durable baseline, so that table creation and the recovery flag update are out of the way
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let writes_before = writes.load(Ordering::SeqCst);
+    for i in 1..=10u64 {
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(Durability::None).unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    assert_eq!(writes.load(Ordering::SeqCst), writes_before);
+
+    // The non-durable commits are visible to new read transactions
+    {
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(U64_TABLE).unwrap();
+        for i in 1..=10u64 {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i * 10);
+        }
+    }
+
+    // A durable commit writes the accumulated pages out
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&100, &100).unwrap();
+    }
+    txn.commit().unwrap();
+    assert!(writes.load(Ordering::SeqCst) > writes_before);
 }
 
 fn test_persistence(durability: Durability) {
