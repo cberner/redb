@@ -563,8 +563,14 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
-        self.storage.flush()?;
+        // The in-memory state is being discarded for the on-disk state, so buffered writes --
+        // which can only belong to the discarded state -- are dropped rather than written out;
+        // after an external truncation, writing them could even fail beyond the end of the file.
+        // Both caches are cleared before the fallible sync, so an early error return cannot
+        // leave cached pages that disagree with the file.
+        self.storage.discard_write_buffer();
         self.storage.invalidate_cache_all();
+        self.storage.sync_file()?;
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
@@ -917,7 +923,7 @@ impl TransactionalMemory {
         self.storage.check_io_errors()?;
 
         self.unpersisted.lock().unwrap().extend(newly_unpersisted);
-        self.storage.write_barrier()?;
+        self.storage.write_barrier();
 
         let mut state = self.state.lock().unwrap();
         state

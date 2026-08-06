@@ -195,6 +195,24 @@ impl CheckedBackend {
         }
         result.map_err(StorageError::from)
     }
+
+    // Like write(), but a failure does not permanently fail the backend. For a write that only an
+    // optimization depends on, latching would turn every later operation into a PreviousIo error
+    // over data that nothing was waiting on.
+    fn write_best_effort(&self, offset: u64, data: &[u8]) -> Result<()> {
+        self.check_failure()?;
+        self.file.write(offset, data).map_err(StorageError::from)
+    }
+}
+
+// Whether the data written by a write buffer flush has to reach the file. Either way a page whose
+// write fails stays buffered; they differ in what a failure does to the backend.
+#[derive(Copy, Clone)]
+enum Writeback {
+    // A failure is propagated and permanently fails the backend
+    Required,
+    // A failure leaves the backend usable
+    BestEffort,
 }
 
 pub(super) struct PagedCachedFile {
@@ -213,6 +231,10 @@ pub(super) struct PagedCachedFile {
     // writes are in progress, while write-heavy workloads never starve readers
     // below 50%.
     //
+    // Non-durable commits leave their pages in the write buffer (see write_barrier()), so it is
+    // not necessarily empty between transactions. Invariant 1 bounds what they accumulate, and
+    // read() flushes them out under pressure, so they cannot hold the read cache below 100%.
+    //
     // We track usage with two atomic counters and compute the total on the fly.
     // The resulting read is not perfectly atomic (between loading the two
     // counters a concurrent operation could change one), but the budget is a
@@ -221,6 +243,15 @@ pub(super) struct PagedCachedFile {
     // negligible accuracy gain.
     read_cache_bytes: AtomicUsize,
     write_buffer_bytes: AtomicUsize,
+    // True when the write buffer holds committed, reader-visible pages, left there by a
+    // non-durable commit (see write_barrier()) instead of being written to the file. While set,
+    // PageHint::Clean reads must consult the buffer, since a clean page may live there rather
+    // than in the file.
+    //
+    // The buffer also holds the in-progress write transaction's uncommitted pages, but readers
+    // cannot observe them: pages are copy-on-write, and a freed offset is only reallocated once
+    // no live read transaction can reference it.
+    committed_pages_buffered: AtomicBool,
     max_cache_size: usize,
     // Rotates the starting stripe for read-cache eviction
     next_eviction_stripe: AtomicUsize,
@@ -261,6 +292,7 @@ impl PagedCachedFile {
             page_size,
             read_cache_bytes: AtomicUsize::new(0),
             write_buffer_bytes: AtomicUsize::new(0),
+            committed_pages_buffered: AtomicBool::new(false),
             max_cache_size,
             next_eviction_stripe: AtomicUsize::new(0),
             #[cfg(feature = "cache_metrics")]
@@ -396,8 +428,28 @@ impl PagedCachedFile {
             }
             write_buffer.clear();
         }
+        // The buffer is empty, so readers no longer need to consult it
+        self.committed_pages_buffered
+            .store(false, Ordering::Release);
 
         Ok(())
+    }
+
+    // Drop all buffered writes without writing them to the file. Only valid when the state they
+    // belong to is being abandoned (e.g. rolling back to the on-disk state).
+    pub(super) fn discard_write_buffer(&self) {
+        self.committed_pages_buffered
+            .store(false, Ordering::Release);
+        for stripe in &self.write_buffer {
+            let mut write_buffer = stripe.lock().unwrap();
+            for (_, buffer) in write_buffer.cache.iter() {
+                // Like flush_write_buffer(), decrement per page rather than storing zero: a
+                // concurrent writer may be adding to a stripe this loop has already passed.
+                self.write_buffer_bytes
+                    .fetch_sub(buffer.as_ref().unwrap().len(), Ordering::AcqRel);
+            }
+            write_buffer.clear();
+        }
     }
 
     // Caller should invalidate all cached pages that are no longer valid
@@ -443,11 +495,12 @@ impl PagedCachedFile {
         self.file.sync_data()
     }
 
-    // Make writes visible to readers, but does not guarantee any durability
-    pub(super) fn write_barrier(&self) -> Result {
-        // TODO: non-durable commits would be much faster, if this did not issues writes to disk,
-        // and instead just made the data visible to readers
-        self.flush_write_buffer()
+    // Make buffered writes visible to readers, without writing them to the file or guaranteeing
+    // durability. They stay in the buffer, against its budget, until flushed or evicted.
+    pub(super) fn write_barrier(&self) {
+        if self.write_buffer_bytes.load(Ordering::Acquire) > 0 {
+            self.committed_pages_buffered.store(true, Ordering::Release);
+        }
     }
 
     // Read directly from the file, ignoring any cached data
@@ -473,7 +526,8 @@ impl PagedCachedFile {
         #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
-        if !matches!(hint, PageHint::Clean) {
+        // A write transaction's own dirty pages are in the write buffer, so look there first.
+        if matches!(hint, PageHint::None) {
             let lock = self.write_buffer_stripe(offset).lock().unwrap();
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
@@ -494,7 +548,58 @@ impl PagedCachedFile {
             }
         }
 
+        // A clean page is only in the write buffer after a non-durable commit left committed pages
+        // there, and then never also in the read cache: write() drops the read cache entry when it
+        // buffers a page, and flush_write_buffer() empties the buffer as it repopulates the cache.
+        // Checking the read cache first keeps the buffer's mutex, which serializes readers that
+        // the striped read cache lets run concurrently, off the path of pages cached for reading.
+        if matches!(hint, PageHint::Clean) && self.committed_pages_buffered.load(Ordering::Acquire)
+        {
+            let lock = self.write_buffer_stripe(offset).lock().unwrap();
+            if let Some(cached) = lock.get(offset) {
+                #[cfg(feature = "cache_metrics")]
+                self.reads_hits.fetch_add(1, Ordering::Release);
+                debug_assert_eq!(cached.len(), len);
+                let result = cached.clone();
+                // Copy the page into the read cache, so that further reads of it are served by
+                // the striped read locks rather than serializing on this stripe's mutex. Both
+                // caches then hold the same Arc and count it, which only makes the budget
+                // conservative; whichever copy is dropped first -- the buffer's, once it is
+                // flushed, or the read cache's, once it is evicted -- leaves the other counted
+                // exactly once.
+                let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
+                if cache_size + len <= self.max_cache_size {
+                    let mut write_lock = self.read_cache[cache_slot].write().unwrap();
+                    if let Some(replaced) = write_lock.insert(offset, result.clone()) {
+                        // A race could cause us to replace an existing buffer
+                        self.read_cache_bytes
+                            .fetch_sub(replaced.len(), Ordering::AcqRel);
+                    }
+                } else {
+                    self.read_cache_bytes.fetch_sub(len, Ordering::AcqRel);
+                }
+                return Ok(result);
+            }
+        }
+
         let buffer = self.read_direct_into_arc(offset, len)?;
+
+        // Pages a non-durable commit left in the write buffer would otherwise hold up to half the
+        // cache until the next durable commit. They can always be written out, so reclaim their
+        // space rather than evicting read cache entries for them. Done before the read cache lock
+        // is taken, to keep the ordering of write buffer before read cache.
+        //
+        // Reclaiming is best effort: on a write error the page stays buffered, the eviction below
+        // makes room instead, and the error is neither propagated nor latched, so a read is not
+        // failed -- nor every operation after it -- by a writeback nothing depends on.
+        if self.committed_pages_buffered.load(Ordering::Acquire) {
+            let read_bytes = self.read_cache_bytes.load(Ordering::Acquire);
+            let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
+            if read_bytes + len + write_bytes > self.max_cache_size {
+                let _ = self.flush_buffered_pages(len);
+            }
+        }
+
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
         let mut write_lock = self.read_cache[cache_slot].write().unwrap();
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
@@ -507,7 +612,8 @@ impl PagedCachedFile {
 
         // Rule 3: evict from this read-cache slot if the total exceeds the
         // budget.  We evict exactly `len` bytes (one page) per miss to avoid
-        // over-eviction spikes.
+        // over-eviction spikes.  `write_bytes` is read after any reclaim above,
+        // so this only evicts for a shortfall the reclaim did not cover.
         let write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
         let over_total = cache_size + len + write_bytes > self.max_cache_size;
         let mut removed = 0;
@@ -575,12 +681,16 @@ impl PagedCachedFile {
         &self,
         stripe: &mut LRUWriteCache,
         bytes_needed: usize,
+        writeback: Writeback,
     ) -> Result<usize> {
         let mut flushed = 0;
         while flushed < bytes_needed {
             if let Some((offset, buffer)) = stripe.pop_lowest_priority() {
                 let removed_len = buffer.len();
-                let result = self.file.write(offset, &buffer);
+                let result = match writeback {
+                    Writeback::Required => self.file.write(offset, &buffer),
+                    Writeback::BestEffort => self.file.write_best_effort(offset, &buffer),
+                };
                 if result.is_err() {
                     stripe.insert(offset, buffer);
                 }
@@ -594,6 +704,30 @@ impl PagedCachedFile {
                 flushed += removed_len;
             } else {
                 break;
+            }
+        }
+        Ok(flushed)
+    }
+
+    // Writes buffered pages to the backend until `bytes_needed` bytes have been flushed, or no
+    // stripe yields more. Returns the bytes flushed. Stripes are taken with try_lock, like the
+    // over-budget eviction in write(), so a stripe another thread holds is skipped rather than
+    // risking a deadlock against a writer evicting toward this one.
+    fn flush_buffered_pages(&self, bytes_needed: usize) -> Result<usize> {
+        let num_stripes = self.write_buffer.len();
+        let start = self.next_eviction_stripe.fetch_add(1, Ordering::Relaxed) % num_stripes;
+        let mut flushed = 0;
+        for i in 0..num_stripes {
+            if flushed >= bytes_needed {
+                break;
+            }
+            let stripe = (start + i) % num_stripes;
+            if let Ok(mut lock) = self.write_buffer[stripe].try_lock() {
+                flushed += self.flush_lowest_priority(
+                    &mut lock,
+                    bytes_needed - flushed,
+                    Writeback::BestEffort,
+                )?;
             }
         }
         Ok(flushed)
@@ -646,15 +780,21 @@ impl PagedCachedFile {
             // and a commit flushes every stripe regardless.
             if write_bytes > half {
                 let mut excess = write_bytes - half;
-                excess = excess.saturating_sub(self.flush_lowest_priority(&mut lock, excess)?);
+                excess = excess.saturating_sub(self.flush_lowest_priority(
+                    &mut lock,
+                    excess,
+                    Writeback::Required,
+                )?);
                 if excess > 0 {
                     let own: usize = (offset % Self::lock_stripes()).try_into().unwrap();
                     for i in 1..self.write_buffer.len() {
                         let other = (own + i) % self.write_buffer.len();
                         if let Ok(mut other_lock) = self.write_buffer[other].try_lock() {
-                            excess = excess.saturating_sub(
-                                self.flush_lowest_priority(&mut other_lock, excess)?,
-                            );
+                            excess = excess.saturating_sub(self.flush_lowest_priority(
+                                &mut other_lock,
+                                excess,
+                                Writeback::Required,
+                            )?);
                             if excess == 0 {
                                 break;
                             }
@@ -702,7 +842,51 @@ mod test {
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: InMemoryBackend,
+        writes: Arc<AtomicU64>,
+    }
+
+    impl CountingBackend {
+        fn new(len: u64) -> (Self, Arc<AtomicU64>) {
+            let inner = InMemoryBackend::new();
+            inner.set_len(len).unwrap();
+            let writes = Arc::new(AtomicU64::new(0));
+            (
+                Self {
+                    inner,
+                    writes: writes.clone(),
+                },
+                writes,
+            )
+        }
+    }
+
+    impl StorageBackend for CountingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.write(offset, data)
+        }
+    }
 
     #[test]
     fn cache_leak() {
@@ -789,5 +973,145 @@ mod test {
         cached_file.resize(256).unwrap();
         assert_eq!(cached_file.read_cache_bytes.load(Ordering::Acquire), 128);
         assert_eq!(cached_file.raw_file_len().unwrap(), 256);
+    }
+
+    // write_barrier() must not write to the file: the pages stay in the buffer, still visible to
+    // readers, including PageHint::Clean ones
+    #[test]
+    fn write_barrier_issues_no_file_writes() {
+        let (backend, writes) = CountingBackend::new(1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024).unwrap();
+
+        let mut page = cached_file.write(0, 128, true).unwrap();
+        page.mem_mut().fill(0xAB);
+        drop(page);
+        cached_file.write_barrier();
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+
+        assert_eq!(
+            &*cached_file.read(0, 128, PageHint::Clean).unwrap(),
+            [0xAB; 128].as_slice()
+        );
+        assert_eq!(
+            &*cached_file.read(0, 128, PageHint::None).unwrap(),
+            [0xAB; 128].as_slice()
+        );
+        assert_eq!(cached_file.read_direct(0, 128).unwrap(), vec![0; 128]);
+
+        // A flush writes the page out and clears the buffer
+        cached_file.flush().unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(cached_file.read_direct(0, 128).unwrap(), vec![0xAB; 128]);
+        assert_eq!(
+            &*cached_file.read(0, 128, PageHint::Clean).unwrap(),
+            [0xAB; 128].as_slice()
+        );
+    }
+
+    // discard_write_buffer() must drop buffered pages, so reads fall through to the file
+    #[test]
+    fn discard_write_buffer_drops_buffered_pages() {
+        let (backend, writes) = CountingBackend::new(1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024).unwrap();
+
+        let mut page = cached_file.write(0, 128, true).unwrap();
+        page.mem_mut().fill(0xCD);
+        drop(page);
+        cached_file.write_barrier();
+
+        cached_file.discard_write_buffer();
+        assert_eq!(cached_file.write_buffer_bytes.load(Ordering::Acquire), 0);
+        assert_eq!(
+            &*cached_file.read(0, 128, PageHint::None).unwrap(),
+            [0u8; 128].as_slice()
+        );
+        cached_file.flush().unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    // Pages retained by a non-durable commit must not hold the read cache below its share: they
+    // can always be written out, so a read-heavy workload reclaims the space they occupy.
+    #[test]
+    fn retained_pages_do_not_starve_read_cache() {
+        const PAGE: usize = 128;
+        const MAX_CACHE: usize = 4096;
+        const FILE_LEN: u64 = 16 * 1024;
+
+        let (backend, _writes) = CountingBackend::new(FILE_LEN);
+        let cached_file = PagedCachedFile::new(Box::new(backend), PAGE as u64, MAX_CACHE).unwrap();
+
+        // Fill the write buffer to its half-of-cache cap, then commit non-durably so the pages
+        // stay buffered
+        for i in 0..(MAX_CACHE / 2 / PAGE) as u64 {
+            let mut page = cached_file.write(i * PAGE as u64, PAGE, true).unwrap();
+            page.mem_mut().fill(0x11);
+            drop(page);
+        }
+        cached_file.write_barrier();
+        assert_eq!(
+            cached_file.write_buffer_bytes.load(Ordering::Acquire),
+            MAX_CACHE / 2
+        );
+
+        // Read far more distinct pages than the cache holds, none of them buffered
+        let first_unbuffered = (MAX_CACHE / 2 / PAGE) as u64;
+        for i in first_unbuffered..FILE_LEN / PAGE as u64 {
+            cached_file
+                .read(i * PAGE as u64, PAGE, PageHint::Clean)
+                .unwrap();
+        }
+
+        // The retained pages must have been flushed to make room, rather than capping the read
+        // cache at the half of the budget they were occupying
+        assert!(
+            cached_file.read_cache_bytes.load(Ordering::Acquire) > MAX_CACHE / 2,
+            "read cache starved at {} bytes by {} bytes of retained pages",
+            cached_file.read_cache_bytes.load(Ordering::Acquire),
+            cached_file.write_buffer_bytes.load(Ordering::Acquire)
+        );
+    }
+
+    // A zero-size cache must stay empty, so that reads always reach the backend, even when
+    // reclaiming write buffer space could not get the total under the budget
+    #[test]
+    fn zero_size_cache_stays_empty_after_reclaim() {
+        let (backend, _writes) = CountingBackend::new(1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 0).unwrap();
+
+        let mut page = cached_file.write(0, 128, true).unwrap();
+        page.mem_mut().fill(0x22);
+        drop(page);
+        cached_file.write_barrier();
+
+        for i in 1..8u64 {
+            cached_file.read(i * 128, 128, PageHint::Clean).unwrap();
+            assert_eq!(cached_file.read_cache_bytes.load(Ordering::Acquire), 0);
+        }
+    }
+
+    // Pages spilled to the file by write-buffer pressure must stay visible to readers, alongside
+    // the pages still buffered
+    #[test]
+    fn buffered_pages_spill_under_pressure() {
+        let (backend, writes) = CountingBackend::new(1024);
+        // A two page budget caps the buffer at one page, so each write() spills an earlier one
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 256).unwrap();
+
+        for i in 0..4u8 {
+            let offset = u64::from(i) * 128;
+            let mut page = cached_file.write(offset, 128, true).unwrap();
+            page.mem_mut().fill(i);
+            drop(page);
+        }
+        cached_file.write_barrier();
+        assert!(writes.load(Ordering::SeqCst) > 0);
+
+        for i in 0..4u8 {
+            let offset = u64::from(i) * 128;
+            assert_eq!(
+                &*cached_file.read(offset, 128, PageHint::Clean).unwrap(),
+                [i; 128].as_slice()
+            );
+        }
     }
 }
