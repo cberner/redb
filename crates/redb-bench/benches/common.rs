@@ -553,7 +553,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     results
 }
 
-fn database_size(path: &Path) -> u64 {
+pub fn database_size(path: &Path) -> u64 {
     let mut size = 0u64;
     for result in walkdir::WalkDir::new(path) {
         let entry = result.unwrap();

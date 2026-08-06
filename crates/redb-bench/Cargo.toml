@@ -68,3 +68,7 @@ harness = false
 [[bench]]
 name = "insert_hint_benchmark"
 harness = false
+
+[[bench]]
+name = "graph_load_benchmark"
+harness = false
