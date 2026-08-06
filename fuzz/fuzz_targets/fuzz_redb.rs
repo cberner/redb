@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use redb::{
-    AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
+    AccessGuard, Database, Durability, Error, InsertHint, MultimapTable, MultimapTableDefinition,
     MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint,
     StorageBackend, Table, TableDefinition, WriteTransaction,
 };
@@ -328,6 +328,9 @@ fn handle_multimap_table_op(
         FuzzOperation::GetMut { .. } => {
             // no-op. Multimap tables don't support get_mut
         }
+        FuzzOperation::InsertWithHint { .. } => {
+            // no-op. Multimap tables don't support insert hints
+        }
         FuzzOperation::Insert { key, value_size } => {
             let key = key.value;
             let value_size = value_size.value as usize;
@@ -511,6 +514,15 @@ fn handle_table_op(
             let value_size = value_size.value as usize;
             let value = vec![0xFF; value_size];
             table.insert(&key, value.as_slice())?;
+            reference.insert(key, value_size);
+        }
+        FuzzOperation::InsertWithHint { key, value_size } => {
+            let key = key.value;
+            let value_size = value_size.value as usize;
+            let value = vec![0xFF; value_size];
+            // The hint is advisory: it must never change the stored data, whether or
+            // not this key actually is greater than every existing one
+            table.insert_with_hint(&key, value.as_slice(), InsertHint::Append)?;
             reference.insert(key, value_size);
         }
         FuzzOperation::InsertReserve { key, value_size } => {
