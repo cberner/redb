@@ -21,5 +21,7 @@ syn = { version = "2.0", features = ["full"] }
 redb = { path = "../..", features = ["uuid"] }
 tempfile = "3.5.0"
 uuid = { version = "1.17.0", features = ["v4"] }
-# An old version of the redb package, for the tests that derive against two versions at once
+# Old versions of the redb package, for the tests that derive against two versions at once.
+# 3.0.0 is the oldest whose public API supports deriving for a struct with fields.
 redb2_6 = { package = "redb", version = "=2.6.0" }
+redb3_0 = { package = "redb", version = "=3.0.0" }
