@@ -728,6 +728,30 @@ le_value!(f64);
 mod tests {
     use super::*;
 
+    #[test]
+    fn classification_is_readable_through_reconstruction() {
+        // The derive macro reads a field type's classification by rebuilding its `TypeName`
+        // through `TypeName::new` and comparing, because the generated code has to compile
+        // against older redb versions that lack `is_user_defined()` (see `#[redb(crate)]` in
+        // redb-derive). Equality must keep agreeing with `is_user_defined()` for every
+        // classification.
+        let samples = [
+            TypeName::new("Plain"),
+            TypeName::internal("Plain"),
+            TypeName::internal2("Plain"),
+            TypeName::internal("Composite").into_composite(true),
+            TypeName::internal("Composite").into_composite(false),
+            TypeName::internal2("Composite").into_composite(true),
+            TypeName::internal2("Composite").into_composite(false),
+        ];
+        for type_name in samples {
+            assert_eq!(
+                type_name.is_user_defined(),
+                type_name == TypeName::new(type_name.name())
+            );
+        }
+    }
+
     // A user-defined type whose name deliberately collides with the built-in `u32`, and whose
     // fixed width matches it. Before composite classifications bubbled up, `Option<FakeU32>` and
     // `Option<u32>` produced byte-identical `TypeName`s, letting one silently open as the other.

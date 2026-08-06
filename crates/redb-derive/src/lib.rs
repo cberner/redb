@@ -45,7 +45,12 @@ fn redb_crate_path_for(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
 /// The generated implementation refers to the redb crate as `::redb`. When it should be
 /// generated for a crate under another name -- a renamed dependency
 /// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
-/// with `#[redb(crate = "my_redb")]`.
+/// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
+/// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
+/// versions as well. The tagging of user-defined field types in the composed type name follows
+/// the named version's classification: redb 4.1 and older classify composites (`Option`,
+/// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
+/// untagged there, and their names collide exactly where that version's own type names do.
 #[proc_macro_derive(Key, attributes(redb))]
 pub fn derive_key(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -88,7 +93,12 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 /// The generated implementation refers to the redb crate as `::redb`. When it should be
 /// generated for a crate under another name -- a renamed dependency
 /// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
-/// with `#[redb(crate = "my_redb")]`.
+/// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
+/// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
+/// versions as well. The tagging of user-defined field types in the composed type name follows
+/// the named version's classification: redb 4.1 and older classify composites (`Option`,
+/// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
+/// untagged there, and their names collide exactly where that version's own type names do.
 #[proc_macro_derive(Value, attributes(redb))]
 pub fn derive_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -183,6 +193,40 @@ fn generate_self_type(
     }
 }
 
+// Renders the name of one field's type for embedding in the struct's `TypeName`. A user-defined
+// type may share its name string with a built-in type (e.g. a user type named "String"), and only
+// the classification of its `TypeName` tells the two apart, so user-defined field types are
+// tagged to keep the composed names distinct. Built-in field types render as the bare name,
+// which keeps the `TypeName` of structs made only of built-in types unchanged.
+//
+// The classification is read by rebuilding the `TypeName` through `TypeName::new` -- the
+// user-defined constructor -- and comparing: `TypeName` equality is exactly (classification,
+// name), so the rebuilt name is equal iff the field's classification is user-defined. redb's
+// `TypeName::is_user_defined()` would say the same, but it is crate-private, and `new`,
+// `name()`, and `PartialEq` reach back to redb 3.0, which `#[redb(crate = "...")]` may name
+// (`name()` is private before that, so field-bearing structs already floor there).
+//
+// The classification is whatever the named redb reports: 4.1 and older classify composites of
+// user-defined types (`Option<UserType>`, say) as built-in, so those fields render untagged
+// and collide exactly where that version's own type names do. Recursing into the field's type
+// syntax instead would misrender aliases (`type A = Option<UserType>`) and change composed
+// names between redb versions, breaking existing tables on upgrade.
+fn render_field_type_name(
+    field_type: &syn::Type,
+    redb: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        {
+            let type_name = <#field_type as #redb::Value>::type_name();
+            if type_name == #redb::TypeName::new(type_name.name()) {
+                ::std::format!("{}#user", type_name.name())
+            } else {
+                ::std::borrow::ToOwned::to_owned(type_name.name())
+            }
+        }
+    }
+}
+
 fn generate_type_name(
     struct_name: &Ident,
     fields: &Fields,
@@ -195,13 +239,9 @@ fn generate_type_name(
                 .iter()
                 .map(|field| {
                     let field_name = field.ident.as_ref().unwrap();
-                    let field_type = &field.ty;
+                    let rendered_type = render_field_type_name(&field.ty, redb);
                     quote! {
-                        ::std::format!(
-                            "{}: {}",
-                            ::std::stringify!(#field_name),
-                            <#field_type as #redb::Value>::type_name().name(),
-                        )
+                        ::std::format!("{}: {}", ::std::stringify!(#field_name), #rendered_type)
                     }
                 })
                 .collect();
@@ -225,12 +265,7 @@ fn generate_type_name(
             let field_strings: Vec<_> = fields_unnamed
                 .unnamed
                 .iter()
-                .map(|field| {
-                    let field_type = &field.ty;
-                    quote! {
-                        <#field_type as #redb::Value>::type_name().name()
-                    }
-                })
+                .map(|field| render_field_type_name(&field.ty, redb))
                 .collect();
 
             if field_strings.is_empty() {

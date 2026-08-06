@@ -101,6 +101,19 @@
   instead of splitting it evenly when an insert past the leaf's last key forces a split. This
   reduces free space left behind when loading data in ascending key order, at the cost of
   leaves needing to split again to accept a later key that falls inside them.
+### redb-derive (unreleased)
+* Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
+  `as_bytes`, or `type_name` on field types, instead of the `Value` trait methods. The
+  generated code now uses fully qualified paths, and no longer requires the `Value` and `Key`
+  traits to be in scope at the derive site.
+* Add `#[redb(crate = "...")]` to name the crate the implementations are generated for, when
+  redb is renamed or present in several versions. Structs with fields require redb 3.0+.
+* Fix derived structs producing the same `TypeName` when two field types with different
+  definitions share a name, such as a user-defined type named `String` and the built-in
+  `String`. User-defined field types (including the `chrono` types redb provides) are now
+  tagged in the derived `TypeName`, so structs containing them change type identity: their
+  existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
+  all built-in types are unaffected.
 
 ### Python bindings
 * Add `Database.create(path)` for creating or opening a database file.

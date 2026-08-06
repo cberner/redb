@@ -1,4 +1,4 @@
-use redb::{Database, Key, ReadableDatabase, TableDefinition, TypeName, Value};
+use redb::{Database, Key, ReadableDatabase, TableDefinition, TableError, TypeName, Value};
 use redb_derive::{Key, Value};
 use std::fmt::Debug;
 use tempfile::NamedTempFile;
@@ -287,7 +287,7 @@ fn test_inherent_methods_do_not_shadow_trait_methods() {
     // The inherent `type_name` returns "bogus"
     assert_eq!(
         InherentHolder::type_name().name(),
-        "InherentHolder {a: Inherent, b: u64}"
+        "InherentHolder {a: Inherent#user, b: u64}"
     );
 
     test_key_helper::<InherentHolder>(&original);
@@ -380,7 +380,7 @@ fn test_field_with_conflicting_inherent_signatures() {
     assert_eq!(decoded, original);
     assert_eq!(
         UuidHolder::type_name().name(),
-        "UuidHolder {id: FakeUuid, tag: String}"
+        "UuidHolder {id: FakeUuid#user, tag: String}"
     );
 }
 
@@ -401,7 +401,7 @@ fn test_uuid_field() {
     assert_eq!(decoded, original);
     assert_eq!(
         RealUuidHolder::type_name().name(),
-        "RealUuidHolder {id: uuid::Uuid, tag: String}"
+        "RealUuidHolder {id: uuid::Uuid#user, tag: String}"
     );
     test_key_helper::<RealUuidHolder>(&original);
 }
@@ -525,6 +525,139 @@ fn test_no_prelude_at_derive_site() {
         c: vec![4, 5],
     };
     test_key_helper::<no_prelude::Bare>(&original);
+}
+
+mod name_collision {
+    use redb::TypeName;
+
+    // A user-defined type that shares its name with the built-in `String`, with an incompatible
+    // serialized representation
+    #[derive(Debug, PartialEq)]
+    pub struct String {
+        pub inner: u64,
+    }
+
+    impl redb::Value for String {
+        type SelfType<'a> = String;
+        type AsBytes<'a> = [u8; 8];
+
+        fn fixed_width() -> Option<usize> {
+            Some(8)
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> String
+        where
+            Self: 'a,
+        {
+            String {
+                inner: u64::from_le_bytes(data.try_into().unwrap()),
+            }
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a String) -> [u8; 8]
+        where
+            Self: 'b,
+        {
+            value.inner.to_le_bytes()
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("String")
+        }
+    }
+}
+
+#[derive(Value, Debug)]
+struct BuiltinField {
+    s: String,
+}
+
+mod user_field {
+    use redb_derive::Value;
+
+    #[derive(Value, Debug)]
+    pub struct BuiltinField {
+        pub s: super::name_collision::String,
+    }
+}
+
+#[test]
+fn test_user_defined_field_type_name_does_not_collide() {
+    // Structs made only of built-in field types keep the exact pre-0.2 type identity, so their
+    // existing tables still open
+    assert_eq!(
+        BuiltinField::type_name(),
+        TypeName::new("BuiltinField {s: String}")
+    );
+    // A user-defined field type with a colliding name yields a distinct identity
+    assert_eq!(
+        user_field::BuiltinField::type_name().name(),
+        "BuiltinField {s: String#user}"
+    );
+    assert_ne!(
+        BuiltinField::type_name(),
+        user_field::BuiltinField::type_name()
+    );
+}
+
+#[test]
+fn test_colliding_types_do_not_open_each_others_tables() {
+    let file = create_tempfile();
+    let db = Database::create(file.path()).unwrap();
+
+    let def: TableDefinition<u32, BuiltinField> = TableDefinition::new("test");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(def).unwrap();
+        table
+            .insert(
+                1,
+                BuiltinField {
+                    s: "hello".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let colliding_def: TableDefinition<u32, user_field::BuiltinField> =
+        TableDefinition::new("test");
+    assert!(matches!(
+        read_txn.open_table(colliding_def),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+}
+
+#[derive(Value, Debug)]
+struct Nested {
+    inner: SingleField,
+}
+
+#[derive(Value, Debug)]
+struct WrappedUser {
+    v: Vec<SingleField>,
+    w: Vec<u32>,
+}
+
+#[derive(Value, Debug)]
+struct TupleNested(SingleField, u32);
+
+#[test]
+fn test_nested_user_types_are_marked() {
+    assert_eq!(
+        Nested::type_name().name(),
+        "Nested {inner: SingleField {value: i32}#user}"
+    );
+    // Composites wrapping a user type are user-defined; composites of built-ins are not
+    assert_eq!(
+        WrappedUser::type_name().name(),
+        "WrappedUser {v: Vec<SingleField {value: i32}>#user, w: Vec<u32>}"
+    );
+    assert_eq!(
+        TupleNested::type_name().name(),
+        "TupleNested(SingleField {value: i32}#user, u32)"
+    );
 }
 
 #[test]
