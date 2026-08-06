@@ -5,7 +5,11 @@ use redb::{
 const TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 fn create_tempfile() -> tempfile::NamedTempFile {
-    tempfile::NamedTempFile::new().unwrap()
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/tmp").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
 }
 
 // Zero padded so that lexicographic order matches numeric order
