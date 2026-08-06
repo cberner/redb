@@ -2,7 +2,6 @@
 // through `#[redb(crate = "...")]`, and any stray `redb` path in the generated code fails to
 // compile here.
 use redb_derive::{Key, Value};
-use renamed_redb::Value as _;
 
 #[derive(Key, Value, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[redb(crate = "renamed_redb")]

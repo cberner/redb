@@ -1,4 +1,4 @@
-use redb::{Database, Error, ReadableDatabase, TableDefinition, Value};
+use redb::{Database, Error, ReadableDatabase, TableDefinition};
 
 use redb_derive::{Key, Value};
 
