@@ -10,7 +10,36 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, GenericParam, Ident, parse_macro_input};
 
-#[proc_macro_derive(Key)]
+// The path of the redb crate in generated code: `::redb`, unless an explicit
+// `#[redb(crate = "path")]` on the deriving struct names it otherwise, as when the dependency
+// is renamed (`my_redb = { package = "redb" }`) or the implementations are derived against one
+// of several versions of the redb package.
+fn redb_crate_path_for(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let mut path = None;
+    for attr in &input.attrs {
+        if !attr.path().is_ident("redb") {
+            continue;
+        }
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("crate") {
+                let value: syn::LitStr = meta.value()?.parse()?;
+                path = Some(value.parse::<syn::Path>()?);
+                Ok(())
+            } else {
+                Err(meta.error("expected `#[redb(crate = \"...\")]`"))
+            }
+        })?;
+    }
+    Ok(path.map_or_else(|| quote! { ::redb }, |path| quote! { #path }))
+}
+
+/// Derives `redb::Key` for a struct whose fields all implement `Key`.
+///
+/// The generated implementation refers to the redb crate as `::redb`. When it should be
+/// generated for a crate under another name -- a renamed dependency
+/// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
+/// with `#[redb(crate = "my_redb")]`.
+#[proc_macro_derive(Key, attributes(redb))]
 pub fn derive_key(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -31,9 +60,10 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let redb = redb_crate_path_for(input)?;
 
     Ok(quote! {
-        impl #impl_generics redb::Key for #name #ty_generics #where_clause {
+        impl #impl_generics #redb::Key for #name #ty_generics #where_clause {
             fn compare(data1: &[u8], data2: &[u8]) -> std::cmp::Ordering {
                 let value1 = #name::from_bytes(data1);
                 let value2 = #name::from_bytes(data2);
@@ -43,7 +73,13 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     })
 }
 
-#[proc_macro_derive(Value)]
+/// Derives `redb::Value` for a struct whose fields all implement `Value`.
+///
+/// The generated implementation refers to the redb crate as `::redb`. When it should be
+/// generated for a crate under another name -- a renamed dependency
+/// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
+/// with `#[redb(crate = "my_redb")]`.
+#[proc_macro_derive(Value, attributes(redb))]
 pub fn derive_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
@@ -66,14 +102,15 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let self_type = generate_self_type(name, generics)?;
+    let redb = redb_crate_path_for(input)?;
 
-    let type_name_impl = generate_type_name(name, &data_struct.fields);
+    let type_name_impl = generate_type_name(name, &data_struct.fields, &redb);
     let as_bytes_impl = generate_as_bytes(&data_struct.fields);
     let from_bytes_impl = generate_from_bytes(name, &data_struct.fields);
     let fixed_width_impl = generate_fixed_width(&data_struct.fields);
 
     Ok(quote! {
-        impl #impl_generics redb::Value for #name #ty_generics #where_clause {
+        impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
             type SelfType<'a> = #self_type
             where
                 Self: 'a;
@@ -99,7 +136,7 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
                 #as_bytes_impl
             }
 
-            fn type_name() -> redb::TypeName {
+            fn type_name() -> #redb::TypeName {
                 #type_name_impl
             }
         }
@@ -136,7 +173,11 @@ fn generate_self_type(
     }
 }
 
-fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::TokenStream {
+fn generate_type_name(
+    struct_name: &Ident,
+    fields: &Fields,
+    redb: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     match fields {
         Fields::Named(fields_named) => {
             let field_strings: Vec<_> = fields_named
@@ -153,13 +194,13 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
 
             if field_strings.is_empty() {
                 quote! {
-                    redb::TypeName::new(&format!("{} {{}}",
+                    #redb::TypeName::new(&format!("{} {{}}",
                         stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    redb::TypeName::new(&format!("{} {{{}}}",
+                    #redb::TypeName::new(&format!("{} {{{}}}",
                         stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
@@ -180,13 +221,13 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
 
             if field_strings.is_empty() {
                 quote! {
-                    redb::TypeName::new(&format!("{}()",
+                    #redb::TypeName::new(&format!("{}()",
                         stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    redb::TypeName::new(&format!("{}({})",
+                    #redb::TypeName::new(&format!("{}({})",
                         stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
@@ -195,7 +236,7 @@ fn generate_type_name(struct_name: &Ident, fields: &Fields) -> proc_macro2::Toke
         }
         Fields::Unit => {
             quote! {
-                redb::TypeName::new(stringify!(#struct_name))
+                #redb::TypeName::new(stringify!(#struct_name))
             }
         }
     }

@@ -20,3 +20,5 @@ syn = { version = "2.0", features = ["full"] }
 [dev-dependencies]
 redb = { path = "../.." }
 tempfile = "3.5.0"
+# An old version of the redb package, for the tests that derive against two versions at once
+redb2_6 = { package = "redb", version = "=2.6.0" }
