@@ -549,10 +549,8 @@ impl TableTreeMut {
         new_name: &str,
         table_type: TableType,
     ) -> Result<(), TableError> {
-        // Move the definition as stored in the tree, without applying pending_table_updates:
-        // a root staged by a table close must stay out of the master tree until commit,
-        // because reopening the table can free that root's pages. stats() relies on the
-        // staged roots of open tables living only in pending_table_updates, which it skips.
+        // Move the definition as stored, not the pending update: staged roots must stay out
+        // of the master tree, since reopening the table can free their pages (see stats())
         let stored_definition = if let Some(guard) = self.tree.get(&name)? {
             let definition = guard.value();
             definition.check_match_untyped(table_type, name)?;
@@ -706,14 +704,8 @@ impl TableTreeMut {
         Ok(())
     }
 
-    // `is_open` must return true for tables that are currently open in this transaction.
-    // An open table may have staged a root here on a previous close, and then freed pages
-    // reachable from that root: pages allocated by this transaction are returned to the
-    // allocator immediately when freed, so they may already have been reallocated and
-    // rewritten with unrelated data. Walking such a root reads garbage. The committed root
-    // is always safe to walk, because pages allocated by previous transactions are only
-    // queued for freeing at commit, so for open tables we ignore the staged root and report
-    // the table as of the start of the transaction.
+    // Staged roots of tables that are currently open (per `is_open`) may reference recycled
+    // pages, so those tables are reported from their stored root: as of the transaction start.
     pub fn stats(&self, is_open: impl Fn(&str) -> bool) -> Result<DatabaseStats> {
         let master_tree_stats = self.tree.stats()?;
         let mut max_subtree_height = 0;
