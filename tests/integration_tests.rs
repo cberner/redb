@@ -720,6 +720,52 @@ fn stats_with_renamed_open_table() {
     txn.abort().unwrap();
 }
 
+// Opening a database containing a corrupted persistent savepoint record must error, not panic
+#[test]
+fn corrupted_persistent_savepoint_record() {
+    let tmpfile = create_tempfile();
+    let path = tmpfile.path();
+    let savepoint_id = {
+        let db = Database::create(path).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        id
+    };
+
+    // Find the serialized savepoint record: version 3, the savepoint id, a plausible
+    // transaction id, and a non-null user root
+    let mut data = fs::read(path).unwrap();
+    let mut offsets = vec![];
+    for i in 0..data.len() - 18 {
+        let transaction_id = u64::from_le_bytes(data[i + 9..i + 17].try_into().unwrap());
+        if data[i] == 3
+            && u64::from_le_bytes(data[i + 1..i + 9].try_into().unwrap()) == savepoint_id
+            && transaction_id > 0
+            && transaction_id < 100
+            && data[i + 17] == 1
+        {
+            offsets.push(i);
+        }
+    }
+    assert_eq!(offsets.len(), 1);
+    // Corrupt the version byte
+    data[offsets[0]] = 9;
+    fs::write(path, &data).unwrap();
+
+    let result = Database::open(path);
+    assert!(matches!(
+        result,
+        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+    ));
+}
+
 // A failed reopen must not discard the update staged when the table was closed
 #[test]
 fn failed_reopen_preserves_staged_table() {
@@ -2140,6 +2186,7 @@ fn check_integrity_after_persistent_savepoint_restore_and_delete() {
 
     let txn = db.begin_write().unwrap();
     assert!(txn.delete_persistent_savepoint(id).unwrap());
+    assert!(!txn.delete_persistent_savepoint(id).unwrap());
     txn.commit().unwrap();
 
     // Must not panic
