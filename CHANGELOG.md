@@ -99,6 +99,10 @@
   Existing databases created by older versions remain readable. If an older database already used
   such a colliding composite name, its stored type identity remains ambiguous and may still open
   under either spelling.
+* Optimize inserting in ascending key order. An insert past the table's last key now starts a new
+  leaf page, instead of splitting the full one in half and leaving space behind that no later
+  insert can use. A table loaded in key order occupies about half as many pages as before, and
+  loads faster.
 
 ### redb-derive (unreleased)
 * Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
