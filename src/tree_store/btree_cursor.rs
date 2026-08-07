@@ -63,6 +63,26 @@ pub(super) enum Position<'a> {
     After(&'a [u8]),
 }
 
+impl<'a> Position<'a> {
+    // The gap before the first key the bound admits.
+    pub(super) fn from_lower_bound(bound: Bound<&'a [u8]>) -> Self {
+        match bound {
+            Included(key) => Self::Before(key),
+            Excluded(key) => Self::After(key),
+            Unbounded => Self::Start,
+        }
+    }
+
+    // The gap after the last key the bound admits.
+    pub(super) fn from_upper_bound(bound: Bound<&'a [u8]>) -> Self {
+        match bound {
+            Included(key) => Self::After(key),
+            Excluded(key) => Self::Before(key),
+            Unbounded => Self::End,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq)]
 enum Direction {
     Next,
@@ -1164,6 +1184,65 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 }
 
+// The tree borrows shared by every owner of detached cursor state: the root,
+// the plumbing needed to build `CursorMut`s over it, and the pages their
+// mutations free, drained after every operation so the master list's lock is
+// never held while control returns to the caller.
+pub(super) struct CursorTree<'a, K: Key + 'static, V: Value + 'static> {
+    root: &'a mut Option<BtreeHeader>,
+    page_allocator: PageAllocator,
+    allocated: Arc<Mutex<PageTrackerPolicy>>,
+    master_free_list: Arc<Mutex<Vec<PageNumber>>>,
+    freed: Vec<PageNumber>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
+    fn new(
+        root: &'a mut Option<BtreeHeader>,
+        page_allocator: PageAllocator,
+        master_free_list: Arc<Mutex<Vec<PageNumber>>>,
+        allocated: Arc<Mutex<PageTrackerPolicy>>,
+    ) -> Self {
+        Self {
+            root,
+            page_allocator,
+            allocated,
+            master_free_list,
+            freed: vec![],
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
+
+    fn cursor(&mut self, state: CursorState) -> CursorMut<'a, '_, K, V> {
+        CursorMut::with_state(
+            &mut *self.root,
+            &self.page_allocator,
+            &mut self.freed,
+            &self.allocated,
+            state,
+        )
+    }
+
+    fn drain_freed(&mut self) {
+        if self.freed.is_empty() {
+            return;
+        }
+        let mut master_free_list = self.master_free_list.lock().unwrap();
+        let mut allocated = self.allocated.lock().unwrap();
+        for page in self.freed.drain(..) {
+            if !self
+                .page_allocator
+                .free_if_uncommitted(page, &mut allocated)
+            {
+                master_free_list.push(page);
+            }
+        }
+    }
+}
+
 // One end of a `RangeMut`. The ends share the tree, and a mutation through
 // one end invalidates the other end's cursor path, so at most one end keeps a
 // live cursor at a time. The other end is parked as the key bound describing
@@ -1199,13 +1278,7 @@ struct ParkedBatch {
 // and flushed when the scan leaves the leaf, when the other end is activated,
 // or on close.
 pub(super) struct RangeMut<'a, K: Key + 'static, V: Value + 'static> {
-    root: &'a mut Option<BtreeHeader>,
-    page_allocator: PageAllocator,
-    allocated: Arc<Mutex<PageTrackerPolicy>>,
-    master_free_list: Arc<Mutex<Vec<PageNumber>>>,
-    // Pages freed by cursor mutations, drained after every operation so the
-    // master list's lock is never held while control returns to the caller.
-    freed: Vec<PageNumber>,
+    tree: CursorTree<'a, K, V>,
     front: EndState,
     back: EndState,
     // Which end, if any, is known to be live and positioned at an in-range
@@ -1215,8 +1288,6 @@ pub(super) struct RangeMut<'a, K: Key + 'static, V: Value + 'static> {
     // caller: they may remain in the tree, so the transaction must not
     // commit. Every range operation re-raises instead of touching the tree.
     poisoned: bool,
-    _key_type: PhantomData<K>,
-    _value_type: PhantomData<V>,
 }
 
 impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
@@ -1229,17 +1300,11 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         allocated: Arc<Mutex<PageTrackerPolicy>>,
     ) -> Self {
         Self {
-            root,
-            page_allocator,
-            allocated,
-            master_free_list,
-            freed: vec![],
+            tree: CursorTree::new(root, page_allocator, master_free_list, allocated),
             front: EndState::Parked(lower_bound),
             back: EndState::Parked(upper_bound),
             settled: None,
             poisoned: false,
-            _key_type: PhantomData,
-            _value_type: PhantomData,
         }
     }
 
@@ -1422,19 +1487,12 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             EndState::Pending(batch) => batch.bound.clone(),
             EndState::Live(_) => unreachable!("end must be parked"),
         };
+        let bound = bound.as_ref().map(Vec::as_slice);
         let target = match direction {
-            Direction::Next => match &bound {
-                Included(key) => Position::Before(key),
-                Excluded(key) => Position::After(key),
-                Unbounded => Position::Start,
-            },
-            Direction::Previous => match &bound {
-                Included(key) => Position::After(key),
-                Excluded(key) => Position::Before(key),
-                Unbounded => Position::End,
-            },
+            Direction::Next => Position::from_lower_bound(bound),
+            Direction::Previous => Position::from_upper_bound(bound),
         };
-        let mut cursor = self.cursor(CursorState::default());
+        let mut cursor = self.tree.cursor(CursorState::default());
         let result = cursor.seek_to(target);
         let state = cursor.into_state();
         // On error the end stays parked, preserving any pending batch for close().
@@ -1475,7 +1533,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             Ok(())
         };
         *self.end_mut(direction) = parked;
-        self.drain_freed();
+        self.tree.drain_freed();
         result
     }
 
@@ -1508,16 +1566,16 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
                 .expect("snapshot entry must exist")
                 .key();
             let mut helper: MutateHelper<'_, '_, K, V> = MutateHelper::new(
-                &mut *self.root,
-                self.page_allocator.clone(),
-                &mut self.freed,
-                Arc::clone(&self.allocated),
+                &mut *self.tree.root,
+                self.tree.page_allocator.clone(),
+                &mut self.tree.freed,
+                Arc::clone(&self.tree.allocated),
             );
             // In-place deletion must be disabled: the other end's pending
             // snapshot and any deferred-removal guards handed to the caller
             // may share the buffer of the live leaf containing this key.
             let result = helper.delete_key(key, false);
-            self.drain_freed();
+            self.tree.drain_freed();
             match result {
                 Ok(removed) => debug_assert!(removed.is_some()),
                 Err(err) => {
@@ -1538,25 +1596,15 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         let EndState::Live(state) = std::mem::replace(end, EndState::Parked(Unbounded)) else {
             unreachable!("end must be live");
         };
-        let mut cursor = self.cursor(state);
+        let mut cursor = self.tree.cursor(state);
         let result = operation(&mut cursor);
         let state = cursor.into_state();
         if state.poisoned {
             self.poisoned = true;
         }
         *self.end_mut(direction) = EndState::Live(state);
-        self.drain_freed();
+        self.tree.drain_freed();
         result
-    }
-
-    fn cursor(&mut self, state: CursorState) -> CursorMut<'a, '_, K, V> {
-        CursorMut::with_state(
-            &mut *self.root,
-            &self.page_allocator,
-            &mut self.freed,
-            &self.allocated,
-            state,
-        )
     }
 
     // Whether the live end's current entry is still inside the range bounded
@@ -1598,22 +1646,6 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         match direction {
             Direction::Next => &mut self.front,
             Direction::Previous => &mut self.back,
-        }
-    }
-
-    fn drain_freed(&mut self) {
-        if self.freed.is_empty() {
-            return;
-        }
-        let mut master_free_list = self.master_free_list.lock().unwrap();
-        let mut allocated = self.allocated.lock().unwrap();
-        for page in self.freed.drain(..) {
-            if !self
-                .page_allocator
-                .free_if_uncommitted(page, &mut allocated)
-            {
-                master_free_list.push(page);
-            }
         }
     }
 }
