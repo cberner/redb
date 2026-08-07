@@ -59,15 +59,6 @@ impl TableStats {
     }
 }
 
-/// A hint describing the workload an insert belongs to
-#[non_exhaustive]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum InsertHint {
-    /// The key is expected to compare greater than all existing keys in the table,
-    /// and further appending insert calls are likely
-    Append,
-}
-
 /// A table containing key-value mappings
 pub struct Table<'txn, K: Key + 'static, V: Value + 'static> {
     name: String,
@@ -255,28 +246,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
-        self.insert_helper(key, value, None)
-    }
-
-    /// Identical to [`Table::insert`], but allows the caller to provide a workload hint
-    ///
-    /// A hint only changes how pages are laid out; it never changes the stored data. An
-    /// [`InsertHint::Append`] that does not turn out to be an append is ignored
-    pub fn insert_with_hint<'k, 'v>(
-        &mut self,
-        key: impl Borrow<K::SelfType<'k>>,
-        value: impl Borrow<V::SelfType<'v>>,
-        hint: InsertHint,
-    ) -> Result<Option<AccessGuard<'_, V>>> {
-        self.insert_helper(key, value, Some(hint))
-    }
-
-    fn insert_helper<'k, 'v>(
-        &mut self,
-        key: impl Borrow<K::SelfType<'k>>,
-        value: impl Borrow<V::SelfType<'v>>,
-        hint: Option<InsertHint>,
-    ) -> Result<Option<AccessGuard<'_, V>>> {
         let value_len = V::as_bytes(value.borrow()).as_ref().len();
         if value_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len));
@@ -288,8 +257,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         if value_len + key_len > MAX_PAIR_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
-        self.tree
-            .insert_with_hint(key.borrow(), value.borrow(), hint)
+        self.tree.insert(key.borrow(), value.borrow())
     }
 
     /// Removes the given key
