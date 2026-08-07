@@ -1,6 +1,8 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Fix a panic when opening a database containing a corrupted persistent savepoint record;
+  `StorageError::Corrupted` is now returned instead.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live

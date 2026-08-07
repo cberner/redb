@@ -1,7 +1,7 @@
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION3;
 use crate::tree_store::{BtreeHeader, TransactionalMemory};
-use crate::{TypeName, Value};
+use crate::{Result, StorageError, TypeName, Value};
 use std::fmt::Debug;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -114,11 +114,25 @@ impl SerializedSavepoint<'_> {
         }
     }
 
-    pub(crate) fn to_savepoint(&self, transaction_tracker: Arc<TransactionTracker>) -> Savepoint {
+    pub(crate) fn to_savepoint(
+        &self,
+        transaction_tracker: Arc<TransactionTracker>,
+    ) -> Result<Savepoint> {
         let data = self.data();
+        let serialized_len =
+            2 * size_of::<u8>() + 2 * size_of::<u64>() + BtreeHeader::serialized_size();
+        if data.len() != serialized_len {
+            return Err(StorageError::Corrupted(
+                "Corrupted savepoint record".to_string(),
+            ));
+        }
         let mut offset = 0;
         let version = data[offset];
-        assert_eq!(version, FILE_FORMAT_VERSION3);
+        if version != FILE_FORMAT_VERSION3 {
+            return Err(StorageError::Corrupted(format!(
+                "Unsupported savepoint version: {version}"
+            )));
+        }
         offset += size_of::<u8>();
 
         let id = u64::from_le_bytes(
@@ -136,7 +150,11 @@ impl SerializedSavepoint<'_> {
         offset += size_of::<u64>();
 
         let not_null = data[offset];
-        assert!(not_null == 0 || not_null == 1);
+        if not_null > 1 {
+            return Err(StorageError::Corrupted(
+                "Corrupted savepoint record".to_string(),
+            ));
+        }
         offset += 1;
         let user_root = if not_null == 1 {
             Some(BtreeHeader::from_le_bytes(
@@ -148,16 +166,16 @@ impl SerializedSavepoint<'_> {
             None
         };
         offset += BtreeHeader::serialized_size();
-        assert_eq!(offset, data.len());
+        debug_assert_eq!(offset, data.len());
 
-        Savepoint {
+        Ok(Savepoint {
             version,
             id: SavepointId(id),
             transaction_id: TransactionId::new(transaction_id),
             user_root,
             transaction_tracker,
             ephemeral: false,
-        }
+        })
     }
 }
 
@@ -191,5 +209,48 @@ impl Value for SerializedSavepoint<'_> {
 
     fn type_name() -> TypeName {
         TypeName::internal("redb::SerializedSavepoint")
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::transaction_tracker::{TransactionId, TransactionTracker};
+    use std::sync::Arc;
+
+    #[test]
+    fn corrupted_record_errors() {
+        let tracker = Arc::new(TransactionTracker::new(TransactionId::new(1)));
+
+        let mut record = vec![FILE_FORMAT_VERSION3];
+        record.extend(1u64.to_le_bytes());
+        record.extend(1u64.to_le_bytes());
+        record.push(0);
+        record.extend([0; BtreeHeader::serialized_size()]);
+        assert!(
+            SerializedSavepoint::Ref(&record)
+                .to_savepoint(tracker.clone())
+                .is_ok()
+        );
+
+        let truncated = &record[..record.len() - 1];
+        assert!(matches!(
+            SerializedSavepoint::Ref(truncated).to_savepoint(tracker.clone()),
+            Err(StorageError::Corrupted(_))
+        ));
+
+        let mut bad_version = record.clone();
+        bad_version[0] = 9;
+        assert!(matches!(
+            SerializedSavepoint::Ref(&bad_version).to_savepoint(tracker.clone()),
+            Err(StorageError::Corrupted(_))
+        ));
+
+        let mut bad_null_marker = record.clone();
+        bad_null_marker[17] = 2;
+        assert!(matches!(
+            SerializedSavepoint::Ref(&bad_null_marker).to_savepoint(tracker),
+            Err(StorageError::Corrupted(_))
+        ));
     }
 }

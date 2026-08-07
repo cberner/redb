@@ -1163,7 +1163,9 @@ impl WriteTransaction {
     pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint, SavepointError> {
         let Some(value) = self.read_existing_system_table(SAVEPOINT_TABLE, |table| {
             let value = table.get(&SavepointId(id))?;
-            Ok(value.map(|x| x.value().to_savepoint(self.transaction_tracker.clone())))
+            value
+                .map(|x| x.value().to_savepoint(self.transaction_tracker.clone()))
+                .transpose()
         })?
         else {
             return Err(SavepointError::InvalidSavepoint);
@@ -1190,19 +1192,20 @@ impl WriteTransaction {
             return Ok(false);
         }
         let mut table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
-        let savepoint = table.remove(SavepointId(id))?;
-        if let Some(serialized) = savepoint {
-            let savepoint = serialized
+        // Parse before removing, so that a corrupted record errors out without staging any change
+        let savepoint = if let Some(serialized) = table.get(SavepointId(id))? {
+            serialized
                 .value()
-                .to_savepoint(self.transaction_tracker.clone());
-            self.savepoint_state
-                .lock()
-                .unwrap()
-                .record_deleted(savepoint.get_id(), savepoint.get_transaction_id());
-            Ok(true)
+                .to_savepoint(self.transaction_tracker.clone())?
         } else {
-            Ok(false)
-        }
+            return Ok(false);
+        };
+        table.remove(SavepointId(id))?;
+        self.savepoint_state
+            .lock()
+            .unwrap()
+            .record_deleted(savepoint.get_id(), savepoint.get_transaction_id());
+        Ok(true)
     }
 
     /// List all persistent savepoints
