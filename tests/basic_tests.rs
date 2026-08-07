@@ -2999,6 +2999,84 @@ fn retain_predicate_panic_poisons_transaction() {
     assert!(table.get(4).unwrap().is_none());
 }
 
+// An insert past the table's last key starts a new leaf, instead of splitting the full
+// one evenly. An ascending load never returns to a leaf it has moved past, so an even
+// split would strand half of every leaf behind it.
+#[test]
+fn ascending_inserts_pack_leaves() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..20_000 {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        // 25 of these pairs fit in a page, so 800 packed leaves hold them all, where
+        // splitting evenly leaves each half full and needs over 1,500
+        let leaves = table.stats().unwrap().leaf_pages();
+        assert!(leaves < 900, "{leaves} leaves");
+    }
+    write_txn.commit().unwrap();
+}
+
+// The leaf appended to is committed here, and so cannot be modified in place
+#[test]
+fn ascending_inserts_pack_leaves_across_transactions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    for chunk in 0u64..20 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(definition).unwrap();
+            for i in chunk * 1_000..(chunk + 1) * 1_000 {
+                table.insert(i, [0u8; 150]).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.len().unwrap(), 20_000);
+    let leaves = table.stats().unwrap().leaf_pages();
+    assert!(leaves < 900, "{leaves} leaves");
+}
+
+// Packing only changes the layout: a key that later falls inside a packed leaf must
+// still be accepted, splitting it as usual
+#[test]
+fn packed_leaves_accept_interior_inserts() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in (0u64..20_000).step_by(2) {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        for i in (1u64..20_000).step_by(2) {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 20_000);
+        for i in 0u64..20_000 {
+            assert!(table.get(i).unwrap().is_some());
+        }
+    }
+    write_txn.commit().unwrap();
+
+    db.check_integrity().unwrap();
+}
+
 #[test]
 fn range_arc() {
     let tmpfile = create_tempfile();
