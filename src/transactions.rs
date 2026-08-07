@@ -551,6 +551,8 @@ impl SystemNamespace {
             .map_err(|e| {
                 e.into_storage_error_or_corrupted("Internal error. System table is corrupted")
             })?;
+        self.table_tree
+            .clear_pending_table_update(definition.name());
         transaction.dirty.store(true, Ordering::Release);
 
         let page_allocator = self.table_tree.page_allocator().clone();
@@ -650,6 +652,7 @@ impl TableNamespace {
         let root = self
             .table_tree
             .get_or_create_table::<K, V>(name, table_type)?;
+        self.table_tree.clear_pending_table_update(name);
         self.open_tables
             .insert(name.to_string(), panic::Location::caller());
 
