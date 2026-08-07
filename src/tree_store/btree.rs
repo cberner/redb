@@ -1,5 +1,4 @@
 use crate::db::TransactionGuard;
-use crate::table::InsertHint;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
@@ -423,15 +422,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
-        self.insert_with_hint(key, value, None)
-    }
-
-    pub(crate) fn insert_with_hint(
-        &mut self,
-        key: &K::SelfType<'_>,
-        value: &V::SelfType<'_>,
-        hint: Option<InsertHint>,
-    ) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!(
             "Btree(root={:?}): Inserting {:?} with value of length {}",
@@ -448,7 +438,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
         );
-        let (old_value, _) = operation.insert(key, value, hint)?;
+        let (old_value, _) = operation.insert(key, value)?;
         Ok(old_value)
     }
 
@@ -842,7 +832,7 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> BtreeMut<K, V> {
             freed_pages.as_mut(),
             self.allocated_pages.clone(),
         );
-        let (_, guard) = operation.insert(key, &V::from_bytes(&value), None)?;
+        let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
         Ok(guard)
     }
 }

@@ -64,7 +64,3 @@ harness = false
 [[bench]]
 name = "syscall_benchmark"
 harness = false
-
-[[bench]]
-name = "insert_hint_benchmark"
-harness = false
