@@ -612,6 +612,12 @@ impl TableTreeMut {
         Ok(false)
     }
 
+    // Takes the staged update for `name`. Called when the table is opened: while it is open
+    // the live root is in the handle, and it is re-staged on close
+    pub(crate) fn clear_pending_table_update(&mut self, name: &str) {
+        self.pending_table_updates.remove(name);
+    }
+
     pub(crate) fn get_or_create_table<K: Key, V: Value>(
         &mut self,
         name: &str,
@@ -624,9 +630,6 @@ impl TableTreeMut {
             self.tree.insert(&name, &table)?;
             table
         };
-
-        // Take the staged update: while the table is open its root lives in the handle
-        self.pending_table_updates.remove(name);
 
         match table {
             InternalTableDefinition::Normal {
