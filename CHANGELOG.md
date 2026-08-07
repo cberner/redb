@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Add `Table::append_sorted()`, which loads pairs whose keys are greater than everything already
+  in the table without descending the tree for each one. Keys must be strictly increasing, and
+  `StorageError::KeysNotAscending` is returned if they are not.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live

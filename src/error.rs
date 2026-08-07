@@ -12,6 +12,9 @@ pub enum StorageError {
     Corrupted(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// Keys given to [`crate::Table::append_sorted`] were not strictly greater than
+    /// every key already in the table
+    KeysNotAscending,
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -38,6 +41,7 @@ impl From<StorageError> for Error {
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
+            StorageError::KeysNotAscending => Error::KeysNotAscending,
             StorageError::LockPoisoned(location) => Error::LockPoisoned(location),
         }
     }
@@ -54,6 +58,12 @@ impl Display for StorageError {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            StorageError::KeysNotAscending => {
+                write!(
+                    f,
+                    "Keys appended to a table must be strictly greater than every key it already contains"
                 )
             }
             StorageError::Io(err) => {
@@ -540,6 +550,9 @@ pub enum Error {
     UpgradeRequired(u8),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// Keys given to [`crate::Table::append_sorted`] were not strictly greater than
+    /// every key already in the table
+    KeysNotAscending,
     /// Table types didn't match.
     TableTypeMismatch {
         table: String,
@@ -600,6 +613,12 @@ impl Display for Error {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            Error::KeysNotAscending => {
+                write!(
+                    f,
+                    "Keys appended to a table must be strictly greater than every key it already contains"
                 )
             }
             Error::TypeDefinitionChanged {

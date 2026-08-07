@@ -337,6 +337,9 @@ fn handle_multimap_table_op(
         FuzzOperation::InsertReserve { .. } => {
             // no-op. Multimap tables don't support insert_reserve
         }
+        FuzzOperation::AppendSorted { .. } => {
+            // no-op. Multimap tables don't support append_sorted
+        }
         FuzzOperation::Remove { key } => {
             let key = key.value;
             let entry = reference.remove(&key);
@@ -505,6 +508,32 @@ fn handle_table_op(
                 v.insert(value.as_slice())?;
             }
             reference.get_mut(&key).map(|x| *x = value_size);
+        }
+        FuzzOperation::AppendSorted {
+            count,
+            stride,
+            value_size,
+        } => {
+            let value_size = value_size.value as usize;
+            let value = vec![0xFF; value_size];
+            let stride = stride.value;
+            let start = reference
+                .keys()
+                .next_back()
+                .map_or(0, |max| max.saturating_add(stride));
+            let keys: Vec<u64> = (0..count.value as u64)
+                .map(|i| start.saturating_add(i.saturating_mul(stride)))
+                .take_while(|key| *key < KEY_SPACE)
+                .collect();
+            // saturating_add can repeat a key at the top of the space, which
+            // append_sorted rejects rather than silently overwrites.
+            let ascending = keys.windows(2).all(|pair| pair[0] < pair[1]);
+            if ascending && keys.first().is_none_or(|first| !reference.contains_key(first)) {
+                table.append_sorted(keys.iter().map(|key| (*key, value.as_slice())))?;
+                for key in keys {
+                    reference.insert(key, value_size);
+                }
+            }
         }
         FuzzOperation::Insert { key, value_size } => {
             let key = key.value;

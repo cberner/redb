@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{
     leaf_split_required, retained_after_removals,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
-    DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
+    DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, SplitBranch, Subtree,
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
@@ -41,6 +41,13 @@ enum DeletionResult {
     // Indicates that the branch node was deleted, and includes the only remaining child.
     // Checksum is retained for the same reason as `PartialBranch`.
     DeletedBranch(PageNumber, Checksum),
+    // A branch outgrew a page and was split in two, so its parent gains a child.
+    // Only the appending splice path reaches this: deletions only ever shrink a branch.
+    SplitBranch {
+        left: PageNumber,
+        key: Vec<u8>,
+        right: PageNumber,
+    },
 }
 
 #[derive(Debug)]
@@ -153,6 +160,20 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let new_root = match deletion_result {
             Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
             DeletedSubtree => None,
+            // The split reached the top, so the tree gains a level.
+            SplitBranch { left, key, right } => {
+                let mut builder =
+                    BranchBuilder::new(&self.page_allocator, &self.allocated, 2, K::fixed_width());
+                builder.push_child(left, DEFERRED);
+                builder.push_key(&key);
+                builder.push_child(right, DEFERRED);
+                let page = builder.build()?;
+                Some(BtreeHeader::new(
+                    page.get_page_number(),
+                    DEFERRED,
+                    new_length,
+                ))
+            }
             PartialLeaf {
                 page,
                 deleted_pairs,
@@ -254,6 +275,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         mut replaced_children: Range<usize>,
         mut entries: OwnedEntryBuffer,
         removed_pairs: u64,
+        added_pairs: u64,
     ) -> Result {
         assert!(!replaced_children.is_empty());
         let length = self.root.expect("replace requires a root").length;
@@ -361,7 +383,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
         let new_length = length
             .checked_sub(removed_pairs)
-            .expect("cursor removed more entries than the tree contains");
+            .expect("cursor removed more entries than the tree contains")
+            + added_pairs;
         self.finish_deletion(result, new_length)?;
         // Freed only after every fallible step, so an error never leaves the
         // surviving root referencing a freed page.
@@ -1143,6 +1166,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     ) -> Result<DeletionResult> {
         let result = if let Some((only_child, checksum)) = builder.to_single_child() {
             DeletedBranch(only_child, checksum)
+        } else if builder.should_split() {
+            // Splicing appended leaves in grows a branch, unlike every other
+            // caller here, so this is the one path that can outgrow a page.
+            let (left, key, right) = builder.build_split()?;
+            SplitBranch {
+                left: left.get_page_number(),
+                key: key.to_vec(),
+                right: right.get_page_number(),
+            }
         } else if builder.required_bytes() < page_size / 3 {
             // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
             // full pages, so we use 33% instead of 50% to avoid oscillating.
@@ -1222,6 +1254,38 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             return Ok(Subtree(result_page));
         }
 
+        // The child split, so this branch gains one: rebuild it with both halves
+        // in place of the original child, splitting again if that overflows.
+        if let SplitBranch { left, key, right } = result {
+            let children = accessor.count_children();
+            let mut builder = BranchBuilder::new(
+                &self.page_allocator,
+                &self.allocated,
+                children + 1,
+                K::fixed_width(),
+            );
+            for i in 0..children {
+                if i == child_index {
+                    builder.push_child(left, DEFERRED);
+                    builder.push_key(&key);
+                    builder.push_child(right, DEFERRED);
+                } else {
+                    builder.push_child(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    );
+                }
+                if i + 1 < children {
+                    builder.push_key(accessor.key(i).unwrap());
+                }
+            }
+            let result =
+                Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
+            drop(page);
+            self.conditional_free(original_page_number);
+            return Ok(result);
+        }
+
         // Child is requesting to be merged with a sibling
         let mut builder = BranchBuilder::new(
             &self.page_allocator,
@@ -1231,8 +1295,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         );
 
         let final_result = match result {
-            Subtree(_) => {
-                // Handled in the if above
+            Subtree(_) | SplitBranch { .. } => {
+                // Both are handled in the ifs above
                 unreachable!();
             }
             DeletedSubtree => {

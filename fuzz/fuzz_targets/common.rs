@@ -9,7 +9,7 @@ const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
 // Limit values to 100KiB
 const MAX_VALUE_SIZE: usize = 100_000;
-const KEY_SPACE: u64 = 1_000_000;
+pub(crate) const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 6;
 
 #[derive(Debug, Clone)]
@@ -110,6 +110,14 @@ pub(crate) enum FuzzOperation {
     },
     Insert {
         key: BoundedU64<KEY_SPACE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+    },
+    // Keys are derived from the table's current maximum, since append_sorted
+    // only accepts a strictly ascending stream. Rejection of everything else is
+    // covered by unit tests.
+    AppendSorted {
+        count: BoundedUSize<64>,
+        stride: U64Between<1, 8>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
     InsertReserve {

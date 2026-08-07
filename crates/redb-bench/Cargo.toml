@@ -64,3 +64,7 @@ harness = false
 [[bench]]
 name = "syscall_benchmark"
 harness = false
+
+[[bench]]
+name = "graph_load_benchmark"
+harness = false

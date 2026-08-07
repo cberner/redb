@@ -1,7 +1,7 @@
 use crate::AccessGuard;
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, LEAF, LeafAccessor, OwnedEntryBuffer, leaf_below_merge_threshold,
-    leaf_fits_one_page, retained_after_removals,
+    BRANCH, BranchAccessor, LEAF, LeafAccessor, OwnedEntryBuffer, is_single_large_value,
+    leaf_below_merge_threshold, leaf_fits_one_page, retained_after_removals,
 };
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -15,6 +15,11 @@ use std::collections::Bound::{Excluded, Included, Unbounded};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
+
+// Bytes buffered by append_sorted before packed leaves are spliced in. Each
+// splice rewrites the parent chain, so what costs is the number of splices, not
+// the buffer; the gain flattens out above this.
+const APPEND_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
 struct Branch {
@@ -269,6 +274,7 @@ struct LeafRunRewrite {
     // bounded by fanout x page_size.
     entries: OwnedEntryBuffer,
     removed_pairs: u64,
+    added_pairs: u64,
 }
 
 impl LeafRunRewrite {
@@ -284,7 +290,15 @@ impl LeafRunRewrite {
             replaced_children,
             entries: OwnedEntryBuffer::default(),
             removed_pairs: 0,
+            added_pairs: 0,
         }
+    }
+
+    // Buffers a pair that is not yet in the tree. Callers must keep the run in
+    // ascending key order, so this is only valid past every key it already holds.
+    fn push_entry(&mut self, key: &[u8], value: &[u8]) {
+        self.entries.push(key, value);
+        self.added_pairs += 1;
     }
 
     fn append_entries_from<K: Key, V: Value>(
@@ -505,6 +519,10 @@ pub(super) struct CursorState {
     // so it may outlive the position; it is spliced before the tree is
     // observed.
     leaf_run_rewrite: Option<LeafRunRewrite>,
+    // Highest key appended so far, against which the next append is checked.
+    // Seeded from the tree on the first append, since the run buffer is emptied
+    // by every splice.
+    appended_last_key: Option<Vec<u8>>,
 }
 
 enum LeafCloseOutcome {
@@ -1095,6 +1113,79 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         run.append_entries_from::<K, V>(page, child_index, removed_indexes);
     }
 
+    // Buffers a pair past every key in the tree, splicing packed leaves into the
+    // parent once the buffer is large enough to fill several of them. The tail
+    // leaf is absorbed on open so the run rewrites it rather than leaving it
+    // short.
+    pub(super) fn append_sorted(&mut self, key: &[u8], value: &[u8]) -> Result {
+        if let Some(last) = self.state.appended_last_key.as_deref()
+            && K::compare(key, last) != Ordering::Greater
+        {
+            return Err(StorageError::KeysNotAscending);
+        }
+        if self.state.leaf_run_rewrite.is_none() {
+            self.seek_to(Position::End)?;
+            // Checked against the tree only on the first append, since after that
+            // the highest key is one this call wrote.
+            if self.state.appended_last_key.is_none()
+                && let Some(position) = self.state.position.as_ref()
+            {
+                let accessor = LeafAccessor::new(
+                    position.leaf.page.memory(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                if accessor.num_pairs() > 0
+                    && K::compare(key, accessor.last_entry().key()) != Ordering::Greater
+                {
+                    return Err(StorageError::KeysNotAscending);
+                }
+            }
+            // Opening a run absorbs the tail leaf, so a leaf holding one large
+            // value would be copied through the buffer whole. Ordinary insert
+            // gives that pair a leaf of its own, and the next call absorbs that
+            // one instead.
+            let tail_is_large_value = self.state.position.as_ref().is_some_and(|position| {
+                let accessor = LeafAccessor::new(
+                    position.leaf.page.memory(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                is_single_large_value(&accessor, self.page_allocator.get_page_size())
+            });
+            let has_parent = self
+                .state
+                .position
+                .as_ref()
+                .is_some_and(|position| !position.path.is_empty());
+            if !has_parent || tail_is_large_value {
+                // Without a parent there is nothing to splice into either: the root
+                // is still a leaf, and ordinary inserts grow the tree until there is one.
+                self.state.position = None;
+                self.mutate_helper()
+                    .insert(&K::from_bytes(key), &V::from_bytes(value))?;
+                self.state.appended_last_key = Some(key.to_vec());
+                return Ok(());
+            }
+            self.append_leaf_to_run(Direction::Next, &[]);
+        }
+
+        let run = self.state.leaf_run_rewrite.as_mut().unwrap();
+        run.push_entry(key, value);
+        if run.entries.total_bytes() >= APPEND_BUFFER_BYTES {
+            self.splice_open_run()?;
+        }
+        self.state.appended_last_key = Some(key.to_vec());
+        Ok(())
+    }
+
+    pub(super) fn flush_sorted(&mut self) -> Result {
+        if self.state.leaf_run_rewrite.is_some() {
+            self.splice_open_run()?;
+        }
+        Ok(())
+    }
+
     // Replaces the run's children in the parent with packed leaves built from
     // the buffered entries, while the cursor path is still valid. The cursor
     // position is consumed; callers reseek from the run's boundary key. On
@@ -1135,6 +1226,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             run.replaced_children,
             run.entries,
             run.removed_pairs,
+            run.added_pairs,
         )
     }
 

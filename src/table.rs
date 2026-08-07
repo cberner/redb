@@ -9,6 +9,7 @@ use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use std::borrow::Borrow;
+use std::cmp::max;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::RangeBounds;
@@ -258,6 +259,33 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
         self.tree.insert(key.borrow(), value.borrow())
+    }
+
+    /// Appends pairs in ascending key order, past every key already in the table
+    ///
+    /// Buffers them and writes packed leaves once enough have accumulated, rather
+    /// than descending the tree for each one
+    ///
+    /// Each key must be greater than the last, and greater than every key already
+    /// in the table; otherwise [`StorageError::KeysNotAscending`] is returned. The
+    /// pairs accepted before that point are kept, as they would be by [`Table::insert`]
+    /// in a loop, so abort the transaction to discard them
+    pub fn append_sorted<'k, 'v, I>(&mut self, pairs: I) -> Result
+    where
+        I: IntoIterator<Item = (K::SelfType<'k>, V::SelfType<'v>)>,
+    {
+        self.tree
+            .append_sorted(pairs.into_iter().map(|(key, value)| {
+                let key_len = K::as_bytes(&key).as_ref().len();
+                let value_len = V::as_bytes(&value).as_ref().len();
+                if key_len > MAX_VALUE_LENGTH || value_len > MAX_VALUE_LENGTH {
+                    return Err(StorageError::ValueTooLarge(max(key_len, value_len)));
+                }
+                if key_len + value_len > MAX_PAIR_LENGTH {
+                    return Err(StorageError::ValueTooLarge(key_len + value_len));
+                }
+                Ok((key, value))
+            }))
     }
 
     /// Removes the given key

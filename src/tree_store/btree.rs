@@ -511,6 +511,26 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         cursor.remove_next()
     }
 
+    // Appends pairs in ascending key order through a cursor, buffering them and
+    // splicing packed leaves into the tree once enough have accumulated.
+    pub(crate) fn append_sorted<'k, 'v, I>(&mut self, pairs: I) -> Result
+    where
+        I: IntoIterator<Item = Result<(K::SelfType<'k>, V::SelfType<'v>)>>,
+    {
+        let mut freed_pages = self.freed_pages.lock().unwrap();
+        let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
+            &mut self.root,
+            &self.page_allocator,
+            freed_pages.as_mut(),
+            &self.allocated_pages,
+        );
+        for pair in pairs {
+            let (key, value) = pair?;
+            cursor.append_sorted(K::as_bytes(&key).as_ref(), V::as_bytes(&value).as_ref())?;
+        }
+        cursor.flush_sorted()
+    }
+
     // Removes and returns the rightmost entry in the tree, if any, in a single tree descent.
     pub(crate) fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         let mut freed_pages = self.freed_pages.lock().unwrap();

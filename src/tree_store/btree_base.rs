@@ -718,6 +718,11 @@ impl OwnedEntryBuffer {
         }
     }
 
+    pub(super) fn push(&mut self, key: &[u8], value: &[u8]) {
+        let pair = self.store(key, value);
+        self.pairs.push_back(pair);
+    }
+
     pub(super) fn num_pairs(&self) -> usize {
         self.pairs.len()
     }
