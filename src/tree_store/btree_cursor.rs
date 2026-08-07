@@ -339,8 +339,6 @@ impl LeafRunRewrite {
 // The threshold at which a cursor's pending inserts are spliced into the
 // tree. The splice cost is dominated by rebuilding the ancestor path, so what
 // matters is the flush count; measurements flatten out around 1MiB.
-// Reachable only from the unit tests until the public cursor API lands.
-#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(feature = "experimental_cursor")]
 const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
 
@@ -351,7 +349,6 @@ const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
 //
 // While a run is open the tree is never mutated and the cursor position never
 // moves, so the position's path stays valid until the splice.
-#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(feature = "experimental_cursor")]
 struct InsertRun {
     // Key of the entry after the gap when the run opened; None when the gap
@@ -370,7 +367,6 @@ struct InsertRun {
 #[cfg(feature = "experimental_cursor")]
 impl InsertRun {
     // True unless `key` sorts strictly between the run's bounds.
-    #[cfg_attr(not(test), allow(dead_code))]
     fn rejects<K: Key>(&self, key: &[u8]) -> bool {
         if let Some(previous) = &self.previous_key
             && K::compare(key, previous).is_le()
@@ -397,6 +393,17 @@ pub(super) struct EntryRef<'a, K: Key + 'static, V: Value + 'static> {
 impl<K: Key + 'static, V: Value + 'static> EntryRef<'_, K, V> {
     pub(super) fn key_bytes(&self) -> &[u8] {
         &self.page.memory()[self.key_range.clone()]
+    }
+
+    // Guards over the entry that outlive this borrow of the cursor. They stay
+    // valid as long as the tree is not mutated, which the compiler enforces
+    // once the caller ties them to a borrow of the cursor's owner.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn to_guards<'g>(&self) -> (AccessGuard<'g, K>, AccessGuard<'g, V>) {
+        (
+            AccessGuard::with_page(self.page.clone(), self.key_range.clone()),
+            AccessGuard::with_page(self.page.clone(), self.value_range.clone()),
+        )
     }
 
     pub(super) fn key(&self) -> K::SelfType<'_> {
@@ -1251,7 +1258,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(feature = "experimental_cursor")]
 impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
     /// Buffers `key`/`value` for insertion into the gap, leaving the gap
@@ -1423,6 +1429,122 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
                 master_free_list.push(page);
             }
         }
+    }
+}
+
+// The tree-level cursor behind the public `CursorMut`: one gap cursor that
+// owns its state across calls, in the style of `RangeMut` but with a single
+// end and buffered insertion instead of removal batching.
+#[cfg(feature = "experimental_cursor")]
+pub(crate) struct BtreeCursorMut<'a, K: Key + 'static, V: Value + 'static> {
+    tree: CursorTree<'a, K, V>,
+    state: CursorState,
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
+    pub(crate) fn new(
+        root: &'a mut Option<BtreeHeader>,
+        page_allocator: PageAllocator,
+        master_free_list: Arc<Mutex<Vec<PageNumber>>>,
+        allocated: Arc<Mutex<PageTrackerPolicy>>,
+    ) -> Self {
+        Self {
+            tree: CursorTree::new(root, page_allocator, master_free_list, allocated),
+            state: CursorState::default(),
+        }
+    }
+
+    /// Positions the cursor at the gap before the first key `bound` admits.
+    pub(crate) fn seek_lower_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        self.with_cursor(|cursor| cursor.seek_to(Position::from_lower_bound(bound)))
+    }
+
+    /// Positions the cursor at the gap after the last key `bound` admits.
+    pub(crate) fn seek_upper_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        self.with_cursor(|cursor| cursor.seek_to(Position::from_upper_bound(bound)))
+    }
+
+    /// The entry after the gap, including while inserts are pending: peeking
+    /// never splices them.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn peek_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        if let Some(run) = &self.state.insert_run {
+            // The position must not move while a run is open, so the entry
+            // after the gap (the run's captured upper bound, unchanged since
+            // the tree is not mutated during a run) is re-read with a
+            // detached read-only cursor.
+            let Some(upper_key) = &run.upper_key else {
+                return Ok(None);
+            };
+            let header = self
+                .tree
+                .root
+                .expect("a captured upper bound implies a root");
+            let mut cursor: Cursor<K, V> = Cursor::new(
+                header.root,
+                self.tree.page_allocator.resolver(),
+                PageHint::None,
+            );
+            cursor.seek_to(Position::Before(upper_key))?;
+            let entry = cursor
+                .next()?
+                .expect("the captured upper bound is in the tree");
+            let (page, key_range, value_range) = entry.into_raw();
+            return Ok(Some((
+                AccessGuard::with_page(page.clone(), key_range),
+                AccessGuard::with_page(page, value_range),
+            )));
+        }
+        self.with_cursor(|cursor| Ok(cursor.peek_next()?.map(|entry| entry.to_guards())))
+    }
+
+    /// The entry before the gap, including while inserts are pending: the
+    /// most recent insert is returned without splicing.
+    ///
+    /// While a run is open, its buffer holds every predecessor the gap has in
+    /// the current leaf (the normalizing peeks settled the position on the
+    /// earlier of two leaves sharing the gap), so an empty buffer means the
+    /// gap is at the start of the tree.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        if let Some(run) = &self.state.insert_run {
+            return Ok(run.entries.back().map(|(key, value)| {
+                (
+                    AccessGuard::with_owned_value(key.to_vec()),
+                    AccessGuard::with_owned_value(value.to_vec()),
+                )
+            }));
+        }
+        self.with_cursor(|cursor| Ok(cursor.peek_prev()?.map(|entry| entry.to_guards())))
+    }
+
+    /// See [`CursorMut::insert_before`].
+    pub(crate) fn insert_before(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.with_cursor(|cursor| cursor.insert_before(key, value))
+    }
+
+    /// Splices any pending inserts into the tree, consuming the position.
+    pub(crate) fn finish(&mut self) -> Result {
+        self.with_cursor(|cursor| cursor.flush_insert_run(false))
+    }
+
+    /// True if an error interrupted inserts that were already reported to the
+    /// caller: they may be missing from the tree, so the transaction must not
+    /// commit.
+    pub(crate) fn poisoned(&self) -> bool {
+        self.state.poisoned
+    }
+
+    fn with_cursor<R>(
+        &mut self,
+        operation: impl FnOnce(&mut CursorMut<'a, '_, K, V>) -> Result<R>,
+    ) -> Result<R> {
+        let mut cursor = self.tree.cursor(std::mem::take(&mut self.state));
+        let result = operation(&mut cursor);
+        self.state = cursor.into_state();
+        self.tree.drain_freed();
+        result
     }
 }
 

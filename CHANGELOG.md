@@ -3,6 +3,11 @@
 ## 4.2.0 - 2026-XX-XX
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
+* Add an experimental cursor API, behind the `experimental_cursor` feature flag:
+  `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
+  between entries, modeled on the standard library's `BTreeMap` cursors. Its `insert_before()`
+  method makes bulk loading sorted data much faster than `insert()`. The feature is unstable and
+  may change incompatibly, or be removed, in any release.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live

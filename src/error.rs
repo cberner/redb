@@ -12,6 +12,9 @@ pub enum StorageError {
     Corrupted(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// The key does not sort strictly between the entries adjacent to the cursor
+    #[cfg(feature = "experimental_cursor")]
+    UnorderedKey,
     Io(io::Error),
     PreviousIo,
     DatabaseClosed,
@@ -35,6 +38,8 @@ impl From<StorageError> for Error {
         match err {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+            #[cfg(feature = "experimental_cursor")]
+            StorageError::UnorderedKey => Error::UnorderedKey,
             StorageError::Io(x) => Error::Io(x),
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -54,6 +59,13 @@ impl Display for StorageError {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            #[cfg(feature = "experimental_cursor")]
+            StorageError::UnorderedKey => {
+                write!(
+                    f,
+                    "The key does not sort strictly between the entries adjacent to the cursor"
                 )
             }
             StorageError::Io(err) => {
@@ -540,6 +552,9 @@ pub enum Error {
     UpgradeRequired(u8),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
+    /// The key does not sort strictly between the entries adjacent to the cursor
+    #[cfg(feature = "experimental_cursor")]
+    UnorderedKey,
     /// Table types didn't match.
     TableTypeMismatch {
         table: String,
@@ -600,6 +615,13 @@ impl Display for Error {
                     f,
                     "The value (length={len}) being inserted exceeds the maximum of {}GiB",
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            #[cfg(feature = "experimental_cursor")]
+            Error::UnorderedKey => {
+                write!(
+                    f,
+                    "The key does not sort strictly between the entries adjacent to the cursor"
                 )
             }
             Error::TypeDefinitionChanged {

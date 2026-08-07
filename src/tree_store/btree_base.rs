@@ -719,8 +719,6 @@ impl OwnedEntryBuffer {
     }
 
     // Appends one pair, which must be greater than every buffered entry.
-    // Reachable only from the unit tests until the public cursor API lands.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "experimental_cursor")]
     pub(super) fn push(&mut self, key: &[u8], value: &[u8]) {
         let pair = self.store(key, value);
@@ -729,7 +727,6 @@ impl OwnedEntryBuffer {
 
     // Copies `range` of the leaf's pairs to the back of the buffer. The pairs
     // must all be greater than the buffered entries.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "experimental_cursor")]
     pub(super) fn extend_from_leaf_range(
         &mut self,
@@ -752,6 +749,13 @@ impl OwnedEntryBuffer {
 
     pub(super) fn total_bytes(&self) -> usize {
         self.data.len()
+    }
+
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn back(&self) -> Option<(&[u8], &[u8])> {
+        self.pairs
+            .back()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
     }
 
     pub(super) fn entries(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
