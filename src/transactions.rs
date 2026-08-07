@@ -2413,14 +2413,23 @@ impl WriteTransaction {
     }
 
     /// Retrieves information about storage usage in the database
+    ///
+    /// Tables that are currently open in this transaction are reported as of the start of
+    /// the transaction: modifications made through an open table handle are not reflected
+    /// until the handle is dropped. Tables that were modified and then closed are reported
+    /// with their in-progress contents.
     pub fn stats(&self) -> Result<DatabaseStats> {
         let tables = self.tables.lock().unwrap();
-        let table_tree = &tables.table_tree;
-        let data_tree_stats = table_tree.stats()?;
+        let tables = &*tables;
+        let data_tree_stats = tables
+            .table_tree
+            .stats(|name| tables.open_tables.contains_key(name))?;
 
         let system_tables = self.system_tables.lock().unwrap();
         let system_table_tree = &system_tables.table_tree;
-        let system_tree_stats = system_table_tree.stats()?;
+        // System tables are only open while redb's own methods hold the system_tables lock,
+        // so none can be open here
+        let system_tree_stats = system_table_tree.stats(|_| false)?;
 
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
             + system_tree_stats.metadata_bytes

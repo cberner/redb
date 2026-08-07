@@ -695,7 +695,15 @@ impl TableTreeMut {
         Ok(())
     }
 
-    pub fn stats(&self) -> Result<DatabaseStats> {
+    // `is_open` must return true for tables that are currently open in this transaction.
+    // An open table may have staged a root here on a previous close, and then freed pages
+    // reachable from that root: pages allocated by this transaction are returned to the
+    // allocator immediately when freed, so they may already have been reallocated and
+    // rewritten with unrelated data. Walking such a root reads garbage. The committed root
+    // is always safe to walk, because pages allocated by previous transactions are only
+    // queued for freeing at commit, so for open tables we ignore the staged root and report
+    // the table as of the start of the transaction.
+    pub fn stats(&self, is_open: impl Fn(&str) -> bool) -> Result<DatabaseStats> {
         let master_tree_stats = self.tree.stats()?;
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
@@ -711,7 +719,9 @@ impl TableTreeMut {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if let Some((updated_root, length, _)) = self.pending_table_updates.get(entry.key()) {
+            if !is_open(entry.key())
+                && let Some((updated_root, length, _)) = self.pending_table_updates.get(entry.key())
+            {
                 definition.set_header(*updated_root, *length);
             }
             match definition {
