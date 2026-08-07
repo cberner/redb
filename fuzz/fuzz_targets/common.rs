@@ -9,7 +9,7 @@ const MAX_CRASH_OPS: u64 = 20;
 const MAX_CACHE_SIZE: usize = 100_000_000;
 // Limit values to 100KiB
 const MAX_VALUE_SIZE: usize = 100_000;
-const KEY_SPACE: u64 = 1_000_000;
+pub(crate) const KEY_SPACE: u64 = 1_000_000;
 pub const MAX_SAVEPOINTS: usize = 6;
 
 #[derive(Debug, Clone)]
@@ -114,6 +114,15 @@ pub(crate) enum FuzzOperation {
     },
     InsertReserve {
         key: BoundedU64<KEY_SPACE>,
+        value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+    },
+    // Keys are derived from the gap around start_key in the reference model,
+    // since the cursor rejects keys that do not sort into its gap; rejection
+    // itself is covered by unit tests.
+    CursorInsert {
+        start_key: BoundedU64<KEY_SPACE>,
+        count: U64Between<0, 64>,
+        stride: U64Between<1, 8>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
     },
     Remove {

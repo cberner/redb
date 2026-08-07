@@ -14,6 +14,8 @@ pub(crate) use btree::{Btree, BtreeMut, BtreeStats, RawBtree};
 pub(crate) use btree_base::BtreeHeader;
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
+#[cfg(feature = "experimental_cursor")]
+pub(crate) use btree_cursor::BtreeCursorMut;
 pub(crate) use btree_cursor_range::BtreeCursorRange;
 pub(crate) use btree_iters::AllPageNumbersBtreeIter;
 pub(crate) use extract_if::BtreeExtractIf;

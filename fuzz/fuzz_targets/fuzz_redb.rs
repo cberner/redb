@@ -3,13 +3,14 @@
 use libfuzzer_sys::fuzz_target;
 use redb::{
     AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
-    MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata, Savepoint,
-    StorageBackend, Table, TableDefinition, WriteTransaction,
+    MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
+    Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tempfile::NamedTempFile;
@@ -337,6 +338,9 @@ fn handle_multimap_table_op(
         FuzzOperation::InsertReserve { .. } => {
             // no-op. Multimap tables don't support insert_reserve
         }
+        FuzzOperation::CursorInsert { .. } => {
+            // no-op. Multimap tables don't support cursors
+        }
         FuzzOperation::Remove { key } => {
             let key = key.value;
             let entry = reference.remove(&key);
@@ -519,6 +523,39 @@ fn handle_table_op(
             let mut value = table.insert_reserve(&key, value_size)?;
             value.as_mut().fill(0xFF);
             reference.insert(key, value_size);
+        }
+        FuzzOperation::CursorInsert {
+            start_key,
+            count,
+            stride,
+            value_size,
+        } => {
+            let start = start_key.value;
+            let stride = stride.value;
+            let value_size = value_size.value as usize;
+            let value = vec![0xFF; value_size];
+            // The gap before the smallest key >= start: its neighbors in the
+            // reference bound the keys the cursor accepts.
+            let successor = reference.range(start..).next().map(|(k, _)| *k);
+            let predecessor = reference.range(..start).next_back().map(|(k, _)| *k);
+            let keys: Vec<u64> = (0..count.value)
+                .map(|i| start + i * stride)
+                .take_while(|k| *k < KEY_SPACE && successor.is_none_or(|s| *k < s))
+                .collect();
+            let mut cursor = table.lower_bound_mut(Bound::Included(&start))?;
+            assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), predecessor);
+            assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
+            for key in &keys {
+                cursor.insert_before(key, value.as_slice())?;
+            }
+            // Peeks observe pending inserts without splicing them
+            let last = keys.last().copied().or(predecessor);
+            assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), last);
+            assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
+            cursor.close()?;
+            for key in keys {
+                reference.insert(key, value_size);
+            }
         }
         FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
             let key = key.value;

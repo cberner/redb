@@ -63,8 +63,6 @@ impl DeletedPairs {
 // A page produced while splicing an insert run into the tree, with its
 // subtree's greatest key. The key is None only for the node whose subtree
 // contains the tree's original last entry, which stays last at every level.
-// Reachable only from the unit tests until the public cursor API lands.
-#[cfg_attr(not(test), allow(dead_code))]
 #[cfg(feature = "experimental_cursor")]
 type SplicedNode = (PageNumber, Checksum, Option<Vec<u8>>);
 
@@ -475,7 +473,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // greatest key. Ancestors above the level where the replacements collapse
     // back to a single node take the deletion path's child-pointer swap
     // instead of a rebuild.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "experimental_cursor")]
     pub(super) fn splice_insert_run(
         &mut self,
@@ -549,7 +546,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // Rebuilds one branch of the path, with `replacement` in place of
     // `child_index`. Returns the built pages, more than one if the level had
     // to split.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "experimental_cursor")]
     fn rebuild_branch_level(
         &mut self,
@@ -591,7 +587,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // Mirrors `build_replacement_leaves`: cut a page whenever the next child
     // would not fit, except that a page must keep at least two children, so
     // the tail is merged into its neighbor instead of rebalanced.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[cfg(feature = "experimental_cursor")]
     fn build_branch_nodes(&mut self, children: &[SplicedNode]) -> Result<Vec<SplicedNode>> {
         fn separator(node: &SplicedNode) -> &[u8] {
