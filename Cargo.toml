@@ -45,6 +45,8 @@ redb-derive = { path = "./crates/redb-derive" }
 logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
+# Unstable cursor API. May change incompatibly, or be removed, in any release
+experimental_cursor = []
 
 [profile.bench]
 debug = true
