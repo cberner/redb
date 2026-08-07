@@ -336,6 +336,56 @@ impl LeafRunRewrite {
     }
 }
 
+// The threshold at which a cursor's pending inserts are spliced into the
+// tree. The splice cost is dominated by rebuilding the ancestor path, so what
+// matters is the flush count; measurements flatten out around 1MiB.
+// Reachable only from the unit tests until the public cursor API lands.
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(feature = "experimental_cursor")]
+const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
+
+// Pending inserts at the cursor's gap. The buffer holds the current leaf's
+// entries before the gap followed by the inserts, in ascending key order, so
+// the splice packs it (plus the rest of the leaf) into full leaves in one
+// parent update per flush instead of descending the tree per insert.
+//
+// While a run is open the tree is never mutated and the cursor position never
+// moves, so the position's path stays valid until the splice.
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(feature = "experimental_cursor")]
+struct InsertRun {
+    // Key of the entry after the gap when the run opened; None when the gap
+    // is at the end of the tree. Inserts must sort strictly below it.
+    upper_key: Option<Vec<u8>>,
+    // Greatest key at or before the gap: the last insert or, before any
+    // insert, the entry preceding the gap; None at the start of the tree.
+    // Inserts must sort strictly above it.
+    previous_key: Option<Vec<u8>>,
+    entries: OwnedEntryBuffer,
+    // Buffered pairs that are new inserts; the rest were copied from the
+    // current leaf.
+    inserted_pairs: u64,
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl InsertRun {
+    // True unless `key` sorts strictly between the run's bounds.
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn rejects<K: Key>(&self, key: &[u8]) -> bool {
+        if let Some(previous) = &self.previous_key
+            && K::compare(key, previous).is_le()
+        {
+            return true;
+        }
+        if let Some(upper) = &self.upper_key
+            && K::compare(key, upper).is_ge()
+        {
+            return true;
+        }
+        false
+    }
+}
+
 pub(super) struct EntryRef<'a, K: Key + 'static, V: Value + 'static> {
     page: &'a PageImpl,
     key_range: Range<usize>,
@@ -525,6 +575,11 @@ pub(super) struct CursorState {
     // so it may outlive the position; it is spliced before the tree is
     // observed.
     leaf_run_rewrite: Option<LeafRunRewrite>,
+    // Pending inserts at the gap, spliced when the buffer fills or the cursor
+    // moves on. Never set by the removal-oriented cursor users. Boxed to keep
+    // the state small for those users.
+    #[cfg(feature = "experimental_cursor")]
+    insert_run: Option<Box<InsertRun>>,
 }
 
 enum LeafCloseOutcome {
@@ -624,6 +679,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.check_not_poisoned()?;
         assert!(self.state.leaf_run_rewrite.is_none());
         assert!(self.state.removed_indexes.is_empty());
+        #[cfg(feature = "experimental_cursor")]
+        assert!(self.state.insert_run.is_none());
         self.state.position = None;
         let Some(header) = *self.root else {
             return Ok(());
@@ -665,6 +722,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // flushes its pending removals and reseeks past it in the updated tree.
     fn ensure_has_entry(&mut self, direction: Direction) -> Result<bool> {
         self.check_not_poisoned()?;
+        // Moving across a leaf edge here would invalidate an open insert
+        // run's captured position; its owner peeks the buffer instead.
+        #[cfg(feature = "experimental_cursor")]
+        assert!(self.state.insert_run.is_none());
         self.check_pending_removals(direction);
         loop {
             let Some(position) = self.state.position.as_ref() else {
@@ -951,6 +1012,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.state.position = None;
         self.state.removed_indexes.clear();
         self.state.leaf_run_rewrite = None;
+        #[cfg(feature = "experimental_cursor")]
+        {
+            self.state.insert_run = None;
+        }
     }
 
     fn check_not_poisoned(&self) -> Result {
@@ -1163,6 +1228,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // violation would later splice through a stale path.
     fn mutate_helper<'c>(&'c mut self) -> MutateHelper<'a, 'c, K, V> {
         assert!(self.state.leaf_run_rewrite.is_none());
+        #[cfg(feature = "experimental_cursor")]
+        assert!(self.state.insert_run.is_none());
         MutateHelper::new(
             &mut *self.root,
             (*self.page_allocator).clone(),
@@ -1181,6 +1248,122 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         let path = path.into_iter().map(Branch::into_parts).collect();
         let entry = self.mutate_helper().pop_leaf_entry(leaf, path, index)?;
         Ok(Some(entry))
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(feature = "experimental_cursor")]
+impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
+    /// Buffers `key`/`value` for insertion into the gap, leaving the gap
+    /// after the new entry. Returns false, leaving the tree and any pending
+    /// inserts unchanged, unless `key` sorts strictly between the entries
+    /// adjacent to the gap.
+    pub(super) fn insert_before(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.check_not_poisoned()?;
+        assert!(self.state.removed_indexes.is_empty());
+        assert!(self.state.leaf_run_rewrite.is_none());
+        if self.state.insert_run.is_none() {
+            self.open_insert_run()?;
+        }
+        let run = self.state.insert_run.as_mut().unwrap();
+        if run.rejects::<K>(key) {
+            // A run opened just for a rejected key holds nothing; drop it
+            // again, so rejection never leaves an open run behind to trip
+            // operations that require no pending inserts.
+            if run.inserted_pairs == 0 {
+                self.state.insert_run = None;
+            }
+            return Ok(false);
+        }
+        run.entries.push(key, value);
+        run.previous_key = Some(key.to_vec());
+        run.inserted_pairs += 1;
+        if run.entries.total_bytes() >= INSERT_FLUSH_BYTES {
+            self.flush_insert_run(true)?;
+        }
+        Ok(true)
+    }
+
+    // Captures the gap's neighbor keys and the current leaf's entries before
+    // the gap. The peeks first settle a gap at the edge of two leaves on the
+    // later leaf and then back on the earlier one, so afterward the gap's
+    // remaining predecessors all sit in the current leaf before `position`,
+    // and its successors are `position..` of the current leaf plus every
+    // later leaf.
+    fn open_insert_run(&mut self) -> Result {
+        assert!(self.state.insert_run.is_none());
+        let upper_key = self.peek_next()?.map(|entry| entry.key_bytes().to_vec());
+        let previous_key = self.peek_prev()?.map(|entry| entry.key_bytes().to_vec());
+        let mut entries = OwnedEntryBuffer::default();
+        if let Some(position) = &self.state.position {
+            let accessor = LeafAccessor::new(
+                position.leaf.page.memory(),
+                K::fixed_width(),
+                V::fixed_width(),
+            );
+            entries.extend_from_leaf_range(&accessor, 0..position.leaf.position);
+        }
+        self.state.insert_run = Some(Box::new(InsertRun {
+            upper_key,
+            previous_key,
+            entries,
+            inserted_pairs: 0,
+        }));
+        Ok(())
+    }
+
+    /// Splices the pending inserts into the tree. With `reseek` the cursor is
+    /// repositioned at the gap after the last insert; without it the position
+    /// is consumed and the cursor must not be used again.
+    ///
+    /// On error the cursor is poisoned: inserts already reported to the
+    /// caller were lost, so the transaction must not commit.
+    pub(super) fn flush_insert_run(&mut self, reseek: bool) -> Result {
+        self.check_not_poisoned()?;
+        let Some(run) = self.state.insert_run.take() else {
+            return Ok(());
+        };
+        if run.inserted_pairs == 0 {
+            // No pending inserts: the tree is untouched and the position
+            // remains valid.
+            return Ok(());
+        }
+        let resume_key = run
+            .previous_key
+            .expect("a run with inserts records the last inserted key");
+        let mut entries = run.entries;
+        let replaced = if let Some(position) = self.state.position.take() {
+            // The rest of the current leaf follows every pending insert.
+            let accessor = LeafAccessor::new(
+                position.leaf.page.memory(),
+                K::fixed_width(),
+                V::fixed_width(),
+            );
+            entries.extend_from_leaf_range(&accessor, position.leaf.position..position.leaf.len);
+            let CursorPosition { path, leaf } = position;
+            let replaced_leaf = leaf.page.get_page_number();
+            // The leaf is one of the pages the splice frees, so its page
+            // reference must be released first.
+            drop(leaf);
+            Some((
+                path.into_iter().map(Branch::into_parts).collect(),
+                replaced_leaf,
+            ))
+        } else {
+            None
+        };
+        let result = self
+            .mutate_helper()
+            .splice_insert_run(replaced, &entries, run.inserted_pairs);
+        if result.is_err() {
+            // The buffered inserts were consumed and can no longer be applied.
+            self.poison();
+        }
+        result?;
+        if reseek {
+            self.seek_to(Position::After(&resume_key))?;
+        }
+        Ok(())
     }
 }
 
@@ -1697,7 +1880,7 @@ mod tests {
         AllocationPolicy, InMemoryBackend, PAGE_SIZE, PageTrackerPolicy, TransactionalMemory,
     };
 
-    fn leaf_root_with_entries(entries: &[u64]) -> (PageAllocator, PageNumber) {
+    fn test_page_allocator() -> PageAllocator {
         let mem = TransactionalMemory::new(
             Box::new(InMemoryBackend::new()),
             true,
@@ -1708,9 +1891,16 @@ mod tests {
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
-        let mem = Arc::new(mem);
-        let page_allocator = PageAllocator::new(mem, AllocationPolicy::Default);
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
+    }
+
+    // The returned tracker records the built page: mutations through a cursor
+    // must share it, so the pages they free are found tracked.
+    fn leaf_root_with_entries(
+        entries: &[u64],
+    ) -> (PageAllocator, PageNumber, Arc<Mutex<PageTrackerPolicy>>) {
+        let page_allocator = test_page_allocator();
+        let allocated_pages = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
         let keys_and_values: Vec<_> = entries
             .iter()
             .map(|entry| {
@@ -1734,11 +1924,11 @@ mod tests {
         let root = page.get_page_number();
         drop(page);
 
-        (page_allocator, root)
+        (page_allocator, root, allocated_pages)
     }
 
     fn cursor_with_entries(entries: &[u64]) -> Cursor<u64, u64> {
-        let (page_allocator, root) = leaf_root_with_entries(entries);
+        let (page_allocator, root, _) = leaf_root_with_entries(entries);
         let mut cursor = Cursor::<u64, u64>::new(root, page_allocator.resolver(), PageHint::None);
         cursor.seek_to(Position::Start).unwrap();
         cursor
@@ -1772,10 +1962,9 @@ mod tests {
     // unpositioned cursor would park as Unbounded, un-consuming the entries.
     #[test]
     fn cursor_mut_stays_parked_at_tree_edge() {
-        let (page_allocator, root_page) = leaf_root_with_entries(&[1, 2, 3]);
+        let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[1, 2, 3]);
         let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
         let mut freed = vec![];
-        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
         let mut cursor: CursorMut<'_, '_, u64, u64> =
             CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
 
@@ -1808,15 +1997,333 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "experimental_cursor")]
+    mod insert_tests {
+        use super::*;
+        use crate::tree_store::RawBtree;
+        use crate::tree_store::btree::UntypedBtreeMut;
+
+        fn insert(cursor: &mut CursorMut<'_, '_, u64, u64>, key: u64, value: u64) -> bool {
+            cursor
+                .insert_before(u64::as_bytes(&key).as_ref(), u64::as_bytes(&value).as_ref())
+                .unwrap()
+        }
+
+        fn scan(root: Option<BtreeHeader>, page_allocator: &PageAllocator) -> Vec<(u64, u64)> {
+            let Some(header) = root else {
+                return vec![];
+            };
+            let mut cursor =
+                Cursor::<u64, u64>::new(header.root, page_allocator.resolver(), PageHint::None);
+            cursor.seek_to(Position::Start).unwrap();
+            let mut entries = vec![];
+            while let Some(entry) = cursor.next().unwrap() {
+                entries.push((entry.key(), entry.value()));
+            }
+            entries
+        }
+
+        // Full validation of a spliced tree: contents and order via a scan,
+        // stored length, per-key branch routing (which depends on the
+        // separators the splice wrote), and checksum-tree consistency.
+        fn assert_tree(
+            root: Option<BtreeHeader>,
+            page_allocator: &PageAllocator,
+            expected: &[(u64, u64)],
+        ) {
+            assert_eq!(scan(root, page_allocator), expected);
+            assert_eq!(
+                root.map_or(0, |header| header.length),
+                expected.len() as u64
+            );
+            for (key, value) in expected {
+                let mut cursor = Cursor::<u64, u64>::new(
+                    root.unwrap().root,
+                    page_allocator.resolver(),
+                    PageHint::None,
+                );
+                cursor
+                    .seek_to(Position::Before(u64::as_bytes(key).as_ref()))
+                    .unwrap();
+                let entry = cursor.next().unwrap().expect("key must route to its leaf");
+                assert_eq!(entry.key(), *key);
+                assert_eq!(entry.value(), *value);
+            }
+            let mut untyped = UntypedBtreeMut::new(
+                root,
+                page_allocator.clone(),
+                Arc::new(Mutex::new(vec![])),
+                u64::fixed_width(),
+                u64::fixed_width(),
+            );
+            let finalized = untyped.finalize_dirty_checksums().unwrap();
+            let raw = RawBtree::new(
+                finalized,
+                u64::fixed_width(),
+                u64::fixed_width(),
+                page_allocator.resolver(),
+                PageHint::None,
+            );
+            assert!(raw.verify_checksum().unwrap());
+        }
+
+        #[test]
+        fn insert_run_builds_tree_from_empty() {
+            for flush_every in [1, 3, 64] {
+                let page_allocator = test_page_allocator();
+                let mut root = None;
+                let mut freed = vec![];
+                let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+                let mut cursor: CursorMut<'_, '_, u64, u64> =
+                    CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+                cursor.seek_to(Position::End).unwrap();
+                for key in 0..2000 {
+                    assert!(insert(&mut cursor, key, key * 3));
+                    if key % flush_every == 0 {
+                        cursor.flush_insert_run(true).unwrap();
+                    }
+                }
+                cursor.flush_insert_run(true).unwrap();
+                drop(cursor);
+
+                let expected: Vec<_> = (0..2000).map(|key| (key, key * 3)).collect();
+                assert_tree(root, &page_allocator, &expected);
+            }
+        }
+
+        #[test]
+        fn insert_run_grows_multiple_levels() {
+            let page_allocator = test_page_allocator();
+            let mut root = None;
+            let mut freed = vec![];
+            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor.seek_to(Position::End).unwrap();
+            for key in 0..60_000 {
+                assert!(insert(&mut cursor, key, key));
+                if key % 1000 == 999 {
+                    cursor.flush_insert_run(true).unwrap();
+                }
+            }
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+
+            let stats = crate::tree_store::btree::btree_stats(
+                root.map(|header| header.root),
+                &page_allocator.resolver(),
+                u64::fixed_width(),
+                u64::fixed_width(),
+                PageHint::None,
+            )
+            .unwrap();
+            assert!(stats.tree_height >= 3, "height {}", stats.tree_height);
+
+            let expected: Vec<_> = (0..60_000).map(|key| (key, key)).collect();
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        #[test]
+        fn insert_run_into_leaf_middle() {
+            let existing: Vec<u64> = (0..100).map(|i| i * 10).collect();
+            let (page_allocator, root_page, allocated) = leaf_root_with_entries(&existing);
+            let mut root = Some(BtreeHeader::new(root_page, DEFERRED, existing.len() as u64));
+            let mut freed = vec![];
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor
+                .seek_to(Position::Before(u64::as_bytes(&500).as_ref()))
+                .unwrap();
+            for key in 491..500 {
+                assert!(insert(&mut cursor, key, key));
+            }
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+
+            let mut expected: Vec<_> = existing.iter().map(|&key| (key, key)).collect();
+            expected.extend((491..500).map(|key| (key, key)));
+            expected.sort_unstable();
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        // Splicing many entries into a single-leaf root exercises replacing
+        // the root leaf itself and growing new levels above the replacements.
+        #[test]
+        fn insert_run_splits_root_leaf() {
+            let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[0, 1_000_000]);
+            let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 2));
+            let mut freed = vec![];
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&0).as_ref()))
+                .unwrap();
+            for key in 1..=10_000 {
+                assert!(insert(&mut cursor, key, key));
+            }
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+
+            let mut expected = vec![(0, 0), (1_000_000, 1_000_000)];
+            expected.extend((1..=10_000).map(|key| (key, key)));
+            expected.sort_unstable();
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        // A splice under a non-rightmost branch of a height-3 tree: the
+        // rebuilt branch is not its parent's last child, so its subtree's
+        // unchanged greatest key must be recovered from the parent's
+        // separator rather than propagated as unknown.
+        #[test]
+        fn insert_run_into_middle_of_tall_tree() {
+            let page_allocator = test_page_allocator();
+            let mut root = None;
+            let mut freed = vec![];
+            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor.seek_to(Position::End).unwrap();
+            // Even keys, leaving gaps to insert into; enough for three levels
+            for key in 0..60_000 {
+                assert!(insert(&mut cursor, key * 2, key * 2));
+                if key % 1000 == 999 {
+                    cursor.flush_insert_run(true).unwrap();
+                }
+            }
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+            let stats = crate::tree_store::btree::btree_stats(
+                root.map(|header| header.root),
+                &page_allocator.resolver(),
+                u64::fixed_width(),
+                u64::fixed_width(),
+                PageHint::None,
+            )
+            .unwrap();
+            assert!(stats.tree_height >= 3, "height {}", stats.tree_height);
+
+            // Gaps chosen to land under leaves in the interior of the tree
+            let mut expected: Vec<(u64, u64)> = (0..60_000).map(|key| (key * 2, key * 2)).collect();
+            for target in [1001u64, 30_001, 60_001, 90_001, 119_001] {
+                let mut cursor: CursorMut<'_, '_, u64, u64> =
+                    CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+                cursor
+                    .seek_to(Position::Before(u64::as_bytes(&target).as_ref()))
+                    .unwrap();
+                assert!(insert(&mut cursor, target, target));
+                cursor.flush_insert_run(false).unwrap();
+                drop(cursor);
+                expected.push((target, target));
+            }
+            expected.sort_unstable();
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        // Once a splice's replacement collapses to a single node, the
+        // ancestors take the deletion path's child-pointer swap, writing
+        // uncommitted pages in place instead of rebuilding the spine. The
+        // second splice below lands in a leaf rebalanced by the first, so it
+        // replaces one leaf with one leaf and must leave the root page --
+        // and everything else above the leaf's parent -- untouched.
+        #[test]
+        fn insert_run_swaps_ancestors_in_place() {
+            let page_allocator = test_page_allocator();
+            let mut root = None;
+            let mut freed = vec![];
+            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor.seek_to(Position::End).unwrap();
+            // Even keys, leaving gaps to insert into; enough for three levels
+            for key in 0..60_000 {
+                assert!(insert(&mut cursor, key * 2, key * 2));
+                if key % 1000 == 999 {
+                    cursor.flush_insert_run(true).unwrap();
+                }
+            }
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+            let stats = crate::tree_store::btree::btree_stats(
+                root.map(|header| header.root),
+                &page_allocator.resolver(),
+                u64::fixed_width(),
+                u64::fixed_width(),
+                PageHint::None,
+            )
+            .unwrap();
+            assert!(stats.tree_height >= 3, "height {}", stats.tree_height);
+
+            // The first splice splits a packed-full leaf, rebalancing the
+            // pieces; root stability is not guaranteed here, since the
+            // parent may split as well.
+            for target in [30_001u64, 30_003] {
+                let root_before = root.map(|header| header.root);
+                let mut cursor: CursorMut<'_, '_, u64, u64> =
+                    CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+                cursor
+                    .seek_to(Position::Before(u64::as_bytes(&target).as_ref()))
+                    .unwrap();
+                assert!(insert(&mut cursor, target, target));
+                cursor.flush_insert_run(false).unwrap();
+                drop(cursor);
+                if target == 30_003 {
+                    assert_eq!(root.map(|header| header.root), root_before);
+                }
+            }
+
+            let mut expected: Vec<(u64, u64)> = (0..60_000).map(|key| (key * 2, key * 2)).collect();
+            expected.push((30_001, 30_001));
+            expected.push((30_003, 30_003));
+            expected.sort_unstable();
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        #[test]
+        fn insert_run_rejects_unordered_keys() {
+            let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[10, 20, 30]);
+            let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
+            let mut freed = vec![];
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&20).as_ref()))
+                .unwrap();
+            // Equal to the previous entry, below it, equal to the next entry,
+            // and above it are all rejected.
+            assert!(!insert(&mut cursor, 20, 20));
+            assert!(!insert(&mut cursor, 15, 15));
+            assert!(!insert(&mut cursor, 30, 30));
+            assert!(!insert(&mut cursor, 35, 35));
+            // Rejections that leave no pending inserts also drop the run they
+            // opened, keeping operations that require no pending inserts
+            // available; seek_to asserts exactly that.
+            assert!(cursor.state.insert_run.is_none());
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&20).as_ref()))
+                .unwrap();
+            assert!(insert(&mut cursor, 25, 25));
+            // Inserts must also stay above the pending insert.
+            assert!(!insert(&mut cursor, 25, 25));
+            assert!(!insert(&mut cursor, 24, 24));
+            // A rejection with inserts pending must keep the run open.
+            assert!(cursor.state.insert_run.is_some());
+            assert!(insert(&mut cursor, 26, 26));
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+
+            let expected = [10, 20, 25, 26, 30].map(|key| (key, key));
+            assert_tree(root, &page_allocator, &expected);
+        }
+    }
+
     // Once poisoned, every cursor operation re-raises instead of touching the
     // tree, so removals stranded by the original error can never be observed
     // as applied.
     #[test]
     fn poisoned_cursor_mut_re_raises() {
-        let (page_allocator, root_page) = leaf_root_with_entries(&[1, 2, 3]);
+        let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[1, 2, 3]);
         let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
         let mut freed = vec![];
-        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
         let mut cursor: CursorMut<'_, '_, u64, u64> =
             CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
 

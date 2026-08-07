@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental_cursor")]
+use crate::tree_store::btree_base::RawBranchBuilder;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, OwnedEntryBuffer, is_single_large_value, leaf_below_merge_threshold,
@@ -57,6 +59,14 @@ impl DeletedPairs {
         }
     }
 }
+
+// A page produced while splicing an insert run into the tree, with its
+// subtree's greatest key. The key is None only for the node whose subtree
+// contains the tree's original last entry, which stays last at every level.
+// Reachable only from the unit tests until the public cursor API lands.
+#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(feature = "experimental_cursor")]
+type SplicedNode = (PageNumber, Checksum, Option<Vec<u8>>);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum LeafDeleteDisposition {
@@ -454,6 +464,210 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             leaves.push((page2.get_page_number(), entries[range.end - 1].0.to_vec()));
         }
         Ok(leaves)
+    }
+
+    // Replaces the leaf at the end of `path` (all of the tree when `replaced`
+    // is None) with packed leaves built from `entries`, rebuilding the
+    // ancestor branches bottom-up. Unlike `replace_leaf_children`, the
+    // replacements can outnumber what they replace, so branches split on the
+    // way up and the root grows new levels; the separator for the replaced
+    // slot is refreshed at every level, since inserting can raise a subtree's
+    // greatest key. Ancestors above the level where the replacements collapse
+    // back to a single node take the deletion path's child-pointer swap
+    // instead of a rebuild.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn splice_insert_run(
+        &mut self,
+        replaced: Option<(Vec<(PageImpl, usize)>, PageNumber)>,
+        entries: &OwnedEntryBuffer,
+        inserted_pairs: u64,
+    ) -> Result {
+        assert!(entries.num_pairs() > 0);
+        assert_eq!(replaced.is_some(), self.root.is_some());
+        let length = self.root.map_or(0, |header| header.length);
+        let leaves = self.build_replacement_leaves(entries)?;
+        let mut nodes: Vec<SplicedNode> = leaves
+            .into_iter()
+            .map(|(page, greatest_key)| (page, DEFERRED, Some(greatest_key)))
+            .collect();
+        // Freed only after every fallible step, so an error never leaves the
+        // surviving root referencing a freed page.
+        let mut removed_pages = vec![];
+        if let Some((path, replaced_leaf)) = replaced {
+            removed_pages.push(replaced_leaf);
+            for (page, child_index) in path.into_iter().rev() {
+                // Once the replacement has collapsed to a single node whose
+                // stored separator is still exact, the remaining ancestors
+                // need only their child pointer replaced. This shares the
+                // deletion path's pointer swap, whose in-place write for
+                // uncommitted pages keeps repeated flushes from rebuilding
+                // the whole spine.
+                if nodes.len() == 1 {
+                    let accessor = BranchAccessor::new(&page, K::fixed_width());
+                    let stored = accessor.key(child_index);
+                    let separator = nodes[0].2.as_deref();
+                    // Exact when the node kept its subtree's original bound
+                    // (None), when the stored separator already equals the
+                    // new bound, or when the slot is the branch's last child
+                    // and stores no separator at all.
+                    if separator.is_none() || stored.is_none() || stored == separator {
+                        // With no stored separator, a raised bound must keep
+                        // propagating; a matching stored separator proves the
+                        // bound unchanged, which None expresses upward.
+                        let carried = if stored.is_none() {
+                            std::mem::take(&mut nodes[0].2)
+                        } else {
+                            None
+                        };
+                        let original = page.get_page_number();
+                        let (new_page, replaced_page) =
+                            self.replace_branch_child(page, child_index, nodes[0].0)?;
+                        if replaced_page {
+                            removed_pages.push(original);
+                        }
+                        nodes[0] = (new_page, DEFERRED, carried);
+                        continue;
+                    }
+                }
+                nodes = self.rebuild_branch_level(&page, child_index, nodes)?;
+                removed_pages.push(page.get_page_number());
+                drop(page);
+            }
+        }
+        while nodes.len() > 1 {
+            nodes = self.build_branch_nodes(&nodes)?;
+        }
+        let (root, _, _) = nodes.pop().unwrap();
+        *self.root = Some(BtreeHeader::new(root, DEFERRED, length + inserted_pairs));
+        for page_number in removed_pages {
+            self.conditional_free(page_number);
+        }
+        Ok(())
+    }
+
+    // Rebuilds one branch of the path, with `replacement` in place of
+    // `child_index`. Returns the built pages, more than one if the level had
+    // to split.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(feature = "experimental_cursor")]
+    fn rebuild_branch_level(
+        &mut self,
+        parent: &PageImpl,
+        child_index: usize,
+        mut replacement: Vec<SplicedNode>,
+    ) -> Result<Vec<SplicedNode>> {
+        let accessor = BranchAccessor::new(parent, K::fixed_width());
+        let count = accessor.count_children();
+        assert!(child_index < count);
+        // A replacement ending in None kept the replaced subtree's original
+        // last entry, whose key the lower level does not store: this level's
+        // separator for the slot is exactly that unchanged bound. It stays
+        // None only for the parent's own last child, so after this, None
+        // appears only at the end of the level.
+        if let Some(last) = replacement.last_mut()
+            && last.2.is_none()
+        {
+            last.2 = accessor.key(child_index).map(<[u8]>::to_vec);
+        }
+        // Preserved children keep their checksum, and reuse the original
+        // separator as their greatest key; only the original last child's is
+        // unknown (None), and it stays last through every rebuild above.
+        let preserved = |i: usize| {
+            (
+                accessor.child_page(i).unwrap(),
+                accessor.child_checksum(i).unwrap(),
+                accessor.key(i).map(<[u8]>::to_vec),
+            )
+        };
+        let mut children = Vec::with_capacity(count - 1 + replacement.len());
+        children.extend((0..child_index).map(preserved));
+        children.extend(replacement);
+        children.extend(((child_index + 1)..count).map(preserved));
+        self.build_branch_nodes(&children)
+    }
+
+    // Packs `children` into as many branch pages as they require, in order.
+    // Mirrors `build_replacement_leaves`: cut a page whenever the next child
+    // would not fit, except that a page must keep at least two children, so
+    // the tail is merged into its neighbor instead of rebalanced.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(feature = "experimental_cursor")]
+    fn build_branch_nodes(&mut self, children: &[SplicedNode]) -> Result<Vec<SplicedNode>> {
+        fn separator(node: &SplicedNode) -> &[u8] {
+            node.2
+                .as_deref()
+                .expect("only the last child of a level may lack a separator")
+        }
+
+        assert!(children.len() >= 2);
+        let page_size = self.page_allocator.get_page_size();
+
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        let mut key_bytes = 0;
+        for index in 1..children.len() {
+            // Extending the page to `children[index]` stores the separator of
+            // the previously-last child.
+            let separator_bytes = separator(&children[index - 1]).len();
+            let required = RawBranchBuilder::required_bytes(
+                index - start,
+                key_bytes + separator_bytes,
+                K::fixed_width(),
+            );
+            // num_keys is stored as a u16, so the page must also be cut before
+            // it would exceed u16::MAX keys, even when the bytes still fit
+            // (possible with large pages); otherwise build() would panic in
+            // RawBranchBuilder::new.
+            let too_many_keys = index - start > usize::from(u16::MAX);
+            if (required > page_size || too_many_keys) && index - start >= 2 {
+                plan.push(start..index);
+                start = index;
+                key_bytes = 0;
+            } else {
+                key_bytes += separator_bytes;
+            }
+        }
+        plan.push(start..children.len());
+        // A single child cannot form a branch page; put it back with its
+        // neighbor, slightly overfilling that page. If the neighbor is at the
+        // u16::MAX key limit, take its last child instead, so both pages stay
+        // within the limit.
+        if plan.last().unwrap().len() == 1 && plan.len() >= 2 {
+            let last = plan.pop().unwrap();
+            let previous = plan.last_mut().unwrap();
+            if previous.len() > usize::from(u16::MAX) {
+                previous.end -= 1;
+                let tail = previous.end..last.end;
+                plan.push(tail);
+            } else {
+                previous.end = last.end;
+            }
+        }
+
+        let mut nodes = Vec::with_capacity(plan.len());
+        for range in plan {
+            let chunk = &children[range];
+            let mut builder = BranchBuilder::new(
+                &self.page_allocator,
+                &self.allocated,
+                chunk.len(),
+                K::fixed_width(),
+            );
+            for (page, checksum, _) in chunk {
+                builder.push_child(*page, *checksum);
+            }
+            for node in &chunk[..chunk.len() - 1] {
+                builder.push_key(separator(node));
+            }
+            let page = builder.build()?;
+            nodes.push((
+                page.get_page_number(),
+                DEFERRED,
+                chunk.last().unwrap().2.clone(),
+            ));
+        }
+        Ok(nodes)
     }
 
     #[allow(clippy::type_complexity)]
@@ -1181,47 +1395,67 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok((final_result, found))
     }
 
+    // Replaces the child pointer at `child_index` with `new_child` (checksum
+    // DEFERRED), leaving every other entry -- including the slot's separator
+    // key -- untouched; the caller must know the stored separator is still
+    // exact. Writes in place when the branch page is uncommitted. Returns the
+    // branch's resulting page number, and whether it is a new page whose
+    // predecessor the caller must free.
+    fn replace_branch_child(
+        &mut self,
+        page: PageImpl,
+        child_index: usize,
+        new_child: PageNumber,
+    ) -> Result<(PageNumber, bool)> {
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let original_page_number = page.get_page_number();
+        let child_page_number = accessor.child_page(child_index).unwrap();
+        let child_checksum = accessor.child_checksum(child_index).unwrap();
+        // Skip-path: the child's in-parent entry is already (child_page_number, DEFERRED)
+        // and the mutated child kept its page number, so no write to this branch is needed.
+        // This preserves the optimization from f8ccc39 without carrying a checksum on
+        // `Subtree` (a modified `Subtree` always has checksum DEFERRED).
+        if new_child == child_page_number && child_checksum == DEFERRED {
+            return Ok((original_page_number, false));
+        }
+
+        if self.page_allocator.uncommitted(original_page_number) {
+            drop(page);
+            let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
+            let mut mutator = BranchMutator::new(mutpage.memory_mut());
+            mutator.write_child_page(child_index, new_child, DEFERRED);
+            Ok((original_page_number, false))
+        } else {
+            let mut builder = BranchBuilder::new(
+                &self.page_allocator,
+                &self.allocated,
+                accessor.count_children(),
+                K::fixed_width(),
+            );
+            builder.push_all(&accessor);
+            builder.replace_child(child_index, new_child, DEFERRED);
+            let new_page = builder.build()?;
+            Ok((new_page.get_page_number(), true))
+        }
+    }
+
     fn apply_child_deletion_result(
         &mut self,
         page: PageImpl,
         child_index: usize,
         result: DeletionResult,
     ) -> Result<DeletionResult> {
-        let accessor = BranchAccessor::new(&page, K::fixed_width());
         let original_page_number = page.get_page_number();
-        let child_page_number = accessor.child_page(child_index).unwrap();
-        let child_checksum = accessor.child_checksum(child_index).unwrap();
         if let Subtree(new_child) = result {
-            // Skip-path: the child's in-parent entry is already (child_page_number, DEFERRED)
-            // and the mutated child kept its page number, so no write to this branch is needed.
-            // This preserves the optimization from f8ccc39 without carrying a checksum on
-            // `Subtree` (a modified `Subtree` always has checksum DEFERRED).
-            if new_child == child_page_number && child_checksum == DEFERRED {
-                return Ok(Subtree(original_page_number));
-            }
-
-            let result_page = if self.page_allocator.uncommitted(original_page_number) {
-                drop(page);
-                let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
-                let mut mutator = BranchMutator::new(mutpage.memory_mut());
-                mutator.write_child_page(child_index, new_child, DEFERRED);
-                original_page_number
-            } else {
-                let mut builder = BranchBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
-                    accessor.count_children(),
-                    K::fixed_width(),
-                );
-                builder.push_all(&accessor);
-                builder.replace_child(child_index, new_child, DEFERRED);
-                let new_page = builder.build()?;
+            let (result_page, replaced) =
+                self.replace_branch_child(page, child_index, new_child)?;
+            if replaced {
                 self.conditional_free(original_page_number);
-                new_page.get_page_number()
-            };
+            }
             return Ok(Subtree(result_page));
         }
 
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
         // Child is requesting to be merged with a sibling
         let mut builder = BranchBuilder::new(
             &self.page_allocator,
@@ -1523,5 +1757,101 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             BRANCH => self.delete_branch_helper(page, key, allow_in_place),
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(all(test, feature = "experimental_cursor"))]
+mod tests {
+    use super::*;
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, TransactionalMemory};
+
+    const MAX_KEYS: usize = u16::MAX as usize;
+
+    // Large enough that MAX_KEYS + 2 children with 8-byte keys fit in one
+    // page by bytes, so only the key count can force a cut.
+    const HUGE_PAGE: usize = 4 * 1024 * 1024;
+
+    fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+        PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
+    }
+
+    // Children as build_branch_nodes receives them: ascending separators,
+    // with only the level's last child lacking one.
+    fn synthetic_children(count: u32) -> Vec<SplicedNode> {
+        (0..count)
+            .map(|i| {
+                let separator = (i != count - 1).then(|| u64::from(i).to_le_bytes().to_vec());
+                (PageNumber::new(0, i, 0), DEFERRED, separator)
+            })
+            .collect()
+    }
+
+    fn pack_branches(children: &[SplicedNode], page_allocator: &PageAllocator) -> Vec<SplicedNode> {
+        let mut root = None;
+        let mut freed = vec![];
+        let mut helper: MutateHelper<'_, '_, u64, u64> = MutateHelper::new(
+            &mut root,
+            page_allocator.clone(),
+            &mut freed,
+            Arc::new(Mutex::new(PageTrackerPolicy::new_tracking())),
+        );
+        helper.build_branch_nodes(children).unwrap()
+    }
+
+    fn count_children(page_allocator: &PageAllocator, node: &SplicedNode) -> usize {
+        let page = page_allocator.get_page(node.0, PageHint::None).unwrap();
+        BranchAccessor::new(&page, u64::fixed_width()).count_children()
+    }
+
+    // num_keys is stored as a u16. With a page large enough that the byte
+    // condition never cuts, the packer must cut on the key count instead of
+    // building a branch that RawBranchBuilder::new cannot represent. The cut
+    // leaves a single-child tail here, whose neighbor is already at the
+    // limit: merging would overflow it, so the tail takes the neighbor's
+    // last child instead.
+    #[test]
+    fn branch_packing_splits_at_max_keys() {
+        let page_allocator = make_allocator_with_page_size(HUGE_PAGE);
+        let children = synthetic_children(u32::try_from(MAX_KEYS).unwrap() + 2);
+        let nodes = pack_branches(&children, &page_allocator);
+
+        assert_eq!(nodes.len(), 2);
+        let first = count_children(&page_allocator, &nodes[0]);
+        let second = count_children(&page_allocator, &nodes[1]);
+        assert_eq!(first, MAX_KEYS);
+        assert_eq!(second, 2);
+        // Each node's separator is its last child's; the level's last child
+        // keeps None.
+        assert_eq!(nodes[0].2, children[first - 1].2);
+        assert!(nodes[1].2.is_none());
+        // The second page holds the stolen child and the orphan, with the
+        // stolen child's separator between them.
+        let page = page_allocator.get_page(nodes[1].0, PageHint::None).unwrap();
+        let accessor = BranchAccessor::new(&page, u64::fixed_width());
+        assert_eq!(accessor.child_page(0).unwrap(), children[first].0);
+        assert_eq!(accessor.child_page(1).unwrap(), children[first + 1].0);
+        assert_eq!(accessor.key(0), children[first].2.as_deref());
+    }
+
+    // The boundary case: exactly u16::MAX keys still packs into one page.
+    #[test]
+    fn branch_packing_fills_page_to_max_keys() {
+        let page_allocator = make_allocator_with_page_size(HUGE_PAGE);
+        let children = synthetic_children(u32::try_from(MAX_KEYS).unwrap() + 1);
+        let nodes = pack_branches(&children, &page_allocator);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(count_children(&page_allocator, &nodes[0]), children.len());
+        assert!(nodes[0].2.is_none());
     }
 }
