@@ -603,10 +603,8 @@ fn page_reuse_after_unclean_reopen() {
     test_page_reuse_after_unclean_reopen(true);
 }
 
-// stats() used to walk the root staged when an open table was last closed. Pages reachable
-// from that root may have been freed by modifications through the reopened handle and
-// reallocated to other tables, so the walk read unrelated pages: an assertion failure with
-// debug_assertions on, garbage statistics otherwise.
+// stats() used to walk an open table's staged root, whose pages the reopened handle may
+// have freed for reuse: garbage statistics, or an assertion failure with debug_assertions
 #[test]
 fn stats_with_open_table() {
     const BIG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("big");
@@ -623,8 +621,7 @@ fn stats_with_open_table() {
             table.insert(i, i).unwrap();
         }
     }
-    // Reopen the table and free the pages of the root staged by the close above, keeping
-    // the handle open so that root stays staged
+    // Reopen the table and free the staged root's pages, keeping the handle open
     let mut table = {
         let mut table = txn.open_table(U64_TABLE).unwrap();
         for i in 0..5000 {
@@ -642,7 +639,7 @@ fn stats_with_open_table() {
     }
 
     let big_stored = BIG_ELEMENTS * (u64::fixed_width().unwrap() as u64 + BIG_VALUE_LEN as u64);
-    // The open table is reported as of the start of the transaction, when it did not exist
+    // The open table is reported as of the transaction start, when it did not exist
     let stats = txn.stats().unwrap();
     assert_eq!(stats.stored_bytes(), big_stored);
 
@@ -658,10 +655,8 @@ fn stats_with_open_table() {
     txn.abort().unwrap();
 }
 
-// Same as stats_with_open_table, but the staged root travels through a rename before the
-// table is reopened. rename_table() used to write the staged root into the master tree
-// entry for the new name, so stats() would walk it even though it skips staged roots of
-// open tables.
+// Same as stats_with_open_table, but the staged root travels through a rename, which used
+// to write it into the master tree entry where the open-table skip could not help.
 #[test]
 fn stats_with_renamed_open_table() {
     const RENAMED_TABLE: TableDefinition<u64, u64> = TableDefinition::new("renamed");
@@ -691,7 +686,7 @@ fn stats_with_renamed_open_table() {
         }
     }
     txn.rename_table(U64_TABLE, RENAMED_TABLE).unwrap();
-    // Reopen the renamed table and free the pages of the staged root, keeping the handle open
+    // Reopen the renamed table and free the staged root's pages, keeping the handle open
     let table = {
         let mut table = txn.open_table(RENAMED_TABLE).unwrap();
         for i in 0..2 * COMMITTED_ELEMENTS {
@@ -710,7 +705,7 @@ fn stats_with_renamed_open_table() {
 
     let element_stored = 2 * u64::fixed_width().unwrap() as u64;
     let big_stored = BIG_ELEMENTS * (u64::fixed_width().unwrap() as u64 + BIG_VALUE_LEN as u64);
-    // The open table is reported as of the start of the transaction
+    // The open table is reported as of the transaction start
     let stats = txn.stats().unwrap();
     assert_eq!(
         stats.stored_bytes(),
