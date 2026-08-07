@@ -226,6 +226,8 @@ pub(crate) struct TableTreeMut {
     page_allocator: PageAllocator,
     // Cached updates from tables that have been closed. These must be flushed to the btree.
     // The bool indicates whether the root has dirty (DEFERRED) checksums that need finalization.
+    // Never contains an entry for an open table -- the update is taken out on open and re-staged
+    // on close -- so entries cannot reference pages that an open handle frees.
     pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64, bool)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
@@ -623,6 +625,9 @@ impl TableTreeMut {
             table
         };
 
+        // Take the staged update: while the table is open its root lives in the handle
+        self.pending_table_updates.remove(name);
+
         match table {
             InternalTableDefinition::Normal {
                 table_root,
@@ -704,9 +709,7 @@ impl TableTreeMut {
         Ok(())
     }
 
-    // Staged roots of tables that are currently open (per `is_open`) may reference recycled
-    // pages, so those tables are reported from their stored root: as of the transaction start.
-    pub fn stats(&self, is_open: impl Fn(&str) -> bool) -> Result<DatabaseStats> {
+    pub fn stats(&self) -> Result<DatabaseStats> {
         let master_tree_stats = self.tree.stats()?;
         let mut max_subtree_height = 0;
         let mut total_stored_bytes = 0;
@@ -722,9 +725,7 @@ impl TableTreeMut {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
             let mut definition = entry.value();
-            if !is_open(entry.key())
-                && let Some((updated_root, length, _)) = self.pending_table_updates.get(entry.key())
-            {
+            if let Some((updated_root, length, _)) = self.pending_table_updates.get(entry.key()) {
                 definition.set_header(*updated_root, *length);
             }
             match definition {

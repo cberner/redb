@@ -720,6 +720,27 @@ fn stats_with_renamed_open_table() {
     txn.abort().unwrap();
 }
 
+// A failed reopen must not discard the update staged when the table was closed
+#[test]
+fn failed_reopen_preserves_staged_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    let wrong_type: TableDefinition<&str, &str> = TableDefinition::new("u64");
+    assert!(txn.open_table(wrong_type).is_err());
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    assert_eq!(txn.open_table(U64_TABLE).unwrap().len().unwrap(), 100);
+}
+
 fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
     let mut txn = db.begin_write().unwrap();
     txn.set_quick_repair(quick_repair);
