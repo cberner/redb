@@ -2418,15 +2418,12 @@ impl WriteTransaction {
     /// transaction; their modifications are reflected once the handle is dropped.
     pub fn stats(&self) -> Result<DatabaseStats> {
         let tables = self.tables.lock().unwrap();
-        let tables = &*tables;
-        let data_tree_stats = tables
-            .table_tree
-            .stats(|name| tables.open_tables.contains_key(name))?;
+        let table_tree = &tables.table_tree;
+        let data_tree_stats = table_tree.stats()?;
 
         let system_tables = self.system_tables.lock().unwrap();
         let system_table_tree = &system_tables.table_tree;
-        // No system table can be open here, since they hold this lock while open
-        let system_tree_stats = system_table_tree.stats(|_| false)?;
+        let system_tree_stats = system_table_tree.stats()?;
 
         let total_metadata_bytes = data_tree_stats.metadata_bytes()
             + system_tree_stats.metadata_bytes
