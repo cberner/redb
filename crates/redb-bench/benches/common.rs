@@ -992,6 +992,22 @@ impl BenchInserter for RedbBenchInserter<'_> {
         self.table.insert(key, value).map(|_| ()).map_err(|_| ())
     }
 
+    fn insert_sorted<'i>(
+        &mut self,
+        pairs: impl Iterator<Item = (&'i [u8], &'i [u8])>,
+    ) -> Result<(), ()> {
+        // redb's appending cursor: buffers the inserts and splices packed leaves into
+        // the tree, instead of descending it for each pair
+        let mut cursor = self
+            .table
+            .upper_bound_mut(Bound::<&[u8]>::Unbounded)
+            .map_err(|_| ())?;
+        for (key, value) in pairs {
+            cursor.insert_before(key, value).map_err(|_| ())?;
+        }
+        cursor.close().map_err(|_| ())
+    }
+
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.table.remove(key).map(|_| ()).map_err(|_| ())
     }
