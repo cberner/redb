@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental_cursor")]
+use crate::tree_store::btree_base::RawBranchBuilder;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, OwnedEntryBuffer, is_single_large_value, leaf_below_merge_threshold,
@@ -57,6 +59,12 @@ impl DeletedPairs {
         }
     }
 }
+
+// A page produced while splicing an insert run into the tree, with its
+// subtree's greatest key. The key is None only for the node whose subtree
+// contains the tree's original last entry, which stays last at every level.
+#[cfg(feature = "experimental_cursor")]
+type SplicedNode = (PageNumber, Checksum, Option<Vec<u8>>);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum LeafDeleteDisposition {
@@ -454,6 +462,158 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             leaves.push((page2.get_page_number(), entries[range.end - 1].0.to_vec()));
         }
         Ok(leaves)
+    }
+
+    // Replaces the leaf at the end of `path` (all of the tree when `replaced`
+    // is None) with packed leaves built from `entries`, rebuilding the
+    // ancestor branches bottom-up. Unlike `replace_leaf_children`, the
+    // replacements can outnumber what they replace, so branches split on the
+    // way up and the root grows new levels; the separator for the replaced
+    // slot is refreshed at every level, since inserting can raise a subtree's
+    // greatest key.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn splice_insert_run(
+        &mut self,
+        replaced: Option<(Vec<(PageImpl, usize)>, PageNumber)>,
+        entries: &OwnedEntryBuffer,
+        inserted_pairs: u64,
+    ) -> Result {
+        assert!(entries.num_pairs() > 0);
+        assert_eq!(replaced.is_some(), self.root.is_some());
+        let length = self.root.map_or(0, |header| header.length);
+        let leaves = self.build_replacement_leaves(entries)?;
+        let mut nodes: Vec<SplicedNode> = leaves
+            .into_iter()
+            .map(|(page, greatest_key)| (page, DEFERRED, Some(greatest_key)))
+            .collect();
+        // Freed only after every fallible step, so an error never leaves the
+        // surviving root referencing a freed page.
+        let mut removed_pages = vec![];
+        if let Some((path, replaced_leaf)) = replaced {
+            removed_pages.push(replaced_leaf);
+            for (page, child_index) in path.into_iter().rev() {
+                nodes = self.rebuild_branch_level(&page, child_index, nodes)?;
+                removed_pages.push(page.get_page_number());
+                drop(page);
+            }
+        }
+        while nodes.len() > 1 {
+            nodes = self.build_branch_nodes(&nodes)?;
+        }
+        let (root, _, _) = nodes.pop().unwrap();
+        *self.root = Some(BtreeHeader::new(root, DEFERRED, length + inserted_pairs));
+        for page_number in removed_pages {
+            self.conditional_free(page_number);
+        }
+        Ok(())
+    }
+
+    // Rebuilds one branch of the path, with `replacement` in place of
+    // `child_index`. Returns the built pages, more than one if the level had
+    // to split.
+    #[cfg(feature = "experimental_cursor")]
+    fn rebuild_branch_level(
+        &mut self,
+        parent: &PageImpl,
+        child_index: usize,
+        mut replacement: Vec<SplicedNode>,
+    ) -> Result<Vec<SplicedNode>> {
+        let accessor = BranchAccessor::new(parent, K::fixed_width());
+        let count = accessor.count_children();
+        assert!(child_index < count);
+        // A replacement ending in None kept the replaced subtree's original
+        // last entry, whose key the lower level does not store: this level's
+        // separator for the slot is exactly that unchanged bound. It stays
+        // None only for the parent's own last child, so after this, None
+        // appears only at the end of the level.
+        if let Some(last) = replacement.last_mut()
+            && last.2.is_none()
+        {
+            last.2 = accessor.key(child_index).map(<[u8]>::to_vec);
+        }
+        // Preserved children keep their checksum, and reuse the original
+        // separator as their greatest key; only the original last child's is
+        // unknown (None), and it stays last through every rebuild above.
+        let preserved = |i: usize| {
+            (
+                accessor.child_page(i).unwrap(),
+                accessor.child_checksum(i).unwrap(),
+                accessor.key(i).map(<[u8]>::to_vec),
+            )
+        };
+        let mut children = Vec::with_capacity(count - 1 + replacement.len());
+        children.extend((0..child_index).map(preserved));
+        children.extend(replacement);
+        children.extend(((child_index + 1)..count).map(preserved));
+        self.build_branch_nodes(&children)
+    }
+
+    // Packs `children` into as many branch pages as they require, in order.
+    // Mirrors `build_replacement_leaves`: cut a page whenever the next child
+    // would not fit, except that a page must keep at least two children, so
+    // the tail is merged into its neighbor instead of rebalanced.
+    #[cfg(feature = "experimental_cursor")]
+    fn build_branch_nodes(&mut self, children: &[SplicedNode]) -> Result<Vec<SplicedNode>> {
+        fn separator(node: &SplicedNode) -> &[u8] {
+            node.2
+                .as_deref()
+                .expect("only the last child of a level may lack a separator")
+        }
+
+        assert!(children.len() >= 2);
+        let page_size = self.page_allocator.get_page_size();
+
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        let mut key_bytes = 0;
+        for index in 1..children.len() {
+            // Extending the page to `children[index]` stores the separator of
+            // the previously-last child.
+            let separator_bytes = separator(&children[index - 1]).len();
+            let required = RawBranchBuilder::required_bytes(
+                index - start,
+                key_bytes + separator_bytes,
+                K::fixed_width(),
+            );
+            if required > page_size && index - start >= 2 {
+                plan.push(start..index);
+                start = index;
+                key_bytes = 0;
+            } else {
+                key_bytes += separator_bytes;
+            }
+        }
+        plan.push(start..children.len());
+        // A single child cannot form a branch page; put it back with its
+        // neighbor, slightly overfilling that page.
+        if plan.last().unwrap().len() == 1 && plan.len() >= 2 {
+            let last = plan.pop().unwrap();
+            plan.last_mut().unwrap().end = last.end;
+        }
+
+        let mut nodes = Vec::with_capacity(plan.len());
+        for range in plan {
+            let chunk = &children[range];
+            let mut builder = BranchBuilder::new(
+                &self.page_allocator,
+                &self.allocated,
+                chunk.len(),
+                K::fixed_width(),
+            );
+            for (page, checksum, _) in chunk {
+                builder.push_child(*page, *checksum);
+            }
+            for node in &chunk[..chunk.len() - 1] {
+                builder.push_key(separator(node));
+            }
+            let page = builder.build()?;
+            nodes.push((
+                page.get_page_number(),
+                DEFERRED,
+                chunk.last().unwrap().2.clone(),
+            ));
+        }
+        Ok(nodes)
     }
 
     #[allow(clippy::type_complexity)]

@@ -1,5 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
+#[cfg(feature = "experimental_cursor")]
+use crate::tree_store::BtreeCursorMut;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeCursorRange, BtreeExtractIf, BtreeHeader, BtreeMut,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
@@ -11,6 +13,8 @@ use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
+#[cfg(feature = "experimental_cursor")]
+use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -268,6 +272,86 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<Option<AccessGuard<'_, V>>> {
         self.tree.remove(key.borrow())
+    }
+
+    /// Returns a [`CursorMut`] pointing at the gap before the smallest key
+    /// greater than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// before the smallest key greater than or equal to `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// before the smallest key greater than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// before the smallest key in the table.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::lower_bound_mut`].
+    #[cfg(feature = "experimental_cursor")]
+    pub fn lower_bound_mut<'a>(
+        &mut self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<CursorMut<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor_mut();
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(CursorMut::new(inner, self.transaction))
+    }
+
+    /// Returns a [`CursorMut`] pointing at the gap after the greatest key
+    /// smaller than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// after the greatest key smaller than or equal to `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// after the greatest key smaller than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// after the greatest key in the table.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::upper_bound_mut`].
+    ///
+    /// # Examples
+    ///
+    /// Bulk loading a table from a stream of ascending keys:
+    ///
+    /// ```rust
+    /// use std::ops::Bound;
+    /// use redb::{Database, Error, ReadableTableMetadata, TableDefinition};
+    /// # use tempfile::NamedTempFile;
+    /// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+    ///
+    /// # fn main() -> Result<(), Error> {
+    /// # #[cfg(not(target_os = "wasi"))]
+    /// # let tmpfile = NamedTempFile::new().unwrap();
+    /// # #[cfg(target_os = "wasi")]
+    /// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
+    /// # let filename = tmpfile.path();
+    /// let db = Database::create(filename)?;
+    /// let write_txn = db.begin_write()?;
+    /// {
+    ///     let mut table = write_txn.open_table(TABLE)?;
+    ///     let mut cursor = table.upper_bound_mut(Bound::<u64>::Unbounded)?;
+    ///     for key in 0..1000 {
+    ///         cursor.insert_before(key, &(key * 2))?;
+    ///     }
+    ///     cursor.close()?;
+    ///     assert_eq!(table.len()?, 1000);
+    /// }
+    /// write_txn.commit()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "experimental_cursor")]
+    pub fn upper_bound_mut<'a>(
+        &mut self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<CursorMut<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor_mut();
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(CursorMut::new(inner, self.transaction))
     }
 
     /// Gets the given key's corresponding entry in the table for in-place manipulation.
@@ -1071,5 +1155,187 @@ impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
                 "inserted entry not found after VacantEntry::insert".to_string(),
             )
         })
+    }
+}
+
+#[cfg(feature = "experimental_cursor")]
+fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
+    bound: &Bound<KR>,
+) -> Bound<Vec<u8>> {
+    match bound {
+        Bound::Included(key) => Bound::Included(K::as_bytes(key.borrow()).as_ref().to_vec()),
+        Bound::Excluded(key) => Bound::Excluded(K::as_bytes(key.borrow()).as_ref().to_vec()),
+        Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+/// A cursor over a [`Table`], pointing at a gap between two entries, with
+/// support for inserting new entries into that gap.
+///
+/// Cursors are constructed with [`Table::lower_bound_mut`] and
+/// [`Table::upper_bound_mut`], and mirror the nightly
+/// [`std::collections::btree_map::CursorMut`] as closely as the redb data
+/// model allows: values are stored serialized, so inspecting the entries
+/// around the gap returns [`AccessGuard`]s instead of references, and every
+/// operation can report a storage error.
+///
+/// A cursor makes it cheap to insert a run of keys that arrive in sorted
+/// order, such as when bulk loading a table: inserting through the gap skips
+/// the per-key descent from the root that [`Table::insert`] performs, and
+/// packs finished leaves densely. Pending inserts may be buffered internally.
+/// They are visible through the cursor's own [`peek_prev`](Self::peek_prev)
+/// and [`peek_next`](Self::peek_next), and are spliced into the table when
+/// the buffer fills and when the cursor is closed or dropped. Call
+/// [`close`](Self::close) to observe errors from the final splice: if the
+/// cursor is dropped instead and the splice fails, the write transaction is
+/// poisoned so the loss cannot be committed, and
+/// [`crate::WriteTransaction::commit`] will return
+/// [`crate::CommitError::TransactionPoisoned`].
+///
+/// The cursor mutably borrows the [`Table`]: the table cannot be used while
+/// a cursor into it exists.
+#[cfg(feature = "experimental_cursor")]
+pub struct CursorMut<'a, K: Key + 'static, V: Value + 'static> {
+    inner: BtreeCursorMut<'a, K, V>,
+    transaction: &'a WriteTransaction,
+    // An I/O error leaves the cursor position unreliable, so later operations
+    // re-raise instead of continuing. Pending inserts are still flushed (or
+    // the transaction poisoned) on close: an error never latches while both
+    // pending inserts and a damaged position exist.
+    errored: bool,
+    closed: bool,
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
+    pub(crate) fn new(inner: BtreeCursorMut<'a, K, V>, transaction: &'a WriteTransaction) -> Self {
+        Self {
+            inner,
+            transaction,
+            errored: false,
+            closed: false,
+        }
+    }
+
+    /// Returns the entry after the cursor's gap without moving the cursor.
+    ///
+    /// Returns `None` if the gap is at the end of the table.
+    #[allow(clippy::type_complexity)]
+    pub fn peek_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        match self.inner.peek_next() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                // Peeking never consumes pending inserts, so unlike a failed
+                // splice this cannot lose reported inserts; the position is
+                // merely unreliable.
+                self.errored = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Returns the entry before the cursor's gap without moving the cursor.
+    ///
+    /// Returns `None` if the gap is at the start of the table.
+    #[allow(clippy::type_complexity)]
+    pub fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        match self.inner.peek_prev() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                self.errored = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Inserts a new entry into the gap that the cursor is pointing at. After
+    /// the insertion, the cursor points at the gap after the newly inserted
+    /// entry.
+    ///
+    /// If the key does not sort strictly greater than the entry before the
+    /// gap and strictly smaller than the entry after it,
+    /// [`StorageError::UnorderedKey`] is returned and the table, the pending
+    /// inserts, and the cursor are unchanged. Unlike [`Table::insert`], an
+    /// existing key is never overwritten: inserting a key equal to either
+    /// neighbor is unordered.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::insert_before`].
+    pub fn insert_before<'k, 'v>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<()> {
+        self.check_usable()?;
+        let key_bytes = K::as_bytes(key.borrow());
+        let value_bytes = V::as_bytes(value.borrow());
+        let key_len = key_bytes.as_ref().len();
+        let value_len = value_bytes.as_ref().len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+        if key_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
+        match self
+            .inner
+            .insert_before(key_bytes.as_ref(), value_bytes.as_ref())
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StorageError::UnorderedKey),
+            Err(err) => Err(self.latch_error(err)),
+        }
+    }
+
+    /// Closes the cursor, splicing any pending inserts into the table.
+    ///
+    /// Dropping the cursor also closes it, but this method returns any error
+    /// encountered while splicing. `Ok` means every reported insert is in the
+    /// table.
+    pub fn close(mut self) -> Result {
+        self.closed = true;
+        self.finish()
+    }
+
+    fn check_usable(&self) -> Result {
+        if self.errored {
+            return Err(StorageError::PreviousIo);
+        }
+        Ok(())
+    }
+
+    fn latch_error(&mut self, err: StorageError) -> StorageError {
+        self.errored = true;
+        if self.inner.poisoned() {
+            // Inserts already reported as applied were lost; the transaction
+            // must not commit without them.
+            self.transaction.poison();
+        }
+        err
+    }
+
+    fn finish(&mut self) -> Result {
+        let result = self.inner.finish();
+        if result.is_err() || self.inner.poisoned() {
+            self.transaction.poison();
+        }
+        result
+    }
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl<K: Key + 'static, V: Value + 'static> Drop for CursorMut<'_, K, V> {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        // Drop cannot surface a splice failure; finish() poisons the
+        // transaction instead, so the loss cannot be committed.
+        let _ = self.finish();
     }
 }

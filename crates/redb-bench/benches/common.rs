@@ -1,5 +1,5 @@
 use fjall::Readable as _;
-use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode};
+use heed::{CompactionOption, EnvFlags, EnvInfo, FlagSetMode, PutFlags};
 use redb::{
     AccessGuard, Durability, ReadableDatabase, ReadableTable, ReadableTableMetadata,
     TableDefinition,
@@ -20,6 +20,7 @@ const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
 const READ_ITERATIONS: usize = 2;
 const BULK_ELEMENTS: usize = 5_000_000;
+const SORTED_ELEMENTS: usize = 1_000_000;
 const INDIVIDUAL_WRITES: usize = 1_000;
 const NOSYNC_WRITES: usize = 50_000;
 const BATCH_WRITES: usize = 100;
@@ -550,6 +551,42 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         results.push(("compacted size".to_string(), ResultType::NA));
     }
 
+    // Sorted inserts: pairs whose keys ascend, all past every existing key, loaded
+    // through the fastest sorted-insert path the database offers. The keys extend the
+    // largest possible random key by a suffix so they sort past every existing entry,
+    // and the pairs are precomputed so the timing covers only the load. Runs after the
+    // size measurements so those stay comparable with historical results.
+    let sorted_pairs: Vec<([u8; KEY_SIZE + 8], Vec<u8>)> = (0..SORTED_ELEMENTS as u64)
+        .map(|i| {
+            let mut key = [0xFFu8; KEY_SIZE + 8];
+            key[KEY_SIZE..].copy_from_slice(&i.to_be_bytes());
+            let mut value = vec![0u8; VALUE_SIZE];
+            rng.fill(&mut value);
+            (key, value)
+        })
+        .collect();
+    let connection = db.connect();
+    let start = Instant::now();
+    let mut txn = connection.write_transaction();
+    let mut inserter = txn.get_inserter();
+    inserter
+        .insert_sorted(
+            sorted_pairs
+                .iter()
+                .map(|(key, value)| (key.as_slice(), value.as_slice())),
+        )
+        .unwrap();
+    drop(inserter);
+    txn.commit().unwrap();
+    let duration = start.elapsed();
+    println!(
+        "{}: Loaded {} sorted items in {}ms",
+        T::db_type_name(),
+        SORTED_ELEMENTS,
+        duration.as_millis()
+    );
+    results.push(("sorted inserts".to_string(), ResultType::Duration(duration)));
+
     results
 }
 
@@ -649,6 +686,20 @@ pub trait BenchInserter {
 
     #[allow(clippy::result_unit_err)]
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()>;
+
+    // Inserts pairs whose keys are strictly ascending and greater than every key
+    // already in the table, through the fastest sorted-insert path the database
+    // offers. Databases without one fall back to ordinary inserts.
+    #[allow(clippy::result_unit_err)]
+    fn insert_sorted<'i>(
+        &mut self,
+        pairs: impl Iterator<Item = (&'i [u8], &'i [u8])>,
+    ) -> Result<(), ()> {
+        for (key, value) in pairs {
+            self.insert(key, value)?;
+        }
+        Ok(())
+    }
 
     #[allow(clippy::result_unit_err)]
     fn remove(&mut self, key: &[u8]) -> Result<(), ()>;
@@ -941,6 +992,22 @@ impl BenchInserter for RedbBenchInserter<'_> {
         self.table.insert(key, value).map(|_| ()).map_err(|_| ())
     }
 
+    fn insert_sorted<'i>(
+        &mut self,
+        pairs: impl Iterator<Item = (&'i [u8], &'i [u8])>,
+    ) -> Result<(), ()> {
+        // redb's appending cursor: buffers the inserts and splices packed leaves into
+        // the tree, instead of descending it for each pair
+        let mut cursor = self
+            .table
+            .upper_bound_mut(Bound::<&[u8]>::Unbounded)
+            .map_err(|_| ())?;
+        for (key, value) in pairs {
+            cursor.insert_before(key, value).map_err(|_| ())?;
+        }
+        cursor.close().map_err(|_| ())
+    }
+
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
         self.table.remove(key).map(|_| ()).map_err(|_| ())
     }
@@ -1189,6 +1256,20 @@ impl BenchInserter for HeedBenchInserter<'_, '_> {
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ()> {
         self.db.put(self.txn, key, value).map_err(|_| ())
+    }
+
+    fn insert_sorted<'i>(
+        &mut self,
+        pairs: impl Iterator<Item = (&'i [u8], &'i [u8])>,
+    ) -> Result<(), ()> {
+        // LMDB's append mode: writes at the cursor without searching the tree, and
+        // requires each key to be greater than every key already in the table
+        for (key, value) in pairs {
+            self.db
+                .put_with_flags(self.txn, PutFlags::APPEND, key, value)
+                .map_err(|_| ())?;
+        }
+        Ok(())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), ()> {
