@@ -658,6 +658,73 @@ fn stats_with_open_table() {
     txn.abort().unwrap();
 }
 
+// Same as stats_with_open_table, but the staged root travels through a rename before the
+// table is reopened. rename_table() used to write the staged root into the master tree
+// entry for the new name, so stats() would walk it even though it skips staged roots of
+// open tables.
+#[test]
+fn stats_with_renamed_open_table() {
+    const RENAMED_TABLE: TableDefinition<u64, u64> = TableDefinition::new("renamed");
+    const BIG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("big");
+    const BIG_ELEMENTS: u64 = 2000;
+    const BIG_VALUE_LEN: usize = 16000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    const COMMITTED_ELEMENTS: u64 = 5000;
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..COMMITTED_ELEMENTS {
+            table.insert(i, i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    // Stage a root made of this transaction's pages, and move it through a rename
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in COMMITTED_ELEMENTS..2 * COMMITTED_ELEMENTS {
+            table.insert(i, i).unwrap();
+        }
+    }
+    txn.rename_table(U64_TABLE, RENAMED_TABLE).unwrap();
+    // Reopen the renamed table and free the pages of the staged root, keeping the handle open
+    let table = {
+        let mut table = txn.open_table(RENAMED_TABLE).unwrap();
+        for i in 0..2 * COMMITTED_ELEMENTS {
+            table.remove(i).unwrap();
+        }
+        table
+    };
+    // Reallocate the freed pages with unrelated contents
+    {
+        let mut big = txn.open_table(BIG_TABLE).unwrap();
+        let value = vec![0xEE; BIG_VALUE_LEN];
+        for i in 0..BIG_ELEMENTS {
+            big.insert(i, value.as_slice()).unwrap();
+        }
+    }
+
+    let element_stored = 2 * u64::fixed_width().unwrap() as u64;
+    let big_stored = BIG_ELEMENTS * (u64::fixed_width().unwrap() as u64 + BIG_VALUE_LEN as u64);
+    // The open table is reported as of the start of the transaction
+    let stats = txn.stats().unwrap();
+    assert_eq!(
+        stats.stored_bytes(),
+        big_stored + COMMITTED_ELEMENTS * element_stored
+    );
+
+    // Once the table is closed, its staged contents are reported
+    drop(table);
+    let stats = txn.stats().unwrap();
+    assert_eq!(stats.stored_bytes(), big_stored);
+
+    txn.abort().unwrap();
+}
+
 fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
     let mut txn = db.begin_write().unwrap();
     txn.set_quick_repair(quick_repair);

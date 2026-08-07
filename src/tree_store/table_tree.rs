@@ -549,7 +549,21 @@ impl TableTreeMut {
         new_name: &str,
         table_type: TableType,
     ) -> Result<(), TableError> {
-        if let Some(definition) = self.get_table_untyped(name, table_type)? {
+        // Move the definition as stored in the tree, without applying pending_table_updates:
+        // a root staged by a table close must stay out of the master tree until commit,
+        // because reopening the table can free that root's pages. stats() relies on the
+        // staged roots of open tables living only in pending_table_updates, which it skips.
+        let stored_definition = {
+            // Scoped so its cached pages are released before the mutations below free them
+            let stored_tree = TableTree::new(
+                self.tree.get_root(),
+                PageHint::None,
+                self.guard.clone(),
+                self.page_allocator.resolver(),
+            )?;
+            stored_tree.get_table_untyped(name, table_type)?
+        };
+        if let Some(definition) = stored_definition {
             if self.get_table_untyped(new_name, table_type)?.is_some() {
                 return Err(TableError::TableExists(new_name.to_string()));
             }
