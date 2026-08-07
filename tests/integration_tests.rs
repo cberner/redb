@@ -603,6 +603,61 @@ fn page_reuse_after_unclean_reopen() {
     test_page_reuse_after_unclean_reopen(true);
 }
 
+// stats() used to walk the root staged when an open table was last closed. Pages reachable
+// from that root may have been freed by modifications through the reopened handle and
+// reallocated to other tables, so the walk read unrelated pages: an assertion failure with
+// debug_assertions on, garbage statistics otherwise.
+#[test]
+fn stats_with_open_table() {
+    const BIG_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("big");
+    const BIG_ELEMENTS: u64 = 2000;
+    const BIG_VALUE_LEN: usize = 16000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..5000 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    // Reopen the table and free the pages of the root staged by the close above, keeping
+    // the handle open so that root stays staged
+    let mut table = {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..5000 {
+            table.remove(i).unwrap();
+        }
+        table
+    };
+    // Reallocate the freed pages with unrelated contents
+    {
+        let mut big = txn.open_table(BIG_TABLE).unwrap();
+        let value = vec![0xEE; BIG_VALUE_LEN];
+        for i in 0..BIG_ELEMENTS {
+            big.insert(i, value.as_slice()).unwrap();
+        }
+    }
+
+    let big_stored = BIG_ELEMENTS * (u64::fixed_width().unwrap() as u64 + BIG_VALUE_LEN as u64);
+    // The open table is reported as of the start of the transaction, when it did not exist
+    let stats = txn.stats().unwrap();
+    assert_eq!(stats.stored_bytes(), big_stored);
+
+    // Once the table is closed, its staged contents are reported
+    table.insert(0, 0).unwrap();
+    drop(table);
+    let stats = txn.stats().unwrap();
+    assert_eq!(
+        stats.stored_bytes(),
+        big_stored + 2 * u64::fixed_width().unwrap() as u64
+    );
+
+    txn.abort().unwrap();
+}
+
 fn begin_page_reuse_write(db: &Database, quick_repair: bool) -> WriteTransaction {
     let mut txn = db.begin_write().unwrap();
     txn.set_quick_repair(quick_repair);
