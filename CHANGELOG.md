@@ -2,9 +2,10 @@
 
 ## 4.2.0 - 2026-XX-XX
 * Fix `WriteTransaction::stats()` reading pages that had been freed and reallocated when called
-  while a table handle was open, if that table had already been modified and closed earlier in
-  the transaction. This returned garbage statistics, or panicked with debug assertions enabled.
-  A table that is currently open is now reported as of the start of the transaction.
+  while a table handle was open, if that table had already been modified and closed (and possibly
+  renamed) earlier in the transaction. This returned garbage statistics, or panicked with debug
+  assertions enabled. A table that is currently open is now reported as of the start of the
+  transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
   `WriteTransaction` now keeps the database open: the transaction remains usable after the
   `Database` is dropped, and the database closes when the transaction commits, aborts, or is
