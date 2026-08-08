@@ -19,7 +19,7 @@ pub(crate) use btree_cursor::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 pub(crate) use btree_cursor::BtreeCursorMut;
 pub(crate) use btree_cursor_range::BtreeCursorRange;
-pub(crate) use btree_iters::AllPageNumbersBtreeIter;
+pub(crate) use btree_iters::{AllPageNumbersBtreeIter, encode_bounds};
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;

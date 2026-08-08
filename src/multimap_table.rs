@@ -2,6 +2,7 @@ use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::table::{OwnedAccessGuard, ReadableTableMetadata, TableStats};
+use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
@@ -13,7 +14,8 @@ use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransac
 use std::borrow::Borrow;
 use std::marker::PhantomData;
 use std::mem;
-use std::ops::{Range, RangeBounds, RangeFull};
+use std::ops::RangeBounds;
+use std::ops::{Bound, Range, RangeFull};
 use std::sync::{Arc, Mutex};
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
@@ -956,7 +958,18 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let inner = self.tree.range(&range)?;
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
+    }
+}
+
+impl<K: Key + 'static, V: Key + 'static> MultimapTable<'_, K, V> {
+    fn range_in_bounds(
+        &self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+    ) -> Result<MultimapRange<'_, K, V>> {
+        let inner = self.tree.range_bounds(lower, upper)?;
         Ok(MultimapRange::new(
             inner,
             self.transaction.transaction_guard(),
@@ -1142,7 +1155,16 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     where
         KR: Borrow<K::SelfType<'a>>,
     {
-        let inner = self.tree.range(&range)?;
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
+    }
+
+    fn range_in_bounds(
+        &self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+    ) -> Result<MultimapRange<'static, K, V>> {
+        let inner = self.tree.range_bounds(lower, upper)?;
         Ok(MultimapRange::new(
             inner,
             self.transaction_guard.clone(),
@@ -1160,8 +1182,9 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     where
         KR: Borrow<K::SelfType<'a>>,
     {
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         Ok(OwnedMultimapRange::new(
-            self.range(range)?,
+            self.range_in_bounds(lower, upper)?,
             self.transaction_guard.clone(),
         ))
     }
@@ -1223,12 +1246,8 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let inner = self.tree.range(&range)?;
-        Ok(MultimapRange::new(
-            inner,
-            self.transaction_guard.clone(),
-            self.mem.clone(),
-        ))
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
     }
 }
 

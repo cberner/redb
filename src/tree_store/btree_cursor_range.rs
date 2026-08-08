@@ -1,6 +1,6 @@
 use crate::Result;
 use crate::tree_store::btree_cursor::{Cursor, Position};
-use crate::tree_store::btree_iters::{EntryGuard, range_is_empty};
+use crate::tree_store::btree_iters::{EntryGuard, bounds_are_empty, encode_bounds};
 use crate::tree_store::page_store::PageHint;
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -61,16 +61,21 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
         manager: PageResolver,
         hint: PageHint,
     ) -> Result<Self> {
-        if table_root.is_none() || range_is_empty::<K, KR, T>(query_range) {
+        let (lower_bound, upper_bound) = encode_bounds::<K, KR, T>(query_range);
+        Self::from_bounds(lower_bound, upper_bound, table_root, manager, hint)
+    }
+
+    pub(crate) fn from_bounds(
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
+        table_root: Option<PageNumber>,
+        manager: PageResolver,
+        hint: PageHint,
+    ) -> Result<Self> {
+        if table_root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound) {
             return Ok(Self::empty(manager, hint));
         }
 
-        let lower_bound = query_range
-            .start_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
-        let upper_bound = query_range
-            .end_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
         Ok(Self {
             root: table_root,
             lower_bound,

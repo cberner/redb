@@ -97,29 +97,30 @@ impl Iterator for AllPageNumbersBtreeIter {
     }
 }
 
-pub(super) fn range_is_empty<
-    'a,
-    K: Key + 'static,
+// Encodes a range's bounds with Key::as_bytes
+pub(crate) fn encode_bounds<'a, K, KR, R>(range: &R) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
+where
+    K: Key + 'a,
     KR: Borrow<K::SelfType<'a>>,
-    T: RangeBounds<KR>,
->(
-    range: &T,
+    R: RangeBounds<KR>,
+{
+    let encode = |key: &KR| K::as_bytes(key.borrow()).as_ref().to_vec();
+    (
+        range.start_bound().map(encode),
+        range.end_bound().map(encode),
+    )
+}
+
+// Whether the encoded bounds select no keys, i.e. the range is reversed or empty
+pub(crate) fn bounds_are_empty<K: Key + 'static>(
+    lower: &Bound<Vec<u8>>,
+    upper: &Bound<Vec<u8>>,
 ) -> bool {
-    match (range.start_bound(), range.end_bound()) {
+    match (lower, upper) {
         (Unbounded, _) | (_, Unbounded) => false,
         (Included(start), Excluded(end)) | (Excluded(start), Included(end) | Excluded(end)) => {
-            let start_tmp = K::as_bytes(start.borrow());
-            let start_value = start_tmp.as_ref();
-            let end_tmp = K::as_bytes(end.borrow());
-            let end_value = end_tmp.as_ref();
-            K::compare(start_value, end_value).is_ge()
+            K::compare(start, end).is_ge()
         }
-        (Included(start), Included(end)) => {
-            let start_tmp = K::as_bytes(start.borrow());
-            let start_value = start_tmp.as_ref();
-            let end_tmp = K::as_bytes(end.borrow());
-            let end_value = end_tmp.as_ref();
-            K::compare(start_value, end_value).is_gt()
-        }
+        (Included(start), Included(end)) => K::compare(start, end).is_gt(),
     }
 }
