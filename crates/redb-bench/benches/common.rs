@@ -1052,12 +1052,13 @@ impl BenchInserter for RedbBenchInserter<'_> {
     where
         F: for<'f> FnMut(&'f [u8], &'f [u8]) -> bool + 'a,
     {
-        // redb has a native cursor-based extract_from_if that removes entries lazily as the
-        // returned iterator is consumed.
-        let iter = self
-            .table
-            .extract_from_if::<&[u8], F>(range, predicate)
-            .map_err(|_| ())?;
+        // redb natively extracts over a range, removing entries lazily as the returned iterator
+        // is consumed.
+        #[cfg(feature = "experimental-api-5")]
+        let iter = self.table.extract_if::<&[u8], F>(range, predicate);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let iter = self.table.extract_from_if::<&[u8], F>(range, predicate);
+        let iter = iter.map_err(|_| ())?;
         Ok(RedbExtractIfIterator { iter })
     }
 }

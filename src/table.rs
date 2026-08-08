@@ -160,11 +160,39 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
     ) -> Result<ExtractIf<'_, K, V, F>> {
-        self.extract_from_if::<K::SelfType<'_>, F>(.., predicate)
+        self.extract_range_if::<K::SelfType<'_>, F>(.., predicate)
+    }
+
+    /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
+    /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::extract_if`].
+    ///
+    /// Note: values not read from the iterator will not be removed
+    ///
+    /// If the iterator returns an error, later calls keep returning an error
+    /// (the failure is not recoverable). Entries already yielded stay
+    /// removed; if finalizing their removal fails too, the write transaction
+    /// is poisoned and cannot be committed.
+    ///
+    /// The predicate must not panic. If it panics, the write transaction is
+    /// poisoned and [`crate::WriteTransaction::commit`] will return
+    /// [`crate::CommitError::TransactionPoisoned`].
+    #[cfg(feature = "experimental-api-5")]
+    pub fn extract_if<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        range: impl RangeBounds<KR> + 'a,
+        predicate: F,
+    ) -> Result<ExtractIf<'_, K, V, F>>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.extract_range_if(range, predicate)
     }
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
@@ -180,7 +208,19 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn extract_from_if<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        range: impl RangeBounds<KR> + 'a,
+        predicate: F,
+    ) -> Result<ExtractIf<'_, K, V, F>>
+    where
+        KR: Borrow<K::SelfType<'a>> + 'a,
+    {
+        self.extract_range_if(range, predicate)
+    }
+
+    fn extract_range_if<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl RangeBounds<KR> + 'a,
         predicate: F,

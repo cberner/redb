@@ -9,6 +9,11 @@ homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Tracks redb's feature of the same name, so that --all-features builds this crate against the
+# 5.0 signatures
+experimental-api-5 = ["redb/experimental-api-5"]
+
 # Common test/bench dependencies
 [dev-dependencies]
 redb = { path = "../..", features = ["experimental_cursor"] }

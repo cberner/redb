@@ -47,6 +47,9 @@ logging = ["dep:log"]
 cache_metrics = []
 # Unstable cursor API. May change incompatibly, or be removed, in any release
 experimental_cursor = []
+# Enables the API changes planned for the 5.0 release, ahead of it. May change incompatibly, or be
+# removed, in any release
+experimental-api-5 = []
 
 [profile.bench]
 debug = true

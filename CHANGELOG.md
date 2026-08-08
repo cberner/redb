@@ -1,6 +1,14 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Add an `experimental-api-5` feature flag, which enables the `Table` API changes planned for the
+  5.0 release ahead of that release, so that they can be tried out and ported to early. Under it
+  `Table::extract_if()` takes the range to extract from, matching
+  `std::collections::BTreeMap::extract_if()`, and the now redundant `Table::extract_from_if()` is
+  removed. Calls port over as `extract_from_if(range, predicate)` ->
+  `extract_if(range, predicate)`, and `extract_if(predicate)` ->
+  `extract_if::<KeyType, _>(.., predicate)`. The feature is unstable and may change incompatibly,
+  or be removed, in any release.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
 * Add an experimental cursor API, behind the `experimental_cursor` feature flag:
