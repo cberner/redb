@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::{io, thread};
 
 use crate::error::TransactionError;
-use crate::sealed::Sealed;
+use crate::sealed::{Sealed, SealedInApi5};
 use crate::transactions::{
     ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
@@ -354,7 +354,7 @@ impl Drop for TransactionGuard {
     }
 }
 
-pub trait ReadableDatabase {
+pub trait ReadableDatabase: SealedInApi5 {
     /// Begins a read transaction
     ///
     /// Captures a snapshot of the database, so that only data committed before calling this method
@@ -414,6 +414,8 @@ pub struct ReadOnlyDatabase {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
 }
+
+impl Sealed for ReadOnlyDatabase {}
 
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
@@ -529,6 +531,8 @@ pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
 }
+
+impl Sealed for Database {}
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
