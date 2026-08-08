@@ -881,7 +881,7 @@ impl Database {
                 Arc::new(TransactionGuard::untracked()),
                 resolver,
             )?;
-            for result in ReadableTable::range::<TransactionIdWithPagination>(&table, ..)? {
+            for result in ReadableTable::iter(&table)? {
                 let (_, pages) = result?;
                 for i in 0..pages.value().len() {
                     assert!(mem.is_allocated(pages.value().get(i)));
@@ -938,7 +938,7 @@ impl Database {
                     Arc::new(TransactionGuard::untracked()),
                     resolver,
                 )?;
-            for result in ReadableTable::range::<TransactionIdWithPagination>(&table, ..)? {
+            for result in ReadableTable::iter(&table)? {
                 let (_, page_list) = result?;
                 for i in 0..page_list.value().len() {
                     visitor(page_list.value().get(i))?;

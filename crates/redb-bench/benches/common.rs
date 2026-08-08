@@ -1056,7 +1056,7 @@ impl BenchInserter for RedbBenchInserter<'_> {
         // returned iterator is consumed.
         let iter = self
             .table
-            .extract_from_if::<&[u8], F>(range, predicate)
+            .extract_from_if(range, predicate)
             .map_err(|_| ())?;
         Ok(RedbExtractIfIterator { iter })
     }
