@@ -1,5 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
+#[cfg(feature = "experimental-api-5")]
+use crate::tree_store::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 use crate::tree_store::BtreeCursorMut;
 use crate::tree_store::{
@@ -13,7 +15,7 @@ use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
-#[cfg(feature = "experimental_cursor")]
+#[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -443,6 +445,28 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
     fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.last()
     }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor()?;
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction.transaction_guard()))
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor()?;
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction.transaction_guard()))
+    }
 }
 
 impl<K: Key, V: Value> Sealed for Table<'_, K, V> {}
@@ -567,6 +591,89 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
 
     /// Returns the last key-value pair in the table, if it exists
     fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>>;
+
+    /// Returns a read-only [`Cursor`] pointing at the gap before the smallest
+    /// key greater than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// before the smallest key greater than or equal to `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// before the smallest key greater than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// before the smallest key in the table.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::lower_bound`].
+    ///
+    /// # Examples
+    ///
+    /// Probing around a key in any table, read-only or not. The cursor's
+    /// methods additionally require the `experimental_cursor` feature flag:
+    ///
+    #[cfg_attr(feature = "experimental_cursor", doc = "```rust")]
+    #[cfg_attr(not(feature = "experimental_cursor"), doc = "```rust,ignore")]
+    /// use std::ops::Bound;
+    /// use redb::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
+    /// # use tempfile::NamedTempFile;
+    /// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+    ///
+    /// fn entry_at_or_after(
+    ///     table: &impl ReadableTable<u64, u64>,
+    ///     key: u64,
+    /// ) -> Result<Option<u64>, Error> {
+    ///     let mut cursor = table.lower_bound(Bound::Included(&key))?;
+    ///     Ok(cursor.peek_next()?.map(|(key, _)| key.value()))
+    /// }
+    ///
+    /// # fn main() -> Result<(), Error> {
+    /// # #[cfg(not(target_os = "wasi"))]
+    /// # let tmpfile = NamedTempFile::new().unwrap();
+    /// # #[cfg(target_os = "wasi")]
+    /// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
+    /// # let filename = tmpfile.path();
+    /// let db = Database::create(filename)?;
+    /// let write_txn = db.begin_write()?;
+    /// {
+    ///     let mut table = write_txn.open_table(TABLE)?;
+    ///     for key in 0..10 {
+    ///         table.insert(key, &(key * 2))?;
+    ///     }
+    ///     assert_eq!(entry_at_or_after(&table, 5)?, Some(5));
+    /// }
+    /// write_txn.commit()?;
+    ///
+    /// let read_txn = db.begin_read()?;
+    /// let table = read_txn.open_table(TABLE)?;
+    /// assert_eq!(entry_at_or_after(&table, 5)?, Some(5));
+    /// assert_eq!(entry_at_or_after(&table, 100)?, None);
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>>;
+
+    /// Returns a read-only [`Cursor`] pointing at the gap after the greatest
+    /// key smaller than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// after the greatest key smaller than or equal to `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// after the greatest key smaller than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// after the greatest key in the table.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::upper_bound`].
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>>;
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<'_, K, V>> {
@@ -695,6 +802,32 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
             self.transaction_guard.clone(),
         ))
     }
+
+    /// This method is like [`ReadableTable::lower_bound()`], but the cursor is reference counted
+    /// and keeps the transaction alive until it is dropped.
+    #[cfg(feature = "experimental-api-5")]
+    pub fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'static, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction_guard.clone()))
+    }
+
+    /// This method is like [`ReadableTable::upper_bound()`], but the cursor is reference counted
+    /// and keeps the transaction alive until it is dropped.
+    #[cfg(feature = "experimental-api-5")]
+    pub fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'static, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction_guard.clone()))
+    }
 }
 
 impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTable<K, V> {
@@ -736,6 +869,22 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
 
     fn last(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.tree.last()
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>> {
+        ReadOnlyTable::lower_bound(self, bound)
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<Cursor<'_, K, V>> {
+        ReadOnlyTable::upper_bound(self, bound)
     }
 }
 
@@ -1159,7 +1308,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
+#[cfg(feature = "experimental-api-5")]
 fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
     bound: &Bound<KR>,
 ) -> Bound<Vec<u8>> {
@@ -1167,6 +1316,86 @@ fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
         Bound::Included(key) => Bound::Included(K::as_bytes(key.borrow()).as_ref().to_vec()),
         Bound::Excluded(key) => Bound::Excluded(K::as_bytes(key.borrow()).as_ref().to_vec()),
         Bound::Unbounded => Bound::Unbounded,
+    }
+}
+
+/// A read-only cursor over a table, pointing at a gap between two entries.
+///
+/// Cursors are constructed with [`ReadableTable::lower_bound`] and
+/// [`ReadableTable::upper_bound`], and mirror the nightly
+/// [`std::collections::btree_map::Cursor`] as closely as the redb data model
+/// allows: values are stored serialized, so the entries around the gap are
+/// returned as [`AccessGuard`]s instead of references, and every operation
+/// can report a storage error.
+///
+/// The cursor's methods are behind the `experimental_cursor` feature flag,
+/// separately from its constructors, so that the constructors' signatures
+/// can stabilize first.
+#[cfg(feature = "experimental-api-5")]
+pub struct Cursor<'a, K: Key + 'static, V: Value + 'static> {
+    // Only the cursor's own methods read the position; without them the
+    // constructors still store it, ready for the methods' flag to be enabled.
+    #[cfg_attr(not(feature = "experimental_cursor"), allow(dead_code))]
+    inner: BtreeCursor<K, V>,
+    _transaction_guard: Arc<TransactionGuard>,
+    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation
+    _lifetime: PhantomData<&'a ()>,
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl<K: Key + 'static, V: Value + 'static> Cursor<'_, K, V> {
+    pub(crate) fn new(inner: BtreeCursor<K, V>, guard: Arc<TransactionGuard>) -> Self {
+        Self {
+            inner,
+            _transaction_guard: guard,
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
+    /// Returns the entry after the cursor's gap without moving the cursor.
+    ///
+    /// Returns `None` if the gap is at the end of the table.
+    #[allow(clippy::type_complexity)]
+    pub fn peek_next(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.inner.peek_next()
+    }
+
+    /// Returns the entry before the cursor's gap without moving the cursor.
+    ///
+    /// Returns `None` if the gap is at the start of the table.
+    #[allow(clippy::type_complexity)]
+    pub fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.inner.peek_prev()
+    }
+
+    /// Moves the cursor past the entry after the gap, returning that entry.
+    ///
+    /// Returns `None`, and does not move, if the gap is at the end of the
+    /// table.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::Cursor::next`]. The cursor is not an
+    /// [`Iterator`], since every step can report a storage error; use
+    /// [`ReadableTable::range`] for iteration.
+    #[allow(clippy::should_implement_trait, clippy::type_complexity)]
+    pub fn next(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.inner.next()
+    }
+
+    /// Moves the cursor before the entry preceding the gap, returning that
+    /// entry.
+    ///
+    /// Returns `None`, and does not move, if the gap is at the start of the
+    /// table.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::Cursor::prev`].
+    #[allow(clippy::type_complexity)]
+    pub fn prev(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.inner.prev()
     }
 }
 

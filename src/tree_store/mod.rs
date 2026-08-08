@@ -14,6 +14,8 @@ pub(crate) use btree::{Btree, BtreeMut, BtreeStats, RawBtree};
 pub(crate) use btree_base::BtreeHeader;
 pub use btree_base::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace};
 pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
+#[cfg(feature = "experimental-api-5")]
+pub(crate) use btree_cursor::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 pub(crate) use btree_cursor::BtreeCursorMut;
 pub(crate) use btree_cursor_range::BtreeCursorRange;

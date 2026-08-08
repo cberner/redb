@@ -8,6 +8,14 @@
   between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
   through its `insert_before()` method can be around 3x faster than calling `insert()` with the
   same data. The feature is unstable and may change incompatibly, or be removed, in any release.
+* Add a read-only counterpart to the experimental cursor API. Behind the new `experimental-api-5`
+  feature flag, which collects trait additions planned for redb 5, `ReadableTable::lower_bound()`
+  and `ReadableTable::upper_bound()` return a `Cursor` pointing at a gap between entries, with
+  reference-counted variants on `ReadOnlyTable` that keep the transaction alive. The cursor's
+  `peek_next()`, `peek_prev()`, `next()`, and `prev()` methods, which mirror the standard
+  library's `BTreeMap` cursors, are behind the `experimental_cursor` feature flag (which enables
+  `experimental-api-5`); the split lets the trait surface stabilize before the cursor's own
+  methods settle.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live

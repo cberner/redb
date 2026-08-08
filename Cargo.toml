@@ -46,7 +46,10 @@ logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
 # Unstable cursor API. May change incompatibly, or be removed, in any release
-experimental_cursor = []
+experimental_cursor = ["experimental-api-5"]
+# Unstable additions to the public traits, planned for redb 5. May change incompatibly, or be
+# removed, in any release
+experimental-api-5 = []
 
 [profile.bench]
 debug = true
