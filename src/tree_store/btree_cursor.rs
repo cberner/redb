@@ -352,7 +352,7 @@ const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
 #[cfg(feature = "experimental_cursor")]
 struct InsertRun {
     // Key of the entry after the gap when the run opened; None when the gap
-    // is at the end of the tree. Inserts must sort strictly below it.
+    // is at the end of the tree.
     upper_key: Option<Vec<u8>>,
     // Greatest key at or before the gap: the last insert or, before any
     // insert, the entry preceding the gap; None at the start of the tree.
@@ -366,15 +366,27 @@ struct InsertRun {
 
 #[cfg(feature = "experimental_cursor")]
 impl InsertRun {
-    // True unless `key` sorts strictly between the run's bounds.
+    // The buffered entry nearest the gap on the entry-before side, if any:
+    // a pending insert or an entry copied from the leaf's head.
+    fn buffered_previous(&self) -> Option<(&[u8], &[u8])> {
+        self.entries.back()
+    }
+
+    // Smallest key at or after the gap: the entry following the gap when the
+    // run opened. Inserts must sort strictly below it.
+    fn next_key(&self) -> Option<&[u8]> {
+        self.upper_key.as_deref()
+    }
+
+    // True unless `key` sorts strictly between the gap's live bounds.
     fn rejects<K: Key>(&self, key: &[u8]) -> bool {
         if let Some(previous) = &self.previous_key
             && K::compare(key, previous).is_le()
         {
             return true;
         }
-        if let Some(upper) = &self.upper_key
-            && K::compare(key, upper).is_ge()
+        if let Some(next) = self.next_key()
+            && K::compare(key, next).is_ge()
         {
             return true;
         }
@@ -1614,12 +1626,12 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     ///
     /// While a run is open, its buffer holds every predecessor the gap has in
     /// the current leaf (the normalizing peeks settled the position on the
-    /// earlier of two leaves sharing the gap), so an empty buffer means the
-    /// gap is at the start of the tree.
+    /// earlier of two leaves sharing the gap), so no buffered entry before
+    /// the gap means the gap is at the start of the tree.
     #[allow(clippy::type_complexity)]
     pub(crate) fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         if let Some(run) = &self.state.insert_run {
-            return Ok(run.entries.back().map(|(key, value)| {
+            return Ok(run.buffered_previous().map(|(key, value)| {
                 (
                     AccessGuard::with_owned_value(key.to_vec()),
                     AccessGuard::with_owned_value(value.to_vec()),

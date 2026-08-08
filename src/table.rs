@@ -1521,17 +1521,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
         self.check_usable()?;
         let key_bytes = K::as_bytes(key.borrow());
         let value_bytes = V::as_bytes(value.borrow());
-        let key_len = key_bytes.as_ref().len();
-        let value_len = value_bytes.as_ref().len();
-        if value_len > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_len));
-        }
-        if key_len > MAX_VALUE_LENGTH {
-            return Err(StorageError::ValueTooLarge(key_len));
-        }
-        if value_len + key_len > MAX_PAIR_LENGTH {
-            return Err(StorageError::ValueTooLarge(value_len + key_len));
-        }
+        Self::check_lengths(key_bytes.as_ref(), value_bytes.as_ref())?;
         match self
             .inner
             .insert_before(key_bytes.as_ref(), value_bytes.as_ref())
@@ -1540,6 +1530,19 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
             Ok(false) => Err(StorageError::UnorderedKey),
             Err(err) => Err(self.latch_error(err)),
         }
+    }
+
+    fn check_lengths(key: &[u8], value: &[u8]) -> Result {
+        if value.len() > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value.len()));
+        }
+        if key.len() > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key.len()));
+        }
+        if value.len() + key.len() > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value.len() + key.len()));
+        }
+        Ok(())
     }
 
     /// Closes the cursor, applying any of its inserts that have not yet
