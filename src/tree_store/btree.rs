@@ -8,7 +8,7 @@ use crate::tree_store::btree_cursor::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 use crate::tree_store::btree_cursor::BtreeCursorMut;
 use crate::tree_store::btree_cursor::{CursorMut, Position};
-use crate::tree_store::btree_iters::range_is_empty;
+use crate::tree_store::btree_iters::{bounds_are_empty, encode_bounds};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
@@ -672,6 +672,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         self.read_tree()?.range(range)
     }
 
+    pub(crate) fn range_bounds(
+        &self,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
+    ) -> Result<BtreeCursorRange<K, V>> {
+        self.read_tree()?.range_bounds(lower_bound, upper_bound)
+    }
+
     pub(crate) fn extract_from_if<
         'a,
         'a0,
@@ -686,13 +694,19 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     where
         K: 'a0,
     {
-        let lower_bound = range
-            .start_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
-        let upper_bound = range
-            .end_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
+        let (lower_bound, upper_bound) = encode_bounds::<K, KR, T>(range);
+        self.extract_from_bounds(lower_bound, upper_bound, predicate)
+    }
 
+    pub(crate) fn extract_from_bounds<
+        'a,
+        F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool,
+    >(
+        &'a mut self,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
+        predicate: F,
+    ) -> Result<BtreeExtractIf<'a, K, V, F>> {
         let result = BtreeExtractIf::new(
             &mut self.root,
             lower_bound,
@@ -729,25 +743,17 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     // Sets `poisoned` if an error left entries in the tree that the
     // predicate had already rejected; the caller must then poison the
     // transaction so they cannot be committed.
-    pub(crate) fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub(crate) fn retain_in_bounds<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         mut predicate: F,
-        range: impl RangeBounds<KR> + 'a,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
         poisoned: &mut bool,
-    ) -> Result
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        if self.root.is_none() || range_is_empty::<K, KR, _>(&range) {
+    ) -> Result {
+        if self.root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound) {
             return Ok(());
         }
 
-        let lower_bound = range
-            .start_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
-        let upper_bound = range
-            .end_bound()
-            .map(|key| K::as_bytes(key.borrow()).as_ref().to_vec());
         let mut freed = vec![];
         let result = self.retain_in_helper(
             lower_bound.as_ref().map(Vec::as_slice),
@@ -1145,6 +1151,20 @@ impl<K: Key, V: Value> Btree<K, V> {
     ) -> Result<BtreeCursorRange<K, V>> {
         BtreeCursorRange::new(
             range,
+            self.root.map(|x| x.root),
+            self.mem.clone(),
+            self.hint,
+        )
+    }
+
+    pub(crate) fn range_bounds(
+        &self,
+        lower_bound: Bound<Vec<u8>>,
+        upper_bound: Bound<Vec<u8>>,
+    ) -> Result<BtreeCursorRange<K, V>> {
+        BtreeCursorRange::from_bounds(
+            lower_bound,
+            upper_bound,
             self.root.map(|x| x.root),
             self.mem.clone(),
             self.hint,

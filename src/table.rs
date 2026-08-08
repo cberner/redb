@@ -4,6 +4,7 @@ use crate::sealed::Sealed;
 use crate::tree_store::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 use crate::tree_store::BtreeCursorMut;
+use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeCursorRange, BtreeExtractIf, BtreeHeader, BtreeMut,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
@@ -15,7 +16,6 @@ use crate::{Result, TableHandle};
 use std::borrow::Borrow;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
-#[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 use std::ops::RangeBounds;
 use std::sync::{Arc, Mutex};
@@ -166,7 +166,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         predicate: F,
     ) -> Result<ExtractIf<'_, K, V, F>> {
-        self.extract_from_if::<K::SelfType<'_>, F>(.., predicate)
+        self.extract_in_bounds(Bound::Unbounded, Bound::Unbounded, predicate)
     }
 
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
@@ -190,7 +190,27 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        let inner = self.tree.extract_from_if(&range, predicate)?;
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.extract_in_bounds(lower, upper, predicate)
+    }
+
+    fn range_in_bounds(
+        &self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+    ) -> Result<Range<'_, K, V>> {
+        self.tree
+            .range_bounds(lower, upper)
+            .map(|x| Range::new(x, self.transaction.transaction_guard()))
+    }
+
+    fn extract_in_bounds<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+        predicate: F,
+    ) -> Result<ExtractIf<'_, K, V, F>> {
+        let inner = self.tree.extract_from_bounds(lower, upper, predicate)?;
         Ok(ExtractIf::new(inner, Some(self.transaction)))
     }
 
@@ -205,16 +225,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         &mut self,
         predicate: F,
     ) -> Result {
-        let mut panic_guard = RetainPanicGuard::new(self.transaction);
-        let mut poisoned = false;
-        let result = self
-            .tree
-            .retain_in::<K::SelfType<'_>, F>(predicate, .., &mut poisoned);
-        panic_guard.disarm();
-        if poisoned {
-            self.transaction.poison();
-        }
-        result
+        self.retain_in_bounds(Bound::Unbounded, Bound::Unbounded, predicate)
     }
 
     /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
@@ -232,9 +243,21 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.retain_in_bounds(lower, upper, predicate)
+    }
+
+    fn retain_in_bounds<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+        &mut self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+        predicate: F,
+    ) -> Result {
         let mut panic_guard = RetainPanicGuard::new(self.transaction);
         let mut poisoned = false;
-        let result = self.tree.retain_in(predicate, range, &mut poisoned);
+        let result = self
+            .tree
+            .retain_in_bounds(predicate, lower, upper, &mut poisoned);
         panic_guard.disarm();
         if poisoned {
             self.transaction.poison();
@@ -433,9 +456,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree
-            .range(&range)
-            .map(|x| Range::new(x, self.transaction.transaction_guard()))
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
     }
 
     fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
@@ -785,8 +807,17 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     where
         KR: Borrow<K::SelfType<'a>>,
     {
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
+    }
+
+    fn range_in_bounds(
+        &self,
+        lower: Bound<Vec<u8>>,
+        upper: Bound<Vec<u8>>,
+    ) -> Result<Range<'static, K, V>> {
         self.tree
-            .range(&range)
+            .range_bounds(lower, upper)
             .map(|x| Range::new(x, self.transaction_guard.clone()))
     }
 
@@ -797,8 +828,9 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     where
         KR: Borrow<K::SelfType<'a>>,
     {
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         Ok(OwnedRange::new(
-            self.range(range)?,
+            self.range_in_bounds(lower, upper)?,
             self.transaction_guard.clone(),
         ))
     }
@@ -858,9 +890,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
     where
         KR: Borrow<K::SelfType<'a>> + 'a,
     {
-        self.tree
-            .range(&range)
-            .map(|x| Range::new(x, self.transaction_guard.clone()))
+        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
+        self.range_in_bounds(lower, upper)
     }
 
     fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
