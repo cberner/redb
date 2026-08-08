@@ -10,12 +10,37 @@ use redb::{
     TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
+#[cfg(feature = "experimental-api-5")]
+use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
 use std::sync;
 
 const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
+
+// Bridges the range signature change made by the experimental-api-5 feature, so that these tests
+// cover both configurations. The 5.0 signature infers the key type from the range itself, and an
+// unbounded range has none to infer, so today's signature needs it named.
+macro_rules! range_all {
+    ($table:expr, $key:ty) => {{
+        #[cfg(feature = "experimental-api-5")]
+        let range = $table.range(..);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let range = $table.range::<$key>(..);
+        range
+    }};
+}
+
+macro_rules! range_owned_all {
+    ($table:expr, $key:ty) => {{
+        #[cfg(feature = "experimental-api-5")]
+        let range = $table.range_owned(..);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let range = $table.range_owned::<$key>(..);
+        range
+    }};
+}
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -2227,7 +2252,7 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
-    let mut iter: OwnedRange<i128, i128> = table.range_owned::<i128>(..).unwrap();
+    let mut iter: OwnedRange<i128, i128> = range_owned_all!(table, i128).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i);
     }
@@ -2403,7 +2428,7 @@ fn array_type() {
     let hello = b"hello";
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
 
-    let mut iter: OwnedRange<&[u8; 5], &[u8; 9]> = table.range_owned::<&[u8; 5]>(..).unwrap();
+    let mut iter: OwnedRange<&[u8; 5], &[u8; 9]> = range_owned_all!(table, &[u8; 5]).unwrap();
     assert_eq!(iter.next().unwrap().unwrap().1.value(), b"world_123");
     assert!(iter.next().is_none());
 }
@@ -2510,7 +2535,7 @@ fn range_lifetime() {
 
     let mut iter = {
         let start = "hello".to_string();
-        table.range::<&str>(start.as_str()..).unwrap()
+        table.range(start.as_str()..).unwrap()
     };
     assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
@@ -3095,7 +3120,13 @@ fn range_arc() {
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_table(definition).unwrap();
         let start = "hello".to_string();
-        table.range::<&str>(start.as_str()..).unwrap()
+        // The 'static range() does not keep the transaction alive, so experimental-api-5 drops it
+        // in favour of range_owned()
+        #[cfg(feature = "experimental-api-5")]
+        let iter = table.range_owned(start.as_str()..).unwrap();
+        #[cfg(not(feature = "experimental-api-5"))]
+        let iter = table.range(start.as_str()..).unwrap();
+        iter
     };
     assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());
@@ -3215,7 +3246,7 @@ fn owned_get_signatures() {
 
     assert_eq!(2, table.get(&1).unwrap().unwrap().value());
 
-    let mut iter: OwnedRange<u32, u32> = table.range_owned::<u32>(..).unwrap();
+    let mut iter: OwnedRange<u32, u32> = range_owned_all!(table, u32).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
@@ -3225,11 +3256,76 @@ fn owned_get_signatures() {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
+    // Naming the key type is only needed for today's signature: with a `KR` type parameter to
+    // infer, a reference bound is ambiguous.
+    #[cfg(feature = "experimental-api-5")]
+    let mut iter = table.range(&0..&10).unwrap();
+    #[cfg(not(feature = "experimental-api-5"))]
     let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
+}
+
+// Every range shape the range taking methods accept under experimental-api-5, without a type
+// annotation. `..` in particular carries no key type, which is why the methods take a KeyRange
+// rather than a RangeBounds over a key type parameter.
+#[cfg(feature = "experimental-api-5")]
+#[test]
+fn range_signature_inference() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        assert_eq!(table.range(..).unwrap().count(), 10);
+        assert_eq!(table.range(2..8).unwrap().count(), 6);
+        assert_eq!(table.range(2..=8).unwrap().count(), 7);
+        assert_eq!(table.range(8..).unwrap().count(), 2);
+        assert_eq!(table.range(..8).unwrap().count(), 8);
+        assert_eq!(table.range(..=8).unwrap().count(), 9);
+        assert_eq!(table.range(&2..&8).unwrap().count(), 6);
+        assert_eq!(
+            table
+                .range((Bound::Excluded(2), Bound::Unbounded))
+                .unwrap()
+                .count(),
+            7
+        );
+        let range = 2..8;
+        assert_eq!(table.range(&range).unwrap().count(), 6);
+        assert_eq!(table.iter().unwrap().count(), 10);
+
+        table.retain_in(.., |_, _| true).unwrap();
+        table.retain_in(0..1, |_, _| true).unwrap();
+        assert_eq!(table.extract_from_if(.., |_, _| false).unwrap().count(), 0);
+        assert_eq!(
+            table.extract_from_if(2..8, |_, _| false).unwrap().count(),
+            0
+        );
+    }
+    {
+        // A borrowed key type, with bounds that borrow from a temporary
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("a", "1").unwrap();
+        let key = "a".to_string();
+        assert_eq!(table.range(..).unwrap().count(), 1);
+        assert_eq!(table.range(key.as_str()..).unwrap().count(), 1);
+        assert_eq!(table.range("a".."b").unwrap().count(), 1);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.range(..).unwrap().count(), 10);
+    assert_eq!(table.range(2..8).unwrap().count(), 6);
+    assert_eq!(table.range_owned(..).unwrap().count(), 10);
+    assert_eq!(table.range_owned(2..8).unwrap().count(), 6);
 }
 
 #[test]
@@ -3255,7 +3351,7 @@ fn ref_get_signatures() {
 
     let start = vec![0u8];
     let end = vec![10u8];
-    let mut iter = table.range::<&[u8]>(..).unwrap();
+    let mut iter = range_all!(table, &[u8]).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
     }

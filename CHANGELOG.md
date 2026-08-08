@@ -1,5 +1,17 @@
 # redb - Changelog
 
+## 5.0.0 - 2026-XX-XX
+* Behind the `experimental-api-5` feature flag, the range taking methods --
+  `ReadableTable::range()`, `ReadOnlyTable::range_owned()`, `Table::retain_in()`,
+  `Table::extract_from_if()`, and their multimap equivalents -- take a `KeyRange` instead of a
+  `RangeBounds` over a borrowed key type, so ranges that carry no key type no longer need one
+  named: `table.range(..)` replaces `table.range::<KeyType>(..)`. Calls that named the key type in
+  a turbofish must drop it, and implementations of `ReadableTable` or `ReadableMultimapTable` must
+  update their `range()` signature. The inherent `ReadOnlyTable::range()` and
+  `ReadOnlyMultimapTable::range()`, whose `'static` iterators do not keep the transaction alive,
+  are removed under the flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
+  `range_owned()` variants when the iterator must outlive the table.
+
 ## 4.2.0 - 2026-XX-XX
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.

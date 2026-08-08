@@ -163,7 +163,7 @@ fn range_lifetime() {
 
     let mut iter = {
         let start = "hello".to_string();
-        table.range::<&str>(start.as_str()..).unwrap()
+        table.range(start.as_str()..).unwrap()
     };
     assert_eq!(
         iter.next()
@@ -197,7 +197,13 @@ fn range_arc_lifetime() {
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_multimap_table(definition).unwrap();
         let start = "hello".to_string();
-        table.range::<&str>(start.as_str()..).unwrap()
+        // The 'static range() does not keep the transaction alive, so experimental-api-5 drops it
+        // in favour of range_owned()
+        #[cfg(feature = "experimental-api-5")]
+        let iter = table.range_owned(start.as_str()..).unwrap();
+        #[cfg(not(feature = "experimental-api-5"))]
+        let iter = table.range(start.as_str()..).unwrap();
+        iter
     };
     assert_eq!(
         iter.next()

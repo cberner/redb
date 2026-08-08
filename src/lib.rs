@@ -69,6 +69,8 @@ pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
     StorageError, TableError, TransactionError,
 };
+#[cfg(feature = "experimental-api-5")]
+pub use key_range::KeyRange;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
@@ -91,6 +93,8 @@ pub mod backends;
 mod complex_types;
 mod db;
 mod error;
+#[cfg(feature = "experimental-api-5")]
+mod key_range;
 mod multimap_table;
 mod sealed;
 mod table;
