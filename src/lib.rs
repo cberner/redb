@@ -73,6 +73,8 @@ pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
+#[cfg(feature = "experimental-api-5")]
+pub use table::Cursor;
 #[cfg(feature = "experimental_cursor")]
 pub use table::CursorMut;
 pub use table::{

@@ -3893,6 +3893,22 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
     fn last(&self) -> redb::Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.inner.last()
     }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> redb::Result<redb::Cursor<'_, K, V>> {
+        self.inner.lower_bound(bound)
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> redb::Result<redb::Cursor<'_, K, V>> {
+        self.inner.upper_bound(bound)
+    }
 }
 
 impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTableMetadata

@@ -3,6 +3,8 @@ use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
 };
+#[cfg(feature = "experimental-api-5")]
+use crate::tree_store::btree_cursor::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
 use crate::tree_store::btree_cursor::BtreeCursorMut;
 use crate::tree_store::btree_cursor::{CursorMut, Position};
@@ -704,6 +706,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         Ok(result)
     }
 
+    // The tree-level cursor behind the public read-only `Cursor`, over the
+    // tree's current (possibly uncommitted) state. The caller positions it
+    // with its seek methods before use.
+    #[cfg(feature = "experimental-api-5")]
+    pub(crate) fn cursor(&self) -> Result<BtreeCursor<K, V>> {
+        Ok(self.read_tree()?.cursor())
+    }
+
     // The tree-level cursor behind the public `CursorMut`. The caller
     // positions it with its seek methods before use.
     #[cfg(feature = "experimental_cursor")]
@@ -994,6 +1004,13 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     pub(crate) fn hint(&self) -> PageHint {
         self.hint
+    }
+
+    // The tree-level cursor behind the public read-only `Cursor`. The caller
+    // positions it with its seek methods before use.
+    #[cfg(feature = "experimental-api-5")]
+    pub(crate) fn cursor(&self) -> BtreeCursor<K, V> {
+        BtreeCursor::new(self.root, self.mem.clone(), self.hint)
     }
 
     pub(crate) fn get_root(&self) -> Option<BtreeHeader> {

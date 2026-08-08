@@ -446,3 +446,235 @@ fn abort_discards_cursor_inserts() {
 
     assert_u64_table_contents(&db, &[(1, 1)]);
 }
+
+fn populate_u64_table(db: &Database, entries: impl Iterator<Item = (u64, u64)>) {
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for (key, value) in entries {
+            table.insert(key, &value).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+}
+
+#[allow(clippy::type_complexity)]
+fn peeked_key(entry: Option<(redb::AccessGuard<u64>, redb::AccessGuard<u64>)>) -> Option<u64> {
+    entry.map(|(key, _)| key.value())
+}
+
+#[test]
+fn read_cursor_all_bound_positions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, [10, 20, 30].into_iter().map(|key| (key, key * 2)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+
+    // (bound constructor, is_lower, expected peek_prev, expected peek_next)
+    #[allow(clippy::type_complexity)]
+    let cases: &[(Bound<u64>, bool, Option<u64>, Option<u64>)] = &[
+        (Bound::Unbounded, true, None, Some(10)),
+        (Bound::Included(20), true, Some(10), Some(20)),
+        (Bound::Excluded(20), true, Some(20), Some(30)),
+        (Bound::Included(15), true, Some(10), Some(20)),
+        (Bound::Unbounded, false, Some(30), None),
+        (Bound::Included(20), false, Some(20), Some(30)),
+        (Bound::Excluded(20), false, Some(10), Some(20)),
+        (Bound::Included(15), false, Some(10), Some(20)),
+    ];
+    for (bound, is_lower, previous, next) in cases {
+        let mut cursor = if *is_lower {
+            table.lower_bound(bound.as_ref()).unwrap()
+        } else {
+            table.upper_bound(bound.as_ref()).unwrap()
+        };
+        assert_eq!(peeked_key(cursor.peek_prev().unwrap()), *previous);
+        assert_eq!(peeked_key(cursor.peek_next().unwrap()), *next);
+        // Peeks never move the cursor.
+        assert_eq!(peeked_key(cursor.peek_prev().unwrap()), *previous);
+        assert_eq!(peeked_key(cursor.peek_next().unwrap()), *next);
+        // The values came along.
+        if let Some((key, value)) = cursor.peek_next().unwrap() {
+            assert_eq!(value.value(), key.value() * 2);
+        }
+    }
+}
+
+#[test]
+fn read_cursor_walks_both_directions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, (0..1_000).map(|key| (key, key * 3)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+
+    let mut cursor = table.lower_bound(Bound::<u64>::Unbounded).unwrap();
+    for expected in 0..1_000 {
+        let (key, value) = cursor.next().unwrap().unwrap();
+        assert_eq!(key.value(), expected);
+        assert_eq!(value.value(), expected * 3);
+    }
+    assert!(cursor.next().unwrap().is_none());
+    // The gap is now at the end; walk all the way back.
+    for expected in (0..1_000).rev() {
+        let (key, _) = cursor.prev().unwrap().unwrap();
+        assert_eq!(key.value(), expected);
+    }
+    assert!(cursor.prev().unwrap().is_none());
+
+    // Stepping over an entry and back returns the same entry.
+    let mut cursor = table.lower_bound(Bound::Included(&500)).unwrap();
+    assert_eq!(peeked_key(cursor.next().unwrap()), Some(500));
+    assert_eq!(peeked_key(cursor.prev().unwrap()), Some(500));
+    assert_eq!(peeked_key(cursor.peek_next().unwrap()), Some(500));
+    assert_eq!(peeked_key(cursor.peek_prev().unwrap()), Some(499));
+}
+
+#[test]
+fn read_cursor_string_keys() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(STR_TABLE).unwrap();
+        for i in 0..100u64 {
+            table.insert(key(i).as_str(), key(i).as_bytes()).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(STR_TABLE).unwrap();
+    let mut cursor = table
+        .lower_bound(Bound::Included(key(50).as_str()))
+        .unwrap();
+    let (first, _) = cursor.peek_next().unwrap().unwrap();
+    assert_eq!(first.value(), key(50));
+    drop(first);
+    for i in 50..100 {
+        let (entry_key, entry_value) = cursor.next().unwrap().unwrap();
+        assert_eq!(entry_key.value(), key(i));
+        assert_eq!(entry_value.value(), key(i).as_bytes());
+    }
+    assert!(cursor.next().unwrap().is_none());
+}
+
+#[test]
+fn read_cursor_empty_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    txn.open_table(U64_TABLE).map(drop).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    let mut cursor = table.lower_bound(Bound::<u64>::Unbounded).unwrap();
+    assert!(cursor.peek_next().unwrap().is_none());
+    assert!(cursor.peek_prev().unwrap().is_none());
+    assert!(cursor.next().unwrap().is_none());
+    assert!(cursor.prev().unwrap().is_none());
+    let mut cursor = table.upper_bound(Bound::Included(&5)).unwrap();
+    assert!(cursor.next().unwrap().is_none());
+    assert!(cursor.prev().unwrap().is_none());
+}
+
+#[test]
+fn read_cursor_sees_uncommitted_writes() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, &(i + 1)).unwrap();
+        }
+        // A read-only cursor over the write table sees the uncommitted state.
+        let mut cursor = table.upper_bound(Bound::<u64>::Unbounded).unwrap();
+        assert_eq!(peeked_key(cursor.peek_prev().unwrap()), Some(99));
+        assert_eq!(peeked_key(cursor.prev().unwrap()), Some(99));
+        assert_eq!(peeked_key(cursor.prev().unwrap()), Some(98));
+        drop(cursor);
+
+        let mut cursor = table.lower_bound(Bound::Excluded(&41)).unwrap();
+        let (key, value) = cursor.next().unwrap().unwrap();
+        assert_eq!((key.value(), value.value()), (42, 43));
+    }
+    txn.abort().unwrap();
+}
+
+#[test]
+fn read_cursor_keeps_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, (0..10).map(|key| (key, key)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    let mut cursor = table.lower_bound(Bound::Included(&3)).unwrap();
+    // The ReadOnlyTable cursor is 'static: it stays usable after the table
+    // (and the guards it yields after the cursor) are dropped.
+    drop(table);
+    drop(txn);
+    let (key, _) = cursor.next().unwrap().unwrap();
+    assert_eq!(key.value(), 3);
+    let entry = cursor.peek_next().unwrap().unwrap();
+    drop(cursor);
+    assert_eq!(entry.0.value(), 4);
+}
+
+#[test]
+fn read_cursor_guards_outlive_cursor() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, (0..10).map(|key| (key, key)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    let mut cursor = table.lower_bound(Bound::Included(&3)).unwrap();
+    // The guards borrow the table, not the cursor: they stay valid after the
+    // cursor moves on or is dropped.
+    let (stepped, _) = cursor.next().unwrap().unwrap();
+    let peeked = cursor.peek_next().unwrap().unwrap();
+    drop(cursor);
+    assert_eq!(stepped.value(), 3);
+    assert_eq!(peeked.0.value(), 4);
+}
+
+#[test]
+fn read_cursor_generic_over_readable_table() {
+    fn nearest_at_or_above<T: ReadableTable<u64, u64>>(table: &T, key: u64) -> Option<u64> {
+        let mut cursor = table.lower_bound(Bound::Included(&key)).unwrap();
+        cursor.peek_next().unwrap().map(|(key, _)| key.value())
+    }
+
+    fn nearest_below<T: ReadableTable<u64, u64>>(table: &T, key: u64) -> Option<u64> {
+        let mut cursor = table.upper_bound(Bound::Excluded(&key)).unwrap();
+        cursor.peek_prev().unwrap().map(|(key, _)| key.value())
+    }
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, [10, 20, 30].into_iter().map(|key| (key, key)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(nearest_at_or_above(&table, 15), Some(20));
+    assert_eq!(nearest_below(&table, 15), Some(10));
+    assert_eq!(nearest_at_or_above(&table, 31), None);
+    drop(table);
+    drop(txn);
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(25, &25).unwrap();
+        assert_eq!(nearest_at_or_above(&table, 21), Some(25));
+        assert_eq!(nearest_below(&table, 25), Some(20));
+    }
+    txn.abort().unwrap();
+}

@@ -519,6 +519,29 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
         Ok(Some(entry(leaf, leaf.position)))
     }
 
+    // The entry after the gap, without moving the gap. The position may still
+    // settle onto an adjacent leaf sharing the gap.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn peek_next(&mut self) -> Result<Option<EntryGuard<K, V>>> {
+        if !self.ensure_has_entry(Direction::Next)? {
+            return Ok(None);
+        }
+
+        let leaf = self.leaf.as_ref().expect("cursor must be positioned");
+        Ok(Some(entry(leaf, leaf.position)))
+    }
+
+    // The entry before the gap, without moving the gap.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn peek_prev(&mut self) -> Result<Option<EntryGuard<K, V>>> {
+        if !self.ensure_has_entry(Direction::Previous)? {
+            return Ok(None);
+        }
+
+        let leaf = self.leaf.as_ref().expect("cursor must be positioned");
+        Ok(Some(entry(leaf, leaf.position - 1)))
+    }
+
     fn page_number(&self) -> PageNumber {
         self.leaf
             .as_ref()
@@ -1432,6 +1455,97 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
     }
 }
 
+// The tree-level cursor behind the public read-only `Cursor`. The caller
+// positions it with its seek methods before use; over an empty tree there is
+// no position and every operation reports no entry.
+#[cfg(feature = "experimental-api-5")]
+pub(crate) struct BtreeCursor<K: Key + 'static, V: Value + 'static> {
+    inner: Option<Cursor<K, V>>,
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
+    pub(crate) fn new(root: Option<BtreeHeader>, resolver: PageResolver, hint: PageHint) -> Self {
+        Self {
+            inner: root.map(|header| Cursor::new(header.root, resolver, hint)),
+        }
+    }
+
+    /// Positions the cursor at the gap before the first key `bound` admits.
+    pub(crate) fn seek_lower_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        if let Some(cursor) = &mut self.inner {
+            cursor.seek_to(Position::from_lower_bound(bound))?;
+        }
+        Ok(())
+    }
+
+    /// Positions the cursor at the gap after the last key `bound` admits.
+    pub(crate) fn seek_upper_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        if let Some(cursor) = &mut self.inner {
+            cursor.seek_to(Position::from_upper_bound(bound))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "experimental_cursor")]
+impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
+    /// The entry after the gap, without moving the gap.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn peek_next(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let Some(cursor) = &mut self.inner else {
+            return Ok(None);
+        };
+        Ok(cursor.peek_next()?.map(entry_guards))
+    }
+
+    /// The entry before the gap, without moving the gap.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn peek_prev(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let Some(cursor) = &mut self.inner else {
+            return Ok(None);
+        };
+        Ok(cursor.peek_prev()?.map(entry_guards))
+    }
+
+    /// Moves the gap past the entry after it, returning that entry.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn next(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let Some(cursor) = &mut self.inner else {
+            return Ok(None);
+        };
+        Ok(cursor.next()?.map(entry_guards))
+    }
+
+    /// Moves the gap before the entry preceding it, returning that entry.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prev(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        let Some(cursor) = &mut self.inner else {
+            return Ok(None);
+        };
+        Ok(cursor.prev()?.map(entry_guards))
+    }
+}
+
+#[cfg(feature = "experimental_cursor")]
+fn entry_guards<K: Key + 'static, V: Value + 'static>(
+    entry: EntryGuard<K, V>,
+) -> (AccessGuard<'static, K>, AccessGuard<'static, V>) {
+    let (page, key_range, value_range) = entry.into_raw();
+    (
+        AccessGuard::with_page(page.clone(), key_range),
+        AccessGuard::with_page(page, value_range),
+    )
+}
+
 // The tree-level cursor behind the public `CursorMut`: one gap cursor that
 // owns its state across calls, in the style of `RangeMut` but with a single
 // end and buffered insertion instead of removal batching.
@@ -1490,11 +1604,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
             let entry = cursor
                 .next()?
                 .expect("the captured upper bound is in the tree");
-            let (page, key_range, value_range) = entry.into_raw();
-            return Ok(Some((
-                AccessGuard::with_page(page.clone(), key_range),
-                AccessGuard::with_page(page, value_range),
-            )));
+            return Ok(Some(entry_guards(entry)));
         }
         self.with_cursor(|cursor| Ok(cursor.peek_next()?.map(|entry| entry.to_guards())))
     }
