@@ -21,13 +21,24 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git fetch --no-tags --no-recurse-submodules origin "$BASE_SHA"
+          failed=0
           offenders=$(git log --no-merges --pretty=format:'%H %an <%ae> committed by %cn <%ce>' "$BASE_SHA".."$HEAD_SHA" \
             | grep -iE '(claude|codex)' || true)
           if [ -n "$offenders" ]; then
             echo "Commits authored or committed by Claude or Codex are not allowed:"
             echo "$offenders"
-            exit 1
+            failed=1
           fi
+          for sha in $(git log --format=%H "$BASE_SHA".."$HEAD_SHA"); do
+            coauthors=$(git log -1 --format=%B "$sha" \
+              | grep -iE '^[[:space:]]*co[- ]?authored[- ]?by:.*(claude|codex)' || true)
+            if [ -n "$coauthors" ]; then
+              echo "Commit $sha has a co-author trailer referencing Claude or Codex:"
+              echo "$coauthors"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   ci:
     strategy:
