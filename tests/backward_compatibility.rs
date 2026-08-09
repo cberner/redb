@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-api-5")]
+use redb::ReadableTable;
 use redb::{ReadableDatabase, ReadableTableMetadata};
 
 const ELEMENTS: usize = 3;

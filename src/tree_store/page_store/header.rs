@@ -563,6 +563,8 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "experimental-api-5")]
+    use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::base::MAX_REGIONS;

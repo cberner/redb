@@ -2682,6 +2682,8 @@ impl Debug for ReadTransaction {
 
 #[cfg(test)]
 mod test {
+    #[cfg(feature = "experimental-api-5")]
+    use crate::ReadableTable;
     use crate::{Database, ReadableDatabase, StorageError, TableDefinition, TransactionError};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");

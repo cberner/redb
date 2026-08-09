@@ -3,6 +3,8 @@
 //! the live state from disk; it refuses to promote when the backing file was externally truncated
 //! or extended, falling back to repairing the durable state instead.
 
+#[cfg(feature = "experimental-api-5")]
+use redb::ReadableTable;
 use redb::{
     Database, Durability, ReadableDatabase, ReadableTableMetadata, StorageBackend, TableDefinition,
 };

@@ -6,6 +6,8 @@
 //! `Corrupted("File truncated below stored layout")` -- permanent data loss -- even though the
 //! previous durable state was intact. The fix makes the file extension durable as the file grows.
 
+#[cfg(feature = "experimental-api-5")]
+use redb::ReadableTable;
 use redb::backends::InMemoryBackend;
 use redb::{Database, ReadableDatabase, StorageBackend, TableDefinition};
 use std::io::ErrorKind;

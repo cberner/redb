@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use redb::ReadableTable;
 use redb::{Database, Key, ReadableDatabase, TableDefinition, TableError, TypeName, Value};
 use redb_derive::{Key, Value};
 use std::fmt::Debug;

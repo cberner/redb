@@ -879,6 +879,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
 
     /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
     /// and keeps the transaction alive until it is dropped.
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn get<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -893,7 +894,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<Option<OwnedAccessGuard<V>>> {
         Ok(self
-            .get(key)?
+            .tree
+            .get(key.borrow())?
             .map(|x| OwnedAccessGuard::new(x, self.transaction_guard.clone())))
     }
 
