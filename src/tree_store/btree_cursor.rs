@@ -907,8 +907,10 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         )))
     }
 
-    pub(super) fn next(&mut self) -> Result<bool> {
-        if self.peek_next()?.is_none() {
+    // Steps the gap past the entry after it without reading the entry, for
+    // callers that already peeked it.
+    pub(super) fn move_next(&mut self) -> Result<bool> {
+        if !self.ensure_has_entry(Direction::Next)? {
             return Ok(false);
         }
         self.state
@@ -917,6 +919,52 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             .expect("cursor must be positioned")
             .move_once(Direction::Next);
         Ok(true)
+    }
+
+    // Steps the gap before the entry preceding it without reading the entry.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn move_prev(&mut self) -> Result<bool> {
+        if !self.ensure_has_entry(Direction::Previous)? {
+            return Ok(false);
+        }
+        self.state
+            .position
+            .as_mut()
+            .expect("cursor must be positioned")
+            .move_once(Direction::Previous);
+        Ok(true)
+    }
+
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn next(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
+        if !self.move_next()? {
+            return Ok(None);
+        }
+        let position = self
+            .state
+            .position
+            .as_ref()
+            .expect("cursor must be positioned");
+        Ok(Some(entry_ref(
+            &position.leaf,
+            position.entry_index(Direction::Previous),
+        )))
+    }
+
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn prev(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
+        if !self.move_prev()? {
+            return Ok(None);
+        }
+        let position = self
+            .state
+            .position
+            .as_ref()
+            .expect("cursor must be positioned");
+        Ok(Some(entry_ref(
+            &position.leaf,
+            position.entry_index(Direction::Next),
+        )))
     }
 
     /// Removes and returns the next entry.
@@ -1750,6 +1798,27 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
         self.with_cursor(|cursor| Ok(cursor.peek_prev()?.map(|entry| entry.to_guards())))
     }
 
+    /// Moves the gap past the entry after it, returning that entry. Any
+    /// pending inserts are spliced first: moving the cursor closes the run.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.with_cursor(|cursor| {
+            cursor.flush_insert_run(true)?;
+            Ok(cursor.next()?.map(|entry| entry.to_guards()))
+        })
+    }
+
+    /// Moves the gap before the entry preceding it, returning that entry.
+    /// Any pending inserts are spliced first: moving the cursor closes the
+    /// run.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.with_cursor(|cursor| {
+            cursor.flush_insert_run(true)?;
+            Ok(cursor.prev()?.map(|entry| entry.to_guards()))
+        })
+    }
+
     /// See [`CursorMut::insert_before`].
     pub(crate) fn insert_before(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
         self.with_cursor(|cursor| cursor.insert_before(key, value))
@@ -1758,6 +1827,12 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// See [`CursorMut::insert_after`].
     pub(crate) fn insert_after(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
         self.with_cursor(|cursor| cursor.insert_after(key, value))
+    }
+
+    /// Splices any pending inserts into the tree, keeping the cursor at its
+    /// gap.
+    pub(crate) fn apply_pending_inserts(&mut self) -> Result {
+        self.with_cursor(|cursor| cursor.flush_insert_run(true))
     }
 
     /// Splices any pending inserts into the tree, consuming the position.
@@ -2328,7 +2403,7 @@ mod tests {
 
         cursor.seek_to(Position::Start).unwrap();
         for _ in 0..3 {
-            assert!(cursor.next().unwrap());
+            assert!(cursor.move_next().unwrap());
         }
         assert!(cursor.peek_next().unwrap().is_none());
         assert!(cursor.state.position.is_some());

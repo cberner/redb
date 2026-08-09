@@ -818,7 +818,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                 break;
             }
             if predicate(entry.key(), entry.value()) {
-                cursor.next()?;
+                cursor.move_next()?;
             } else {
                 cursor.remove_next_discard()?;
             }
