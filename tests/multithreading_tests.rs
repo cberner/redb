@@ -71,6 +71,78 @@ mod multithreading_test {
         assert_eq!(table.len().unwrap(), 2);
     }
 
+    // Stresses concurrent mutation of separate tables within one WriteTransaction: inserts
+    // allocate and dirty pages concurrently, and removals of committed entries queue pages on the
+    // transaction's shared freed list from multiple threads.
+    #[test]
+    fn multithreaded_insert_and_remove() {
+        let tmpfile = create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+
+        const ELEMENTS: u64 = 1000;
+        let table_defs: Vec<TableDefinition<u64, u64>> = vec![
+            TableDefinition::new("a"),
+            TableDefinition::new("b"),
+            TableDefinition::new("c"),
+            TableDefinition::new("d"),
+        ];
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut tables: Vec<_> = table_defs
+                .iter()
+                .map(|def| write_txn.open_table(*def).unwrap())
+                .collect();
+            thread::scope(|s| {
+                for table in tables.iter_mut() {
+                    s.spawn(move || {
+                        for i in 0..ELEMENTS {
+                            table.insert(i, i).unwrap();
+                        }
+                    });
+                }
+            });
+        }
+        write_txn.commit().unwrap();
+
+        // Remove half the now-committed entries and insert new ones, concurrently
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut tables: Vec<_> = table_defs
+                .iter()
+                .map(|def| write_txn.open_table(*def).unwrap())
+                .collect();
+            thread::scope(|s| {
+                for table in tables.iter_mut() {
+                    s.spawn(move || {
+                        for i in 0..ELEMENTS {
+                            if i % 2 == 0 {
+                                assert_eq!(table.remove(i).unwrap().unwrap().value(), i);
+                            } else {
+                                table.insert(ELEMENTS + i, i).unwrap();
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        for def in &table_defs {
+            let table = read_txn.open_table(*def).unwrap();
+            assert_eq!(table.len().unwrap(), ELEMENTS);
+            for i in 0..ELEMENTS {
+                if i % 2 == 0 {
+                    assert!(table.get(i).unwrap().is_none());
+                } else {
+                    assert_eq!(table.get(i).unwrap().unwrap().value(), i);
+                    assert_eq!(table.get(ELEMENTS + i).unwrap().unwrap().value(), i);
+                }
+            }
+        }
+    }
+
     #[test]
     fn multithreaded_re_read() {
         let tmpfile = create_tempfile();

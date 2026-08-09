@@ -334,11 +334,26 @@ impl UntypedBtreeMut {
     }
 }
 
+// Merges pages freed by a mutation into the transaction's shared freed-pages list, leaving the
+// source empty with its capacity intact. The shared mutex is held only for the merge, never across
+// a whole tree descent: tables of one WriteTransaction share it and may be written from different
+// threads. Callers must merge before propagating errors, since pages queued before a failure still
+// need to be recorded for commit.
+fn merge_freed_pages(freed_pages: &Mutex<Vec<PageNumber>>, freed: &mut Vec<PageNumber>) {
+    if !freed.is_empty() {
+        freed_pages.lock().unwrap().append(freed);
+    }
+}
+
 pub(crate) struct BtreeMut<K: Key + 'static, V: Value + 'static> {
     page_allocator: PageAllocator,
     transaction_guard: Arc<TransactionGuard>,
     root: Option<BtreeHeader>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
+    // Scratch list for the pages freed by a single operation, merged into `freed_pages` before
+    // that operation returns. Kept here, instead of allocated per operation, so that its capacity
+    // is reused across operations that free committed pages.
+    local_freed: Vec<PageNumber>,
     allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -357,6 +372,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             transaction_guard: guard,
             root,
             freed_pages,
+            local_freed: vec![],
             allocated_pages,
             _key_type: PhantomData,
             _value_type: PhantomData,
@@ -433,16 +449,15 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             key,
             V::as_bytes(value).as_ref().len()
         );
-        // The cursor updates the root incrementally, so pages queued before an
-        // error still need to be recorded for commit.
-        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.page_allocator.clone(),
-            freed_pages.as_mut(),
+            &mut self.local_freed,
             self.allocated_pages.clone(),
         );
-        let (old_value, _) = operation.insert(key, value)?;
+        let result = operation.insert(key, value);
+        merge_freed_pages(&self.freed_pages, &mut self.local_freed);
+        let (old_value, _) = result?;
         Ok(old_value)
     }
 
@@ -491,41 +506,45 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     pub(crate) fn remove(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'_, V>>> {
         #[cfg(feature = "logging")]
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
-        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
             self.page_allocator.clone(),
-            freed_pages.as_mut(),
+            &mut self.local_freed,
             self.allocated_pages.clone(),
         );
-        let result = operation.delete(key)?;
-        Ok(result)
+        let result = operation.delete(key);
+        merge_freed_pages(&self.freed_pages, &mut self.local_freed);
+        result
     }
 
     // Removes and returns the leftmost entry in the tree, if any, in a single tree descent.
     pub(crate) fn pop_first(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
             &mut self.root,
             &self.page_allocator,
-            freed_pages.as_mut(),
+            &mut self.local_freed,
             &self.allocated_pages,
         );
-        cursor.seek_to(Position::Start)?;
-        cursor.remove_next()
+        let result = cursor
+            .seek_to(Position::Start)
+            .and_then(|()| cursor.remove_next());
+        merge_freed_pages(&self.freed_pages, &mut self.local_freed);
+        result
     }
 
     // Removes and returns the rightmost entry in the tree, if any, in a single tree descent.
     pub(crate) fn pop_last(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
-        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut cursor: CursorMut<'_, '_, K, V> = CursorMut::new(
             &mut self.root,
             &self.page_allocator,
-            freed_pages.as_mut(),
+            &mut self.local_freed,
             &self.allocated_pages,
         );
-        cursor.seek_to(Position::End)?;
-        cursor.remove_prev()
+        let result = cursor
+            .seek_to(Position::End)
+            .and_then(|()| cursor.remove_prev());
+        merge_freed_pages(&self.freed_pages, &mut self.local_freed);
+        result
     }
 
     #[allow(dead_code)]
@@ -754,6 +773,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             return Ok(());
         }
 
+        // Uses its own list rather than `local_freed`: retain_in_helper takes `&mut self`, so it
+        // cannot also borrow the field. One allocation is amortized over the whole scan.
         let mut freed = vec![];
         let result = self.retain_in_helper(
             lower_bound.as_ref().map(Vec::as_slice),
@@ -763,10 +784,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             poisoned,
         );
 
-        // The cursor updates the root incrementally, so pages queued before an
-        // error still need to be recorded for commit.
-        let mut freed_pages = self.freed_pages.lock().unwrap();
-        freed_pages.extend(freed);
+        merge_freed_pages(&self.freed_pages, &mut freed);
 
         result
     }
@@ -853,16 +871,17 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> BtreeMut<K, V> {
             "Btree(root={:?}): Inserting {:?} with {} reserved bytes for the value",
             &self.root, key, value_length
         );
-        let mut freed_pages = self.freed_pages.lock().unwrap();
         let mut value = vec![0u8; value_length];
         V::initialize(&mut value);
         let mut operation = MutateHelper::<K, V>::new(
             &mut self.root,
             self.page_allocator.clone(),
-            freed_pages.as_mut(),
+            &mut self.local_freed,
             self.allocated_pages.clone(),
         );
-        let (_, guard) = operation.insert(key, &V::from_bytes(&value))?;
+        let result = operation.insert(key, &V::from_bytes(&value));
+        merge_freed_pages(&self.freed_pages, &mut self.local_freed);
+        let (_, guard) = result?;
         Ok(guard)
     }
 }
