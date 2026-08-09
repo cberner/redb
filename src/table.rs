@@ -1439,7 +1439,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
 }
 
 #[cfg(feature = "experimental-api-5")]
-fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
+pub(crate) fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
     bound: &Bound<KR>,
 ) -> Bound<Vec<u8>> {
     match bound {

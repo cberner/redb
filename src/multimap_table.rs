@@ -3,7 +3,11 @@ use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
+#[cfg(feature = "experimental-api-5")]
+use crate::table::bound_to_bytes;
 use crate::table::{OwnedAccessGuard, ReadableTableMetadata, TableStats};
+#[cfg(feature = "experimental-api-5")]
+use crate::tree_store::BtreeCursor;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::tree_store::encode_bounds;
 use crate::tree_store::{
@@ -972,6 +976,34 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
         let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor()?;
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(MultimapCursor::new(
+            inner,
+            self.transaction.transaction_guard(),
+        ))
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor()?;
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(MultimapCursor::new(
+            inner,
+            self.transaction.transaction_guard(),
+        ))
+    }
 }
 
 impl<K: Key + 'static, V: Key + 'static> MultimapTable<'_, K, V> {
@@ -1011,6 +1043,47 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
     fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
     where
         KR: Borrow<K::SelfType<'a>> + 'a;
+
+    /// Returns a read-only [`MultimapCursor`] pointing at the gap before the
+    /// first entry of the smallest key greater than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// before the first entry of the smallest key greater than or equal to
+    /// `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// before the first entry of the smallest key greater than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// before the first entry in the table.
+    ///
+    /// This is the multimap counterpart of
+    /// [`ReadableTable::lower_bound`](crate::ReadableTable::lower_bound).
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>>;
+
+    /// Returns a read-only [`MultimapCursor`] pointing at the gap after the
+    /// last entry of the greatest key smaller than the given bound.
+    ///
+    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
+    /// after the last entry of the greatest key smaller than or equal to `x`.
+    ///
+    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
+    /// after the last entry of the greatest key smaller than `x`.
+    ///
+    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
+    /// after the last entry in the table.
+    ///
+    /// This is the multimap counterpart of
+    /// [`ReadableTable::upper_bound`](crate::ReadableTable::upper_bound).
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>>;
 
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
@@ -1298,6 +1371,71 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
         let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(MultimapCursor::new(inner, self.transaction_guard.clone()))
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> Result<MultimapCursor<'_, K, V>> {
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(MultimapCursor::new(inner, self.transaction_guard.clone()))
+    }
 }
 
 impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}
+
+/// A read-only cursor over a multimap table, pointing at a gap between two
+/// entries.
+///
+/// Cursors are constructed with [`ReadableMultimapTable::lower_bound`] and
+/// [`ReadableMultimapTable::upper_bound`]. For now the type only reserves the
+/// constructors' signatures in the trait: methods for navigating the table,
+/// mirroring the table cursors ([`Cursor`](crate::Cursor)) with
+/// multimap-aware movement, will be added behind the `experimental_cursor`
+/// feature flag, separately from the constructors, so that the constructors'
+/// signatures can stabilize first.
+#[cfg(feature = "experimental-api-5")]
+pub struct MultimapCursor<'a, K: Key + 'static, V: Key + 'static> {
+    // Only the cursor's future methods will read the position; until they
+    // land the constructors still store it, ready for the methods to be
+    // added.
+    #[allow(dead_code)]
+    inner: BtreeCursor<K, &'static DynamicCollection<V>>,
+    // The cursor owns page handles, so it must keep the transaction registered for as long as it
+    // is alive. The lifetime below cannot do that job: the cursor has no `Drop` impl, so the
+    // borrow it represents ends at the cursor's last use, leaving the table free to be dropped
+    // and the transaction free to be closed while the cursor still holds its pages
+    _transaction_guard: Arc<TransactionGuard>,
+    // This lifetime is here so that `&` can be held on the table preventing concurrent mutation.
+    // It will also bound the guards the cursor yields, which is why there is no `'static` cursor:
+    // such a guard could outlive both the cursor and the transaction, letting a writer reclaim
+    // the pages it points at
+    _lifetime: PhantomData<&'a ()>,
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl<K: Key + 'static, V: Key + 'static> MultimapCursor<'_, K, V> {
+    pub(crate) fn new(
+        inner: BtreeCursor<K, &'static DynamicCollection<V>>,
+        guard: Arc<TransactionGuard>,
+    ) -> Self {
+        Self {
+            inner,
+            _transaction_guard: guard,
+            _lifetime: PhantomData,
+        }
+    }
+}
