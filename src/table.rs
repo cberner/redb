@@ -834,32 +834,6 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
             self.transaction_guard.clone(),
         ))
     }
-
-    /// This method is like [`ReadableTable::lower_bound()`], but the cursor is reference counted
-    /// and keeps the transaction alive until it is dropped.
-    #[cfg(feature = "experimental-api-5")]
-    pub fn lower_bound<'a>(
-        &self,
-        bound: Bound<impl Borrow<K::SelfType<'a>>>,
-    ) -> Result<Cursor<'static, K, V>> {
-        let bound = bound_to_bytes::<K, _>(&bound);
-        let mut inner = self.tree.cursor();
-        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
-        Ok(Cursor::new(inner, self.transaction_guard.clone()))
-    }
-
-    /// This method is like [`ReadableTable::upper_bound()`], but the cursor is reference counted
-    /// and keeps the transaction alive until it is dropped.
-    #[cfg(feature = "experimental-api-5")]
-    pub fn upper_bound<'a>(
-        &self,
-        bound: Bound<impl Borrow<K::SelfType<'a>>>,
-    ) -> Result<Cursor<'static, K, V>> {
-        let bound = bound_to_bytes::<K, _>(&bound);
-        let mut inner = self.tree.cursor();
-        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
-        Ok(Cursor::new(inner, self.transaction_guard.clone()))
-    }
 }
 
 impl<K: Key + 'static, V: Value + 'static> ReadableTableMetadata for ReadOnlyTable<K, V> {
@@ -907,7 +881,10 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         &self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
     ) -> Result<Cursor<'_, K, V>> {
-        ReadOnlyTable::lower_bound(self, bound)
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_lower_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction_guard.clone()))
     }
 
     #[cfg(feature = "experimental-api-5")]
@@ -915,7 +892,10 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         &self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
     ) -> Result<Cursor<'_, K, V>> {
-        ReadOnlyTable::upper_bound(self, bound)
+        let bound = bound_to_bytes::<K, _>(&bound);
+        let mut inner = self.tree.cursor();
+        inner.seek_upper_bound(bound.as_ref().map(|bytes| bytes.as_slice()))?;
+        Ok(Cursor::new(inner, self.transaction_guard.clone()))
     }
 }
 
@@ -1368,8 +1348,15 @@ pub struct Cursor<'a, K: Key + 'static, V: Value + 'static> {
     // constructors still store it, ready for the methods' flag to be enabled.
     #[cfg_attr(not(feature = "experimental_cursor"), allow(dead_code))]
     inner: BtreeCursor<K, V>,
+    // The cursor owns page handles, so it must keep the transaction registered for as long as it
+    // is alive. The lifetime below cannot do that job: the cursor has no `Drop` impl, so the
+    // borrow it represents ends at the cursor's last use, leaving the table free to be dropped
+    // and the transaction free to be closed while the cursor still holds its pages
     _transaction_guard: Arc<TransactionGuard>,
-    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation
+    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation.
+    // It also bounds the guards the cursor yields, which is why there is no `'static` cursor:
+    // such a guard could outlive both the cursor and the transaction, letting a writer reclaim
+    // the pages it points at
     _lifetime: PhantomData<&'a ()>,
 }
 

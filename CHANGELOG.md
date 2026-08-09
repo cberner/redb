@@ -10,9 +10,8 @@
   same data. The feature is unstable and may change incompatibly, or be removed, in any release.
 * Add a read-only counterpart to the experimental cursor API. Behind the new `experimental-api-5`
   feature flag, which collects trait additions planned for redb 5, `ReadableTable::lower_bound()`
-  and `ReadableTable::upper_bound()` return a `Cursor` pointing at a gap between entries, with
-  reference-counted variants on `ReadOnlyTable` that keep the transaction alive. The cursor's
-  `peek_next()`, `peek_prev()`, `next()`, and `prev()` methods, which mirror the standard
+  and `ReadableTable::upper_bound()` return a `Cursor` pointing at a gap between entries. The
+  cursor's `peek_next()`, `peek_prev()`, `next()`, and `prev()` methods, which mirror the standard
   library's `BTreeMap` cursors, are behind the `experimental_cursor` feature flag (which enables
   `experimental-api-5`); the split lets the trait surface stabilize before the cursor's own
   methods settle.
