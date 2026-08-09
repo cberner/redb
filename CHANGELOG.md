@@ -15,6 +15,10 @@
   and iterators likewise do not keep the transaction alive, are also removed under the
   `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
   `get_owned()` variants when the guard must outlive the table.
+* Add `ReadableMultimapTable::lower_bound()` and `ReadableMultimapTable::upper_bound()`, behind
+  the `experimental-api-5` feature flag, returning a `MultimapCursor` pointing at a gap between
+  entries. The type reserves the constructors' signatures in the trait; navigation methods will
+  be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
 * Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates

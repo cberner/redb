@@ -748,3 +748,32 @@ fn read_only_range_entries_keep_transaction_alive() {
     assert_eq!(back_key.value(), 1);
     assert_eq!(back_value.value(), 2);
 }
+
+// The stub cursor has no methods yet; the constructors still position it, so
+// they are exercised on empty and populated tables through both table types.
+#[cfg(feature = "experimental-api-5")]
+#[test]
+fn cursor_constructors() {
+    use std::ops::Bound;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        table.lower_bound(Bound::<u64>::Unbounded).unwrap();
+        table.upper_bound(Bound::<u64>::Unbounded).unwrap();
+        for i in 0..10u64 {
+            table.insert(i, i).unwrap();
+            table.insert(i, i + 1).unwrap();
+        }
+        table.lower_bound(Bound::Included(&5)).unwrap();
+        table.upper_bound(Bound::Excluded(&5)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    table.lower_bound(Bound::Included(&5)).unwrap();
+    table.upper_bound(Bound::<u64>::Unbounded).unwrap();
+}

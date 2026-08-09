@@ -3960,6 +3960,22 @@ impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> Readabl
     {
         self.inner.range(range)
     }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn lower_bound<'a>(
+        &self,
+        bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> redb::Result<redb::MultimapCursor<'_, K, V>> {
+        self.inner.lower_bound(bound)
+    }
+
+    #[cfg(feature = "experimental-api-5")]
+    fn upper_bound<'a>(
+        &self,
+        bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
+    ) -> redb::Result<redb::MultimapCursor<'_, K, V>> {
+        self.inner.upper_bound(bound)
+    }
 }
 
 impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> ReadableTableMetadata

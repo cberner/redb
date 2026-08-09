@@ -80,6 +80,8 @@ pub use error::{
 };
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
+#[cfg(feature = "experimental-api-5")]
+pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
