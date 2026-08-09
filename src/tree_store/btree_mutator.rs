@@ -93,9 +93,9 @@ struct InsertionResult<'a, V: Value + 'static> {
 
 pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<BtreeHeader>,
-    page_allocator: PageAllocator,
+    page_allocator: &'b PageAllocator,
     freed: &'b mut Vec<PageNumber>,
-    allocated: Arc<Mutex<PageTrackerPolicy>>,
+    allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -104,9 +104,9 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
 impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     pub(crate) fn new(
         root: &'b mut Option<BtreeHeader>,
-        page_allocator: PageAllocator,
+        page_allocator: &'b PageAllocator,
         freed: &'b mut Vec<PageNumber>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
     ) -> Self {
         Self {
             root,
@@ -167,8 +167,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             } => {
                 let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
                 let mut builder = LeafBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
+                    self.page_allocator,
+                    self.allocated,
                     accessor.num_pairs() - deleted_pairs.len(),
                     K::fixed_width(),
                     V::fixed_width(),
@@ -187,8 +187,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             PartialBranch { children, keys } => {
                 let mut builder = BranchBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
+                    self.page_allocator,
+                    self.allocated,
                     children.len(),
                     K::fixed_width(),
                 );
@@ -321,8 +321,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 DeletedSubtree
             } else {
                 let mut builder = BranchBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
+                    self.page_allocator,
+                    self.allocated,
                     new_children,
                     K::fixed_width(),
                 );
@@ -439,8 +439,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
         let fill = |range: &Range<usize>| {
             let mut builder = LeafBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
+                self.page_allocator,
+                self.allocated,
                 range.len(),
                 fixed_key,
                 fixed_value,
@@ -644,8 +644,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         for range in plan {
             let chunk = &children[range];
             let mut builder = BranchBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
+                self.page_allocator,
+                self.allocated,
                 chunk.len(),
                 K::fixed_width(),
             );
@@ -693,7 +693,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
             let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
                 let mut builder =
-                    BranchBuilder::new(&self.page_allocator, &self.allocated, 2, K::fixed_width());
+                    BranchBuilder::new(self.page_allocator, self.allocated, 2, K::fixed_width());
                 builder.push_child(result.new_root, result.root_checksum);
                 builder.push_key(&key);
                 builder.push_child(page2, page2_checksum);
@@ -709,8 +709,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let key_bytes = key_bytes.as_ref();
             let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
+                self.page_allocator,
+                self.allocated,
                 1,
                 K::fixed_width(),
                 V::fixed_width(),
@@ -748,8 +748,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 // Fast-path to avoid re-building and splitting pages with a single large value
                 if !found && is_single_large_value(&accessor, self.page_allocator.get_page_size()) {
                     let mut builder = LeafBuilder::new(
-                        &self.page_allocator,
-                        &self.allocated,
+                        self.page_allocator,
+                        self.allocated,
                         1,
                         K::fixed_width(),
                         V::fixed_width(),
@@ -852,8 +852,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 {
                     let split_key = accessor.last_entry().key().to_vec();
                     let mut builder = LeafBuilder::new(
-                        &self.page_allocator,
-                        &self.allocated,
+                        self.page_allocator,
+                        self.allocated,
                         1,
                         K::fixed_width(),
                         V::fixed_width(),
@@ -875,8 +875,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 }
 
                 let mut builder = LeafBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
+                    self.page_allocator,
+                    self.allocated,
                     accessor.num_pairs() + 1,
                     K::fixed_width(),
                     V::fixed_width(),
@@ -1034,8 +1034,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                 // A child was added, or we couldn't use the fast-path above
                 let mut builder = BranchBuilder::new(
-                    &self.page_allocator,
-                    &self.allocated,
+                    self.page_allocator,
+                    self.allocated,
                     accessor.count_children() + 1,
                     K::fixed_width(),
                 );
@@ -1324,8 +1324,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         indexes: &[usize],
     ) -> Result<PageNumber> {
         let mut builder = LeafBuilder::new(
-            &self.page_allocator,
-            &self.allocated,
+            self.page_allocator,
+            self.allocated,
             retained_pairs,
             K::fixed_width(),
             V::fixed_width(),
@@ -1422,8 +1422,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             Ok((original_page_number, false))
         } else {
             let mut builder = BranchBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
+                self.page_allocator,
+                self.allocated,
                 accessor.count_children(),
                 K::fixed_width(),
             );
@@ -1453,8 +1453,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let accessor = BranchAccessor::new(&page, K::fixed_width());
         // Child is requesting to be merged with a sibling
         let mut builder = BranchBuilder::new(
-            &self.page_allocator,
-            &self.allocated,
+            self.page_allocator,
+            self.allocated,
             accessor.count_children(),
             K::fixed_width(),
         );
@@ -1509,8 +1509,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 if is_single_large_value(&merge_with_accessor, self.page_allocator.get_page_size())
                 {
                     let mut child_builder = LeafBuilder::new(
-                        &self.page_allocator,
-                        &self.allocated,
+                        self.page_allocator,
+                        self.allocated,
                         retained_pairs,
                         K::fixed_width(),
                         V::fixed_width(),
@@ -1544,8 +1544,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = LeafBuilder::new(
-                            &self.page_allocator,
-                            &self.allocated,
+                            self.page_allocator,
+                            self.allocated,
                             retained_pairs + merge_with_accessor.num_pairs(),
                             K::fixed_width(),
                             V::fixed_width(),
@@ -1612,8 +1612,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            &self.page_allocator,
-                            &self.allocated,
+                            self.page_allocator,
+                            self.allocated,
                             merge_with_accessor.count_children() + 1,
                             K::fixed_width(),
                         );
@@ -1675,8 +1675,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_checksum = accessor.child_checksum(i).unwrap();
                     if i == merge_with {
                         let mut child_builder = BranchBuilder::new(
-                            &self.page_allocator,
-                            &self.allocated,
+                            self.page_allocator,
+                            self.allocated,
                             merge_with_accessor.count_children() + partial_children.len(),
                             K::fixed_width(),
                         );
@@ -1794,12 +1794,9 @@ mod tests {
     fn pack_branches(children: &[SplicedNode], page_allocator: &PageAllocator) -> Vec<SplicedNode> {
         let mut root = None;
         let mut freed = vec![];
-        let mut helper: MutateHelper<'_, '_, u64, u64> = MutateHelper::new(
-            &mut root,
-            page_allocator.clone(),
-            &mut freed,
-            Arc::new(Mutex::new(PageTrackerPolicy::new_tracking())),
-        );
+        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let mut helper: MutateHelper<'_, '_, u64, u64> =
+            MutateHelper::new(&mut root, page_allocator, &mut freed, &allocated);
         helper.build_branch_nodes(children).unwrap()
     }
 
