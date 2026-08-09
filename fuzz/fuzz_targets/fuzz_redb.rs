@@ -529,6 +529,7 @@ fn handle_table_op(
             count,
             stride,
             value_size,
+            descending,
         } => {
             let start = start_key.value;
             let stride = stride.value;
@@ -538,20 +539,41 @@ fn handle_table_op(
             // reference bound the keys the cursor accepts.
             let successor = reference.range(start..).next().map(|(k, _)| *k);
             let predecessor = reference.range(..start).next_back().map(|(k, _)| *k);
-            let keys: Vec<u64> = (0..count.value)
-                .map(|i| start + i * stride)
-                .take_while(|k| *k < KEY_SPACE && successor.is_none_or(|s| *k < s))
-                .collect();
+            let keys: Vec<u64> = if *descending {
+                // insert_after runs descend from the gap toward its
+                // predecessor.
+                (0..count.value)
+                    .map_while(|i| start.checked_sub(i * stride))
+                    .take_while(|k| {
+                        successor.is_none_or(|s| *k < s) && predecessor.is_none_or(|p| *k > p)
+                    })
+                    .collect()
+            } else {
+                (0..count.value)
+                    .map(|i| start + i * stride)
+                    .take_while(|k| *k < KEY_SPACE && successor.is_none_or(|s| *k < s))
+                    .collect()
+            };
             let mut cursor = table.lower_bound_mut(Bound::Included(&start))?;
             assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), predecessor);
             assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
-            for key in &keys {
-                cursor.insert_before(key, value.as_slice())?;
+            if *descending {
+                for key in &keys {
+                    cursor.insert_after(key, value.as_slice())?;
+                }
+                // Peeks observe pending inserts without splicing them
+                let nearest = keys.last().copied().or(successor);
+                assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), predecessor);
+                assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), nearest);
+            } else {
+                for key in &keys {
+                    cursor.insert_before(key, value.as_slice())?;
+                }
+                // Peeks observe pending inserts without splicing them
+                let last = keys.last().copied().or(predecessor);
+                assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), last);
+                assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
             }
-            // Peeks observe pending inserts without splicing them
-            let last = keys.last().copied().or(predecessor);
-            assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), last);
-            assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
             cursor.close()?;
             for key in keys {
                 reference.insert(key, value_size);

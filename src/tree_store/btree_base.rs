@@ -720,26 +720,45 @@ impl OwnedEntryBuffer {
 
     // Appends one pair, which must be greater than every buffered entry.
     #[cfg(feature = "experimental_cursor")]
-    pub(super) fn push(&mut self, key: &[u8], value: &[u8]) {
+    pub(super) fn push_back(&mut self, key: &[u8], value: &[u8]) {
         let pair = self.store(key, value);
         self.pairs.push_back(pair);
     }
 
-    // Copies `range` of the leaf's pairs to the back of the buffer. The pairs
-    // must all be greater than the buffered entries.
+    // Prepends one pair, which must be smaller than every buffered entry.
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn push_front(&mut self, key: &[u8], value: &[u8]) {
+        let pair = self.store(key, value);
+        self.pairs.push_front(pair);
+    }
+
+    // Copies `range` of the leaf's pairs to one end of the buffer. The pairs
+    // must all be greater than the buffered entries when `back` is true, and
+    // entirely smaller otherwise.
     #[cfg(feature = "experimental_cursor")]
     pub(super) fn extend_from_leaf_range(
         &mut self,
         accessor: &LeafAccessor<'_>,
         range: Range<usize>,
+        back: bool,
     ) {
         self.pairs.reserve(range.len());
         self.data
             .reserve(accessor.length_of_pairs(range.start, range.end));
-        for index in range {
-            let entry = accessor.entry(index).unwrap();
-            let pair = self.store(entry.key(), entry.value());
-            self.pairs.push_back(pair);
+        if back {
+            for index in range {
+                let entry = accessor.entry(index).unwrap();
+                let pair = self.store(entry.key(), entry.value());
+                self.pairs.push_back(pair);
+            }
+        } else {
+            // Prepending in reverse leaves the leaf's entries ascending at
+            // the front.
+            for index in range.rev() {
+                let entry = accessor.entry(index).unwrap();
+                let pair = self.store(entry.key(), entry.value());
+                self.pairs.push_front(pair);
+            }
         }
     }
 
@@ -755,6 +774,13 @@ impl OwnedEntryBuffer {
     pub(super) fn back(&self) -> Option<(&[u8], &[u8])> {
         self.pairs
             .back()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+
+    #[cfg(feature = "experimental_cursor")]
+    pub(super) fn front(&self) -> Option<(&[u8], &[u8])> {
+        self.pairs
+            .front()
             .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
     }
 

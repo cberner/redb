@@ -7,7 +7,8 @@
   `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
   between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
   through its `insert_before()` method can be around 3x faster than calling `insert()` with the
-  same data. The feature is unstable and may change incompatibly, or be removed, in any release.
+  same data; `insert_after()` inserts through the gap in descending order at the same speed. The
+  feature is unstable and may change incompatibly, or be removed, in any release.
 * Add a read-only counterpart to the experimental cursor API. Behind the new `experimental-api-5`
   feature flag, which collects trait additions planned for redb 5, `ReadableTable::lower_bound()`
   and `ReadableTable::upper_bound()` return a `Cursor` pointing at a gap between entries, with

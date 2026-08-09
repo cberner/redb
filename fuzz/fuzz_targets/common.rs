@@ -124,6 +124,9 @@ pub(crate) enum FuzzOperation {
         count: U64Between<0, 64>,
         stride: U64Between<1, 8>,
         value_size: BinomialDifferenceBoundedUSize<MAX_VALUE_SIZE>,
+        // Walk down from the gap with insert_after instead of up with
+        // insert_before
+        descending: bool,
     },
     Remove {
         key: BoundedU64<KEY_SPACE>,

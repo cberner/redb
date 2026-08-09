@@ -342,18 +342,33 @@ impl LeafRunRewrite {
 #[cfg(feature = "experimental_cursor")]
 const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
 
-// Pending inserts at the cursor's gap. The buffer holds the current leaf's
-// entries before the gap followed by the inserts, in ascending key order, so
-// the splice packs it (plus the rest of the leaf) into full leaves in one
-// parent update per flush instead of descending the tree per insert.
+// Which side of the gap a run's pending inserts fall on: `insert_before`
+// buffers ascending arrivals behind the gap, `insert_after` descending
+// arrivals in front of it. The two cannot share the ends-only buffer, so
+// switching direction splices the pending run first.
+#[cfg(feature = "experimental_cursor")]
+#[derive(Copy, Clone, PartialEq)]
+enum RunDirection {
+    Ascending,
+    Descending,
+}
+
+// Pending inserts at the cursor's gap, in ascending key order throughout. An
+// ascending run's buffer holds the current leaf's entries before the gap and
+// then the inserts, appended in arrival order; a descending run's holds only
+// the inserts, prepended in arrival order, and the leaf's entries join at
+// the flush. Either way the splice packs the buffer plus the rest of the
+// leaf into full leaves in one parent update per flush instead of descending
+// the tree per insert.
 //
 // While a run is open the tree is never mutated and the cursor position never
 // moves, so the position's path stays valid until the splice.
 #[cfg(feature = "experimental_cursor")]
 struct InsertRun {
+    direction: RunDirection,
     // Key of the entry after the gap when the run opened; None when the gap
     // is at the end of the tree.
-    upper_key: Option<Vec<u8>>,
+    opening_next_key: Option<Vec<u8>>,
     // Greatest key at or before the gap: the last insert or, before any
     // insert, the entry preceding the gap; None at the start of the tree.
     // Inserts must sort strictly above it.
@@ -367,15 +382,31 @@ struct InsertRun {
 #[cfg(feature = "experimental_cursor")]
 impl InsertRun {
     // The buffered entry nearest the gap on the entry-before side, if any:
-    // a pending insert or an entry copied from the leaf's head.
+    // a pending insert or an entry copied from the leaf's head. A descending
+    // run buffers nothing on that side; the predecessor stays in the leaf.
     fn buffered_previous(&self) -> Option<(&[u8], &[u8])> {
-        self.entries.back()
+        match self.direction {
+            RunDirection::Ascending => self.entries.back(),
+            RunDirection::Descending => None,
+        }
     }
 
-    // Smallest key at or after the gap: the entry following the gap when the
-    // run opened. Inserts must sort strictly below it.
+    // The buffered entry nearest the gap on the entry-after side, if any:
+    // the most recent pending insert. An ascending run buffers nothing on
+    // that side; the successor stays in the leaf.
+    fn buffered_next(&self) -> Option<(&[u8], &[u8])> {
+        match self.direction {
+            RunDirection::Ascending => None,
+            RunDirection::Descending => self.entries.front(),
+        }
+    }
+
+    // Smallest key at or after the gap: the last `insert_after` or, before
+    // any, the entry following the gap. Inserts must sort strictly below it.
     fn next_key(&self) -> Option<&[u8]> {
-        self.upper_key.as_deref()
+        self.buffered_next()
+            .map(|(key, _)| key)
+            .or(self.opening_next_key.as_deref())
     }
 
     // True unless `key` sorts strictly between the gap's live bounds.
@@ -1303,9 +1334,7 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
         self.check_not_poisoned()?;
         assert!(self.state.removed_indexes.is_empty());
         assert!(self.state.leaf_run_rewrite.is_none());
-        if self.state.insert_run.is_none() {
-            self.open_insert_run()?;
-        }
+        self.ensure_insert_run(RunDirection::Ascending)?;
         let run = self.state.insert_run.as_mut().unwrap();
         if run.rejects::<K>(key) {
             // A run opened just for a rejected key holds nothing; drop it
@@ -1316,7 +1345,7 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
             }
             return Ok(false);
         }
-        run.entries.push(key, value);
+        run.entries.push_back(key, value);
         run.previous_key = Some(key.to_vec());
         run.inserted_pairs += 1;
         if run.entries.total_bytes() >= INSERT_FLUSH_BYTES {
@@ -1325,27 +1354,75 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
         Ok(true)
     }
 
+    /// Buffers `key`/`value` for insertion into the gap, leaving the gap
+    /// before the new entry. Returns false, leaving the tree and any pending
+    /// inserts unchanged, unless `key` sorts strictly between the entries
+    /// adjacent to the gap.
+    pub(super) fn insert_after(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.check_not_poisoned()?;
+        assert!(self.state.removed_indexes.is_empty());
+        assert!(self.state.leaf_run_rewrite.is_none());
+        self.ensure_insert_run(RunDirection::Descending)?;
+        let run = self.state.insert_run.as_mut().unwrap();
+        if run.rejects::<K>(key) {
+            // A run opened just for a rejected key holds nothing; drop it
+            // again, so rejection never leaves an open run behind to trip
+            // operations that require no pending inserts.
+            if run.inserted_pairs == 0 {
+                self.state.insert_run = None;
+            }
+            return Ok(false);
+        }
+        run.entries.push_front(key, value);
+        run.inserted_pairs += 1;
+        if run.entries.total_bytes() >= INSERT_FLUSH_BYTES {
+            self.flush_insert_run(true)?;
+        }
+        Ok(true)
+    }
+
+    // Opens a run in `direction` if none is open, splicing a pending run on
+    // the gap's other side first: the two directions cannot share the
+    // ends-only buffer.
+    fn ensure_insert_run(&mut self, direction: RunDirection) -> Result {
+        if let Some(run) = &self.state.insert_run {
+            if run.direction == direction {
+                return Ok(());
+            }
+            self.flush_insert_run(true)?;
+        }
+        if self.state.insert_run.is_none() {
+            self.open_insert_run(direction)?;
+        }
+        Ok(())
+    }
+
     // Captures the gap's neighbor keys and the current leaf's entries before
     // the gap. The peeks first settle a gap at the edge of two leaves on the
     // later leaf and then back on the earlier one, so afterward the gap's
     // remaining predecessors all sit in the current leaf before `position`,
     // and its successors are `position..` of the current leaf plus every
     // later leaf.
-    fn open_insert_run(&mut self) -> Result {
+    fn open_insert_run(&mut self, direction: RunDirection) -> Result {
         assert!(self.state.insert_run.is_none());
-        let upper_key = self.peek_next()?.map(|entry| entry.key_bytes().to_vec());
+        let opening_next_key = self.peek_next()?.map(|entry| entry.key_bytes().to_vec());
         let previous_key = self.peek_prev()?.map(|entry| entry.key_bytes().to_vec());
         let mut entries = OwnedEntryBuffer::default();
-        if let Some(position) = &self.state.position {
+        // A descending run's buffer only ever grows at the front, so the
+        // leaf's entries before the gap join at the flush instead of here.
+        if direction == RunDirection::Ascending
+            && let Some(position) = &self.state.position
+        {
             let accessor = LeafAccessor::new(
                 position.leaf.page.memory(),
                 K::fixed_width(),
                 V::fixed_width(),
             );
-            entries.extend_from_leaf_range(&accessor, 0..position.leaf.position);
+            entries.extend_from_leaf_range(&accessor, 0..position.leaf.position, true);
         }
         self.state.insert_run = Some(Box::new(InsertRun {
-            upper_key,
+            direction,
+            opening_next_key,
             previous_key,
             entries,
             inserted_pairs: 0,
@@ -1369,18 +1446,29 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
             // remains valid.
             return Ok(());
         }
-        let resume_key = run
-            .previous_key
-            .expect("a run with inserts records the last inserted key");
+        // The gap sits between the pending inserts on its two sides; resume
+        // on whichever side has one, at the same gap.
+        let resume_before = run.buffered_next().map(|(key, _)| key.to_vec());
+        let resume_after = run.previous_key;
+        let descending = run.direction == RunDirection::Descending;
         let mut entries = run.entries;
         let replaced = if let Some(position) = self.state.position.take() {
-            // The rest of the current leaf follows every pending insert.
             let accessor = LeafAccessor::new(
                 position.leaf.page.memory(),
                 K::fixed_width(),
                 V::fixed_width(),
             );
-            entries.extend_from_leaf_range(&accessor, position.leaf.position..position.leaf.len);
+            // A descending run's buffer holds only the pending inserts; the
+            // leaf's entries before the gap join at the front here. The rest
+            // of the leaf follows every pending insert either way.
+            if descending {
+                entries.extend_from_leaf_range(&accessor, 0..position.leaf.position, false);
+            }
+            entries.extend_from_leaf_range(
+                &accessor,
+                position.leaf.position..position.leaf.len,
+                true,
+            );
             let CursorPosition { path, leaf } = position;
             let replaced_leaf = leaf.page.get_page_number();
             // The leaf is one of the pages the splice frees, so its page
@@ -1402,7 +1490,12 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
         }
         result?;
         if reseek {
-            self.seek_to(Position::After(&resume_key))?;
+            if let Some(key) = &resume_before {
+                self.seek_to(Position::Before(key))?;
+            } else {
+                let key = resume_after.expect("a run with inserts bounds its gap on some side");
+                self.seek_to(Position::After(&key))?;
+            }
         }
         Ok(())
     }
@@ -1591,31 +1684,34 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
         self.with_cursor(|cursor| cursor.seek_to(Position::from_upper_bound(bound)))
     }
 
-    /// The entry after the gap, including while inserts are pending: peeking
-    /// never splices them.
+    /// The entry after the gap, including while inserts are pending: the
+    /// most recent `insert_after` is returned without splicing.
     #[allow(clippy::type_complexity)]
     pub(crate) fn peek_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         if let Some(run) = &self.state.insert_run {
+            if let Some((key, value)) = run.buffered_next() {
+                return Ok(Some((
+                    AccessGuard::with_owned_value(key.to_vec()),
+                    AccessGuard::with_owned_value(value.to_vec()),
+                )));
+            }
             // The position must not move while a run is open, so the entry
-            // after the gap (the run's captured upper bound, unchanged since
-            // the tree is not mutated during a run) is re-read with a
-            // detached read-only cursor.
-            let Some(upper_key) = &run.upper_key else {
+            // after the gap (the run's opening next key, unchanged since the
+            // tree is not mutated during a run) is re-read with a detached
+            // read-only cursor.
+            let Some(next_key) = &run.opening_next_key else {
                 return Ok(None);
             };
-            let header = self
-                .tree
-                .root
-                .expect("a captured upper bound implies a root");
+            let header = self.tree.root.expect("a captured next key implies a root");
             let mut cursor: Cursor<K, V> = Cursor::new(
                 header.root,
                 self.tree.page_allocator.resolver(),
                 PageHint::None,
             );
-            cursor.seek_to(Position::Before(upper_key))?;
+            cursor.seek_to(Position::Before(next_key))?;
             let entry = cursor
                 .next()?
-                .expect("the captured upper bound is in the tree");
+                .expect("the captured next key is in the tree");
             return Ok(Some(entry_guards(entry)));
         }
         self.with_cursor(|cursor| Ok(cursor.peek_next()?.map(|entry| entry.to_guards())))
@@ -1624,19 +1720,32 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// The entry before the gap, including while inserts are pending: the
     /// most recent insert is returned without splicing.
     ///
-    /// While a run is open, its buffer holds every predecessor the gap has in
-    /// the current leaf (the normalizing peeks settled the position on the
-    /// earlier of two leaves sharing the gap), so no buffered entry before
-    /// the gap means the gap is at the start of the tree.
+    /// While a run is open, the gap's predecessors in the current leaf are
+    /// either buffered (ascending runs) or untouched at the position
+    /// (descending runs); the normalizing peeks settled the position on the
+    /// earlier of two leaves sharing the gap, so finding none on either path
+    /// means the gap is at the start of the tree.
     #[allow(clippy::type_complexity)]
     pub(crate) fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         if let Some(run) = &self.state.insert_run {
-            return Ok(run.buffered_previous().map(|(key, value)| {
-                (
+            if let Some((key, value)) = run.buffered_previous() {
+                return Ok(Some((
                     AccessGuard::with_owned_value(key.to_vec()),
                     AccessGuard::with_owned_value(value.to_vec()),
-                )
-            }));
+                )));
+            }
+            // A descending run's buffer holds only entries after the gap;
+            // the predecessor still sits in the current leaf, untouched
+            // while the run is open. No such entry means the gap is at the
+            // start of the tree.
+            if run.direction == RunDirection::Descending
+                && let Some(position) = &self.state.position
+                && position.leaf.position > 0
+            {
+                let entry = entry_ref::<K, V>(&position.leaf, position.leaf.position - 1);
+                return Ok(Some(entry.to_guards()));
+            }
+            return Ok(None);
         }
         self.with_cursor(|cursor| Ok(cursor.peek_prev()?.map(|entry| entry.to_guards())))
     }
@@ -1644,6 +1753,11 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// See [`CursorMut::insert_before`].
     pub(crate) fn insert_before(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
         self.with_cursor(|cursor| cursor.insert_before(key, value))
+    }
+
+    /// See [`CursorMut::insert_after`].
+    pub(crate) fn insert_after(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.with_cursor(|cursor| cursor.insert_after(key, value))
     }
 
     /// Splices any pending inserts into the tree, consuming the position.
@@ -2253,6 +2367,12 @@ mod tests {
                 .unwrap()
         }
 
+        fn insert_after(cursor: &mut CursorMut<'_, '_, u64, u64>, key: u64, value: u64) -> bool {
+            cursor
+                .insert_after(u64::as_bytes(&key).as_ref(), u64::as_bytes(&value).as_ref())
+                .unwrap()
+        }
+
         fn scan(root: Option<BtreeHeader>, page_allocator: &PageAllocator) -> Vec<(u64, u64)> {
             let Some(header) = root else {
                 return vec![];
@@ -2556,6 +2676,104 @@ mod tests {
             drop(cursor);
 
             let expected = [10, 20, 25, 26, 30].map(|key| (key, key));
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        // A run of insert_after calls arrives descending: each insert becomes
+        // the gap's new successor, mirroring insert_before's ascending runs.
+        #[test]
+        fn insert_run_descending_from_empty() {
+            for flush_every in [1, 3, 64] {
+                let page_allocator = test_page_allocator();
+                let mut root = None;
+                let mut freed = vec![];
+                let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+                let mut cursor: CursorMut<'_, '_, u64, u64> =
+                    CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+                cursor.seek_to(Position::Start).unwrap();
+                for key in (0..2000).rev() {
+                    assert!(insert_after(&mut cursor, key, key * 3));
+                    if key % flush_every == 0 {
+                        cursor.flush_insert_run(true).unwrap();
+                    }
+                }
+                cursor.flush_insert_run(true).unwrap();
+                drop(cursor);
+
+                let expected: Vec<_> = (0..2000).map(|key| (key, key * 3)).collect();
+                assert_tree(root, &page_allocator, &expected);
+            }
+        }
+
+        // Both piles fill in one run: insert_before advances the gap's lower
+        // bound while insert_after lowers its upper bound, and the flush
+        // splices them around the same gap.
+        #[test]
+        fn insert_run_mixed_directions() {
+            let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[10, 20, 30]);
+            let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
+            let mut freed = vec![];
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&20).as_ref()))
+                .unwrap();
+            assert!(insert(&mut cursor, 21, 21));
+            assert!(insert_after(&mut cursor, 29, 29));
+            assert!(insert_after(&mut cursor, 25, 25));
+            assert!(insert(&mut cursor, 22, 22));
+            // The live bounds are the piles' innermost pending inserts.
+            assert!(!insert(&mut cursor, 25, 25));
+            assert!(!insert_after(&mut cursor, 22, 22));
+            assert!(!insert_after(&mut cursor, 25, 25));
+            assert!(insert(&mut cursor, 24, 24));
+            // A mid-run flush resumes at the same gap, between the piles.
+            cursor.flush_insert_run(true).unwrap();
+            assert_eq!(cursor.peek_prev().unwrap().unwrap().key(), 24);
+            assert_eq!(cursor.peek_next().unwrap().unwrap().key(), 25);
+            drop(cursor);
+
+            let expected = [10, 20, 21, 22, 24, 25, 29, 30].map(|key| (key, key));
+            assert_tree(root, &page_allocator, &expected);
+        }
+
+        #[test]
+        fn insert_run_after_rejects_unordered_keys() {
+            let (page_allocator, root_page, allocated) = leaf_root_with_entries(&[10, 20, 30]);
+            let mut root = Some(BtreeHeader::new(root_page, DEFERRED, 3));
+            let mut freed = vec![];
+            let mut cursor: CursorMut<'_, '_, u64, u64> =
+                CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&20).as_ref()))
+                .unwrap();
+            // Equal to the previous entry, below it, equal to the next entry,
+            // and above it are all rejected.
+            assert!(!insert_after(&mut cursor, 20, 20));
+            assert!(!insert_after(&mut cursor, 15, 15));
+            assert!(!insert_after(&mut cursor, 30, 30));
+            assert!(!insert_after(&mut cursor, 35, 35));
+            // Rejections that leave no pending inserts also drop the run they
+            // opened; seek_to asserts exactly that.
+            assert!(cursor.state.insert_run.is_none());
+            cursor
+                .seek_to(Position::After(u64::as_bytes(&20).as_ref()))
+                .unwrap();
+            assert!(insert_after(&mut cursor, 25, 25));
+            // Inserts must also stay below the pending insert.
+            assert!(!insert_after(&mut cursor, 25, 25));
+            assert!(!insert_after(&mut cursor, 26, 26));
+            assert!(cursor.state.insert_run.is_some());
+            // Switching direction splices the pending insert first, so this
+            // rejection sees it as the gap's upper bound in the tree, and
+            // the rejected run is dropped again.
+            assert!(!insert(&mut cursor, 25, 25));
+            assert!(cursor.state.insert_run.is_none());
+            assert!(insert(&mut cursor, 21, 21));
+            cursor.flush_insert_run(false).unwrap();
+            drop(cursor);
+
+            let expected = [10, 20, 21, 25, 30].map(|key| (key, key));
             assert_tree(root, &page_allocator, &expected);
         }
     }
