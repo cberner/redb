@@ -451,9 +451,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         );
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             &mut self.local_freed,
-            self.allocated_pages.clone(),
+            &self.allocated_pages,
         );
         let result = operation.insert(key, value);
         merge_freed_pages(&self.freed_pages, &mut self.local_freed);
@@ -474,9 +474,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         let fake_allocated_pages = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
         let mut operation = MutateHelper::<K, V>::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             fake_freed_pages.as_mut(),
-            fake_allocated_pages,
+            &fake_allocated_pages,
         );
         operation.insert_inplace(key, value)?;
         assert!(fake_freed_pages.is_empty());
@@ -508,9 +508,9 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         trace!("Btree(root={:?}): Deleting {:?}", &self.root, key);
         let mut operation: MutateHelper<'_, '_, K, V> = MutateHelper::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             &mut self.local_freed,
-            self.allocated_pages.clone(),
+            &self.allocated_pages,
         );
         let result = operation.delete(key);
         merge_freed_pages(&self.freed_pages, &mut self.local_freed);
@@ -875,9 +875,9 @@ impl<K: Key + 'static, V: MutInPlaceValue + 'static> BtreeMut<K, V> {
         V::initialize(&mut value);
         let mut operation = MutateHelper::<K, V>::new(
             &mut self.root,
-            self.page_allocator.clone(),
+            &self.page_allocator,
             &mut self.local_freed,
-            self.allocated_pages.clone(),
+            &self.allocated_pages,
         );
         let result = operation.insert(key, &V::from_bytes(&value));
         merge_freed_pages(&self.freed_pages, &mut self.local_freed);

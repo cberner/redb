@@ -1398,9 +1398,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         assert!(self.state.insert_run.is_none());
         MutateHelper::new(
             &mut *self.root,
-            (*self.page_allocator).clone(),
+            self.page_allocator,
             &mut *self.freed,
-            Arc::clone(self.allocated),
+            self.allocated,
         )
     }
 
@@ -2290,9 +2290,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
                 .key();
             let mut helper: MutateHelper<'_, '_, K, V> = MutateHelper::new(
                 &mut *self.tree.root,
-                self.tree.page_allocator.clone(),
+                &self.tree.page_allocator,
                 &mut self.tree.freed,
-                Arc::clone(&self.tree.allocated),
+                &self.tree.allocated,
             );
             // In-place deletion must be disabled: the other end's pending
             // snapshot and any deferred-removal guards handed to the caller
