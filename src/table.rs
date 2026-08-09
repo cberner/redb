@@ -1501,6 +1501,61 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
         }
     }
 
+    /// Moves the cursor past the entry after the gap, returning that entry.
+    ///
+    /// Returns `None`, and does not move, if the gap is at the end of the
+    /// table. Any pending inserts are applied first: moving the cursor
+    /// closes the buffered run.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::next`]. The cursor is not
+    /// an [`Iterator`], since every step can report a storage error; use
+    /// [`ReadableTable::range`] for iteration.
+    #[allow(clippy::should_implement_trait, clippy::type_complexity)]
+    pub fn next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        // Applied separately from the move so that a splice failure, which
+        // can poison, is told apart from a failed move, which only leaves
+        // the position unreliable.
+        if let Err(err) = self.inner.apply_pending_inserts() {
+            return Err(self.latch_error(err));
+        }
+        match self.inner.next() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                self.errored = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Moves the cursor before the entry preceding the gap, returning that
+    /// entry.
+    ///
+    /// Returns `None`, and does not move, if the gap is at the start of the
+    /// table. Any pending inserts are applied first: moving the cursor
+    /// closes the buffered run.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::prev`].
+    #[allow(clippy::type_complexity)]
+    pub fn prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        // Applied separately from the move so that a splice failure, which
+        // can poison, is told apart from a failed move, which only leaves
+        // the position unreliable.
+        if let Err(err) = self.inner.apply_pending_inserts() {
+            return Err(self.latch_error(err));
+        }
+        match self.inner.prev() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                self.errored = true;
+                Err(err)
+            }
+        }
+    }
+
     /// Inserts a new entry into the gap that the cursor is pointing at. After
     /// the insertion, the cursor points at the gap after the newly inserted
     /// entry.

@@ -812,3 +812,125 @@ fn insert_after_unordered_keys_rejected() {
 
     assert_u64_table_contents(&db, &[(10, 10), (20, 20), (25, 25), (30, 30)]);
 }
+
+#[test]
+fn moves_walk_both_directions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 20, 30] {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        let step = |cursor: &mut redb::CursorMut<'_, u64, u64>| {
+            cursor.next().unwrap().map(|(k, v)| (k.value(), v.value()))
+        };
+        let step_back = |cursor: &mut redb::CursorMut<'_, u64, u64>| {
+            cursor.prev().unwrap().map(|(k, v)| (k.value(), v.value()))
+        };
+
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        assert_eq!(step(&mut cursor), Some((10, 70)));
+        assert_eq!(step(&mut cursor), Some((20, 140)));
+        assert_eq!(step(&mut cursor), Some((30, 210)));
+        // At the end of the table the cursor stays put
+        assert_eq!(step(&mut cursor), None);
+        assert_eq!(step_back(&mut cursor), Some((30, 210)));
+        assert_eq!(step_back(&mut cursor), Some((20, 140)));
+        assert_eq!(step_back(&mut cursor), Some((10, 70)));
+        assert_eq!(step_back(&mut cursor), None);
+        // A move over an entry is undone by the opposite move
+        assert_eq!(step(&mut cursor), Some((10, 70)));
+        assert_eq!(step_back(&mut cursor), Some((10, 70)));
+        cursor.close().unwrap();
+    }
+    txn.abort().unwrap();
+}
+
+// Moving splices the pending inserts and continues from the same gap, so
+// entries just inserted are walked like entries the table already had.
+#[test]
+fn moves_apply_pending_inserts() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 30] {
+            table.insert(i, &i).unwrap();
+        }
+        let mut cursor = table.upper_bound_mut(Bound::Included(&10)).unwrap();
+        // The gap is between 10 and 30.
+        cursor.insert_before(20, &20).unwrap();
+        assert_eq!(cursor.next().unwrap().unwrap().0.value(), 30);
+        assert_eq!(cursor.prev().unwrap().unwrap().0.value(), 30);
+        // The insert is in the tree now, on the walked path
+        assert_eq!(cursor.prev().unwrap().unwrap().0.value(), 20);
+        assert_eq!(cursor.prev().unwrap().unwrap().0.value(), 10);
+        assert!(cursor.prev().unwrap().is_none());
+        // A pending descending run is spliced by prev() the same way
+        cursor.insert_after(5, &5).unwrap();
+        cursor.insert_after(3, &3).unwrap();
+        assert!(cursor.prev().unwrap().is_none());
+        assert_eq!(cursor.next().unwrap().unwrap().0.value(), 3);
+        assert_eq!(cursor.next().unwrap().unwrap().0.value(), 5);
+        assert_eq!(cursor.next().unwrap().unwrap().0.value(), 10);
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[(3, 3), (5, 5), (10, 10), (20, 20), (30, 30)]);
+}
+
+#[test]
+fn moves_cross_leaf_boundaries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..2_000u64 {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        for i in 0..2_000u64 {
+            let (k, v) = cursor.next().unwrap().unwrap();
+            assert_eq!((k.value(), v.value()), (i, i * 7));
+        }
+        assert!(cursor.next().unwrap().is_none());
+        for i in (0..2_000u64).rev() {
+            let (k, v) = cursor.prev().unwrap().unwrap();
+            assert_eq!((k.value(), v.value()), (i, i * 7));
+        }
+        assert!(cursor.prev().unwrap().is_none());
+        cursor.close().unwrap();
+    }
+    txn.abort().unwrap();
+}
+
+#[test]
+fn moves_on_empty_table_and_at_edges() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        assert!(cursor.next().unwrap().is_none());
+        assert!(cursor.prev().unwrap().is_none());
+        // A move that finds nothing still applies the pending inserts
+        cursor.insert_before(1, &1).unwrap();
+        assert!(cursor.next().unwrap().is_none());
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 1);
+        assert_eq!(cursor.prev().unwrap().unwrap().0.value(), 1);
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[(1, 1)]);
+}

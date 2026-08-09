@@ -127,6 +127,10 @@ pub(crate) enum FuzzOperation {
         // Walk down from the gap with insert_after instead of up with
         // insert_before
         descending: bool,
+        // Steps to move the cursor over the surrounding entries afterward,
+        // splicing the pending inserts: next() for descending runs (over the
+        // inserts just made), prev() for ascending ones.
+        moves: U64Between<0, 8>,
     },
     Remove {
         key: BoundedU64<KEY_SPACE>,

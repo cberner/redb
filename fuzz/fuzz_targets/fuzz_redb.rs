@@ -530,6 +530,7 @@ fn handle_table_op(
             stride,
             value_size,
             descending,
+            moves,
         } => {
             let start = start_key.value;
             let stride = stride.value;
@@ -573,6 +574,49 @@ fn handle_table_op(
                 let last = keys.last().copied().or(predecessor);
                 assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), last);
                 assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
+            }
+            // Moving splices the pending inserts and walks the tree from the
+            // same gap, checked against the reference merged with them: a
+            // descending run's inserts sit after the gap, an ascending run's
+            // before it.
+            let mut merged = reference.clone();
+            for key in &keys {
+                merged.insert(*key, value_size);
+            }
+            if *descending {
+                let lower = predecessor.map_or(Bound::Unbounded, Bound::Excluded);
+                let mut walk = merged.range((lower, Bound::Unbounded));
+                for _ in 0..moves.value {
+                    match (cursor.next()?, walk.next()) {
+                        (Some((key, value)), Some((expected_key, expected_len))) => {
+                            assert_eq!(key.value(), *expected_key);
+                            assert_eq!(value.value().len(), *expected_len);
+                        }
+                        (None, None) => break,
+                        (cursor_entry, walk_entry) => panic!(
+                            "cursor yielded {:?}, reference {:?}",
+                            cursor_entry.map(|(key, _)| key.value()),
+                            walk_entry.map(|(key, _)| key)
+                        ),
+                    }
+                }
+            } else {
+                let upper = successor.map_or(Bound::Unbounded, Bound::Excluded);
+                let mut walk = merged.range((Bound::Unbounded, upper)).rev();
+                for _ in 0..moves.value {
+                    match (cursor.prev()?, walk.next()) {
+                        (Some((key, value)), Some((expected_key, expected_len))) => {
+                            assert_eq!(key.value(), *expected_key);
+                            assert_eq!(value.value().len(), *expected_len);
+                        }
+                        (None, None) => break,
+                        (cursor_entry, walk_entry) => panic!(
+                            "cursor yielded {:?}, reference {:?}",
+                            cursor_entry.map(|(key, _)| key.value()),
+                            walk_entry.map(|(key, _)| key)
+                        ),
+                    }
+                }
             }
             cursor.close()?;
             for key in keys {

@@ -17,6 +17,9 @@
   library's `BTreeMap` cursors, are behind the `experimental_cursor` feature flag (which enables
   `experimental-api-5`); the split lets the trait surface stabilize before the cursor's own
   methods settle.
+* Add `next()` and `prev()` to the experimental `CursorMut`, moving the cursor over the entries
+  around its gap like their read-only `Cursor` counterparts. Pending buffered inserts are applied
+  before the cursor moves.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
