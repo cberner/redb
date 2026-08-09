@@ -1,7 +1,8 @@
 #![cfg(feature = "experimental_cursor")]
 
 use redb::{
-    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
+    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError,
+    TableDefinition, TransactionError,
 };
 use std::ops::Bound;
 
@@ -608,7 +609,7 @@ fn read_cursor_sees_uncommitted_writes() {
 }
 
 #[test]
-fn read_cursor_keeps_transaction_alive() {
+fn read_cursor_outlives_read_transaction() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     populate_u64_table(&db, (0..10).map(|key| (key, key)));
@@ -616,15 +617,47 @@ fn read_cursor_keeps_transaction_alive() {
     let txn = db.begin_read().unwrap();
     let table = txn.open_table(U64_TABLE).unwrap();
     let mut cursor = table.lower_bound(Bound::Included(&3)).unwrap();
-    // The ReadOnlyTable cursor is 'static: it stays usable after the table
-    // (and the guards it yields after the cursor) are dropped.
-    drop(table);
+    // The table keeps the transaction alive, so the cursor and its guards
+    // stay usable after the ReadTransaction is dropped.
     drop(txn);
     let (key, _) = cursor.next().unwrap().unwrap();
     assert_eq!(key.value(), 3);
-    let entry = cursor.peek_next().unwrap().unwrap();
-    drop(cursor);
-    assert_eq!(entry.0.value(), 4);
+    assert_eq!(peeked_key(cursor.peek_next().unwrap()), Some(4));
+}
+
+#[test]
+fn read_cursor_keeps_transaction_alive() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, (0..1_000).map(|key| (key, key)));
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(U64_TABLE).unwrap();
+    let mut cursor = table.lower_bound(Bound::Included(&5)).unwrap();
+    assert_eq!(peeked_key(cursor.next().unwrap()), Some(5));
+
+    // The cursor has no Drop impl, so its borrow of the table ends at the last
+    // use above, and the table can be dropped while the cursor still holds
+    // pages. Only the cursor's own transaction guard keeps the read
+    // transaction registered from here on.
+    drop(table);
+    assert!(matches!(
+        txn.close(),
+        Err(TransactionError::ReadTransactionStillInUse(_))
+    ));
+
+    // Concurrent writers must not reclaim the pages the cursor holds
+    for _ in 0..10 {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            for key in 0..1_000 {
+                table.insert(key, &(key + 1)).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+    // `cursor` is dropped here, without being used again
 }
 
 #[test]
