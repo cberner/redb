@@ -25,6 +25,9 @@
   nothing yet, so building with `default-features = false` still links against the standard
   library. Under the `experimental-api-5` feature flag, which collects the changes planned for
   redb 5, turning it off is instead a compile error until `no_std` is supported.
+* Improve write performance when tables of a single `WriteTransaction` are modified concurrently
+  from multiple threads. Writes to separate tables previously serialized on internal locks and
+  could be slower than writing from a single thread; they now scale with the number of threads.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
 * Add an experimental cursor API, behind the `experimental_cursor` feature flag:

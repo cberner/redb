@@ -202,8 +202,9 @@ pub(super) struct PagedCachedFile {
     page_size: u64,
     // Dynamic cache partitioning.  Three invariants:
     //
-    // 1. The write buffer NEVER exceeds 50% of max_cache_size.
-    //    Pages beyond this limit are flushed to disk immediately.
+    // 1. The write buffer is held at or below 50% of max_cache_size.
+    //    Pages beyond this limit are flushed to disk immediately, best
+    //    effort -- see the eviction in write().
     // 2. The write buffer evicts from the read cache only when
     //    write < 50% AND read > 50% (fairness).
     // 3. write + read never exceeds max_cache_size.
@@ -234,8 +235,12 @@ pub(super) struct PagedCachedFile {
     #[cfg(feature = "cache_metrics")]
     evictions: AtomicU64,
     read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
+    // Striped by page offset, like read_cache, so that concurrent writers
+    // (tables of one WriteTransaction used from different threads) do not
+    // contend on a single lock. Each stripe is individually Arc'd because
+    // outstanding WritablePages return their buffer to the stripe on drop.
     // TODO: maybe move this cache to WriteTransaction?
-    write_buffer: Arc<Mutex<LRUWriteCache>>,
+    write_buffer: Vec<Arc<Mutex<LRUWriteCache>>>,
 }
 
 impl PagedCachedFile {
@@ -246,6 +251,9 @@ impl PagedCachedFile {
     ) -> Result<Self, DatabaseError> {
         let read_cache = (0..Self::lock_stripes())
             .map(|_| RwLock::new(LRUCache::new()))
+            .collect();
+        let write_buffer = (0..Self::lock_stripes())
+            .map(|_| Arc::new(Mutex::new(LRUWriteCache::new())))
             .collect();
 
         Ok(Self {
@@ -266,8 +274,13 @@ impl PagedCachedFile {
             #[cfg(feature = "cache_metrics")]
             evictions: AtomicU64::default(),
             read_cache,
-            write_buffer: Arc::new(Mutex::new(LRUWriteCache::new())),
+            write_buffer,
         })
+    }
+
+    fn write_buffer_stripe(&self, offset: u64) -> &Arc<Mutex<LRUWriteCache>> {
+        let stripe: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+        &self.write_buffer[stripe]
     }
 
     #[allow(clippy::unused_self)]
@@ -322,8 +335,8 @@ impl PagedCachedFile {
     // Evict entries from the read cache to free at least `bytes_needed` bytes.
     // Iterates through cache stripes and pops lowest-priority entries.
     //
-    // Caller must hold the write_buffer mutex to maintain the lock ordering
-    // invariant (write_buffer lock is always acquired before read_cache locks).
+    // Caller must hold a write buffer stripe mutex to maintain the lock ordering
+    // invariant (write buffer stripe locks are always acquired before read_cache locks).
     fn evict_from_read_cache(
         &self,
         bytes_needed: usize,
@@ -354,36 +367,35 @@ impl PagedCachedFile {
     }
 
     fn flush_write_buffer(&self) -> Result {
-        let mut write_buffer = self.write_buffer.lock().unwrap();
+        for stripe in &self.write_buffer {
+            let mut write_buffer = stripe.lock().unwrap();
 
-        for (offset, buffer) in write_buffer.cache.iter() {
-            self.file.write(*offset, buffer.as_ref().unwrap())?;
-        }
-        // Transfer flushed pages into the read cache so they are available
-        // for subsequent reads without a file I/O.  The write buffer is being
-        // drained, so the total check only considers the read cache size.
-        for (offset, buffer) in write_buffer.cache.iter_mut() {
-            let buffer = buffer.take().unwrap();
-            let cache_size = self
-                .read_cache_bytes
-                .fetch_add(buffer.len(), Ordering::AcqRel);
-
-            if cache_size + buffer.len() <= self.max_cache_size {
-                let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
-                let mut lock = self.read_cache[cache_slot].write().unwrap();
-                if let Some(replaced) = lock.insert(*offset, buffer) {
-                    // A race could cause us to replace an existing buffer
-                    self.read_cache_bytes
-                        .fetch_sub(replaced.len(), Ordering::AcqRel);
-                }
-            } else {
-                self.read_cache_bytes
-                    .fetch_sub(buffer.len(), Ordering::AcqRel);
-                break;
+            for (offset, buffer) in write_buffer.cache.iter() {
+                self.file.write(*offset, buffer.as_ref().unwrap())?;
             }
+            // Transfer flushed pages into the read cache so they are available
+            // for subsequent reads without a file I/O.  The write buffer is being
+            // drained, so the total check only considers the read cache size.
+            for (offset, buffer) in write_buffer.cache.iter_mut() {
+                let buffer = buffer.take().unwrap();
+                let len = buffer.len();
+                let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
+
+                if cache_size + len <= self.max_cache_size {
+                    let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+                    let mut lock = self.read_cache[cache_slot].write().unwrap();
+                    if let Some(replaced) = lock.insert(*offset, buffer) {
+                        // A race could cause us to replace an existing buffer
+                        self.read_cache_bytes
+                            .fetch_sub(replaced.len(), Ordering::AcqRel);
+                    }
+                } else {
+                    self.read_cache_bytes.fetch_sub(len, Ordering::AcqRel);
+                }
+                self.write_buffer_bytes.fetch_sub(len, Ordering::AcqRel);
+            }
+            write_buffer.clear();
         }
-        self.write_buffer_bytes.store(0, Ordering::Release);
-        write_buffer.clear();
 
         Ok(())
     }
@@ -462,7 +474,7 @@ impl PagedCachedFile {
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
         if !matches!(hint, PageHint::Clean) {
-            let lock = self.write_buffer.lock().unwrap();
+            let lock = self.write_buffer_stripe(offset).lock().unwrap();
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -522,7 +534,12 @@ impl PagedCachedFile {
     // Discard pending writes to the given range
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
-        if let Some(removed) = self.write_buffer.lock().unwrap().remove(offset) {
+        if let Some(removed) = self
+            .write_buffer_stripe(offset)
+            .lock()
+            .unwrap()
+            .remove(offset)
+        {
             self.write_buffer_bytes
                 .fetch_sub(removed.len(), Ordering::Release);
         }
@@ -551,11 +568,43 @@ impl PagedCachedFile {
         }
     }
 
+    // Writes lowest-priority pages from `stripe` to the backend until `bytes_needed` bytes have
+    // been flushed, or the stripe runs out of evictable pages. Returns the bytes flushed, which
+    // can overshoot `bytes_needed` by up to a page.
+    fn flush_lowest_priority(
+        &self,
+        stripe: &mut LRUWriteCache,
+        bytes_needed: usize,
+    ) -> Result<usize> {
+        let mut flushed = 0;
+        while flushed < bytes_needed {
+            if let Some((offset, buffer)) = stripe.pop_lowest_priority() {
+                let removed_len = buffer.len();
+                let result = self.file.write(offset, &buffer);
+                if result.is_err() {
+                    stripe.insert(offset, buffer);
+                }
+                result?;
+                self.write_buffer_bytes
+                    .fetch_sub(removed_len, Ordering::Release);
+                #[cfg(feature = "cache_metrics")]
+                {
+                    self.evictions.fetch_add(1, Ordering::Relaxed);
+                }
+                flushed += removed_len;
+            } else {
+                break;
+            }
+        }
+        Ok(flushed)
+    }
+
     // If overwrite is true, the page is initialized to zero
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
-        let mut lock = self.write_buffer.lock().unwrap();
+        let stripe = self.write_buffer_stripe(offset);
+        let mut lock = stripe.lock().unwrap();
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
@@ -584,30 +633,35 @@ impl PagedCachedFile {
             let mut write_bytes = previous + len;
             let half = self.max_cache_size / 2;
 
-            // Rule 1: write buffer NEVER exceeds 50%.  Flush excess to disk.
+            // Rule 1: hold the write buffer at or below 50%, flushing the
+            // excess to disk. The budget is global, so drain the stripe we
+            // already hold first, then cover the remainder from the other
+            // stripes. Those are acquired with try_lock: blocking on a second
+            // stripe could deadlock with a concurrent writer evicting toward
+            // this one. Eviction is therefore best effort -- a stripe another
+            // thread holds is skipped, and a page with an outstanding
+            // WritablePage can never be flushed -- so the buffer can briefly
+            // sit above the budget. `excess` is recomputed from the live total
+            // by every write(), so a later one flushes what this one could not,
+            // and a commit flushes every stripe regardless.
             if write_bytes > half {
-                let excess = write_bytes - half;
-                let mut flushed = 0;
-                while flushed < excess {
-                    if let Some((offset, buffer)) = lock.pop_lowest_priority() {
-                        let removed_len = buffer.len();
-                        let result = self.file.write(offset, &buffer);
-                        if result.is_err() {
-                            lock.insert(offset, buffer);
+                let mut excess = write_bytes - half;
+                excess = excess.saturating_sub(self.flush_lowest_priority(&mut lock, excess)?);
+                if excess > 0 {
+                    let own: usize = (offset % Self::lock_stripes()).try_into().unwrap();
+                    for i in 1..self.write_buffer.len() {
+                        let other = (own + i) % self.write_buffer.len();
+                        if let Ok(mut other_lock) = self.write_buffer[other].try_lock() {
+                            excess = excess.saturating_sub(
+                                self.flush_lowest_priority(&mut other_lock, excess)?,
+                            );
+                            if excess == 0 {
+                                break;
+                            }
                         }
-                        result?;
-                        self.write_buffer_bytes
-                            .fetch_sub(removed_len, Ordering::Release);
-                        #[cfg(feature = "cache_metrics")]
-                        {
-                            self.evictions.fetch_add(1, Ordering::Relaxed);
-                        }
-                        flushed += removed_len;
-                    } else {
-                        break;
                     }
                 }
-                write_bytes -= flushed;
+                write_bytes = self.write_buffer_bytes.load(Ordering::Acquire);
             }
 
             // Rules 2 + 3: after rule 1, write <= 50%.  If the total still
@@ -634,7 +688,7 @@ impl PagedCachedFile {
         #[cfg(feature = "cache_metrics")]
         self.writes_total.fetch_add(1, Ordering::AcqRel);
         Ok(WritablePage {
-            buffer: self.write_buffer.clone(),
+            buffer: stripe.clone(),
             offset,
             data,
         })
@@ -680,6 +734,39 @@ mod test {
         t2.join().unwrap();
         cached_file.invalidate_cache(0, 128);
         assert_eq!(cached_file.read_cache_bytes.load(Ordering::Acquire), 0);
+    }
+
+    // The write buffer's budget is global even though the buffer is striped: a writer whose own
+    // stripe has nothing evictable must flush pages from the other stripes.
+    #[test]
+    fn write_buffer_budget_enforced_across_stripes() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(4096).unwrap();
+        let page_size: usize = 128;
+        let max_cache_size = 1024;
+        let budget = max_cache_size / 2;
+        let cached_file =
+            PagedCachedFile::new(Box::new(backend), page_size as u64, max_cache_size).unwrap();
+
+        // Dirty twice as many pages as the write budget holds. Consecutive page offsets land in
+        // different stripes, so each over-budget write finds its own stripe empty and must cover
+        // the excess from the stripes holding the previously written pages.
+        for i in 0..8u64 {
+            let mut page = cached_file
+                .write(i * page_size as u64, page_size, true)
+                .unwrap();
+            page.mem_mut().fill(0xab);
+            drop(page);
+            assert!(cached_file.write_buffer_bytes.load(Ordering::Acquire) <= budget);
+        }
+
+        // Every page must read back intact, whether it was flushed to disk or is still buffered.
+        for i in 0..8u64 {
+            let data = cached_file
+                .read(i * page_size as u64, page_size, PageHint::None)
+                .unwrap();
+            assert!(data.iter().all(|&b| b == 0xab));
+        }
     }
 
     #[test]
