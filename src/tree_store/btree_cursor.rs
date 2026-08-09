@@ -1044,6 +1044,51 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(Some(self.record_removal_deferred(Direction::Previous)))
     }
 
+    /// Removes the entry after the gap, returning it with a copy of its key.
+    /// The mutation consumes the position: once the returned guards have
+    /// dropped, seeking to `Position::Before` the key restores the gap
+    /// between the removed entry's old neighbors.
+    ///
+    /// The returned guards must be dropped before mutating the tree again.
+    #[cfg(feature = "experimental_cursor")]
+    #[allow(clippy::type_complexity)]
+    pub(super) fn remove_next_taking_key(
+        &mut self,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.remove_taking_key(Direction::Next)
+    }
+
+    /// Removes the entry before the gap; see
+    /// [`remove_next_taking_key`](Self::remove_next_taking_key).
+    #[cfg(feature = "experimental_cursor")]
+    #[allow(clippy::type_complexity)]
+    pub(super) fn remove_prev_taking_key(
+        &mut self,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        self.remove_taking_key(Direction::Previous)
+    }
+
+    #[cfg(feature = "experimental_cursor")]
+    #[allow(clippy::type_complexity)]
+    fn remove_taking_key(
+        &mut self,
+        direction: Direction,
+    ) -> Result<Option<(Vec<u8>, AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
+        assert!(self.state.removed_indexes.is_empty());
+        if !self.ensure_has_entry(direction)? {
+            return Ok(None);
+        }
+        let position = self
+            .state
+            .position
+            .take()
+            .expect("cursor must be positioned");
+        let index = position.entry_index(direction);
+        let key = key_data::<K, V>(&position.leaf, index);
+        let entry = self.remove_leaf_entry(position.leaf.page, position.path, index)?;
+        Ok(entry.map(|(key_guard, value_guard)| (key, key_guard, value_guard)))
+    }
+
     fn record_removal(&mut self, direction: Direction) -> usize {
         let position = self
             .state
@@ -1706,6 +1751,11 @@ fn entry_guards<K: Key + 'static, V: Value + 'static>(
 pub(crate) struct BtreeCursorMut<'a, K: Key + 'static, V: Value + 'static> {
     tree: CursorTree<'a, K, V>,
     state: CursorState,
+    // Key of the last removed entry, whose removal consumed the position.
+    // The next operation reseeks to the gap the key names; the reseek must
+    // wait, since an in-place removal is applied only when the returned
+    // value guard drops.
+    pending_reseek: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "experimental_cursor")]
@@ -1719,23 +1769,37 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
         Self {
             tree: CursorTree::new(root, page_allocator, master_free_list, allocated),
             state: CursorState::default(),
+            pending_reseek: None,
         }
     }
 
     /// Positions the cursor at the gap before the first key `bound` admits.
     pub(crate) fn seek_lower_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        self.pending_reseek = None;
         self.with_cursor(|cursor| cursor.seek_to(Position::from_lower_bound(bound)))
     }
 
     /// Positions the cursor at the gap after the last key `bound` admits.
     pub(crate) fn seek_upper_bound(&mut self, bound: Bound<&[u8]>) -> Result {
+        self.pending_reseek = None;
         self.with_cursor(|cursor| cursor.seek_to(Position::from_upper_bound(bound)))
+    }
+
+    // Restores the gap a removal consumed: the removed key, now absent from
+    // the tree, names the gap between its old neighbors. Every operation
+    // except the seeks, which position anew, settles this first.
+    fn settle_reseek(&mut self) -> Result {
+        let Some(key) = self.pending_reseek.take() else {
+            return Ok(());
+        };
+        self.with_cursor(|cursor| cursor.seek_to(Position::Before(&key)))
     }
 
     /// The entry after the gap, including while inserts are pending: the
     /// most recent `insert_after` is returned without splicing.
     #[allow(clippy::type_complexity)]
     pub(crate) fn peek_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
         if let Some(run) = &self.state.insert_run {
             if let Some((key, value)) = run.buffered_next() {
                 return Ok(Some((
@@ -1775,6 +1839,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// means the gap is at the start of the tree.
     #[allow(clippy::type_complexity)]
     pub(crate) fn peek_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
         if let Some(run) = &self.state.insert_run {
             if let Some((key, value)) = run.buffered_previous() {
                 return Ok(Some((
@@ -1802,6 +1867,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// pending inserts are spliced first: moving the cursor closes the run.
     #[allow(clippy::type_complexity)]
     pub(crate) fn next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
         self.with_cursor(|cursor| {
             cursor.flush_insert_run(true)?;
             Ok(cursor.next()?.map(|entry| entry.to_guards()))
@@ -1813,6 +1879,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     /// run.
     #[allow(clippy::type_complexity)]
     pub(crate) fn prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
         self.with_cursor(|cursor| {
             cursor.flush_insert_run(true)?;
             Ok(cursor.prev()?.map(|entry| entry.to_guards()))
@@ -1821,12 +1888,52 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
 
     /// See [`CursorMut::insert_before`].
     pub(crate) fn insert_before(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.settle_reseek()?;
         self.with_cursor(|cursor| cursor.insert_before(key, value))
     }
 
     /// See [`CursorMut::insert_after`].
     pub(crate) fn insert_after(&mut self, key: &[u8], value: &[u8]) -> Result<bool> {
+        self.settle_reseek()?;
         self.with_cursor(|cursor| cursor.insert_after(key, value))
+    }
+
+    /// Removes the entry after the gap, returning it. The gap does not move:
+    /// it ends up between the removed entry's old neighbors. Any pending
+    /// inserts are spliced first: removing through the cursor closes the run.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn remove_next(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
+        let removed = self.with_cursor(|cursor| {
+            cursor.flush_insert_run(true)?;
+            cursor.remove_next_taking_key()
+        })?;
+        Ok(removed.map(|(key, key_guard, value_guard)| {
+            // The mutation consumed the position, and an in-place removal is
+            // applied only when the value guard drops; the reseek waits for
+            // the next operation, by which time the guards are gone.
+            self.pending_reseek = Some(key);
+            (key_guard, value_guard)
+        }))
+    }
+
+    /// Removes the entry before the gap, returning it; the counterpart of
+    /// [`remove_next`](Self::remove_next).
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn remove_prev(
+        &mut self,
+    ) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.settle_reseek()?;
+        let removed = self.with_cursor(|cursor| {
+            cursor.flush_insert_run(true)?;
+            cursor.remove_prev_taking_key()
+        })?;
+        Ok(removed.map(|(key, key_guard, value_guard)| {
+            self.pending_reseek = Some(key);
+            (key_guard, value_guard)
+        }))
     }
 
     /// Splices any pending inserts into the tree, keeping the cursor at its

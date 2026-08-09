@@ -131,6 +131,9 @@ pub(crate) enum FuzzOperation {
         // splicing the pending inserts: next() for descending runs (over the
         // inserts just made), prev() for ascending ones.
         moves: U64Between<0, 8>,
+        // Entries to remove through the cursor after the moves, alternating
+        // remove_next()/remove_prev() starting in the walk direction.
+        removes: U64Between<0, 8>,
     },
     Remove {
         key: BoundedU64<KEY_SPACE>,

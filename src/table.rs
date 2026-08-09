@@ -1537,7 +1537,8 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
 }
 
 /// A cursor over a [`Table`], pointing at a gap between two entries, with
-/// support for inserting new entries into that gap.
+/// support for inserting new entries into that gap and removing the entries
+/// around it.
 ///
 /// Cursors are constructed with [`Table::lower_bound_mut`] and
 /// [`Table::upper_bound_mut`], and mirror the nightly
@@ -1729,6 +1730,62 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
             Ok(true) => Ok(()),
             Ok(false) => Err(StorageError::UnorderedKey),
             Err(err) => Err(self.latch_error(err)),
+        }
+    }
+
+    /// Removes the entry after the cursor's gap, returning it.
+    ///
+    /// The cursor does not move: the gap ends up between the removed entry's
+    /// old neighbors. Returns `None`, and removes nothing, if the gap is at
+    /// the end of the table. Any pending inserts are applied first, so an
+    /// entry just inserted through the cursor is removed like an entry the
+    /// table already had.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::remove_next`].
+    #[allow(clippy::type_complexity)]
+    pub fn remove_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        // Applied separately from the removal so that a splice failure,
+        // which can poison, is told apart from a failed removal, which only
+        // leaves the position unreliable.
+        if let Err(err) = self.inner.apply_pending_inserts() {
+            return Err(self.latch_error(err));
+        }
+        match self.inner.remove_next() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                self.errored = true;
+                Err(err)
+            }
+        }
+    }
+
+    /// Removes the entry before the cursor's gap, returning it.
+    ///
+    /// The cursor does not move: the gap ends up between the removed entry's
+    /// old neighbors. Returns `None`, and removes nothing, if the gap is at
+    /// the start of the table. Any pending inserts are applied first, so an
+    /// entry just inserted through the cursor is removed like an entry the
+    /// table already had.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::remove_prev`].
+    #[allow(clippy::type_complexity)]
+    pub fn remove_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
+        self.check_usable()?;
+        // Applied separately from the removal so that a splice failure,
+        // which can poison, is told apart from a failed removal, which only
+        // leaves the position unreliable.
+        if let Err(err) = self.inner.apply_pending_inserts() {
+            return Err(self.latch_error(err));
+        }
+        match self.inner.remove_prev() {
+            Ok(entry) => Ok(entry),
+            Err(err) => {
+                self.errored = true;
+                Err(err)
+            }
         }
     }
 

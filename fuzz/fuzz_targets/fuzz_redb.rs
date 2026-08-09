@@ -6,7 +6,7 @@ use redb::{
     MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
     Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
@@ -483,6 +483,28 @@ fn check_extract_iter<F: for<'f> FnMut(u64, &'f [u8]) -> bool>(
     Ok(removed)
 }
 
+// Checks one cursor step or removal against the reference model's expected
+// entry, returning whether an entry was consumed. A mismatch panics; storage
+// errors are propagated by the caller before this runs.
+fn check_cursor_entry(
+    entry: Option<(AccessGuard<'_, u64>, AccessGuard<'_, &'static [u8]>)>,
+    expected: Option<(u64, usize)>,
+) -> bool {
+    match (entry, expected) {
+        (Some((key, value)), Some((expected_key, expected_len))) => {
+            assert_eq!(key.value(), expected_key);
+            assert_eq!(value.value().len(), expected_len);
+            true
+        }
+        (None, None) => false,
+        (entry, expected) => panic!(
+            "cursor yielded {:?}, reference {:?}",
+            entry.map(|(key, _)| key.value()),
+            expected.map(|(key, _)| key)
+        ),
+    }
+}
+
 fn handle_table_op(
     op: &FuzzOperation,
     reference: &mut BTreeMap<u64, usize>,
@@ -531,6 +553,7 @@ fn handle_table_op(
             value_size,
             descending,
             moves,
+            removes,
         } => {
             let start = start_key.value;
             let stride = stride.value;
@@ -575,52 +598,77 @@ fn handle_table_op(
                 assert_eq!(cursor.peek_prev()?.map(|(k, _)| k.value()), last);
                 assert_eq!(cursor.peek_next()?.map(|(k, _)| k.value()), successor);
             }
-            // Moving splices the pending inserts and walks the tree from the
-            // same gap, checked against the reference merged with them: a
-            // descending run's inserts sit after the gap, an ascending run's
-            // before it.
+            // The merged view (reference plus pending inserts) split at the
+            // gap: `before` holds the entries below it nearest-first, `after`
+            // the entries above it nearest-first. Moves shuttle entries
+            // between the two; removals consume them.
             let mut merged = reference.clone();
             for key in &keys {
                 merged.insert(*key, value_size);
             }
-            if *descending {
-                let lower = predecessor.map_or(Bound::Unbounded, Bound::Excluded);
-                let mut walk = merged.range((lower, Bound::Unbounded));
-                for _ in 0..moves.value {
-                    match (cursor.next()?, walk.next()) {
-                        (Some((key, value)), Some((expected_key, expected_len))) => {
-                            assert_eq!(key.value(), *expected_key);
-                            assert_eq!(value.value().len(), *expected_len);
-                        }
-                        (None, None) => break,
-                        (cursor_entry, walk_entry) => panic!(
-                            "cursor yielded {:?}, reference {:?}",
-                            cursor_entry.map(|(key, _)| key.value()),
-                            walk_entry.map(|(key, _)| key)
-                        ),
-                    }
-                }
+            // An ascending run leaves the gap above its pending inserts, a
+            // descending run below them.
+            let boundary = if *descending {
+                predecessor
             } else {
-                let upper = successor.map_or(Bound::Unbounded, Bound::Excluded);
-                let mut walk = merged.range((Bound::Unbounded, upper)).rev();
-                for _ in 0..moves.value {
-                    match (cursor.prev()?, walk.next()) {
-                        (Some((key, value)), Some((expected_key, expected_len))) => {
-                            assert_eq!(key.value(), *expected_key);
-                            assert_eq!(value.value().len(), *expected_len);
-                        }
-                        (None, None) => break,
-                        (cursor_entry, walk_entry) => panic!(
-                            "cursor yielded {:?}, reference {:?}",
-                            cursor_entry.map(|(key, _)| key.value()),
-                            walk_entry.map(|(key, _)| key)
-                        ),
+                keys.last().copied().or(predecessor)
+            };
+            let mut before: VecDeque<(u64, usize)> = match boundary {
+                Some(bound) => merged.range(..=bound).rev().map(|(k, v)| (*k, *v)).collect(),
+                None => VecDeque::new(),
+            };
+            let mut after: VecDeque<(u64, usize)> = match boundary {
+                Some(bound) => merged
+                    .range((Bound::Excluded(bound), Bound::Unbounded))
+                    .map(|(k, v)| (*k, *v))
+                    .collect(),
+                None => merged.iter().map(|(k, v)| (*k, *v)).collect(),
+            };
+            // Moving splices the pending inserts and walks the tree from the
+            // same gap: next() over a descending run's inserts, prev() over
+            // an ascending run's.
+            for _ in 0..moves.value {
+                if *descending {
+                    if check_cursor_entry(cursor.next()?, after.front().copied()) {
+                        before.push_front(after.pop_front().unwrap());
+                    } else {
+                        break;
                     }
+                } else if check_cursor_entry(cursor.prev()?, before.front().copied()) {
+                    after.push_front(before.pop_front().unwrap());
+                } else {
+                    break;
                 }
             }
+            // Removals take the entry adjacent to the gap without moving it,
+            // alternating sides from the walk direction onward.
+            let mut removed_keys = vec![];
+            let mut forward = *descending;
+            for _ in 0..removes.value {
+                if forward {
+                    if check_cursor_entry(cursor.remove_next()?, after.front().copied()) {
+                        removed_keys.push(after.pop_front().unwrap().0);
+                    }
+                } else if check_cursor_entry(cursor.remove_prev()?, before.front().copied()) {
+                    removed_keys.push(before.pop_front().unwrap().0);
+                }
+                forward = !forward;
+            }
+            // The gap ends up between the surviving neighbors.
+            assert_eq!(
+                cursor.peek_prev()?.map(|(k, _)| k.value()),
+                before.front().map(|(k, _)| *k)
+            );
+            assert_eq!(
+                cursor.peek_next()?.map(|(k, _)| k.value()),
+                after.front().map(|(k, _)| *k)
+            );
             cursor.close()?;
             for key in keys {
                 reference.insert(key, value_size);
+            }
+            for key in removed_keys {
+                reference.remove(&key);
             }
         }
         FuzzOperation::Remove { key } | FuzzOperation::RemoveOne { key, .. } => {
