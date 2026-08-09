@@ -41,6 +41,10 @@ uuid = { version= "1.17.0", features = ["v4"] }
 redb-derive = { path = "./crates/redb-derive" }
 
 [features]
+default = ["std"]
+# Enables linking against the Rust standard library. Currently a no-op, since building without it
+# is not supported yet; it exists so that dependents can opt out ahead of a future no_std mode
+std = []
 # Enables log messages
 logging = ["dep:log"]
 # Enable cache hit metrics

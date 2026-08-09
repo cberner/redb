@@ -13,6 +13,10 @@
   `range_owned()` variants when the iterator must outlive the table.
 
 ## 4.2.0 - 2026-XX-XX
+* Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates
+  nothing yet, so building with `default-features = false` still links against the standard
+  library. Under the `experimental-api-5` feature flag, which collects the changes planned for
+  redb 5, turning it off is instead a compile error until `no_std` is supported.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
 * Add an experimental cursor API, behind the `experimental_cursor` feature flag:
