@@ -1459,22 +1459,51 @@ fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
 /// The cursor's methods are behind the `experimental_cursor` feature flag,
 /// separately from its constructors, so that the constructors' signatures
 /// can stabilize first.
+///
+/// A cursor holds pages of the table it was created from, so the table cannot be dropped, nor
+/// the transaction closed, while the cursor is alive:
+///
+/// ```compile_fail,E0505
+/// use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+/// use std::ops::Bound;
+///
+/// # fn main() -> Result<(), redb::Error> {
+/// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+/// let tmpfile = tempfile::NamedTempFile::new().unwrap();
+/// let db = Database::create(tmpfile.path())?;
+/// let write_txn = db.begin_write()?;
+/// write_txn.open_table(TABLE).map(drop)?;
+/// write_txn.commit()?;
+///
+/// let read_txn = db.begin_read()?;
+/// let table = read_txn.open_table(TABLE)?;
+/// let cursor = table.lower_bound(Bound::Included(&0))?;
+/// drop(table); // error[E0505]: cannot move out of `table` because it is borrowed
+/// # Ok(())
+/// # }
+/// ```
 #[cfg(feature = "experimental-api-5")]
 pub struct Cursor<'a, K: Key + 'static, V: Value + 'static> {
     // Only the cursor's own methods read the position; without them the
     // constructors still store it, ready for the methods' flag to be enabled.
     #[cfg_attr(not(feature = "experimental_cursor"), allow(dead_code))]
     inner: BtreeCursor<K, V>,
-    // The cursor owns page handles, so it must keep the transaction registered for as long as it
-    // is alive. The lifetime below cannot do that job: the cursor has no `Drop` impl, so the
-    // borrow it represents ends at the cursor's last use, leaving the table free to be dropped
-    // and the transaction free to be closed while the cursor still holds its pages
+    // The cursor owns page handles, so the transaction must stay registered for as long as it is
+    // alive, or a writer could reclaim those pages. Both mechanisms below enforce that, and the
+    // pair is deliberate: either one alone has been enough to get this wrong
     _transaction_guard: Arc<TransactionGuard>,
     // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation.
     // It also bounds the guards the cursor yields, which is why there is no `'static` cursor:
-    // such a guard could outlive both the cursor and the transaction, letting a writer reclaim
-    // the pages it points at
+    // such a guard could outlive both the cursor and the transaction
     _lifetime: PhantomData<&'a ()>,
+}
+
+// Load-bearing, despite the empty body: without a Drop impl the borrow recorded by the lifetime
+// above ends at the cursor's last use rather than at its drop, which would let the table be
+// dropped, and the transaction closed, while the cursor still holds pages
+#[cfg(feature = "experimental-api-5")]
+impl<K: Key + 'static, V: Value + 'static> Drop for Cursor<'_, K, V> {
+    fn drop(&mut self) {}
 }
 
 #[cfg(feature = "experimental-api-5")]
