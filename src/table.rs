@@ -1511,6 +1511,10 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// Unlike [`Table::insert`], an existing key is never overwritten:
     /// inserting a key equal to either neighbor is unordered.
     ///
+    /// Runs of calls in one direction are buffered together; switching
+    /// between `insert_before` and [`insert_after`](Self::insert_after)
+    /// applies the other direction's pending inserts first.
+    ///
     /// This is analogous to the nightly
     /// [`std::collections::btree_map::CursorMut::insert_before`].
     pub fn insert_before<'k, 'v>(
@@ -1525,6 +1529,41 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
         match self
             .inner
             .insert_before(key_bytes.as_ref(), value_bytes.as_ref())
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StorageError::UnorderedKey),
+            Err(err) => Err(self.latch_error(err)),
+        }
+    }
+
+    /// Inserts a new entry into the gap that the cursor is pointing at. After
+    /// the insertion, the cursor points at the gap before the newly inserted
+    /// entry.
+    ///
+    /// If the key does not sort strictly greater than the entry before the
+    /// gap and strictly smaller than the entry after it,
+    /// [`StorageError::UnorderedKey`] is returned and nothing is changed.
+    /// Unlike [`Table::insert`], an existing key is never overwritten:
+    /// inserting a key equal to either neighbor is unordered.
+    ///
+    /// Runs of calls in one direction are buffered together; switching
+    /// between `insert_after` and [`insert_before`](Self::insert_before)
+    /// applies the other direction's pending inserts first.
+    ///
+    /// This is analogous to the nightly
+    /// [`std::collections::btree_map::CursorMut::insert_after`].
+    pub fn insert_after<'k, 'v>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<()> {
+        self.check_usable()?;
+        let key_bytes = K::as_bytes(key.borrow());
+        let value_bytes = V::as_bytes(value.borrow());
+        Self::check_lengths(key_bytes.as_ref(), value_bytes.as_ref())?;
+        match self
+            .inner
+            .insert_after(key_bytes.as_ref(), value_bytes.as_ref())
         {
             Ok(true) => Ok(()),
             Ok(false) => Err(StorageError::UnorderedKey),

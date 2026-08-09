@@ -678,3 +678,137 @@ fn read_cursor_generic_over_readable_table() {
     }
     txn.abort().unwrap();
 }
+
+#[test]
+fn bulk_load_descending() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        for i in (0..10_000).rev() {
+            cursor.insert_after(i, &(i * 7)).unwrap();
+        }
+        cursor.close().unwrap();
+        assert_eq!(table.len().unwrap(), 10_000);
+        assert_eq!(table.get(&5432).unwrap().unwrap().value(), 5432 * 7);
+    }
+    txn.commit().unwrap();
+
+    let expected: Vec<(u64, u64)> = (0..10_000).map(|i| (i, i * 7)).collect();
+    assert_u64_table_contents(&db, &expected);
+
+    // Also readable after reopening the database
+    drop(db);
+    let db = Database::open(tmpfile.path()).unwrap();
+    assert_u64_table_contents(&db, &expected);
+}
+
+// Enough data to cross the cursor's internal buffer threshold several times
+// while loading backward, so mid-run splices and reseeks on the after side
+// are exercised through the public API.
+#[test]
+fn descending_load_crosses_flush_threshold() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(STR_TABLE).unwrap();
+        let mut cursor = table.lower_bound_mut(Bound::<&str>::Unbounded).unwrap();
+        for i in (0..600u64).rev() {
+            let value = vec![i as u8; 2000 + (i as usize % 3000)];
+            cursor
+                .insert_after(key(i).as_str(), value.as_slice())
+                .unwrap();
+        }
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 600);
+    for (index, entry) in table.iter().unwrap().enumerate() {
+        let (k, v) = entry.unwrap();
+        let i = index as u64;
+        assert_eq!(k.value(), key(i));
+        assert_eq!(v.value(), vec![i as u8; 2000 + (index % 3000)]);
+    }
+}
+
+#[test]
+fn mixed_direction_inserts_and_peeks() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 20, 30] {
+            table.insert(i, &i).unwrap();
+        }
+        let mut cursor = table.upper_bound_mut(Bound::Included(&20)).unwrap();
+        cursor.insert_before(21, &21).unwrap();
+        cursor.insert_after(29, &29).unwrap();
+        cursor.insert_after(25, &25).unwrap();
+        // The peeks return the pending inserts nearest the gap on each side.
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 21);
+        assert_eq!(cursor.peek_next().unwrap().unwrap().0.value(), 25);
+        cursor.insert_before(22, &22).unwrap();
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 22);
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    let expected: Vec<(u64, u64)> = [10, 20, 21, 22, 25, 29, 30]
+        .map(|i| (i, i))
+        .into_iter()
+        .collect();
+    assert_u64_table_contents(&db, &expected);
+}
+
+#[test]
+fn insert_after_unordered_keys_rejected() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 30] {
+            table.insert(i, &i).unwrap();
+        }
+        let mut cursor = table.lower_bound_mut(Bound::Included(&30)).unwrap();
+        // The gap is between 10 and 30.
+        assert!(matches!(
+            cursor.insert_after(10, &10),
+            Err(StorageError::UnorderedKey)
+        ));
+        assert!(matches!(
+            cursor.insert_after(30, &30),
+            Err(StorageError::UnorderedKey)
+        ));
+        cursor.insert_after(25, &25).unwrap();
+        // Later inserts must stay strictly below the pending one.
+        assert!(matches!(
+            cursor.insert_after(25, &25),
+            Err(StorageError::UnorderedKey)
+        ));
+        assert!(matches!(
+            cursor.insert_after(27, &27),
+            Err(StorageError::UnorderedKey)
+        ));
+        assert!(matches!(
+            cursor.insert_before(26, &26),
+            Err(StorageError::UnorderedKey)
+        ));
+        cursor.insert_after(20, &20).unwrap();
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[(10, 10), (20, 20), (25, 25), (30, 30)]);
+}
