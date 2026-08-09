@@ -54,6 +54,8 @@ use new::NewValue;
 use old::OldValue;
 use old3::{Old3Inner, Old3Value};
 use redb::ReadableDatabase;
+#[allow(unused_imports)]
+use redb::ReadableTable;
 use redb3_0::ReadableDatabase as _;
 
 fn create_tempfile() -> tempfile::NamedTempFile {

@@ -237,7 +237,13 @@ fn get_arc_lifetime() {
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_multimap_table(definition).unwrap();
         let start = "hello".to_string();
-        table.get(start.as_str()).unwrap()
+        // The 'static get() does not keep the transaction alive, so experimental-api-5 drops it
+        // in favour of get_owned()
+        #[cfg(feature = "experimental-api-5")]
+        let iter = table.get_owned(start.as_str()).unwrap();
+        #[cfg(not(feature = "experimental-api-5"))]
+        let iter = table.get(start.as_str()).unwrap();
+        iter
     };
     assert_eq!(iter.next().unwrap().unwrap().value(), "world");
     assert!(iter.next().is_none());

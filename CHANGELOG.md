@@ -11,6 +11,10 @@
   `ReadOnlyMultimapTable::range()`, whose `'static` iterators do not keep the transaction alive,
   are removed under the flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
   `range_owned()` variants when the iterator must outlive the table.
+* The inherent `ReadOnlyTable::get()` and `ReadOnlyMultimapTable::get()`, whose `'static` guards
+  and iterators likewise do not keep the transaction alive, are also removed under the
+  `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
+  `get_owned()` variants when the guard must outlive the table.
 
 ## 4.2.0 - 2026-XX-XX
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;

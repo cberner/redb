@@ -1133,7 +1133,15 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
 
     /// This method is like [`ReadableMultimapTable::get()`], but the iterator is reference counted and keeps the transaction
     /// alive until it is dropped.
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'static, V>> {
+        self.get_inner(key)
+    }
+
+    fn get_inner<'a>(
+        &self,
+        key: impl Borrow<K::SelfType<'a>>,
+    ) -> Result<MultimapValue<'static, V>> {
         let iter = if let Some(collection) = self.tree.get(key.borrow())? {
             MultimapValue::from_collection(
                 collection,
@@ -1164,7 +1172,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<OwnedMultimapValue<V>> {
         Ok(OwnedMultimapValue::new(
-            self.get(key)?,
+            self.get_inner(key)?,
             self.transaction_guard.clone(),
         ))
     }
