@@ -967,3 +967,233 @@ fn moves_on_empty_table_and_at_edges() {
 
     assert_u64_table_contents(&db, &[(1, 1)]);
 }
+
+#[test]
+fn removes_walk_both_directions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 20, 30] {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        {
+            let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+            for expected in [10u64, 20, 30] {
+                let (k, v) = cursor.remove_next().unwrap().unwrap();
+                assert_eq!(k.value(), expected);
+                assert_eq!(v.value(), expected * 7);
+            }
+            assert!(cursor.remove_next().unwrap().is_none());
+            assert!(cursor.peek_prev().unwrap().is_none());
+            assert!(cursor.peek_next().unwrap().is_none());
+            cursor.close().unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 0);
+
+        for i in [10u64, 20, 30] {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        {
+            let mut cursor = table.upper_bound_mut(Bound::<u64>::Unbounded).unwrap();
+            for expected in [30u64, 20, 10] {
+                let (k, v) = cursor.remove_prev().unwrap().unwrap();
+                assert_eq!(k.value(), expected);
+                assert_eq!(v.value(), expected * 7);
+            }
+            assert!(cursor.remove_prev().unwrap().is_none());
+            cursor.close().unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[]);
+}
+
+// A removal does not move the gap: it ends up between the removed entry's
+// old neighbors, in either direction and under alternation.
+#[test]
+fn removes_keep_the_gap_in_place() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 20, 30, 40] {
+            table.insert(i, &i).unwrap();
+        }
+        let mut cursor = table.lower_bound_mut(Bound::Included(&30)).unwrap();
+        // The gap starts between 20 and 30.
+        assert_eq!(cursor.remove_prev().unwrap().unwrap().0.value(), 20);
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 10);
+        assert_eq!(cursor.peek_next().unwrap().unwrap().0.value(), 30);
+        assert_eq!(cursor.remove_next().unwrap().unwrap().0.value(), 30);
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 10);
+        assert_eq!(cursor.peek_next().unwrap().unwrap().0.value(), 40);
+        assert_eq!(cursor.remove_next().unwrap().unwrap().0.value(), 40);
+        assert_eq!(cursor.remove_prev().unwrap().unwrap().0.value(), 10);
+        assert!(cursor.remove_next().unwrap().is_none());
+        assert!(cursor.remove_prev().unwrap().is_none());
+        cursor.close().unwrap();
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[]);
+}
+
+// Removals apply pending inserts first and take from the same gap, so an
+// entry just inserted through the cursor is removed like a pre-existing one.
+#[test]
+fn removes_apply_pending_inserts() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in [10u64, 30] {
+            table.insert(i, &i).unwrap();
+        }
+        let mut cursor = table.upper_bound_mut(Bound::Included(&10)).unwrap();
+        // The gap is between 10 and 30.
+        cursor.insert_before(20, &20).unwrap();
+        assert_eq!(cursor.remove_next().unwrap().unwrap().0.value(), 30);
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 20);
+        assert!(cursor.peek_next().unwrap().is_none());
+        cursor.insert_after(25, &25).unwrap();
+        // The entry before the gap is the earlier insert, already spliced.
+        assert_eq!(cursor.remove_prev().unwrap().unwrap().0.value(), 20);
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 10);
+        // The entry after the gap is the pending insert, spliced and removed.
+        assert_eq!(cursor.remove_next().unwrap().unwrap().0.value(), 25);
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[(10, 10)]);
+}
+
+// Draining a multi-leaf table in each direction exercises leaf-boundary
+// crossings, merges of underfilled leaves, and root collapse. The table
+// sits on dirty pages, covering the in-place removal fast path and the
+// deferred reseek over its guard-drop-time rewrite.
+#[test]
+fn removes_cross_leaf_boundaries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..2_000u64 {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        {
+            let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+            for i in 0..2_000u64 {
+                let (k, v) = cursor.remove_next().unwrap().unwrap();
+                assert_eq!((k.value(), v.value()), (i, i * 7));
+            }
+            assert!(cursor.remove_next().unwrap().is_none());
+            cursor.close().unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 0);
+
+        for i in 0..2_000u64 {
+            table.insert(i, &(i * 7)).unwrap();
+        }
+        {
+            let mut cursor = table.upper_bound_mut(Bound::<u64>::Unbounded).unwrap();
+            for i in (0..2_000u64).rev() {
+                let (k, v) = cursor.remove_prev().unwrap().unwrap();
+                assert_eq!((k.value(), v.value()), (i, i * 7));
+            }
+            assert!(cursor.remove_prev().unwrap().is_none());
+            cursor.close().unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    txn.abort().unwrap();
+}
+
+// The same drain over committed pages, whose removals rewrite leaves
+// instead of mutating them in place.
+#[test]
+fn removes_from_committed_pages() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    populate_u64_table(&db, (0..2_000).map(|key| (key, key * 7)));
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        for i in 0..2_000u64 {
+            let (k, v) = cursor.remove_next().unwrap().unwrap();
+            assert_eq!((k.value(), v.value()), (i, i * 7));
+        }
+        assert!(cursor.remove_next().unwrap().is_none());
+        cursor.close().unwrap();
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[]);
+}
+
+// Values that get pages of their own ride the same removal path.
+#[test]
+fn removes_large_values() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(STR_TABLE).unwrap();
+        for i in 0..20u64 {
+            let size = if i % 4 == 0 { 100_000 } else { 10 };
+            table
+                .insert(key(i).as_str(), vec![i as u8; size].as_slice())
+                .unwrap();
+        }
+        let mut cursor = table.lower_bound_mut(Bound::<&str>::Unbounded).unwrap();
+        for i in 0..20u64 {
+            let size = if i % 4 == 0 { 100_000 } else { 10 };
+            let (k, v) = cursor.remove_next().unwrap().unwrap();
+            assert_eq!(k.value(), key(i));
+            assert_eq!(v.value(), vec![i as u8; size]);
+        }
+        assert!(cursor.remove_next().unwrap().is_none());
+        cursor.close().unwrap();
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    txn.commit().unwrap();
+}
+
+#[test]
+fn removes_on_empty_table_and_at_edges() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        let mut cursor = table.lower_bound_mut(Bound::<u64>::Unbounded).unwrap();
+        assert!(cursor.remove_next().unwrap().is_none());
+        assert!(cursor.remove_prev().unwrap().is_none());
+        // A removal that finds nothing still applies the pending inserts
+        cursor.insert_before(1, &1).unwrap();
+        assert!(cursor.remove_next().unwrap().is_none());
+        assert_eq!(cursor.peek_prev().unwrap().unwrap().0.value(), 1);
+        assert_eq!(cursor.remove_prev().unwrap().unwrap().0.value(), 1);
+        cursor.close().unwrap();
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    txn.commit().unwrap();
+
+    assert_u64_table_contents(&db, &[]);
+}

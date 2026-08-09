@@ -31,6 +31,9 @@
 * Add `next()` and `prev()` to the experimental `CursorMut`, moving the cursor over the entries
   around its gap like their read-only `Cursor` counterparts. Pending buffered inserts are applied
   before the cursor moves.
+* Add `remove_next()` and `remove_prev()` to the experimental `CursorMut`, removing and returning
+  the entry after or before the cursor's gap without moving it. Pending buffered inserts are
+  applied first, so an entry just inserted through the cursor can be removed.
 * Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
   are enabled, when called while a table is open and modified in the same transaction.
 * Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
