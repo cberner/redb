@@ -63,7 +63,6 @@ fn benchmark(values: &[u128], num_threads: usize) {
     }
 }
 
-// TODO: multi-threaded inserts are slower. Probably due to lock contention checking dirty pages
 fn main() {
     let mut rng = StdRng::seed_from_u64(RNG_SEED);
     let mut values = vec![];
