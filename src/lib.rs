@@ -60,6 +60,15 @@
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
+// The "std" feature is a placeholder: no_std is not supported yet. Enforce it under the redb 5
+// flag, so that turning it off there fails loudly instead of producing a build that still links
+// against the standard library.
+#[cfg(all(feature = "experimental-api-5", not(feature = "std")))]
+compile_error!(
+    "redb requires the standard library: no_std is not supported yet. Enable the \"std\" feature; \
+     it is on by default, so add features = [\"std\"] if you set default-features = false."
+);
+
 pub use db::{
     Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
     ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
