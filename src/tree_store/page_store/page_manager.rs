@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
+use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -108,6 +109,58 @@ impl PageResolver {
     }
 }
 
+// Shards for `UncommittedPages`, padded to a cache line: the contention being removed is cores
+// handing one lock's line back and forth, worst between cores in different L3 domains, which
+// shards sharing a line would reintroduce.
+const UNCOMMITTED_SHARDS: usize = 64;
+
+#[repr(align(64))]
+struct UncommittedShard(Mutex<PageNumberHashSet>);
+
+/// The pages a write transaction has allocated since its last commit, which `uncommitted()`
+/// answers from and rollback frees. Every allocation, free and `uncommitted()` check consults it,
+/// and it can never be switched off, so it is sharded by page to keep concurrent writers -- tables
+/// of one transaction may be written from different threads -- off a single lock.
+struct UncommittedPages {
+    shards: Vec<UncommittedShard>,
+}
+
+impl UncommittedPages {
+    fn new() -> Self {
+        Self {
+            shards: (0..UNCOMMITTED_SHARDS)
+                .map(|_| UncommittedShard(Mutex::new(PageNumberHashSet::default())))
+                .collect(),
+        }
+    }
+
+    fn shard(&self, page: PageNumber) -> &Mutex<PageNumberHashSet> {
+        &self.shards[page.page_index as usize % UNCOMMITTED_SHARDS].0
+    }
+
+    fn insert(&self, page: PageNumber) {
+        assert!(self.shard(page).lock().unwrap().insert(page));
+    }
+
+    /// Removes `page` if present. Returns whether it was in the set.
+    fn remove(&self, page: PageNumber) -> bool {
+        self.shard(page).lock().unwrap().remove(&page)
+    }
+
+    fn contains(&self, page: PageNumber) -> bool {
+        self.shard(page).lock().unwrap().contains(&page)
+    }
+
+    /// Drains every shard, returning all the pages recorded.
+    fn take_all(&self) -> PageNumberHashSet {
+        let mut result = PageNumberHashSet::default();
+        for shard in &self.shards {
+            result.extend(mem::take(&mut *shard.0.lock().unwrap()));
+        }
+        result
+    }
+}
+
 /// Per-write-transaction handle through which btree mutation code allocates
 /// and frees pages. Bundles the shared `TransactionalMemory` with the write
 /// transaction's `AllocationPolicy`.
@@ -115,7 +168,7 @@ impl PageResolver {
 pub(crate) struct PageAllocator {
     mem: Arc<TransactionalMemory>,
     policy: AllocationPolicy,
-    allocated_since_commit: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_since_commit: Arc<UncommittedPages>,
 }
 
 impl PageAllocator {
@@ -123,7 +176,7 @@ impl PageAllocator {
         Self {
             mem,
             policy,
-            allocated_since_commit: Arc::new(Mutex::new(PageTrackerPolicy::new_tracking())),
+            allocated_since_commit: Arc::new(UncommittedPages::new()),
         }
     }
 
@@ -136,7 +189,7 @@ impl PageAllocator {
     /// them. Used by commit and non-durable commit paths to hand the set over
     /// to `TransactionalMemory`.
     pub(crate) fn take_allocated_since_commit(&self) -> PageNumberHashSet {
-        self.allocated_since_commit.lock().unwrap().reset()
+        self.allocated_since_commit.take_all()
     }
 
     /// Reverses every allocation made since the last commit: drains the
@@ -158,10 +211,7 @@ impl PageAllocator {
             AllocationPolicy::Default => self.mem.allocate(size, allocated)?,
             AllocationPolicy::Lowest => self.mem.allocate_lowest(size, allocated)?,
         };
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page.get_page_number());
+        self.allocated_since_commit.insert(page.get_page_number());
         Ok(page)
     }
 
@@ -174,18 +224,12 @@ impl PageAllocator {
         allocated: &mut PageTrackerPolicy,
     ) -> Result<PageMut<'a>> {
         let page = self.mem.allocate_lowest(size, allocated)?;
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page.get_page_number());
+        self.allocated_since_commit.insert(page.get_page_number());
         Ok(page)
     }
 
     pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .remove_if_present(page);
+        self.allocated_since_commit.remove(page);
         self.mem.free(page, allocated);
     }
 
@@ -194,12 +238,7 @@ impl PageAllocator {
         page: PageNumber,
         allocated: &mut PageTrackerPolicy,
     ) -> bool {
-        if self
-            .allocated_since_commit
-            .lock()
-            .unwrap()
-            .remove_if_present(page)
-        {
+        if self.allocated_since_commit.remove(page) {
             self.mem.free(page, allocated);
             true
         } else {
@@ -221,7 +260,7 @@ impl PageAllocator {
     }
 
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
-        self.allocated_since_commit.lock().unwrap().contains(page)
+        self.allocated_since_commit.contains(page)
     }
 
     pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
