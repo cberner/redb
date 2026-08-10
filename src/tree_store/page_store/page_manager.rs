@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::convert::TryInto;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
+use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -108,6 +109,62 @@ impl PageResolver {
     }
 }
 
+// Shards for `UncommittedPages`. Sized so that the sharding still spreads writers on machines
+// with many cores; the shards are empty sets until used, so spare ones cost almost nothing.
+const UNCOMMITTED_SHARDS: usize = 64;
+
+// Padded to a cache line. The contention being removed here is cores handing one lock's cache
+// line back and forth -- worst between cores in different L3 domains -- which shards sharing a
+// line would reintroduce.
+#[repr(align(64))]
+struct UncommittedShard(Mutex<PageNumberHashSet>);
+
+/// The pages a write transaction has allocated since its last commit, which `uncommitted()`
+/// answers from and rollback frees.
+///
+/// Unlike the savepoint tracker this can never be switched off -- every allocation must be
+/// recorded, and every insert, free and `uncommitted()` check consults it -- so it is sharded by
+/// page instead, to keep writers on different cores off a single lock.
+struct UncommittedPages {
+    shards: Vec<UncommittedShard>,
+}
+
+impl UncommittedPages {
+    fn new() -> Self {
+        Self {
+            shards: (0..UNCOMMITTED_SHARDS)
+                .map(|_| UncommittedShard(Mutex::new(PageNumberHashSet::default())))
+                .collect(),
+        }
+    }
+
+    fn shard(&self, page: PageNumber) -> &Mutex<PageNumberHashSet> {
+        &self.shards[page.page_index as usize % UNCOMMITTED_SHARDS].0
+    }
+
+    fn insert(&self, page: PageNumber) {
+        assert!(self.shard(page).lock().unwrap().insert(page));
+    }
+
+    /// Removes `page` if present. Returns whether it was in the set.
+    fn remove(&self, page: PageNumber) -> bool {
+        self.shard(page).lock().unwrap().remove(&page)
+    }
+
+    fn contains(&self, page: PageNumber) -> bool {
+        self.shard(page).lock().unwrap().contains(&page)
+    }
+
+    /// Drains every shard, returning all the pages recorded.
+    fn take_all(&self) -> PageNumberHashSet {
+        let mut result = PageNumberHashSet::default();
+        for shard in &self.shards {
+            result.extend(mem::take(&mut *shard.0.lock().unwrap()));
+        }
+        result
+    }
+}
+
 /// Per-write-transaction handle through which btree mutation code allocates
 /// and frees pages. Bundles the shared `TransactionalMemory` with the write
 /// transaction's `AllocationPolicy`.
@@ -115,7 +172,7 @@ impl PageResolver {
 pub(crate) struct PageAllocator {
     mem: Arc<TransactionalMemory>,
     policy: AllocationPolicy,
-    allocated_since_commit: Arc<PageTracker>,
+    allocated_since_commit: Arc<UncommittedPages>,
 }
 
 impl PageAllocator {
@@ -123,7 +180,7 @@ impl PageAllocator {
         Self {
             mem,
             policy,
-            allocated_since_commit: Arc::new(PageTracker::new_tracking()),
+            allocated_since_commit: Arc::new(UncommittedPages::new()),
         }
     }
 
@@ -136,7 +193,7 @@ impl PageAllocator {
     /// them. Used by commit and non-durable commit paths to hand the set over
     /// to `TransactionalMemory`.
     pub(crate) fn take_allocated_since_commit(&self) -> PageNumberHashSet {
-        self.allocated_since_commit.reset()
+        self.allocated_since_commit.take_all()
     }
 
     /// Reverses every allocation made since the last commit: drains the
@@ -172,12 +229,12 @@ impl PageAllocator {
     }
 
     pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {
-        self.allocated_since_commit.remove_if_present(page);
+        self.allocated_since_commit.remove(page);
         self.mem.free(page, allocated);
     }
 
     pub(crate) fn free_if_uncommitted(&self, page: PageNumber, allocated: &PageTracker) -> bool {
-        if self.allocated_since_commit.remove_if_present(page) {
+        if self.allocated_since_commit.remove(page) {
             self.mem.free(page, allocated);
             true
         } else {
