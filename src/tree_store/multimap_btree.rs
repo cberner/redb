@@ -6,7 +6,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeStats, Page, PageAllocator, PageHint, PageNumber,
-    PageResolver, PageTrackerPolicy, RawBtree,
+    PageResolver, PageTracker, RawBtree,
 };
 use crate::types::{Key, TypeName, Value};
 use std::cmp::max;
@@ -270,8 +270,8 @@ pub(super) fn relocate_subtrees(
     drop(old_page);
     // No need to track allocations, because this method is only called during compaction when
     // there can't be any savepoints
-    let mut ignore = PageTrackerPolicy::Ignore;
-    if !page_allocator.free_if_uncommitted(old_page_number, &mut ignore) {
+    let ignore = PageTracker::ignore();
+    if !page_allocator.free_if_uncommitted(old_page_number, &ignore) {
         freed_pages.lock().unwrap().push(old_page_number);
     }
     Ok((new_page_number, DEFERRED))

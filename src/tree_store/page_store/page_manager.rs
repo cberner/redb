@@ -11,7 +11,7 @@ use crate::tree_store::page_store::header::{
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
-use crate::tree_store::{Page, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{Page, PageNumber, PageTracker};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 use std::cmp::{max, min};
@@ -115,7 +115,7 @@ impl PageResolver {
 pub(crate) struct PageAllocator {
     mem: Arc<TransactionalMemory>,
     policy: AllocationPolicy,
-    allocated_since_commit: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_since_commit: Arc<PageTracker>,
 }
 
 impl PageAllocator {
@@ -123,7 +123,7 @@ impl PageAllocator {
         Self {
             mem,
             policy,
-            allocated_since_commit: Arc::new(Mutex::new(PageTrackerPolicy::new_tracking())),
+            allocated_since_commit: Arc::new(PageTracker::new_tracking()),
         }
     }
 
@@ -136,7 +136,7 @@ impl PageAllocator {
     /// them. Used by commit and non-durable commit paths to hand the set over
     /// to `TransactionalMemory`.
     pub(crate) fn take_allocated_since_commit(&self) -> PageNumberHashSet {
-        self.allocated_since_commit.lock().unwrap().reset()
+        self.allocated_since_commit.reset()
     }
 
     /// Reverses every allocation made since the last commit: drains the
@@ -145,23 +145,16 @@ impl PageAllocator {
         self.mem.debug_assert_no_dirty_pages();
         let drained = self.take_allocated_since_commit();
         for page in &drained {
-            self.mem.free(*page, &mut PageTrackerPolicy::Ignore);
+            self.mem.free(*page, &PageTracker::ignore());
         }
     }
 
-    pub(crate) fn allocate<'a>(
-        &self,
-        size: usize,
-        allocated: &mut PageTrackerPolicy,
-    ) -> Result<PageMut<'a>> {
+    pub(crate) fn allocate<'a>(&self, size: usize, allocated: &PageTracker) -> Result<PageMut<'a>> {
         let page = match self.policy {
             AllocationPolicy::Default => self.mem.allocate(size, allocated)?,
             AllocationPolicy::Lowest => self.mem.allocate_lowest(size, allocated)?,
         };
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page.get_page_number());
+        self.allocated_since_commit.insert(page.get_page_number());
         Ok(page)
     }
 
@@ -171,35 +164,20 @@ impl PageAllocator {
     pub(crate) fn allocate_lowest<'a>(
         &self,
         size: usize,
-        allocated: &mut PageTrackerPolicy,
+        allocated: &PageTracker,
     ) -> Result<PageMut<'a>> {
         let page = self.mem.allocate_lowest(size, allocated)?;
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .insert(page.get_page_number());
+        self.allocated_since_commit.insert(page.get_page_number());
         Ok(page)
     }
 
-    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
-        self.allocated_since_commit
-            .lock()
-            .unwrap()
-            .remove_if_present(page);
+    pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {
+        self.allocated_since_commit.remove_if_present(page);
         self.mem.free(page, allocated);
     }
 
-    pub(crate) fn free_if_uncommitted(
-        &self,
-        page: PageNumber,
-        allocated: &mut PageTrackerPolicy,
-    ) -> bool {
-        if self
-            .allocated_since_commit
-            .lock()
-            .unwrap()
-            .remove_if_present(page)
-        {
+    pub(crate) fn free_if_uncommitted(&self, page: PageNumber, allocated: &PageTracker) -> bool {
+        if self.allocated_since_commit.remove_if_present(page) {
             self.mem.free(page, allocated);
             true
         } else {
@@ -212,7 +190,7 @@ impl PageAllocator {
     pub(crate) fn conditional_free(
         &self,
         page: PageNumber,
-        allocated: &mut PageTrackerPolicy,
+        allocated: &PageTracker,
         freed: &mut Vec<PageNumber>,
     ) {
         if !self.free_if_uncommitted(page, allocated) {
@@ -221,7 +199,7 @@ impl PageAllocator {
     }
 
     pub(crate) fn uncommitted(&self, page: PageNumber) -> bool {
-        self.allocated_since_commit.lock().unwrap().contains(page)
+        self.allocated_since_commit.contains(page)
     }
 
     pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
@@ -1027,7 +1005,7 @@ impl TransactionalMemory {
         self.state.lock().unwrap().header.primary_slot().system_root
     }
 
-    pub(crate) fn free(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+    pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {
         self.free_helper(page, allocated);
     }
 
@@ -1054,7 +1032,7 @@ impl TransactionalMemory {
         }
     }
 
-    fn free_helper(&self, page: PageNumber, allocated: &mut PageTrackerPolicy) {
+    fn free_helper(&self, page: PageNumber, allocated: &PageTracker) {
         #[cfg(debug_assertions)]
         {
             assert!(
@@ -1095,11 +1073,7 @@ impl TransactionalMemory {
     }
 
     // Frees the page if no durable commit has occurred, since it was allocated. Returns true, if the page was freed
-    pub(crate) fn free_if_unpersisted(
-        &self,
-        page: PageNumber,
-        allocated: &mut PageTrackerPolicy,
-    ) -> bool {
+    pub(crate) fn free_if_unpersisted(&self, page: PageNumber, allocated: &PageTracker) -> bool {
         if self.unpersisted.lock().unwrap().remove(&page) {
             self.remove_unpersisted_allocation(page);
             self.free_helper(page, allocated);
@@ -1335,7 +1309,7 @@ impl TransactionalMemory {
     fn allocate<'txn>(
         &self,
         allocation_size: usize,
-        allocated: &mut PageTrackerPolicy,
+        allocated: &PageTracker,
     ) -> Result<PageMut<'txn>> {
         let result = self.allocate_helper(allocation_size, false);
         if let Ok(ref page) = result {
@@ -1347,7 +1321,7 @@ impl TransactionalMemory {
     fn allocate_lowest<'txn>(
         &self,
         allocation_size: usize,
-        allocated: &mut PageTrackerPolicy,
+        allocated: &PageTracker,
     ) -> Result<PageMut<'txn>> {
         let result = self.allocate_helper(allocation_size, true);
         if let Ok(ref page) = result {
@@ -1499,7 +1473,7 @@ mod test {
     #[test]
     fn free_merge_remarks_region_tracker() {
         use super::TransactionalMemory;
-        use crate::tree_store::{InMemoryBackend, Page, PageTrackerPolicy};
+        use crate::tree_store::{InMemoryBackend, Page, PageTracker};
 
         // Small pages and regions keep the reproduction cheap to set up.
         let page_size = 128 * 1024;
@@ -1515,7 +1489,7 @@ mod test {
         .unwrap();
         mem.reset_allocator_state().unwrap();
 
-        let mut ignore = PageTrackerPolicy::Ignore;
+        let ignore = PageTracker::ignore();
 
         // Fill region 0 with order-0 pages. The allocation that spills past region 0 fails on it
         // first, which marks region 0 full at every order.
@@ -1529,7 +1503,7 @@ mod test {
             } else {
                 // First page past region 0: it has done its job of forcing region 0 full. Give it
                 // back so the spilled-into region is left entirely free.
-                mem.free(number, &mut ignore);
+                mem.free(number, &ignore);
                 break;
             }
         }
@@ -1542,7 +1516,7 @@ mod test {
         // Free everything in region 0. The order-0 pages buddy-merge back into larger blocks, so
         // region 0 regains free space above order 0.
         for page in region0_pages {
-            mem.free(page, &mut ignore);
+            mem.free(page, &ignore);
         }
 
         // An order-1 allocation must reuse region 0's merged free block. Before the fix the tracker

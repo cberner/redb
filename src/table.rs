@@ -11,7 +11,7 @@ use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeCursorRange, BtreeExtractIf, BtreeHeader, BtreeMut,
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
-    PageTrackerPolicy, RawBtree,
+    PageTracker, RawBtree,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
@@ -113,7 +113,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         name: &str,
         table_root: Option<BtreeHeader>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
         page_allocator: PageAllocator,
         transaction: &'txn WriteTransaction,
     ) -> Table<'txn, K, V> {
