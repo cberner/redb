@@ -1,3 +1,4 @@
+use crate::Result;
 use crate::tree_store::page_store::cached_file::WritablePage;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
@@ -12,8 +13,8 @@ use std::marker::PhantomData;
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
-#[cfg(debug_assertions)]
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PAIR_LENGTH: usize = 3 * 1024 * 1024 * 1024 + 768 * 1024 * 1024;
@@ -279,7 +280,7 @@ pub(crate) enum PageHint {
     Clean,
 }
 
-pub(crate) enum PageTrackerPolicy {
+enum PageTrackerPolicy {
     Ignore,
     Track(PageNumberHashSet),
     Closed,
@@ -344,6 +345,81 @@ impl PageTrackerPolicy {
                 panic!("Page tracker is closed");
             }
         }
+    }
+}
+
+/// The pages a write transaction has allocated, shared by all of its tables.
+///
+/// Only savepoint restore needs this set, so a transaction with no savepoint tracks nothing.
+/// That is the common case, and tables of one transaction may be written from different threads,
+/// so it must not cost a lock on every allocation: `tracking` is checked first, and the mutex is
+/// touched only while tracking is on. The flag is relaxed because nothing is ordered against it --
+/// a writer that misses a concurrent `disable()` merely records a page into a set that is about to
+/// be discarded, and one that sees it early skips a page nothing will read.
+pub(crate) struct PageTracker {
+    tracking: AtomicBool,
+    policy: Mutex<PageTrackerPolicy>,
+}
+
+impl PageTracker {
+    pub(crate) fn new_tracking() -> Self {
+        Self {
+            tracking: AtomicBool::new(true),
+            policy: Mutex::new(PageTrackerPolicy::new_tracking()),
+        }
+    }
+
+    pub(crate) fn ignore() -> Self {
+        Self {
+            tracking: AtomicBool::new(false),
+            policy: Mutex::new(PageTrackerPolicy::Ignore),
+        }
+    }
+
+    pub(crate) fn closed() -> Self {
+        Self {
+            tracking: AtomicBool::new(true),
+            policy: Mutex::new(PageTrackerPolicy::Closed),
+        }
+    }
+
+    fn tracking(&self) -> bool {
+        self.tracking.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Stops tracking, discarding what was recorded. Called once no savepoint can observe the
+    /// pages, after which the tracker never tracks again for the rest of the transaction:
+    /// `reset()` leaves `Ignore` alone, and `close()` only moves to the poisoned `Closed` state.
+    pub(crate) fn disable(&self) {
+        *self.policy.lock().unwrap() = PageTrackerPolicy::Ignore;
+        self.tracking.store(false, AtomicOrdering::Relaxed);
+    }
+
+    pub(crate) fn insert(&self, page: PageNumber) {
+        if self.tracking() {
+            self.policy.lock().unwrap().insert(page);
+        }
+    }
+
+    pub(crate) fn remove(&self, page: PageNumber) {
+        if self.tracking() {
+            self.policy.lock().unwrap().remove(page);
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.policy.lock().unwrap().is_empty()
+    }
+
+    // Leaves the tracker in the `Closed` state, where any further use panics. `tracking` stays
+    // set so that those uses reach the policy rather than being skipped.
+    pub(crate) fn close(&self) -> Result<PageNumberHashSet> {
+        self.tracking.store(true, AtomicOrdering::Relaxed);
+        Ok(self.policy.lock()?.close())
+    }
+
+    pub(crate) fn reset(&self) -> PageNumberHashSet {
+        self.policy.lock().unwrap().reset()
     }
 }
 

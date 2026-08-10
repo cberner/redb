@@ -10,14 +10,14 @@ use crate::tree_store::btree_mutator::DeletionResult::{
 };
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
-    AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTrackerPolicy,
+    AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTracker,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
 use std::cmp::{max, min};
 use std::marker::PhantomData;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Debug)]
 enum DeletionResult {
@@ -95,7 +95,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     root: &'b mut Option<BtreeHeader>,
     page_allocator: &'b PageAllocator,
     freed: &'b mut Vec<PageNumber>,
-    allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+    allocated: &'b Arc<PageTracker>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     _lifetime: PhantomData<&'a ()>,
@@ -106,7 +106,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         root: &'b mut Option<BtreeHeader>,
         page_allocator: &'b PageAllocator,
         freed: &'b mut Vec<PageNumber>,
-        allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+        allocated: &'b Arc<PageTracker>,
     ) -> Self {
         Self {
             root,
@@ -120,9 +120,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     fn conditional_free(&mut self, page_number: PageNumber) {
-        let mut allocated = self.allocated.lock().unwrap();
         self.page_allocator
-            .conditional_free(page_number, &mut allocated, self.freed);
+            .conditional_free(page_number, self.allocated, self.freed);
     }
 
     pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
@@ -902,8 +901,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         if self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
-                            self.page_allocator.free(page_number, &mut allocated);
+                            self.page_allocator.free(page_number, self.allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
                             self.freed.push(page_number);
@@ -937,8 +935,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         if self.page_allocator.uncommitted(page_number) {
                             let arc = page.to_arc();
                             drop(page);
-                            let mut allocated = self.allocated.lock().unwrap();
-                            self.page_allocator.free(page_number, &mut allocated);
+                            self.page_allocator.free(page_number, self.allocated);
                             Some(AccessGuard::with_arc_page(arc, start..end))
                         } else {
                             self.freed.push(page_number);
@@ -1217,8 +1214,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let page_number = page.get_page_number();
             let arc = page.to_arc();
             drop(page);
-            let mut allocated = self.allocated.lock().unwrap();
-            self.page_allocator.free(page_number, &mut allocated);
+            self.page_allocator.free(page_number, self.allocated);
             let key_guard = want_key.then(|| AccessGuard::with_arc_page(arc.clone(), key_range));
             (key_guard, AccessGuard::with_arc_page(arc, value_range))
         } else {
@@ -1794,7 +1790,7 @@ mod tests {
     fn pack_branches(children: &[SplicedNode], page_allocator: &PageAllocator) -> Vec<SplicedNode> {
         let mut root = None;
         let mut freed = vec![];
-        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let allocated = Arc::new(PageTracker::new_tracking());
         let mut helper: MutateHelper<'_, '_, u64, u64> =
             MutateHelper::new(&mut root, page_allocator, &mut freed, &allocated);
         helper.build_branch_nodes(children).unwrap()
