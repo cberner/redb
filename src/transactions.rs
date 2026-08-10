@@ -7,7 +7,7 @@ use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker}
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageResolver,
-    PageTrackerPolicy, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType,
+    PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType,
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
@@ -402,7 +402,7 @@ impl<'s, K: Key + 'static, V: Value + 'static> SystemTable<'s, K, V> {
     ) -> SystemTable<'s, K, V> {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
-        let ignore = Arc::new(Mutex::new(PageTrackerPolicy::Ignore));
+        let ignore = Arc::new(PageTracker::ignore());
         SystemTable {
             name: name.to_string(),
             namespace,
@@ -521,7 +521,7 @@ impl SystemNamespace {
     ) -> Self {
         // No need to track allocations in the system tree. Savepoint restoration only relies on
         // freeing in the data tree
-        let ignore = Arc::new(Mutex::new(PageTrackerPolicy::Ignore));
+        let ignore = Arc::new(PageTracker::ignore());
         let freed_pages = Arc::new(Mutex::new(vec![]));
         Self {
             table_tree: TableTreeMut::new(
@@ -595,7 +595,7 @@ impl SystemNamespace {
 
 struct TableNamespace {
     open_tables: HashMap<String, &'static panic::Location<'static>>,
-    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_pages: Arc<PageTracker>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     table_tree: TableTreeMut,
 }
@@ -606,7 +606,7 @@ impl TableNamespace {
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
     ) -> Self {
-        let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let allocated = Arc::new(PageTracker::new_tracking());
         let freed_pages = Arc::new(Mutex::new(vec![]));
         let table_tree = TableTreeMut::new(
             root_page,
@@ -630,7 +630,7 @@ impl TableNamespace {
         if !transaction.transaction_tracker.any_savepoint_exists() {
             // No savepoints exist, and we don't allow savepoints to be created in a dirty transaction
             // so we can disable allocation tracking now
-            *self.allocated_pages.lock().unwrap() = PageTrackerPolicy::Ignore;
+            self.allocated_pages.disable();
         }
     }
 
@@ -1356,10 +1356,10 @@ impl WriteTransaction {
         {
             let tables = self.tables.lock().unwrap();
             let page_allocator = tables.table_tree.page_allocator();
-            for page in tables.allocated_pages.lock().unwrap().reset() {
+            for page in tables.allocated_pages.reset() {
                 debug_assert!(page_allocator.uncommitted(page));
                 debug_assert!(self.mem.is_allocated(page));
-                page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+                page_allocator.free(page, &PageTracker::ignore());
             }
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
             data_freed_pages.clear();
@@ -1943,7 +1943,7 @@ impl WriteTransaction {
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in system_freed_pages.lock().unwrap().drain(..) {
-            page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+            page_allocator.free(page, &PageTracker::ignore());
         }
 
         drop(system_tables);
@@ -1996,7 +1996,7 @@ impl WriteTransaction {
                     // See process_freed_pages(): free_until excludes pages that are still needed
                     // by a live reader or pending non-durable commit.
                     debug_assert!(!self.mem.unpersisted(page));
-                    page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+                    page_allocator.free(page, &PageTracker::ignore());
                 },
             )?;
             if !freed_any {
@@ -2103,9 +2103,7 @@ impl WriteTransaction {
         );
 
         for page in post_commit_frees {
-            let removed = self
-                .mem
-                .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore);
+            let removed = self.mem.free_if_unpersisted(page, &PageTracker::ignore());
             assert!(removed);
         }
 
@@ -2135,8 +2133,8 @@ impl WriteTransaction {
                 continue;
             }
             let old_page = page_allocator.get_page(path.page_number(), PageHint::None)?;
-            let mut new_page = page_allocator
-                .allocate_lowest(old_page.memory().len(), &mut PageTrackerPolicy::Ignore)?;
+            let mut new_page =
+                page_allocator.allocate_lowest(old_page.memory().len(), &PageTracker::ignore())?;
             let new_page_number = new_page.get_page_number();
             // We have to copy at least the page type into the new page.
             // Otherwise its cache priority will be calculated incorrectly
@@ -2150,10 +2148,8 @@ impl WriteTransaction {
                         continue;
                     }
                     let old_parent = page_allocator.get_page(*parent, PageHint::None)?;
-                    let mut new_page = page_allocator.allocate_lowest(
-                        old_parent.memory().len(),
-                        &mut PageTrackerPolicy::Ignore,
-                    )?;
+                    let mut new_page = page_allocator
+                        .allocate_lowest(old_parent.memory().len(), &PageTracker::ignore())?;
                     let new_page_number = new_page.get_page_number();
                     // We have to copy at least the page type into the new page.
                     // Otherwise its cache priority will be calculated incorrectly
@@ -2162,7 +2158,7 @@ impl WriteTransaction {
                     relocation_map.insert(*parent, new_page_number);
                 }
             } else {
-                page_allocator.free(new_page_number, &mut PageTrackerPolicy::Ignore);
+                page_allocator.free(new_page_number, &PageTracker::ignore());
                 break;
             }
         }
@@ -2190,7 +2186,7 @@ impl WriteTransaction {
             // pending non-durable commit (see register_non_durable_commit). As a result, no entry
             // whose pages are still unpersisted is eligible for processing here.
             debug_assert!(!self.mem.unpersisted(page));
-            page_allocator.free(page, &mut PageTrackerPolicy::Ignore);
+            page_allocator.free(page, &PageTracker::ignore());
         };
 
         let extracted_transactions = {
@@ -2294,10 +2290,7 @@ impl WriteTransaction {
                 let mut new_pages = vec![];
                 for i in 0..pages.len() {
                     let page = pages.get(i);
-                    if !self
-                        .mem
-                        .free_if_unpersisted(page, &mut PageTrackerPolicy::Ignore)
-                    {
+                    if !self.mem.free_if_unpersisted(page, &PageTracker::ignore()) {
                         new_pages.push(page);
                     }
                 }

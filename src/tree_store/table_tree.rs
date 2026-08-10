@@ -7,7 +7,7 @@ use crate::tree_store::multimap_btree::{
 };
 use crate::tree_store::{
     Btree, BtreeCursorRange, BtreeMut, InternalTableDefinition, PageAllocator, PageHint,
-    PageNumber, PageNumberHashSet, PageResolver, PageTrackerPolicy, RawBtree, TableType,
+    PageNumber, PageNumberHashSet, PageResolver, PageTracker, RawBtree, TableType,
     multimap_btree_stats,
 };
 use crate::types::{Key, Value};
@@ -230,7 +230,7 @@ pub(crate) struct TableTreeMut {
     // on close -- so entries cannot reference pages that an open handle frees.
     pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64, bool)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_pages: Arc<PageTracker>,
 }
 
 impl TableTreeMut {
@@ -239,7 +239,7 @@ impl TableTreeMut {
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
     ) -> Self {
         Self {
             tree: BtreeMut::new(
@@ -315,7 +315,9 @@ impl TableTreeMut {
 
     pub(crate) fn clear_root_updates_and_close(&mut self) {
         self.pending_table_updates.clear();
-        self.allocated_pages.lock().unwrap().close();
+        // This returns no error, so a poisoned tracker panics here as it did when the caller
+        // locked it directly
+        self.allocated_pages.close().unwrap();
     }
 
     pub(crate) fn flush_and_close(
@@ -323,7 +325,7 @@ impl TableTreeMut {
     ) -> Result<(Option<BtreeHeader>, PageNumberHashSet, Vec<PageNumber>)> {
         match self.flush_inner() {
             Ok(header) => {
-                let allocated = self.allocated_pages.lock()?.close();
+                let allocated = self.allocated_pages.close()?;
                 let mut old = vec![];
                 let mut freed_pages = self.freed_pages.lock()?;
                 mem::swap(freed_pages.as_mut(), &mut old);
@@ -332,7 +334,7 @@ impl TableTreeMut {
             Err(err) => {
                 // Ensure that the allocated pages get clear. Otherwise it will cause a panic
                 // when they are dropped
-                self.allocated_pages.lock()?.close();
+                self.allocated_pages.close()?;
                 Err(err)
             }
         }
@@ -591,16 +593,14 @@ impl TableTreeMut {
                 Ok(())
             })?;
             let mut freed_pages = self.freed_pages.lock().unwrap();
-            let mut allocated_pages = self.allocated_pages.lock().unwrap();
             for page in pages {
                 if !self
                     .page_allocator
-                    .free_if_uncommitted(page, &mut allocated_pages)
+                    .free_if_uncommitted(page, &self.allocated_pages)
                 {
                     freed_pages.push(page);
                 }
             }
-            drop(allocated_pages);
             drop(freed_pages);
 
             self.pending_table_updates.remove(name);
@@ -792,7 +792,7 @@ impl Drop for TableTreeMut {
         if thread::panicking() {
             return;
         }
-        assert!(self.allocated_pages.lock().unwrap().is_empty());
+        assert!(self.allocated_pages.is_empty());
     }
 }
 

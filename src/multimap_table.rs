@@ -13,7 +13,7 @@ use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTracker,
     RawBtree, RawLeafBuilder, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
@@ -115,7 +115,7 @@ pub struct MultimapValue<'a, V: Key + 'static> {
     inner: Option<ValueIterState<'a, V>>,
     remaining: u64,
     freed_pages: Option<Arc<Mutex<Vec<PageNumber>>>>,
-    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_pages: Arc<PageTracker>,
     free_on_drop: Vec<PageNumber>,
     _transaction_guard: Arc<TransactionGuard>,
     page_allocator: Option<PageAllocator>,
@@ -132,7 +132,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             inner: Some(ValueIterState::Subtree(Box::new(inner))),
             remaining: num_values,
             freed_pages: None,
-            allocated_pages: Arc::new(Mutex::new(PageTrackerPolicy::Closed)),
+            allocated_pages: Arc::new(PageTracker::closed()),
             free_on_drop: vec![],
             _transaction_guard: guard,
             page_allocator: None,
@@ -144,7 +144,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         inner: BtreeCursorRange<V, ()>,
         num_values: u64,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
         pages: Vec<PageNumber>,
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
@@ -167,7 +167,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
             inner: Some(ValueIterState::InlineLeaf(inner)),
             remaining,
             freed_pages: None,
-            allocated_pages: Arc::new(Mutex::new(PageTrackerPolicy::Closed)),
+            allocated_pages: Arc::new(PageTracker::closed()),
             free_on_drop: vec![],
             _transaction_guard: guard,
             page_allocator: None,
@@ -206,7 +206,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         collection: AccessGuard<'a, &'static DynamicCollection<V>>,
         pages: Vec<PageNumber>,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
     ) -> Result<Self> {
@@ -310,13 +310,12 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
         drop(mem::take(&mut self.inner));
         if !self.free_on_drop.is_empty() {
             let mut freed_pages = self.freed_pages.as_ref().unwrap().lock().unwrap();
-            let mut allocated_pages = self.allocated_pages.lock().unwrap();
             for page in &self.free_on_drop {
                 if !self
                     .page_allocator
                     .as_ref()
                     .unwrap()
-                    .free_if_uncommitted(*page, &mut allocated_pages)
+                    .free_if_uncommitted(*page, &self.allocated_pages)
                 {
                     freed_pages.push(*page);
                 }
@@ -496,7 +495,7 @@ pub struct MultimapTable<'txn, K: Key + 'static, V: Key + 'static> {
     num_values: u64,
     transaction: &'txn WriteTransaction,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_pages: Arc<PageTracker>,
     tree: BtreeMut<K, &'static DynamicCollection<V>>,
     page_allocator: PageAllocator,
     _value_type: PhantomData<V>,
@@ -515,7 +514,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         table_root: Option<BtreeHeader>,
         num_values: u64,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
         page_allocator: PageAllocator,
         transaction: &'txn WriteTransaction,
     ) -> MultimapTable<'txn, K, V> {
@@ -625,11 +624,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                             .insert(key.borrow(), &DynamicCollection::new(&inline_data))?;
                     } else {
                         // convert into a subtree
-                        let mut allocated = self.allocated_pages.lock().unwrap();
                         let mut page = self
                             .page_allocator
-                            .allocate(leaf_data.len(), &mut allocated)?;
-                        drop(allocated);
+                            .allocate(leaf_data.len(), &self.allocated_pages)?;
                         page.memory_mut()[..leaf_data.len()].copy_from_slice(leaf_data);
                         let page_number = page.get_page_number();
                         drop(page);
@@ -822,10 +819,9 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                 // these mutexes and may be used from different threads, so the
                                 // reverse order risks an ABBA deadlock with a concurrent insert.
                                 let mut freed_pages = self.freed_pages.lock().unwrap();
-                                let mut allocated_pages = self.allocated_pages.lock().unwrap();
                                 self.page_allocator.conditional_free(
                                     new_root,
-                                    &mut allocated_pages,
+                                    &self.allocated_pages,
                                     &mut freed_pages,
                                 );
                             } else {

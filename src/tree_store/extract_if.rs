@@ -1,5 +1,5 @@
 use crate::tree_store::btree_cursor::RangeMut;
-use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
 use std::collections::Bound;
@@ -41,7 +41,7 @@ where
         back_bound: Bound<Vec<u8>>,
         predicate: F,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: Arc<PageTracker>,
         page_allocator: PageAllocator,
     ) -> Self {
         Self {

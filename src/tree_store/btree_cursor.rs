@@ -6,7 +6,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
-use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTrackerPolicy};
+use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTracker};
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 use std::cmp::Ordering;
@@ -672,7 +672,7 @@ pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
     root: &'b mut Option<BtreeHeader>,
     page_allocator: &'b PageAllocator,
     freed: &'b mut Vec<PageNumber>,
-    allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+    allocated: &'b Arc<PageTracker>,
     state: CursorState,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
@@ -714,7 +714,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         root: &'b mut Option<BtreeHeader>,
         page_allocator: &'b PageAllocator,
         freed: &'b mut Vec<PageNumber>,
-        allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+        allocated: &'b Arc<PageTracker>,
     ) -> Self {
         Self::with_state(
             root,
@@ -729,7 +729,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         root: &'b mut Option<BtreeHeader>,
         page_allocator: &'b PageAllocator,
         freed: &'b mut Vec<PageNumber>,
-        allocated: &'b Arc<Mutex<PageTrackerPolicy>>,
+        allocated: &'b Arc<PageTracker>,
         state: CursorState,
     ) -> Self {
         Self {
@@ -1601,7 +1601,7 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
 pub(super) struct CursorTree<'a, K: Key + 'static, V: Value + 'static> {
     root: &'a mut Option<BtreeHeader>,
     page_allocator: PageAllocator,
-    allocated: Arc<Mutex<PageTrackerPolicy>>,
+    allocated: Arc<PageTracker>,
     master_free_list: Arc<Mutex<Vec<PageNumber>>>,
     freed: Vec<PageNumber>,
     _key_type: PhantomData<K>,
@@ -1613,7 +1613,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
         root: &'a mut Option<BtreeHeader>,
         page_allocator: PageAllocator,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: Arc<PageTracker>,
     ) -> Self {
         Self {
             root,
@@ -1641,11 +1641,10 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
             return;
         }
         let mut master_free_list = self.master_free_list.lock().unwrap();
-        let mut allocated = self.allocated.lock().unwrap();
         for page in self.freed.drain(..) {
             if !self
                 .page_allocator
-                .free_if_uncommitted(page, &mut allocated)
+                .free_if_uncommitted(page, &self.allocated)
             {
                 master_free_list.push(page);
             }
@@ -1764,7 +1763,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
         root: &'a mut Option<BtreeHeader>,
         page_allocator: PageAllocator,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: Arc<PageTracker>,
     ) -> Self {
         Self {
             tree: CursorTree::new(root, page_allocator, master_free_list, allocated),
@@ -2020,7 +2019,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         upper_bound: Bound<Vec<u8>>,
         page_allocator: PageAllocator,
         master_free_list: Arc<Mutex<Vec<PageNumber>>>,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: Arc<PageTracker>,
     ) -> Self {
         Self {
             tree: CursorTree::new(root, page_allocator, master_free_list, allocated),
@@ -2416,9 +2415,7 @@ fn park_bound<K: Key + 'static, V: Value + 'static>(
 mod tests {
     use super::*;
     use crate::tree_store::btree_base::{DEFERRED, LeafBuilder};
-    use crate::tree_store::{
-        AllocationPolicy, InMemoryBackend, PAGE_SIZE, PageTrackerPolicy, TransactionalMemory,
-    };
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
 
     fn test_page_allocator() -> PageAllocator {
         let mem = TransactionalMemory::new(
@@ -2436,11 +2433,9 @@ mod tests {
 
     // The returned tracker records the built page: mutations through a cursor
     // must share it, so the pages they free are found tracked.
-    fn leaf_root_with_entries(
-        entries: &[u64],
-    ) -> (PageAllocator, PageNumber, Arc<Mutex<PageTrackerPolicy>>) {
+    fn leaf_root_with_entries(entries: &[u64]) -> (PageAllocator, PageNumber, Arc<PageTracker>) {
         let page_allocator = test_page_allocator();
-        let allocated_pages = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+        let allocated_pages = Arc::new(PageTracker::new_tracking());
         let keys_and_values: Vec<_> = entries
             .iter()
             .map(|entry| {
@@ -2619,7 +2614,7 @@ mod tests {
                 let page_allocator = test_page_allocator();
                 let mut root = None;
                 let mut freed = vec![];
-                let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+                let allocated = Arc::new(PageTracker::new_tracking());
                 let mut cursor: CursorMut<'_, '_, u64, u64> =
                     CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
                 cursor.seek_to(Position::End).unwrap();
@@ -2642,7 +2637,7 @@ mod tests {
             let page_allocator = test_page_allocator();
             let mut root = None;
             let mut freed = vec![];
-            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let allocated = Arc::new(PageTracker::new_tracking());
             let mut cursor: CursorMut<'_, '_, u64, u64> =
                 CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
             cursor.seek_to(Position::End).unwrap();
@@ -2725,7 +2720,7 @@ mod tests {
             let page_allocator = test_page_allocator();
             let mut root = None;
             let mut freed = vec![];
-            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let allocated = Arc::new(PageTracker::new_tracking());
             let mut cursor: CursorMut<'_, '_, u64, u64> =
                 CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
             cursor.seek_to(Position::End).unwrap();
@@ -2776,7 +2771,7 @@ mod tests {
             let page_allocator = test_page_allocator();
             let mut root = None;
             let mut freed = vec![];
-            let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+            let allocated = Arc::new(PageTracker::new_tracking());
             let mut cursor: CursorMut<'_, '_, u64, u64> =
                 CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
             cursor.seek_to(Position::End).unwrap();
@@ -2869,7 +2864,7 @@ mod tests {
                 let page_allocator = test_page_allocator();
                 let mut root = None;
                 let mut freed = vec![];
-                let allocated = Arc::new(Mutex::new(PageTrackerPolicy::new_tracking()));
+                let allocated = Arc::new(PageTracker::new_tracking());
                 let mut cursor: CursorMut<'_, '_, u64, u64> =
                     CursorMut::new(&mut root, &page_allocator, &mut freed, &allocated);
                 cursor.seek_to(Position::Start).unwrap();

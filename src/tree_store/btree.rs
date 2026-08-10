@@ -13,7 +13,7 @@ use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeCursorRange, BtreeExtractIf,
-    PageAllocator, PageHint, PageNumber, PageResolver, PageTrackerPolicy,
+    PageAllocator, PageHint, PageNumber, PageResolver, PageTracker,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -322,10 +322,10 @@ impl UntypedBtreeMut {
         let mut freed_pages = self.freed_pages.lock().unwrap();
         // No need to track allocations, because this method is only called during compaction when
         // there can't be any savepoints
-        let mut ignore = PageTrackerPolicy::Ignore;
+        let ignore = PageTracker::ignore();
         if !self
             .page_allocator
-            .free_if_uncommitted(page_number, &mut ignore)
+            .free_if_uncommitted(page_number, &ignore)
         {
             freed_pages.push(page_number);
         }
@@ -354,7 +354,7 @@ pub(crate) struct BtreeMut<K: Key + 'static, V: Value + 'static> {
     // that operation returns. Kept here, instead of allocated per operation, so that its capacity
     // is reused across operations that free committed pages.
     local_freed: Vec<PageNumber>,
-    allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+    allocated_pages: Arc<PageTracker>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -365,7 +365,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        allocated_pages: Arc<Mutex<PageTrackerPolicy>>,
+        allocated_pages: Arc<PageTracker>,
     ) -> Self {
         Self {
             page_allocator,
@@ -471,7 +471,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         value: &V::SelfType<'_>,
     ) -> Result<()> {
         let mut fake_freed_pages = vec![];
-        let fake_allocated_pages = Arc::new(Mutex::new(PageTrackerPolicy::Closed));
+        let fake_allocated_pages = Arc::new(PageTracker::closed());
         let mut operation = MutateHelper::<K, V>::new(
             &mut self.root,
             &self.page_allocator,
@@ -586,13 +586,14 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                 self.page_allocator.get_page_mut(root.root)?
             } else {
                 let mut freed_pages = self.freed_pages.lock().unwrap();
-                let mut allocated = self.allocated_pages.lock().unwrap();
                 let required: usize = root
                     .root
                     .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
                     .try_into()
                     .unwrap();
-                let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
+                let mut new_page = self
+                    .page_allocator
+                    .allocate(required, &self.allocated_pages)?;
                 let old_page = self.page_allocator.get_page(root.root, PageHint::None)?;
                 new_page.memory_mut().copy_from_slice(old_page.memory());
                 drop(old_page);
@@ -645,12 +646,13 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                     self.page_allocator.get_page_mut(child_page)?
                 } else {
                     let mut freed_pages = self.freed_pages.lock().unwrap();
-                    let mut allocated = self.allocated_pages.lock().unwrap();
                     let required: usize = child_page
                         .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
                         .try_into()
                         .unwrap();
-                    let mut new_page = self.page_allocator.allocate(required, &mut allocated)?;
+                    let mut new_page = self
+                        .page_allocator
+                        .allocate(required, &self.allocated_pages)?;
                     let old_child_page =
                         self.page_allocator.get_page(child_page, PageHint::None)?;
                     new_page
@@ -1409,14 +1411,13 @@ mod tests {
         mem.reset_allocator_state().unwrap();
         let mem = Arc::new(mem);
         let page_allocator = PageAllocator::new(mem.clone(), AllocationPolicy::Default);
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
-        let mut allocated_guard = allocated_pages.lock().unwrap();
+        let allocated_pages = PageTracker::new_tracking();
 
         let mut p1_mut = page_allocator
-            .allocate(PAGE_SIZE, &mut allocated_guard)
+            .allocate(PAGE_SIZE, &allocated_pages)
             .unwrap();
         let mut p2_mut = page_allocator
-            .allocate(PAGE_SIZE, &mut allocated_guard)
+            .allocate(PAGE_SIZE, &allocated_pages)
             .unwrap();
 
         let p1 = p1_mut.get_page_number();
@@ -1444,7 +1445,6 @@ mod tests {
 
         drop(p1_mut);
         drop(p2_mut);
-        drop(allocated_guard);
 
         // Construct the UntypedBtree and RawBtree
         let header = BtreeHeader {
