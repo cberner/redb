@@ -1,7 +1,7 @@
 use crate::tree_store::page_store::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageImpl, PageMut, xxh3_checksum,
 };
-use crate::tree_store::{PageAllocator, PageNumber, PageTrackerPolicy};
+use crate::tree_store::{PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
 use std::borrow::Borrow;
@@ -10,7 +10,7 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 pub(crate) const LEAF: u8 = 1;
@@ -273,7 +273,7 @@ pub struct AccessGuardMut<'a, V: Value + 'static> {
     entry_index: usize,
     parent: Option<(PageMut<'a>, usize)>,
     page_allocator: PageAllocator,
-    allocated: Arc<Mutex<PageTrackerPolicy>>,
+    allocated: Arc<PageTracker>,
     root_ref: &'a mut BtreeHeader,
     key_width: Option<usize>,
     _value_type: PhantomData<V>,
@@ -288,7 +288,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         entry_index: usize,
         parent: Option<(PageMut<'a>, usize)>,
         page_allocator: PageAllocator,
-        allocated: Arc<Mutex<PageTrackerPolicy>>,
+        allocated: Arc<PageTracker>,
         root_ref: &'a mut BtreeHeader,
         key_width: Option<usize>,
     ) -> Self {
@@ -375,10 +375,9 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
             let old_page_number = self.page.get_page_number();
             self.page = new_page;
-            let mut allocated = self.allocated.lock().unwrap();
             assert!(
                 self.page_allocator
-                    .free_if_uncommitted(old_page_number, &mut allocated)
+                    .free_if_uncommitted(old_page_number, &self.allocated)
             );
         }
 
@@ -657,7 +656,7 @@ pub(super) struct LeafBuilder<'a, 'b> {
     total_key_bytes: usize,
     total_value_bytes: usize,
     page_allocator: &'b PageAllocator,
-    allocated_pages: &'b Mutex<PageTrackerPolicy>,
+    allocated_pages: &'b PageTracker,
 }
 
 // Key-value pairs copied into owned memory, so they survive any tree mutation.
@@ -803,7 +802,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 
     pub(super) fn new(
         page_allocator: &'b PageAllocator,
-        allocated_pages: &'b Mutex<PageTrackerPolicy>,
+        allocated_pages: &'b PageTracker,
         capacity: usize,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
@@ -894,10 +893,9 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 
         let required_size =
             self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
         let mut page1 = self
             .page_allocator
-            .allocate(required_size, &mut allocated_pages)?;
+            .allocate(required_size, self.allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page1.memory_mut(),
             division,
@@ -918,7 +916,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         );
         let mut page2 = self
             .page_allocator
-            .allocate(required_size, &mut allocated_pages)?;
+            .allocate(required_size, self.allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page2.memory_mut(),
             self.pairs.len() - division,
@@ -939,10 +937,9 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
             self.pairs.len(),
             self.total_key_bytes + self.total_value_bytes,
         );
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
         let mut page = self
             .page_allocator
-            .allocate(required_size, &mut allocated_pages)?;
+            .allocate(required_size, self.allocated_pages)?;
         let mut builder = RawLeafBuilder::new(
             page.memory_mut(),
             self.pairs.len(),
@@ -1918,13 +1915,13 @@ pub(super) struct BranchBuilder<'a, 'b> {
     total_key_bytes: usize,
     fixed_key_size: Option<usize>,
     page_allocator: &'b PageAllocator,
-    allocated_pages: &'b Mutex<PageTrackerPolicy>,
+    allocated_pages: &'b PageTracker,
 }
 
 impl<'a, 'b> BranchBuilder<'a, 'b> {
     pub(super) fn new(
         page_allocator: &'b PageAllocator,
-        allocated_pages: &'b Mutex<PageTrackerPolicy>,
+        allocated_pages: &'b PageTracker,
         child_capacity: usize,
         fixed_key_size: Option<usize>,
     ) -> Self {
@@ -1986,8 +1983,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             self.total_key_bytes,
             self.fixed_key_size,
         );
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
-        let mut page = self.page_allocator.allocate(size, &mut allocated_pages)?;
+        let mut page = self.page_allocator.allocate(size, self.allocated_pages)?;
         let mut builder =
             RawBranchBuilder::new(page.memory_mut(), self.keys.len(), self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
@@ -2013,7 +2009,6 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
-        let mut allocated_pages = self.allocated_pages.lock().unwrap();
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
@@ -2023,7 +2018,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
 
         let size =
             RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
-        let mut page1 = self.page_allocator.allocate(size, &mut allocated_pages)?;
+        let mut page1 = self.page_allocator.allocate(size, self.allocated_pages)?;
         let mut builder = RawBranchBuilder::new(page1.memory_mut(), division, self.fixed_key_size);
         builder.write_first_page(self.children[0].0, self.children[0].1);
         for i in 0..division {
@@ -2042,7 +2037,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
             second_split_key_len,
             self.fixed_key_size,
         );
-        let mut page2 = self.page_allocator.allocate(size, &mut allocated_pages)?;
+        let mut page2 = self.page_allocator.allocate(size, self.allocated_pages)?;
         let mut builder = RawBranchBuilder::new(
             page2.memory_mut(),
             self.keys.len() - division - 1,
@@ -2271,7 +2266,7 @@ mod tests {
 
     fn build_leaf(
         page_allocator: &PageAllocator,
-        allocated_pages: &Mutex<PageTrackerPolicy>,
+        allocated_pages: &PageTracker,
         keys: &[[u8; 8]],
     ) -> PageMut<'static> {
         let mut builder = LeafBuilder::new(
@@ -2297,7 +2292,7 @@ mod tests {
     #[test]
     fn leaf_inplace_insert_rejected_at_max_pairs() {
         let page_allocator = make_allocator();
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let allocated_pages = PageTracker::new_tracking();
         let keys = ascending_keys(MAX_PAIRS);
         let page = build_leaf(&page_allocator, &allocated_pages, &keys);
 
@@ -2322,7 +2317,7 @@ mod tests {
     #[test]
     fn leaf_inplace_append_up_to_max_pairs() {
         let page_allocator = make_allocator();
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let allocated_pages = PageTracker::new_tracking();
         let keys = ascending_keys(MAX_PAIRS - 1);
         let mut page = build_leaf(&page_allocator, &allocated_pages, &keys);
         assert!(page.get_page_number().page_order > 0);
@@ -2349,7 +2344,7 @@ mod tests {
     #[test]
     fn leaf_split_respects_max_pairs() {
         let page_allocator = make_allocator();
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let allocated_pages = PageTracker::new_tracking();
         let num_pairs = MAX_PAIRS + 2;
         let keys = ascending_keys(num_pairs);
         let big_value = vec![0u8; 2 * 1024 * 1024];
@@ -2382,7 +2377,7 @@ mod tests {
     #[test]
     fn leaf_split_respects_max_pairs_by_count() {
         let page_allocator = make_allocator_with_page_size(2 * 1024 * 1024);
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let allocated_pages = PageTracker::new_tracking();
         let num_pairs = MAX_PAIRS + 1;
         let keys = ascending_keys(num_pairs);
         let mut builder = LeafBuilder::new(
@@ -2411,7 +2406,7 @@ mod tests {
     #[test]
     fn branch_split_respects_max_keys_by_count() {
         let page_allocator = make_allocator_with_page_size(4 * 1024 * 1024);
-        let allocated_pages = Mutex::new(PageTrackerPolicy::new_tracking());
+        let allocated_pages = PageTracker::new_tracking();
         // One more key than u16::MAX, i.e. two more children.
         let num_children = MAX_PAIRS + 2;
         let keys = ascending_keys(num_children - 1);
