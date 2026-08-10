@@ -320,6 +320,9 @@ pub(crate) struct TransactionalMemory {
     unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
     // Reverse index into `unpersisted_allocations`
     unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
+    // Data-tree pages freed by non-durable commits. These can stay in memory until the next
+    // durable commit because the commits that produced them are themselves volatile.
+    unpersisted_data_freed: Mutex<BTreeMap<TransactionId, Vec<PageNumber>>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -463,6 +466,7 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(PageNumberHashSet::default()),
             unpersisted_allocations: Mutex::new(BTreeMap::new()),
             unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
+            unpersisted_data_freed: Mutex::new(BTreeMap::new()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -532,8 +536,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
-        self.storage.flush()?;
+        // This path abandons the volatile state in favor of the durable file. Buffered pages may
+        // belong only to that abandoned state, so discard them instead of writing them out.
+        self.storage.discard_write_buffer();
         self.storage.invalidate_cache_all();
+        self.storage.sync_file()?;
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
@@ -560,6 +567,7 @@ impl TransactionalMemory {
         self.unpersisted.lock().unwrap().clear();
         self.unpersisted_allocations.lock().unwrap().clear();
         self.unpersisted_allocation_txn.lock().unwrap().clear();
+        self.unpersisted_data_freed.lock().unwrap().clear();
 
         Ok(was_clean)
     }
@@ -834,6 +842,7 @@ impl TransactionalMemory {
         // flushed to DATA_ALLOCATED_TABLE (see WriteTransaction::durable_commit).
         self.unpersisted_allocations.lock().unwrap().clear();
         self.unpersisted_allocation_txn.lock().unwrap().clear();
+        self.unpersisted_data_freed.lock().unwrap().clear();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -864,7 +873,7 @@ impl TransactionalMemory {
         self.storage.check_io_errors()?;
 
         self.unpersisted.lock().unwrap().extend(newly_unpersisted);
-        self.storage.write_barrier()?;
+        self.storage.write_barrier();
 
         let mut state = self.state.lock().unwrap();
         state
@@ -1133,6 +1142,58 @@ impl TransactionalMemory {
 
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
         self.unpersisted.lock().unwrap().contains(&page)
+    }
+
+    pub(crate) fn record_unpersisted_data_freed(
+        &self,
+        transaction_id: TransactionId,
+        pages: Vec<PageNumber>,
+    ) {
+        if !pages.is_empty() {
+            self.unpersisted_data_freed
+                .lock()
+                .unwrap()
+                .entry(transaction_id)
+                .or_default()
+                .extend(pages);
+        }
+    }
+
+    pub(crate) fn process_unpersisted_data_freed(
+        &self,
+        start: TransactionId,
+        end: TransactionId,
+        mut process_page: impl FnMut(PageNumber) -> bool,
+    ) -> Vec<TransactionId> {
+        let mut map = self.unpersisted_data_freed.lock().unwrap();
+        let transaction_ids: Vec<_> = map.range(start..end).map(|(id, _)| *id).collect();
+        for transaction_id in &transaction_ids {
+            let pages = map.get_mut(transaction_id).unwrap();
+            pages.retain(|page| !process_page(*page));
+            if pages.is_empty() {
+                map.remove(transaction_id);
+            }
+        }
+        transaction_ids
+    }
+
+    pub(crate) fn take_unpersisted_data_freed(&self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
+        std::mem::take(&mut *self.unpersisted_data_freed.lock().unwrap())
+    }
+
+    pub(crate) fn unpersisted_data_freed_pages(&self) -> Vec<PageNumber> {
+        self.unpersisted_data_freed
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn drain_unpersisted_data_freed_after(&self, transaction_id: TransactionId) {
+        let mut map = self.unpersisted_data_freed.lock().unwrap();
+        let _ = map.split_off(&transaction_id.next());
     }
 
     pub(crate) fn allocate_helper<'txn>(

@@ -611,7 +611,8 @@ impl Database {
         // the live state and report not-clean.
         let mut rolling_back_non_durable = false;
         if self.mem.pending_non_durable_commit() {
-            // Verify from disk, not the page cache, so external modification is detected.
+            // Bypass the read cache so spilled pages are verified from disk. Pages retained by a
+            // non-durable commit remain authoritative in the write buffer.
             self.mem.clear_read_cache();
             // Don't promote over a truncated or extended file -- the committed layout would be
             // inconsistent with it. Fall through to reload + repair instead.
@@ -1047,6 +1048,11 @@ impl Database {
             mem.mark_page_allocated(page);
             Ok(())
         })?;
+        // Non-durable commits keep their data-freed records in memory. These pages are as much a
+        // part of the live allocator state as pages referenced by the on-disk freed tables.
+        for page in mem.unpersisted_data_freed_pages() {
+            mem.mark_page_allocated(page);
+        }
         #[cfg(debug_assertions)]
         {
             Self::check_repaired_allocated_pages_table(system_root, mem.clone())?;

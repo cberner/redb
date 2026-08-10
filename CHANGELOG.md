@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 4.2.0 - 2026-XX-XX
+* Improve `Durability::None` commit performance by retaining dirty pages and freed-page metadata in
+  memory. Non-durable commits no longer flush dirty pages to the file at each commit; pages are
+  written by a durable commit, clean database close, or cache-pressure eviction.
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to

@@ -323,6 +323,10 @@ the database is still guaranteed to be consistent, and will return to either the
 full commit that was made.
 Non-durable commits are implemented with an in-memory flag that directs readers to read from the secondary page,
 even though it is not yet promoted to the primary.
+Dirty pages remain in the bounded write buffer and are made visible to readers without being flushed at each
+commit. Cache pressure may spill pages to the database file; a durable commit or clean shutdown flushes the
+remainder. Pending data-page free records are likewise retained in memory and are persisted by the next durable
+commit. Allocator repair treats those deferred records as allocated until they can be processed.
 In the event of a crash, the database will simply rollback to the primary page and the allocator state can be safely
 rebuilt via the normal repair process.
 Note that a non-durable commit may only free pages that were themselves allocated by an earlier, not-yet-durable
