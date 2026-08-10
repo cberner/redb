@@ -21,6 +21,8 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
+* Commits now flush table root updates in a deterministic order, removing a source of
+  nondeterminism that could make identical operation sequences produce differing database files
 * Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates
   nothing yet, so building with `default-features = false` still links against the standard
   library. Under the `experimental-api-5` feature flag, which collects the changes planned for
