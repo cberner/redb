@@ -3580,3 +3580,124 @@ fn u8_array_serialization() {
         assert_eq!(ref_order, generic_order);
     }
 }
+
+#[test]
+fn multi_table_commit_writes_are_deterministic() {
+    use redb::StorageBackend;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, PartialEq)]
+    enum BackendEvent {
+        Write { offset: u64, data: Vec<u8> },
+        SetLen(u64),
+        Sync,
+    }
+
+    type EventLog = Arc<Mutex<Vec<BackendEvent>>>;
+
+    #[derive(Debug)]
+    struct RecordingBackend {
+        inner: InMemoryBackend,
+        log: EventLog,
+    }
+
+    impl StorageBackend for RecordingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::SetLen(len));
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::Sync);
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::Write {
+                offset,
+                data: data.to_vec(),
+            });
+            self.inner.write(offset, data)
+        }
+    }
+
+    // A history rich enough to exercise order-sensitive allocation. Every branch depends only
+    // on loop indices, so two executions perform an identical operation sequence.
+    fn run_workload() -> Vec<BackendEvent> {
+        let log: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            inner: InMemoryBackend::new(),
+            log: Arc::clone(&log),
+        };
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        let mut persistent_ids: Vec<u64> = Vec::new();
+        for round in 0..8u32 {
+            let mut txn = db.begin_write().unwrap();
+            let ephemeral = if round % 2 == 0 {
+                Some(txn.ephemeral_savepoint().unwrap())
+            } else {
+                None
+            };
+            if round == 3 || round == 5 {
+                persistent_ids.push(txn.persistent_savepoint().unwrap());
+            }
+            for i in 0..120u32 {
+                if (i + round) % 3 == 0 {
+                    let name = format!("table_{i:0>60}");
+                    let def: TableDefinition<u32, Vec<u8>> = TableDefinition::new(&name);
+                    let mut table = txn.open_table(def).unwrap();
+                    for k in 0..(1 + (i + round) % 7) {
+                        let len = ((i * 37 + k * 101 + round * 13) % 900) as usize;
+                        table.insert(k, vec![(i % 251) as u8; len]).unwrap();
+                    }
+                    if round > 2 && i % 5 == 0 {
+                        table.remove(0u32).unwrap();
+                    }
+                }
+            }
+            if round >= 4 {
+                for i in 0..120u32 {
+                    if (i + round) % 9 == 0 {
+                        let name = format!("table_{i:0>60}");
+                        let def: TableDefinition<u32, Vec<u8>> = TableDefinition::new(&name);
+                        let _ = txn.delete_table(def).unwrap();
+                    }
+                }
+            }
+            if let Some(sp) = ephemeral {
+                if round % 4 == 0 {
+                    txn.restore_savepoint(&sp).unwrap();
+                }
+                drop(sp);
+            }
+            if round == 6 {
+                for id in persistent_ids.drain(..) {
+                    txn.delete_persistent_savepoint(id).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+            if round == 5 {
+                let abort_txn = db.begin_write().unwrap();
+                let _doomed = abort_txn.persistent_savepoint().unwrap();
+                abort_txn.abort().unwrap();
+            }
+        }
+        drop(db);
+        Arc::try_unwrap(log).unwrap().into_inner().unwrap()
+    }
+
+    let first = run_workload();
+    let second = run_workload();
+    assert_eq!(
+        first, second,
+        "identical operation sequences must produce identical backend write sequences"
+    );
+}

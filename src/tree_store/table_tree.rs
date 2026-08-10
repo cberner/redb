@@ -228,7 +228,9 @@ pub(crate) struct TableTreeMut {
     // The bool indicates whether the root has dirty (DEFERRED) checksums that need finalization.
     // Never contains an entry for an open table -- the update is taken out on open and re-staged
     // on close -- so entries cannot reference pages that an open handle frees.
-    pending_table_updates: HashMap<String, (Option<BtreeHeader>, u64, bool)>,
+    // Ordered so that commits flush table roots in a deterministic order, keeping the pages a
+    // commit allocates -- and therefore the resulting file bytes -- reproducible.
+    pending_table_updates: BTreeMap<String, (Option<BtreeHeader>, u64, bool)>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     allocated_pages: Arc<PageTracker>,
 }
@@ -251,7 +253,7 @@ impl TableTreeMut {
             ),
             guard,
             page_allocator,
-            pending_table_updates: HashMap::default(),
+            pending_table_updates: BTreeMap::new(),
             freed_pages,
             allocated_pages,
         }
@@ -345,7 +347,8 @@ impl TableTreeMut {
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
-        for (name, (new_root, new_length, dirty)) in self.pending_table_updates.drain() {
+        for (name, (new_root, new_length, dirty)) in std::mem::take(&mut self.pending_table_updates)
+        {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();
             // No-op if the root has not changed and checksums are already finalized
