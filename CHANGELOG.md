@@ -22,6 +22,7 @@
 
 ## 4.2.0 - 2026-XX-XX
 * `Durability::None` commits are about 2x faster.
+* Avoid rebuilding B-tree pages whose serialized layout is unchanged.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files
 * Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates
