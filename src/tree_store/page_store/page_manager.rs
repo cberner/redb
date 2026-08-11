@@ -335,22 +335,94 @@ impl InMemoryState {
     }
 }
 
+/// What non-durable commits record in memory instead of in the file. All of it is volatile by
+/// construction -- a crash rolls those commits back -- so it shares one lifecycle, and `clear()`
+/// is the only way it is emptied: by the durable `commit()` that persists what it stands in for,
+/// or the `clear_cache_and_reload()` that abandons it. It lives here because of that coupling,
+/// and because reclaiming a page consults it and the allocator together.
+#[derive(Default)]
+struct UnpersistedState {
+    // Pages allocated by non-durable commits. Still reclaimable while they are here, since no
+    // durable commit references them.
+    pages: PageNumberHashSet,
+    // Data-tree pages allocated per transaction: the in-memory stand-in for DATA_ALLOCATED_TABLE,
+    // kept in memory so that reclaiming a page can cheaply drop its record. Flushed to the table
+    // by durable_commit().
+    allocations: BTreeMap<TransactionId, PageNumberHashSet>,
+    // Reverse index into `allocations`
+    allocation_txn: PageNumberHashMap<TransactionId>,
+}
+
+impl UnpersistedState {
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.pages.shrink_to_fit();
+        self.allocations.clear();
+        self.allocation_txn.clear();
+    }
+
+    fn contains(&self, page: PageNumber) -> bool {
+        self.pages.contains(&page)
+    }
+
+    fn extend(&mut self, pages: PageNumberHashSet) {
+        self.pages.extend(pages);
+    }
+
+    /// Claims `page` for reclamation, returning whether this call got it. The page and its
+    /// allocation record are dropped together, so a claimed page leaves nothing to write out.
+    fn claim(&mut self, page: PageNumber) -> bool {
+        if !self.pages.remove(&page) {
+            return false;
+        }
+        if let Some(txn) = self.allocation_txn.remove(&page) {
+            let pages = self
+                .allocations
+                .get_mut(&txn)
+                .expect("allocation_txn points to a missing entry");
+            let removed = pages.remove(&page);
+            debug_assert!(removed);
+            if pages.is_empty() {
+                self.allocations.remove(&txn);
+            }
+        }
+        true
+    }
+
+    fn record_allocations(
+        &mut self,
+        transaction_id: TransactionId,
+        pages: impl IntoIterator<Item = PageNumber>,
+    ) {
+        let entry = self.allocations.entry(transaction_id).or_default();
+        for page in pages {
+            if entry.insert(page) {
+                let prev = self.allocation_txn.insert(page, transaction_id);
+                debug_assert!(prev.is_none(), "page {page:?} already tracked");
+            }
+        }
+        if entry.is_empty() {
+            self.allocations.remove(&transaction_id);
+        }
+    }
+
+    fn take_allocations(&mut self) -> BTreeMap<TransactionId, PageNumberHashSet> {
+        self.allocation_txn.clear();
+        mem::take(&mut self.allocations)
+    }
+
+    /// The pages allocated by transactions after `transaction_id`, which a savepoint restore to
+    /// that point has to queue for freeing.
+    fn allocations_after(&self, transaction_id: TransactionId) -> Vec<PageNumber> {
+        self.allocations
+            .range(transaction_id.next()..)
+            .flat_map(|(_, pages)| pages.iter().copied())
+            .collect()
+    }
+}
+
 pub(crate) struct TransactionalMemory {
-    // TODO: Maybe we should move all this unpersisted stuff to another transaction layer.
-    // There are durable commits which support persistent and ephemeral savepoints.
-    // And then non-durable commits which support only ephemeral savepoints, and basically
-    // accumulate in unpersisted memory/file space until a durable commit is made.
-    // Maybe the non-durable commit layer should be separate, and build on top of the durable commit layer.
-    unpersisted: Mutex<PageNumberHashSet>,
-    // Data-tree pages allocated by non-durable commits that have not yet been durably persisted.
-    // This is the in-memory replacement for entries
-    // in DATA_ALLOCATED_TABLE for non-durable transactions: by keeping the list in-memory we can
-    // efficiently remove entries when `free_if_unpersisted` reclaims pages.
-    // Flushed to DATA_ALLOCATED_TABLE during durable_commit, and cleared (along with
-    // `unpersisted`) once the commit succeeds.
-    unpersisted_allocations: Mutex<BTreeMap<TransactionId, PageNumberHashSet>>,
-    // Reverse index into `unpersisted_allocations`
-    unpersisted_allocation_txn: Mutex<PageNumberHashMap<TransactionId>>,
+    unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -491,9 +563,7 @@ impl TransactionalMemory {
         assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
-            unpersisted: Mutex::new(PageNumberHashSet::default()),
-            unpersisted_allocations: Mutex::new(BTreeMap::new()),
-            unpersisted_allocation_txn: Mutex::new(PageNumberHashMap::default()),
+            unpersisted: Mutex::new(UnpersistedState::default()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -595,8 +665,6 @@ impl TransactionalMemory {
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
         self.unpersisted.lock().unwrap().clear();
-        self.unpersisted_allocations.lock().unwrap().clear();
-        self.unpersisted_allocation_txn.lock().unwrap().clear();
 
         Ok(was_clean)
     }
@@ -886,13 +954,9 @@ impl TransactionalMemory {
         if shrunk {
             self.storage.resize(header.layout().len())?;
         }
-        let mut unpersisted = self.unpersisted.lock().unwrap();
-        unpersisted.clear();
-        unpersisted.shrink_to_fit();
-        // Any remaining unpersisted allocations are now durable. Their records have already been
-        // flushed to DATA_ALLOCATED_TABLE (see WriteTransaction::durable_commit).
-        self.unpersisted_allocations.lock().unwrap().clear();
-        self.unpersisted_allocation_txn.lock().unwrap().clear();
+        // Everything this stood in for is now durable: durable_commit() flushed the allocation
+        // records to DATA_ALLOCATED_TABLE before reaching here.
+        self.unpersisted.lock().unwrap().clear();
 
         let mut state = self.state.lock().unwrap();
         assert_eq!(
@@ -1068,29 +1132,6 @@ impl TransactionalMemory {
         self.free_helper(page, allocated);
     }
 
-    fn remove_unpersisted_allocation(&self, page: PageNumber) {
-        let Some(txn) = self
-            .unpersisted_allocation_txn
-            .lock()
-            .unwrap()
-            .remove(&page)
-        else {
-            return;
-        };
-        let mut allocations = self.unpersisted_allocations.lock().unwrap();
-        let empty = {
-            let pages = allocations
-                .get_mut(&txn)
-                .expect("unpersisted_allocation_txn points to a missing entry");
-            let removed = pages.remove(&page);
-            debug_assert!(removed);
-            pages.is_empty()
-        };
-        if empty {
-            allocations.remove(&txn);
-        }
-    }
-
     fn free_helper(&self, page: PageNumber, allocated: &PageTracker) {
         #[cfg(debug_assertions)]
         {
@@ -1133,8 +1174,7 @@ impl TransactionalMemory {
 
     // Frees the page if no durable commit has occurred, since it was allocated. Returns true, if the page was freed
     pub(crate) fn free_if_unpersisted(&self, page: PageNumber, allocated: &PageTracker) -> bool {
-        if self.unpersisted.lock().unwrap().remove(&page) {
-            self.remove_unpersisted_allocation(page);
+        if self.unpersisted.lock().unwrap().claim(page) {
             self.free_helper(page, allocated);
             true
         } else {
@@ -1150,26 +1190,16 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         pages: impl IntoIterator<Item = PageNumber>,
     ) {
-        let mut iter = pages.into_iter().peekable();
-        if iter.peek().is_none() {
-            return;
-        }
-        let mut allocations = self.unpersisted_allocations.lock().unwrap();
-        let mut reverse = self.unpersisted_allocation_txn.lock().unwrap();
-        let entry = allocations.entry(transaction_id).or_default();
-        for page in iter {
-            if entry.insert(page) {
-                let prev = reverse.insert(page, transaction_id);
-                debug_assert!(prev.is_none(), "page {page:?} already tracked");
-            }
-        }
+        self.unpersisted
+            .lock()
+            .unwrap()
+            .record_allocations(transaction_id, pages);
     }
 
     pub(crate) fn take_unpersisted_allocations(
         &self,
     ) -> BTreeMap<TransactionId, PageNumberHashSet> {
-        self.unpersisted_allocation_txn.lock().unwrap().clear();
-        std::mem::take(&mut *self.unpersisted_allocations.lock().unwrap())
+        self.unpersisted.lock().unwrap().take_allocations()
     }
 
     // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
@@ -1178,16 +1208,14 @@ impl TransactionalMemory {
         &self,
         transaction_id: TransactionId,
     ) -> Vec<PageNumber> {
-        let allocations = self.unpersisted_allocations.lock().unwrap();
-        let mut result = vec![];
-        for pages in allocations.range(transaction_id.next()..).map(|(_, v)| v) {
-            result.extend(pages.iter().copied());
-        }
-        result
+        self.unpersisted
+            .lock()
+            .unwrap()
+            .allocations_after(transaction_id)
     }
 
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
-        self.unpersisted.lock().unwrap().contains(&page)
+        self.unpersisted.lock().unwrap().contains(page)
     }
 
     pub(crate) fn allocate_helper<'txn>(
