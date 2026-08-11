@@ -504,9 +504,14 @@ agrees on the protocol:
   released when it ends, so any process may write, one at a time. A process taking the lock has to
   pick up what the previous one did, which means loading the allocator state from the file rather
   than rebuilding it -- so every commit in this mode is forced to be a quick-repair commit. Two
-  further consequences: `Durability::None` is rejected, since a non-durable commit lives only in the
-  committing process's memory, and the post-commit free epilogue is skipped, since it publishes its
-  work the same way.
+  further consequence: `Durability::None` is rejected, since a non-durable commit lives only in the
+  committing process's memory.
+
+Both modes skip the post-commit free epilogue, which reclaims a commit's freed pages immediately
+rather than leaving them to the next commit. It publishes its work as a non-durable commit, which no
+other process can see, and the horizon it would use is clamped (below) to what a reader about to
+register can still reach -- which is exactly what the next commit frees anyway. So it buys nothing
+here and costs a system tree update per commit.
 
 Commits in *both* modes are forced to be 2-phase. A 1-phase commit writes the new header and the
 pages it references in a single flush, in no particular order, and relies on the header's checksums
@@ -541,6 +546,18 @@ In the same process, the state lock in `TransactionTracker` is held across the c
 registration, which extends the same atomicity to the in-memory half. Lock order is always
 tracker state, then registry, then the reader slots; a writer only ever *tries* the slot locks, so
 it can never block on a process that is waiting for the registry.
+
+## Savepoints
+
+An ephemeral savepoint belongs to the process that made it, and pins a transaction there like any
+read transaction does, so it is published in that process's slot and needs nothing further.
+
+A persistent savepoint lives in the database rather than in any one process, so a process that
+opened before another created one has never heard of it. A writer therefore reads the set of
+persistent savepoints out of the database at the start of every transaction and adopts it, in place
+of whatever it previously knew, before anything in that transaction can free a page. It picks up the
+savepoint id counter at the same time, so that two processes cannot hand out the same id -- forwards
+only, since this process may have given higher ids to ephemeral savepoints that are still live.
 
 ## Keeping up with other processes
 

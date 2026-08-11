@@ -1395,13 +1395,58 @@ fn begin_write_with_allocation_policy(
         )
         .into());
     }
-    WriteTransaction::new(
+    let transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
         mem.clone(),
         allocation_policy,
-    )
-    .map_err(|e| e.into())
+    )?;
+
+    if transaction_tracker.write_lock_is_shared() {
+        // Another process may have created or deleted a persistent savepoint since this one last
+        // held the write lock. Adopted before anything in this transaction can free a page, since
+        // that is what the savepoints hold back
+        adopt_persistent_savepoints(transaction_tracker, &transaction).map_err(|e| match e {
+            SavepointError::Storage(storage) => TransactionError::Storage(storage),
+            // Neither is reachable from reading the savepoints out of the database
+            SavepointError::InvalidSavepoint | SavepointError::ImmediateDurabilityRequired => {
+                unreachable!()
+            }
+        })?;
+    }
+
+    Ok(transaction)
+}
+
+// Reads the persistent savepoints out of the database and registers them with the tracker, in
+// place of whatever this process previously knew about.
+fn adopt_persistent_savepoints(
+    transaction_tracker: &Arc<TransactionTracker>,
+    transaction: &WriteTransaction,
+) -> Result<(), SavepointError> {
+    let next_savepoint = transaction.next_persistent_savepoint_id()?;
+    let mut savepoints = vec![];
+    for id in transaction.list_persistent_savepoints()? {
+        let savepoint = transaction.get_persistent_savepoint(id)?;
+        savepoints.push((savepoint.get_id(), savepoint.get_transaction_id()));
+    }
+    transaction_tracker.adopt_persistent_savepoints(next_savepoint, &savepoints)?;
+
+    Ok(())
+}
+
+// Whether closing has to write an allocator state table for the next open to load. A database
+// whose every commit is a quick-repair commit already has a current one, and writing another would
+// mean taking the cross-process write lock while dropping the database -- which can block on
+// another process for as long as its transaction runs.
+fn needs_allocator_state_table(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+) -> bool {
+    if !transaction_tracker.requires_quick_repair() {
+        return true;
+    }
+    !matches!(Database::allocator_state_table(mem), Ok(Some(_)))
 }
 
 fn ensure_allocator_state_table_and_trim(
@@ -1433,6 +1478,7 @@ fn ensure_allocator_state_table_and_trim(
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
     if !thread::panicking()
+        && needs_allocator_state_table(transaction_tracker, mem)
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
         #[cfg(feature = "logging")]

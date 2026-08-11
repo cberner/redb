@@ -181,11 +181,16 @@ impl TransactionTracker {
         self.process.is_some()
     }
 
-    // True when the post-commit free epilogue must be skipped: it publishes its work as a
-    // non-durable commit, which is invisible to every other process and is thrown away as soon as
-    // one of them takes the write lock
+    // True when the post-commit free epilogue must be skipped.
+    //
+    // The epilogue reclaims a commit's freed pages immediately, rather than leaving them to the
+    // next commit, by publishing its work as a non-durable commit. Neither half of that survives
+    // contact with other processes: a non-durable commit is invisible to them, and the horizon the
+    // epilogue would use is clamped to what a reader about to register can still reach -- which is
+    // exactly what the next commit will free anyway. So it buys nothing and costs a system tree
+    // update per commit.
     pub(crate) fn defers_post_commit_free(&self) -> bool {
-        self.write_lock_is_shared()
+        self.process.is_some()
     }
 
     // False when a non-durable commit would be invisible to, and silently discarded by, the next
@@ -429,9 +434,64 @@ impl TransactionTracker {
     // costs other processes some page reclamation but is never unsafe -- and this runs on drop
     // paths that have nowhere to report an error to.
     fn publish_pinned(&self, state: &State) {
-        if let Some(process) = &self.process {
-            let _ = process.publish_pinned(state.oldest_pinned());
+        let _ = self.try_publish_pinned(state);
+    }
+
+    fn try_publish_pinned(&self, state: &State) -> Result<()> {
+        match &self.process {
+            Some(process) => process.publish_pinned(state.oldest_pinned()),
+            None => Ok(()),
         }
+    }
+
+    // Replaces the persistent savepoints this process knows about with the ones the file names.
+    //
+    // A persistent savepoint lives in the database rather than in any one process, so a process
+    // that opened before another created one has never heard of it -- and would reclaim the pages
+    // it needs. A writer adopts the file's set at the start of every transaction instead, which is
+    // also where it picks up the savepoint id counter, so that two processes cannot allocate the
+    // same id. Ephemeral savepoints belong to this process alone and are left alone.
+    //
+    // The caller must hold the cross-process write lock, which is what makes it safe to drop the
+    // previous set's page references before adding the new one's.
+    pub(crate) fn adopt_persistent_savepoints(
+        &self,
+        next_savepoint: Option<SavepointId>,
+        savepoints: &[(SavepointId, TransactionId)],
+    ) -> Result<()> {
+        let mut state = self.state.lock()?;
+        let previous: Vec<(SavepointId, TransactionId)> = state
+            .persistent_savepoints
+            .iter()
+            .filter_map(|id| state.valid_savepoints.get(id).map(|txn| (*id, *txn)))
+            .collect();
+        for (id, transaction) in previous {
+            state.persistent_savepoints.remove(&id);
+            state.valid_savepoints.remove(&id);
+            let count = state.live_read_transactions.get_mut(&transaction).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                state.live_read_transactions.remove(&transaction);
+            }
+        }
+
+        if let Some(next_savepoint) = next_savepoint {
+            // Only ever forwards: this process may have handed out higher ids to ephemeral
+            // savepoints, which are still live and must not be handed out again
+            state.next_savepoint_id = state.next_savepoint_id.max(next_savepoint);
+        }
+        for (id, transaction) in savepoints {
+            state
+                .live_read_transactions
+                .entry(*transaction)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            state.valid_savepoints.insert(*id, *transaction);
+            state.persistent_savepoints.insert(*id);
+        }
+        // Unlike the drop paths, this lowers the pinned transaction, so a failure to publish it
+        // would let another process free pages these savepoints need
+        self.try_publish_pinned(&state)
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {

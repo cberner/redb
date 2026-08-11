@@ -27,8 +27,8 @@
   it, so it must be on a filesystem that supports file locking. Two modes are available: one where
   a single process may write, which costs that process nothing on the read path, and one where any
   process may write, which uses quick-repair commits so that each writer can pick up the previous
-  one's allocator state. Non-durable commits, persistent savepoints, compaction and integrity
-  checks are not supported in all configurations -- see the type's documentation.
+  one's allocator state. Non-durable commits, compaction and integrity checks are not supported in
+  all configurations -- see the type's documentation.
 * `Durability::None` commits are about 2x faster.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files
