@@ -351,6 +351,10 @@ struct UnpersistedState {
     allocations: BTreeMap<TransactionId, PageNumberHashSet>,
     // Reverse index into `allocations`
     allocation_txn: PageNumberHashMap<TransactionId>,
+    // Data-tree pages freed per transaction: the in-memory stand-in for DATA_FREED_TABLE. Held
+    // here for the same reason as `allocations` -- the commits that freed them are volatile, so a
+    // crash that loses the records also rolls back the commits they describe.
+    data_freed: BTreeMap<TransactionId, Vec<PageNumber>>,
 }
 
 impl UnpersistedState {
@@ -359,6 +363,7 @@ impl UnpersistedState {
         self.pages.shrink_to_fit();
         self.allocations.clear();
         self.allocation_txn.clear();
+        self.data_freed.clear();
     }
 
     fn contains(&self, page: PageNumber) -> bool {
@@ -418,6 +423,61 @@ impl UnpersistedState {
             .range(transaction_id.next()..)
             .flat_map(|(_, pages)| pages.iter().copied())
             .collect()
+    }
+
+    fn record_data_freed(&mut self, transaction_id: TransactionId, pages: Vec<PageNumber>) {
+        if !pages.is_empty() {
+            self.data_freed
+                .entry(transaction_id)
+                .or_default()
+                .extend(pages);
+        }
+    }
+
+    /// The records of transactions in `start..end`, copied out so that the caller can reclaim
+    /// pages without holding this state locked.
+    fn data_freed_in_range(
+        &self,
+        start: TransactionId,
+        end: TransactionId,
+    ) -> Vec<(TransactionId, Vec<PageNumber>)> {
+        // The bounds are derived independently -- `start` from the oldest unprocessed non-durable
+        // commit, `end` from the oldest live read -- so a live read older than that commit inverts
+        // the range, which BTreeMap::range panics on.
+        if start >= end {
+            return vec![];
+        }
+        self.data_freed
+            .range(start..end)
+            .map(|(id, pages)| (*id, pages.clone()))
+            .collect()
+    }
+
+    /// Replaces a transaction's record with the pages that were not reclaimed, dropping the
+    /// record entirely when none are left.
+    fn replace_data_freed(&mut self, transaction_id: TransactionId, pages: Vec<PageNumber>) {
+        if pages.is_empty() {
+            self.data_freed.remove(&transaction_id);
+        } else {
+            self.data_freed.insert(transaction_id, pages);
+        }
+    }
+
+    fn take_data_freed(&mut self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
+        mem::take(&mut self.data_freed)
+    }
+
+    /// Drops the records of transactions after `transaction_id`, whose commits a savepoint restore
+    /// has discarded.
+    fn drop_data_freed_after(&mut self, transaction_id: TransactionId) {
+        self.data_freed.split_off(&transaction_id.next());
+    }
+
+    /// The pages this state keeps allocated but unreachable from the roots: those freed by a
+    /// non-durable commit and not yet released. An allocator rebuild has to mark them allocated,
+    /// exactly as it does for the pages named by the on-disk freed tables.
+    fn pages_pending_free(&self) -> Vec<PageNumber> {
+        self.data_freed.values().flatten().copied().collect()
     }
 }
 
@@ -1216,6 +1276,62 @@ impl TransactionalMemory {
 
     pub(crate) fn unpersisted(&self, page: PageNumber) -> bool {
         self.unpersisted.lock().unwrap().contains(page)
+    }
+
+    // Record the data-tree pages a non-durable commit freed, for the next durable commit to write
+    // to DATA_FREED_TABLE.
+    pub(crate) fn record_unpersisted_data_freed(
+        &self,
+        transaction_id: TransactionId,
+        pages: Vec<PageNumber>,
+    ) {
+        self.unpersisted
+            .lock()
+            .unwrap()
+            .record_data_freed(transaction_id, pages);
+    }
+
+    // Offers every page freed by a transaction in `start..end` to `free_page`, dropping the ones
+    // it reports having reclaimed. Returns the transactions considered.
+    pub(crate) fn process_unpersisted_data_freed(
+        &self,
+        start: TransactionId,
+        end: TransactionId,
+        mut free_page: impl FnMut(PageNumber) -> bool,
+    ) -> Vec<TransactionId> {
+        // The records are copied out before `free_page` runs, because reclaiming a page locks this
+        // same state. Only the committing write transaction mutates these records, so nothing can
+        // add to a transaction's record in between.
+        let snapshot = self
+            .unpersisted
+            .lock()
+            .unwrap()
+            .data_freed_in_range(start, end);
+        let mut transaction_ids = Vec::with_capacity(snapshot.len());
+        for (transaction_id, pages) in snapshot {
+            let kept: Vec<PageNumber> = pages.into_iter().filter(|p| !free_page(*p)).collect();
+            self.unpersisted
+                .lock()
+                .unwrap()
+                .replace_data_freed(transaction_id, kept);
+            transaction_ids.push(transaction_id);
+        }
+        transaction_ids
+    }
+
+    pub(crate) fn take_unpersisted_data_freed(&self) -> BTreeMap<TransactionId, Vec<PageNumber>> {
+        self.unpersisted.lock().unwrap().take_data_freed()
+    }
+
+    pub(crate) fn drop_unpersisted_data_freed_after(&self, transaction_id: TransactionId) {
+        self.unpersisted
+            .lock()
+            .unwrap()
+            .drop_data_freed_after(transaction_id);
+    }
+
+    pub(crate) fn unpersisted_data_freed_pages(&self) -> Vec<PageNumber> {
+        self.unpersisted.lock().unwrap().pages_pending_free()
     }
 
     pub(crate) fn allocate_helper<'txn>(
