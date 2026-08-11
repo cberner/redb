@@ -1102,6 +1102,12 @@ impl Database {
             mem.mark_page_allocated(page);
             Ok(())
         })?;
+        // Non-durable commits hold their data-freed records in memory rather than in
+        // DATA_FREED_TABLE, so the walk above does not reach those pages. They are still allocated
+        // until a commit processes the records, so mark them like any other freed-table page.
+        for page in mem.unpersisted_data_freed_pages() {
+            mem.mark_page_allocated(page);
+        }
         #[cfg(debug_assertions)]
         {
             Self::check_repaired_allocated_pages_table(system_root, mem.clone())?;
