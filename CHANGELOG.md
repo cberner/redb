@@ -21,6 +21,8 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
+* Add `Key::shortest_separator()` and use it to reduce internal branch-key storage. Byte-slice
+  keys now store minimal prefix separators in branch pages.
 * `Durability::None` commits are about 2x faster.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files

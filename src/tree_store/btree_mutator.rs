@@ -253,8 +253,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
     // Replaces the contiguous `replaced_children` range of the leaf path's
     // parent branch with packed leaves built from `entries`, then rebuilds the
-    // rest of the path. Each replacement's separator is its own greatest key;
-    // separators for preserved children are reused from the original branch.
+    // rest of the path. Separators for preserved children are reused from the
+    // original branch.
     pub(super) fn replace_leaf_children(
         &mut self,
         mut path: Vec<(PageImpl, usize)>,
@@ -325,9 +325,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     new_children,
                     K::fixed_width(),
                 );
-                // Preserved children reuse their original checksum and
-                // separator; freshly built replacements have a deferred
-                // checksum and their greatest key as separator.
+                // Preserved children reuse their original checksum and separator; freshly built
+                // replacements have a deferred checksum and a separator derived from their
+                // adjacent boundary keys.
                 let preserved = |i: usize| {
                     (
                         accessor.child_page(i).unwrap(),
@@ -380,7 +380,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 
     // Packs the buffered entries into full leaves, in key order, returning
-    // each page with its greatest key as separator. No cleanup on error: any
+    // each page with its separator. No cleanup on error: any
     // failure here has latched the storage layer's io_failed flag, which
     // blocks every later commit, so pages already built are transient
     // in-memory state reclaimed on rollback.
@@ -449,14 +449,24 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             builder
         };
-        // Build the planned pages; each separator key is its page's greatest key.
+        // Build the planned pages. The last page keeps its greatest key because the caller may
+        // place a preserved child after it without having that child's least key available here.
         let mut leaves = vec![];
-        for range in &plan {
+        for (index, range) in plan.iter().enumerate() {
             let page = fill(range).build()?;
-            leaves.push((page.get_page_number(), entries[range.end - 1].0.to_vec()));
+            let next_start = plan
+                .get(index + 1)
+                .map(|next| next.start)
+                .or_else(|| balance_tail.as_ref().map(|tail| tail.start));
+            let separator = if let Some(next_start) = next_start {
+                K::shortest_separator(entries[range.end - 1].0, entries[next_start].0)
+            } else {
+                entries[range.end - 1].0
+            };
+            leaves.push((page.get_page_number(), separator.to_vec()));
         }
         if let Some(range) = balance_tail {
-            let (page1, split_key, page2) = fill(&range).build_split()?;
+            let (page1, split_key, page2) = fill(&range).build_split::<K>()?;
             leaves.push((page1.get_page_number(), split_key.to_vec()));
             leaves.push((page2.get_page_number(), entries[range.end - 1].0.to_vec()));
         }
@@ -765,7 +775,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                             new_root: new_page_number,
                             root_checksum: DEFERRED,
                             additional_sibling: Some((
-                                key.to_vec(),
+                                K::shortest_separator(key, accessor.entry(0).unwrap().key())
+                                    .to_vec(),
                                 page.get_page_number(),
                                 page_checksum,
                             )),
@@ -773,7 +784,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                             old_value: None,
                         })
                     } else {
-                        let split_key = accessor.last_entry().key().to_vec();
+                        let split_key =
+                            K::shortest_separator(accessor.last_entry().key(), key).to_vec();
                         Ok(InsertionResult {
                             new_root: page.get_page_number(),
                             root_checksum: page_checksum,
@@ -927,7 +939,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         old_value: existing_value,
                     }
                 } else {
-                    let (new_page1, split_key, new_page2) = builder.build_split()?;
+                    let (new_page1, split_key, new_page2) = builder.build_split::<K>()?;
                     let split_key = split_key.to_vec();
                     let page_number = page.get_page_number();
                     let existing_value = if found {
@@ -1562,7 +1574,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                             );
                         }
                         if child_builder.should_split() {
-                            let (new_page1, split_key, new_page2) = child_builder.build_split()?;
+                            let (new_page1, split_key, new_page2) =
+                                child_builder.build_split::<K>()?;
                             builder.push_key(split_key);
                             builder.push_child(new_page1.get_page_number(), DEFERRED);
                             builder.push_child(new_page2.get_page_number(), DEFERRED);

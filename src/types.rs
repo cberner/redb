@@ -211,6 +211,16 @@ pub trait Key: Value {
     ///
     /// The implementation must ensure there is a total order
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+
+    /// Returns the shortest separator between `a` and `b`.
+    ///
+    /// The inputs are encoded values for which [`Key::compare`] returns [`Ordering::Less`]. The
+    /// result must compare greater than or equal to `a`, and less than `b`. It will only be passed
+    /// to [`Key::compare`], and may not be a valid input to [`Value::from_bytes`]. Implementations
+    /// for fixed-width keys must return a separator of the same width.
+    fn shortest_separator<'a>(a: &'a [u8], _b: &'a [u8]) -> &'a [u8] {
+        a
+    }
 }
 
 impl Value for () {
@@ -403,6 +413,18 @@ impl Value for &[u8] {
 impl Key for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
+    }
+
+    fn shortest_separator<'a>(a: &'a [u8], b: &'a [u8]) -> &'a [u8] {
+        debug_assert!(a < b);
+        let common_bytes = a.iter().zip(b).take_while(|(a, b)| a == b).count();
+        let separator_len = common_bytes + 1;
+
+        if separator_len < a.len() && separator_len < b.len() {
+            &b[..separator_len]
+        } else {
+            a
+        }
     }
 }
 
@@ -750,6 +772,32 @@ mod tests {
                 type_name == TypeName::new(type_name.name())
             );
         }
+    }
+
+    #[test]
+    fn byte_slice_shortest_separator() {
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"abc0suffix", b"abc1suffix", b"abc1"),
+            (b"abc", b"abd-suffix", b"abc"),
+            (b"abc", b"abc-suffix", b"abc"),
+            (b"\x01\xff", b"\x02\x00", b"\x02"),
+            (b"\x01\xff", b"\x02", b"\x01\xff"),
+            (b"", b"\x00", b""),
+        ];
+
+        for &(a, b, expected) in cases {
+            let separator = <&[u8] as Key>::shortest_separator(a, b);
+            assert_eq!(separator, expected);
+            assert!(<&[u8] as Key>::compare(a, separator).is_le());
+            assert!(<&[u8] as Key>::compare(separator, b).is_lt());
+        }
+    }
+
+    #[test]
+    fn default_shortest_separator_returns_full_key() {
+        let a = 1u64.to_le_bytes();
+        let b = 2u64.to_le_bytes();
+        assert_eq!(<u64 as Key>::shortest_separator(&a, &b), a);
     }
 
     // A user-defined type whose name deliberately collides with the built-in `u32`, and whose

@@ -3226,6 +3226,75 @@ fn custom_ordering() {
 }
 
 #[test]
+fn branch_separators_are_not_deserialized() {
+    #[derive(Debug)]
+    struct SeparatorKey;
+
+    impl Value for SeparatorKey {
+        type SelfType<'a> = u64;
+        type AsBytes<'a> = [u8; 8];
+
+        fn fixed_width() -> Option<usize> {
+            None
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> u64
+        where
+            Self: 'a,
+        {
+            assert_eq!(data.len(), 8);
+            (u64::from(data[0]) << 8) | u64::from(data[1])
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a u64) -> [u8; 8]
+        where
+            Self: 'b,
+        {
+            let mut result = [0; 8];
+            result[0] = u8::try_from(value >> 8).unwrap();
+            result[1] = *value as u8;
+            result
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("test::SeparatorKey")
+        }
+    }
+
+    impl Key for SeparatorKey {
+        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            data1.cmp(data2)
+        }
+
+        fn shortest_separator<'a>(a: &'a [u8], b: &'a [u8]) -> &'a [u8] {
+            let separator = <&[u8] as Key>::shortest_separator(a, b);
+            assert!(separator.len() < a.len());
+            separator
+        }
+    }
+
+    const NUM_KEYS: u64 = 1_024;
+    let definition: TableDefinition<SeparatorKey, u64> = TableDefinition::new("separators");
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..NUM_KEYS {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 1);
+    for i in 0..NUM_KEYS {
+        assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+    }
+}
+
+#[test]
 fn owned_get_signatures() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

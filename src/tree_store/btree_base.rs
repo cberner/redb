@@ -865,7 +865,9 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         )
     }
 
-    pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
+    pub(super) fn build_split<'txn, K: Key>(
+        self,
+    ) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -929,7 +931,26 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
         drop(builder);
 
-        Ok((page1, self.pairs[division - 1].0, page2))
+        let left_key = self.pairs[division - 1].0;
+        let right_key = self.pairs[division].0;
+        debug_assert!(
+            K::compare(left_key, right_key).is_lt(),
+            "invalid split boundary: left={left_key:?}, right={right_key:?}"
+        );
+        let separator = K::shortest_separator(left_key, right_key);
+        debug_assert!(
+            K::compare(left_key, separator).is_le(),
+            "separator below left boundary: left={left_key:?}, separator={separator:?}"
+        );
+        debug_assert!(
+            K::compare(separator, right_key).is_lt(),
+            "separator above right boundary: separator={separator:?}, right={right_key:?}"
+        );
+        debug_assert!(
+            self.fixed_key_size
+                .is_none_or(|width| separator.len() == width)
+        );
+        Ok((page1, separator, page2))
     }
 
     pub(super) fn build<'txn>(self) -> Result<PageMut<'txn>> {
@@ -1788,7 +1809,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
-    pub(super) fn print_node<K: Key>(&self) {
+    pub(super) fn print_node(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -1797,7 +1818,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         for i in 0..(self.count_children() - 1) {
             if let Some(child) = self.child_page(i + 1) {
                 let key = self.key(i).unwrap();
-                eprint!(" key_{i}={:?}", K::from_bytes(key));
+                eprint!(" key_{i}={key:?}");
                 eprint!(" child_{}={child:?}", i + 1);
             }
         }
@@ -2362,7 +2383,7 @@ mod tests {
             builder.push(key, &[]);
         }
         assert!(builder.should_split());
-        let (page1, _, page2) = builder.build_split().unwrap();
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
 
         let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
         let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
@@ -2392,13 +2413,27 @@ mod tests {
         }
         // The pairs are tiny, so the leaf fits in the page by bytes; only the count forces a split.
         assert!(builder.should_split());
-        let (page1, _, page2) = builder.build_split().unwrap();
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
 
         let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
         let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
         assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
         assert!(accessor1.num_pairs() <= MAX_PAIRS);
         assert!(accessor2.num_pairs() <= MAX_PAIRS);
+    }
+
+    #[test]
+    fn leaf_split_uses_shortest_separator() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let value = vec![0u8; page_allocator.get_page_size() / 2];
+        let mut builder = LeafBuilder::new(&page_allocator, &allocated_pages, 2, None, None);
+        builder.push(b"abc0-left", &value);
+        builder.push(b"abc1-right", &value);
+        assert!(builder.should_split());
+
+        let (_, separator, _) = builder.build_split::<&[u8]>().unwrap();
+        assert_eq!(separator, b"abc1");
     }
 
     // The same count limit applies to branch nodes (num_keys is also a u16). The page must be large
