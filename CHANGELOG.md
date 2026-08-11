@@ -44,6 +44,12 @@
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
 
+## 4.3.0 - 2026-XX-XX
+* Add `Key::separator()`, which returns a short slice that separates two keys. Internal btree
+  nodes store the result instead of a whole key, so more children fit in each node and lookups
+  touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
+  implementations unchanged; `&[u8]` keys now store minimal prefixes.
+
 ## 4.2.0 - 2026-08-17
 
 ### New features

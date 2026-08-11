@@ -1261,7 +1261,7 @@ impl<K: Key, V: Value> Btree<K, V> {
                                 let child = accessor.child_page(i).unwrap();
                                 next_children.push(self.mem.get_page(child, self.hint)?);
                             }
-                            accessor.print_node::<K>();
+                            accessor.print_node();
                         }
                         _ => unreachable!(),
                     }

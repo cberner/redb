@@ -216,6 +216,23 @@ pub trait Key: Value {
     ///
     /// The implementation must ensure there is a total order
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+
+    /// Returns a separator between `left` and `right`.
+    ///
+    /// `left` and `right` are encoded values for which [`compare()`](Self::compare) returns
+    /// [`Ordering::Less`]. The result must be greater than or equal to `left`, and less than
+    /// `right`, under [`compare()`](Self::compare).
+    ///
+    /// The result is only used to route lookups through the btree's internal nodes: it is passed
+    /// to [`compare()`](Self::compare), and never to [`Value::from_bytes()`], so it need not be a
+    /// valid encoding of `Self`. The shorter it is, the more children fit in each internal node,
+    /// which makes the tree shallower and cheaper to search.
+    ///
+    /// The default implementation returns `left`, which is always valid.
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+        debug_assert!(Self::compare(left, right).is_lt());
+        left
+    }
 }
 
 impl Value for () {
@@ -408,6 +425,21 @@ impl Value for &[u8] {
 impl Key for &[u8] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         data1.cmp(data2)
+    }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+        debug_assert!(left < right);
+        // Truncating `right` just past the first byte where it exceeds `left` leaves something
+        // greater than `left`, and less than `right` as long as bytes were dropped. When that is
+        // no shorter than `left`, `left` itself is the shortest: anything shorter shares fewer
+        // bytes with `left` than `left` and `right` do, so it sorts either below `left` or above
+        // `right`.
+        let separator_len = left.iter().zip(right).take_while(|(x, y)| x == y).count() + 1;
+        if separator_len < left.len() && separator_len < right.len() {
+            &right[..separator_len]
+        } else {
+            left
+        }
     }
 }
 
@@ -755,6 +787,35 @@ mod tests {
                 type_name == TypeName::new(type_name.name())
             );
         }
+    }
+
+    #[test]
+    fn byte_slice_separator() {
+        // (left, right, the shortest slice that separates them)
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"abc0suffix", b"abc1suffix", b"abc1"),
+            // Nothing is shorter than `left` and still above it
+            (b"abc", b"abd-suffix", b"abc"),
+            (b"abc", b"abc-suffix", b"abc"),
+            (b"\x01\xff", b"\x02\x00", b"\x02"),
+            // Truncating `right` at all would reach `right` itself
+            (b"\x01\xff", b"\x02", b"\x01\xff"),
+            (b"", b"\x00", b""),
+        ];
+
+        for &(left, right, expected) in cases {
+            let separator = <&[u8] as Key>::separator(left, right);
+            assert_eq!(separator, expected);
+            assert!(<&[u8] as Key>::compare(left, separator).is_le());
+            assert!(<&[u8] as Key>::compare(separator, right).is_lt());
+        }
+    }
+
+    #[test]
+    fn default_separator_returns_full_key() {
+        let left = 1u64.to_le_bytes();
+        let right = 2u64.to_le_bytes();
+        assert_eq!(<u64 as Key>::separator(&left, &right), left);
     }
 
     // A user-defined type whose name deliberately collides with the built-in `u32`, and whose
