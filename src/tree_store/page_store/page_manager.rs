@@ -21,6 +21,7 @@ use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::io;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
 use std::mem;
@@ -276,6 +277,16 @@ fn ceil_log2(x: usize) -> u8 {
     }
 }
 
+// Flattens the errors that reading a header can produce into the storage error that all of them
+// really are: the other DatabaseError variants describe how a database was opened, not how its
+// bytes parsed
+fn storage_error(error: DatabaseError) -> StorageError {
+    match error {
+        DatabaseError::Storage(storage) => storage,
+        other => StorageError::Corrupted(other.to_string()),
+    }
+}
+
 pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
     hash128_with_seed(data, 0)
 }
@@ -304,6 +315,20 @@ impl InMemoryState {
         self.allocators
             .as_ref()
             .expect("allocators have not been loaded yet")
+    }
+
+    // Reports the absence of allocator state as an error rather than a panic, for the paths a
+    // process that never allocates can reach: a read-only handle on a database another process is
+    // writing has no way to keep allocator state up to date, so it does not load any
+    fn require_allocators(&self) -> Result {
+        if self.allocators.is_none() {
+            return Err(StorageError::Io(io::Error::new(
+                ErrorKind::Unsupported,
+                "page allocation statistics are unavailable: this handle does not track the \
+                 database's allocator state",
+            )));
+        }
+        Ok(())
     }
 
     fn allocators_mut(&mut self) -> &mut Allocators {
@@ -481,6 +506,27 @@ impl UnpersistedState {
     }
 }
 
+/// How a [`TransactionalMemory`] may access its file, and what it may assume about other processes
+/// accessing it at the same time.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum AccessMode {
+    /// This process may write to the file, and is the only process with it open for writing
+    ReadWrite,
+    /// This process only reads the file, and no other process has it open for writing, so an
+    /// unclean shutdown must be repaired before the file can be used
+    ReadOnly,
+    /// This process only reads the file, and another process may be writing to it concurrently. An
+    /// unclean shutdown is left for a writer to repair, and the layout recorded in the header is
+    /// not reconciled against the file length, since a writer may be resizing it
+    SharedRead,
+}
+
+impl AccessMode {
+    fn read_only(self) -> bool {
+        !matches!(self, AccessMode::ReadWrite)
+    }
+}
+
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
@@ -509,7 +555,7 @@ impl TransactionalMemory {
         page_size: usize,
         requested_region_size: Option<u64>,
         cache_size: usize,
-        read_only: bool,
+        access: AccessMode,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -601,21 +647,30 @@ impl TransactionalMemory {
         let unrepaired =
             UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
-        if needs_recovery && read_only {
-            return Err(DatabaseError::RepairAborted);
-        }
-        let (header, _) = unrepaired.finalize(file_len)?;
-        if needs_recovery {
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
-        }
+        let header = if matches!(access, AccessMode::SharedRead) {
+            // A writer in another process may be holding the file open, in which case it is always
+            // flagged as requiring recovery and its layout may not match the file length at this
+            // instant. Neither matters to a reader: it only follows the committed roots, and any
+            // repair is the next writer's job
+            unrepaired.finalize_transaction_slots()?
+        } else {
+            let needs_recovery = unrepaired.recovery_required(file_len);
+            if needs_recovery && access.read_only() {
+                return Err(DatabaseError::RepairAborted);
+            }
+            let (header, _) = unrepaired.finalize(file_len)?;
+            if needs_recovery {
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
+            assert_eq!(header.layout().len(), storage.raw_file_len()?);
+            header
+        };
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
@@ -692,6 +747,12 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
     }
 
+    /// Drops writes that have been buffered but not yet written to the file. Only valid for pages
+    /// no committed root references, i.e. those an aborted transaction allocated.
+    pub(crate) fn discard_buffered_writes(&self) {
+        self.storage.discard_write_buffer();
+    }
+
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
         // The in-memory state is being discarded for the on-disk state, so buffered writes --
         // which can only belong to the discarded state -- are dropped rather than written out;
@@ -702,6 +763,46 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
         self.storage.sync_file()?;
 
+        self.reload_from_file()
+    }
+
+    /// Replaces the in-memory state with what another process has left in the file, in preparation
+    /// for a write transaction. Buffered writes never survive: they can only belong to an aborted
+    /// transaction, whose pages another process may since have reused. Dropping cached pages is
+    /// the caller's decision, since it is the one that can tell whether any of them could have
+    /// been reallocated.
+    ///
+    /// The caller must hold the cross-process write lock, so that no other process can be
+    /// committing, and no write transaction may be in progress in this process.
+    pub(crate) fn reload_for_write(&self) -> Result<(), DatabaseError> {
+        self.storage.discard_write_buffer();
+        // No sync: another process's commits reach this process through the file, which it has
+        // already flushed
+        self.reload_from_file()?;
+        Ok(())
+    }
+
+    /// Picks up commits made by another process, taking only the commit slots from the file. The
+    /// layout is left alone: a writer in another process rewrites it on every resize, so it can
+    /// disagree with the file length at any instant, and a process that is only reading never
+    /// consults it.
+    ///
+    /// Returns the transaction id that is now visible.
+    pub(crate) fn reload_transaction_slots(&self) -> Result<TransactionId> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(storage_error)?;
+        let header = unrepaired.finalize_transaction_slots()?;
+        let mut state = self.state.lock()?;
+        // Only a process whose own state can be ahead of the file has a pending non-durable
+        // commit, and such a process is the only writer, so it never reloads
+        assert!(!state.read_from_secondary);
+        state.header.adopt_transaction_slots(&header);
+
+        Ok(state.header.primary_slot().transaction_id)
+    }
+
+    fn reload_from_file(&self) -> Result<bool, DatabaseError> {
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
@@ -722,6 +823,9 @@ impl TransactionalMemory {
             // load_allocator_state) before any allocation/free path runs.
             state.allocators = None;
         }
+        // Mirrors the allocator state that was just dropped, so it is repopulated with it
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
         self.unpersisted.lock().unwrap().clear();
@@ -1535,6 +1639,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_allocated_pages());
@@ -1545,6 +1650,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_free_pages());
@@ -1583,6 +1689,7 @@ impl TransactionalMemory {
 
 #[cfg(test)]
 mod test {
+    use crate::tree_store::AccessMode;
     use crate::tree_store::page_store::page_manager::INITIAL_REGIONS;
     use crate::{Database, TableDefinition};
 
@@ -1645,9 +1752,15 @@ mod test {
         use super::TransactionalMemory;
         use crate::tree_store::InMemoryBackend;
 
-        let mem =
-            TransactionalMemory::new(Box::new(InMemoryBackend::new()), true, 4096, None, 0, false)
-                .unwrap();
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            4096,
+            None,
+            0,
+            AccessMode::ReadWrite,
+        )
+        .unwrap();
         mem.reset_allocator_state().unwrap();
 
         std::thread::scope(|s| {
@@ -1687,7 +1800,7 @@ mod test {
             page_size,
             Some(region_size),
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();

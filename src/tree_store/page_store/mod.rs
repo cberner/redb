@@ -20,7 +20,7 @@ pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNum
 pub(crate) use fast_hash::PageNumberHashSet;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
-    AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
+    AccessMode, AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, xxh3_checksum,
 };
 pub use savepoint::Savepoint;

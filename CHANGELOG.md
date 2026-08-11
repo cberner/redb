@@ -21,6 +21,14 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
+* Add `MultiProcessDatabase`, a prototype interface for using a database from several processes at
+  once: one write transaction at a time across all of them, and any number of concurrent readers.
+  The database lives in a directory alongside the lock files that coordinate the processes using
+  it, so it must be on a filesystem that supports file locking. Two modes are available: one where
+  a single process may write, which costs that process nothing on the read path, and one where any
+  process may write, which uses quick-repair commits so that each writer can pick up the previous
+  one's allocator state. Non-durable commits, persistent savepoints, compaction and integrity
+  checks are not supported in all configurations -- see the type's documentation.
 * `Durability::None` commits are about 2x faster.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files

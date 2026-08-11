@@ -1,7 +1,9 @@
+use crate::multi_process::ProcessCoordinator;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
-    AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    AccessMode, AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint,
+    PageNumber, PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType,
+    TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -24,7 +26,7 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
-use crate::tree_store::file_backend::FileBackend;
+use crate::tree_store::file_backend::{FileBackend, FileLockKind};
 #[cfg(feature = "logging")]
 use log::{debug, warn};
 
@@ -441,6 +443,42 @@ impl ReadOnlyDatabase {
         Builder::new().open_read_only(path)
     }
 
+    pub(crate) fn from_parts(
+        mem: Arc<TransactionalMemory>,
+        transaction_tracker: Arc<TransactionTracker>,
+    ) -> Self {
+        Self {
+            mem,
+            transaction_tracker,
+        }
+    }
+
+    /// Opens the file for reading, accepting that another process may be writing to it. Returns
+    /// the memory and the coordinator that `make_coordinator` built from it, since the caller
+    /// needs both to construct the tracker.
+    ///
+    /// No allocator state is loaded: keeping it up to date would mean re-reading it every time
+    /// another process commits, and a handle which never allocates has no other use for it.
+    pub(crate) fn new_shared_read(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        cache_size: usize,
+        make_coordinator: impl FnOnce(
+            Arc<TransactionalMemory>,
+        ) -> Result<Arc<ProcessCoordinator>, DatabaseError>,
+    ) -> Result<(Arc<TransactionalMemory>, Arc<ProcessCoordinator>), DatabaseError> {
+        let mem = Arc::new(TransactionalMemory::new(
+            Box::new(ReadOnlyBackend::new(file)),
+            false,
+            page_size,
+            None,
+            cache_size,
+            AccessMode::SharedRead,
+        )?);
+        let coordinator = make_coordinator(mem.clone())?;
+        Ok((mem, coordinator))
+    }
+
     fn new(
         file: Box<dyn StorageBackend>,
         page_size: usize,
@@ -457,12 +495,12 @@ impl ReadOnlyDatabase {
             page_size,
             region_size,
             cache_size,
-            true,
+            AccessMode::ReadOnly,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Database::get_allocator_state_table(&mem)? {
+        if let Some(tree) = Database::allocator_state_table(&mem)? {
             mem.load_allocator_state(&tree)?;
         } else {
             #[cfg(feature = "logging")]
@@ -949,10 +987,10 @@ impl Database {
         Ok(())
     }
 
+    // Rebuilds the set of allocated pages that debug assertions check against, which is only
+    // meaningful once the allocator state it mirrors has been loaded
     #[cfg(debug_assertions)]
-    fn mark_allocated_page_for_debug(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
-    ) -> Result {
+    pub(crate) fn mark_allocated_page_for_debug(mem: &Arc<TransactionalMemory>) -> Result {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
@@ -1128,6 +1166,57 @@ impl Database {
         cache_size: usize,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<Self, DatabaseError> {
+        Self::new_inner(
+            file,
+            allow_initialize,
+            &OpenParams {
+                page_size,
+                region_size,
+                cache_size,
+                repair_callback,
+                restore_persistent_savepoints: true,
+            },
+            |_| Ok(None),
+        )
+    }
+
+    /// Opens a database that other processes may also have open. `make_coordinator` builds the
+    /// cross-process half of the transaction tracker, which needs the memory this creates.
+    ///
+    /// The caller must hold the cross-process write lock: this repairs the database if the last
+    /// writer left it dirty, and writes to it either way.
+    pub(crate) fn new_multi_process(
+        file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
+        params: &OpenParams<'_>,
+        make_coordinator: impl FnOnce(
+            Arc<TransactionalMemory>,
+        ) -> Result<Arc<ProcessCoordinator>, DatabaseError>,
+    ) -> Result<Self, DatabaseError> {
+        Self::new_inner(file, allow_initialize, params, |mem| {
+            make_coordinator(mem).map(Some)
+        })
+    }
+
+    pub(crate) fn transaction_tracker(&self) -> &Arc<TransactionTracker> {
+        &self.transaction_tracker
+    }
+
+    fn new_inner(
+        file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
+        params: &OpenParams<'_>,
+        make_coordinator: impl FnOnce(
+            Arc<TransactionalMemory>,
+        ) -> Result<Option<Arc<ProcessCoordinator>>, DatabaseError>,
+    ) -> Result<Self, DatabaseError> {
+        let &OpenParams {
+            page_size,
+            region_size,
+            cache_size,
+            repair_callback,
+            restore_persistent_savepoints,
+        } = params;
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
@@ -1138,17 +1227,17 @@ impl Database {
             page_size,
             region_size,
             cache_size,
-            false,
+            AccessMode::ReadWrite,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Self::get_allocator_state_table(&mem)? {
+        if let Some(tree) = Self::allocator_state_table(&mem)? {
             #[cfg(feature = "logging")]
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
-            Self::mark_allocated_page_for_debug(&mut mem)?;
+            Self::mark_allocated_page_for_debug(&mem)?;
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -1171,10 +1260,20 @@ impl Database {
         mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
+        let transaction_tracker = match make_coordinator(mem.clone())? {
+            Some(coordinator) => {
+                TransactionTracker::new_multi_process(next_transaction_id, coordinator)
+            }
+            None => TransactionTracker::new(next_transaction_id),
+        };
         let db = Database {
             mem,
-            transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+            transaction_tracker: Arc::new(transaction_tracker),
         };
+
+        if !restore_persistent_savepoints {
+            return Ok(db);
+        }
 
         // Restore the tracker state for any persistent savepoints
         let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
@@ -1201,7 +1300,7 @@ impl Database {
         Ok(db)
     }
 
-    fn get_allocator_state_table(
+    pub(crate) fn allocator_state_table(
         mem: &Arc<TransactionalMemory>,
     ) -> Result<Option<AllocatorStateTree>> {
         // The allocator state table is only valid if the primary was written using 2-phase commit
@@ -1275,10 +1374,16 @@ fn begin_write_with_allocation_policy(
 ) -> Result<WriteTransaction, TransactionError> {
     // Fail early if there has been an I/O error -- nothing can be committed in that case
     mem.check_io_errors()?;
-    let guard = TransactionGuard::new_write(
-        transaction_tracker.start_write_transaction(),
-        transaction_tracker.clone(),
-    );
+    let transaction_id = match transaction_tracker.process() {
+        // Takes the cross-process write lock and picks up whatever another process has committed,
+        // before this transaction is numbered from what it finds
+        Some(process) => {
+            let process = process.clone();
+            transaction_tracker.start_write_transaction_prepared(move || process.begin_write())?
+        }
+        None => transaction_tracker.start_write_transaction(),
+    };
+    let guard = TransactionGuard::new_write(transaction_id, transaction_tracker.clone());
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption. Returning drops the guard,
@@ -1357,6 +1462,18 @@ impl Drop for Database {
 
         close_database(&self.transaction_tracker, &self.mem);
     }
+}
+
+/// How a database is to be opened. Bundled so that the paths which share the open sequence do not
+/// each thread the same handful of arguments through it.
+pub(crate) struct OpenParams<'a> {
+    pub(crate) page_size: usize,
+    pub(crate) region_size: Option<u64>,
+    pub(crate) cache_size: usize,
+    pub(crate) repair_callback: &'a (dyn Fn(&mut RepairSession) + 'static),
+    /// Persistent savepoints are restored into the tracker when the database is opened, which only
+    /// makes them visible to the process that did so
+    pub(crate) restore_persistent_savepoints: bool,
 }
 
 pub struct RepairSession {
@@ -1504,7 +1621,7 @@ impl Builder {
         let file = OpenOptions::new().read(true).open(path)?;
 
         ReadOnlyDatabase::new(
-            Box::new(FileBackend::new_internal(file, true)?),
+            Box::new(FileBackend::new_internal(file, FileLockKind::Shared)?),
             self.page_size,
             None,
             self.cache_size,

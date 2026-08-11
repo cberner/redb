@@ -10,13 +10,22 @@ pub struct FileBackend {
     file: Mutex<File>,
 }
 
+/// Which whole-file advisory lock a [`FileBackend`] takes when it is created. This platform has no
+/// file locking, so the choice is ignored.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum FileLockKind {
+    Exclusive,
+    Shared,
+    None,
+}
+
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Self::new_internal(file, false)
+        Self::new_internal(file, FileLockKind::Exclusive)
     }
 
-    pub(crate) fn new_internal(file: File, _: bool) -> Result<Self, DatabaseError> {
+    pub(crate) fn new_internal(file: File, _: FileLockKind) -> Result<Self, DatabaseError> {
         Ok(Self {
             file: Mutex::new(file),
         })

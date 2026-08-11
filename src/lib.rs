@@ -80,6 +80,7 @@ pub use error::{
 };
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
+pub use multi_process::{MultiProcessBuilder, MultiProcessDatabase, WriterMode};
 #[cfg(feature = "experimental-api-5")]
 pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
@@ -106,6 +107,7 @@ mod db;
 mod error;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
+mod multi_process;
 mod multimap_table;
 mod sealed;
 mod table;
