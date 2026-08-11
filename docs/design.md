@@ -230,8 +230,11 @@ only after a clean shutdown; the latter is usable even after a crash.
 ## B+tree pages
 
 redb stores data in a B+tree, in which only leaf pages contain key-value pairs; branch pages
-contain only routing keys and pointers to their children. Allocated pages may therefore be of two
-types: B+tree branch pages, or B+tree leaf pages. The format of each is described below:
+contain only routing keys and pointers to their children. A routing key sorts at or above every key
+in the child before it, and below every key in the child after it. Routing keys are never
+deserialized, so they may be prefixes rather than full keys that exist in the tree. Allocated pages
+may therefore be of two types: B+tree branch pages, or B+tree leaf pages. The format of each is
+described below:
 
 ### Branch page:
 * 1 byte: type

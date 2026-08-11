@@ -27,6 +27,29 @@ pub(super) type Checksum = u128;
 // Dummy value. Final value will be computed during commit
 pub(super) const DEFERRED: Checksum = 999;
 
+// The key to store in a branch node between a child whose greatest key is `left` and the next,
+// whose least key is `right`. Branch keys only route lookups -- they are compared, never
+// deserialized -- so a `Key` implementation may shorten them, which packs more children into each
+// branch page.
+pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+    debug_assert!(K::compare(left, right).is_lt());
+    // Branch keys of a fixed width type are stored at that stride, so a shorter separator would
+    // corrupt the page, and a same width one would save nothing. Never ask for one.
+    if K::fixed_width().is_some() {
+        return left;
+    }
+    let separator = K::separator(left, right);
+    debug_assert!(
+        K::compare(left, separator).is_le(),
+        "separator sorts below the left child's greatest key"
+    );
+    debug_assert!(
+        K::compare(separator, right).is_lt(),
+        "separator does not sort below the right child's least key"
+    );
+    separator
+}
+
 pub(super) fn leaf_checksum<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
@@ -873,7 +896,10 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         )
     }
 
-    pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
+    // Returns the two halves, and the separator to store between them in their parent
+    pub(super) fn build_split<'txn, K: Key>(
+        self,
+    ) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -937,7 +963,8 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
         }
         drop(builder);
 
-        Ok((page1, self.pairs[division - 1].0, page2))
+        let separator = branch_separator::<K>(self.pairs[division - 1].0, self.pairs[division].0);
+        Ok((page1, separator, page2))
     }
 
     pub(super) fn build<'txn>(self) -> Result<PageMut<'txn>> {
@@ -1797,7 +1824,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
     }
 
     #[cfg(not(redb_no_std))]
-    pub(super) fn print_node<K: Key>(&self) {
+    pub(super) fn print_node(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",
             self.page.get_page_number(),
@@ -1805,8 +1832,9 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         );
         for i in 0..(self.count_children() - 1) {
             if let Some(child) = self.child_page(i + 1) {
+                // Branch keys are separators, which need not be valid encodings of the key type
                 let key = self.key(i).unwrap();
-                eprint!(" key_{i}={:?}", K::from_bytes(key));
+                eprint!(" key_{i}={key:?}");
                 eprint!(" child_{}={child:?}", i + 1);
             }
         }
@@ -2348,6 +2376,72 @@ mod tests {
         assert_eq!(accessor.last_entry().key(), key);
     }
 
+    // A split promotes a separator, not the left half's greatest key, so the parent stores only
+    // enough of the boundary to route between the halves
+    #[test]
+    fn leaf_split_promotes_separator() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let value = vec![0u8; page_allocator.get_page_size() / 2];
+        let mut builder = LeafBuilder::new(&page_allocator, &allocated_pages, 2, None, None);
+        builder.push(b"abc0-left", &value);
+        builder.push(b"abc1-right", &value);
+        assert!(builder.should_split());
+
+        let (_, separator, _) = builder.build_split::<&[u8]>().unwrap();
+        assert_eq!(separator, b"abc1");
+    }
+
+    // Branch keys of a fixed width type are stored at that stride, so a `Key` implementation that
+    // returns a shorter separator must not be able to corrupt the page
+    #[test]
+    fn fixed_width_keys_ignore_custom_separators() {
+        #[derive(Debug)]
+        struct BadSeparator;
+
+        impl Value for BadSeparator {
+            type SelfType<'a> = u64;
+            type AsBytes<'a> = [u8; 8];
+
+            fn fixed_width() -> Option<usize> {
+                Some(8)
+            }
+
+            // Only the width and the ordering are needed to pick a separator
+            fn from_bytes<'a>(_data: &'a [u8]) -> u64
+            where
+                Self: 'a,
+            {
+                unreachable!()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(_value: &'a u64) -> [u8; 8]
+            where
+                Self: 'b,
+            {
+                unreachable!()
+            }
+
+            fn type_name() -> crate::TypeName {
+                unreachable!()
+            }
+        }
+
+        impl Key for BadSeparator {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                data1.cmp(data2)
+            }
+
+            fn separator<'a>(_left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+                &right[..1]
+            }
+        }
+
+        let left = [1u8; 8];
+        let right = [2u8; 8];
+        assert_eq!(branch_separator::<BadSeparator>(&left, &right), left);
+    }
+
     // Splitting divides by total bytes, which can be arbitrarily lopsided when one pair
     // contains a huge value. Neither half may end up with more than u16::MAX pairs
     #[test]
@@ -2371,7 +2465,7 @@ mod tests {
             builder.push(key, &[]);
         }
         assert!(builder.should_split());
-        let (page1, _, page2) = builder.build_split().unwrap();
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
 
         let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
         let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
@@ -2401,7 +2495,7 @@ mod tests {
         }
         // The pairs are tiny, so the leaf fits in the page by bytes; only the count forces a split.
         assert!(builder.should_split());
-        let (page1, _, page2) = builder.build_split().unwrap();
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
 
         let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
         let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
