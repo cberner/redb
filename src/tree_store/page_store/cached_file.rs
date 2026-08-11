@@ -270,7 +270,6 @@ pub(super) struct PagedCachedFile {
     // (tables of one WriteTransaction used from different threads) do not
     // contend on a single lock. Each stripe is individually Arc'd because
     // outstanding WritablePages return their buffer to the stripe on drop.
-    // TODO: maybe move this cache to WriteTransaction?
     write_buffer: Vec<Arc<Mutex<LRUWriteCache>>>,
 }
 
