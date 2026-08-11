@@ -400,12 +400,17 @@ impl std::error::Error for CompactionError {}
 pub enum SetDurabilityError {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// Multi-process databases require immediately durable commits
+    MultiProcessDurabilityRequired,
 }
 
 impl From<SetDurabilityError> for Error {
     fn from(err: SetDurabilityError) -> Error {
         match err {
             SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+            SetDurabilityError::MultiProcessDurabilityRequired => {
+                Error::MultiProcessDurabilityRequired
+            }
         }
     }
 }
@@ -418,6 +423,9 @@ impl Display for SetDurabilityError {
                     f,
                     "Persistent savepoint modified. Cannot reduce transaction durability"
                 )
+            }
+            SetDurabilityError::MultiProcessDurabilityRequired => {
+                write!(f, "Multi-process databases require immediate durability")
             }
         }
     }
@@ -538,6 +546,8 @@ pub enum Error {
     RepairAborted,
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// Multi-process databases require immediately durable commits
+    MultiProcessDurabilityRequired,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -686,6 +696,9 @@ impl Display for Error {
                     f,
                     "Persistent savepoint modified. Cannot reduce transaction durability"
                 )
+            }
+            Error::MultiProcessDurabilityRequired => {
+                write!(f, "Multi-process databases require immediate durability")
             }
             Error::PersistentSavepointExists => {
                 write!(

@@ -255,6 +255,29 @@ impl UnrepairedDatabaseHeader {
         Ok((self.inner, kept_primary && !layout_stale))
     }
 
+    // Multi-process readers may observe a file extension made by the active writer before its
+    // updated layout is committed. Keep using the durable layout and roots in that case; the next
+    // writer owner reconciles the extra space before allocating from it.
+    pub(super) fn finalize_multiprocess_read(mut self, file_len: u64) -> Result<DatabaseHeader> {
+        if self.inner.recovery_required {
+            return Err(StorageError::Corrupted(
+                "multi-process database requires writer recovery".to_string(),
+            ));
+        }
+
+        let stored_len = self.inner.layout().len();
+        if file_len < stored_len {
+            return Err(StorageError::Corrupted(format!(
+                "File truncated below stored layout: file_len={file_len}, layout_len={stored_len}"
+            )));
+        }
+        if file_len > stored_len {
+            self.layout_from_file_len(file_len)?;
+        }
+        self.select_primary_slot()?;
+        Ok(self.inner)
+    }
+
     // Rebuild the database layout from the actual file length, trusting only the immutable region
     // geometry. Rejects any length no valid layout can produce: too short to hold a region, more
     // regions than the 20-bit region index can address, or a length that doesn't fall on a region

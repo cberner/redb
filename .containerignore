@@ -7,6 +7,8 @@
 !LICENSE-MIT
 !README.md
 !build.rs
+!benches/
+!benches/**
 !clippy.toml
 !crates/
 !crates/**

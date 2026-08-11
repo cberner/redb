@@ -107,6 +107,7 @@ mod error;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
 mod multimap_table;
+mod multiprocess;
 mod sealed;
 mod table;
 mod transaction_tracker;

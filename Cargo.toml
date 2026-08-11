@@ -58,6 +58,10 @@ experimental-api-5 = []
 [profile.bench]
 debug = true
 
+[[bench]]
+name = "multiprocess_benchmark"
+harness = false
+
 [lints.clippy]
 big_endian_bytes = "deny"
 dbg_macro = "deny"

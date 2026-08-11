@@ -383,6 +383,13 @@ enum PostCommitFree {
     Disabled,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum TransactionMode {
+    SingleProcess,
+    MultiProcessSingleWriter,
+    MultiProcessMultipleWriters,
+}
+
 // Like a Table but only one may be open at a time to avoid possible races
 pub struct SystemTable<'s, K: Key + 'static, V: Value + 'static> {
     name: String,
@@ -910,6 +917,7 @@ pub struct WriteTransaction {
     // Set by a savepoint restore, to discard the in-memory freed-page records of the non-durable
     // commits it rolled back. Kept transaction-local so that an abort leaves them in place.
     restored_transaction: Option<TransactionId>,
+    mode: TransactionMode,
     // All transaction-local savepoint lifecycle state. See
     // `SavepointTransactionState` for the commit/abort contract.
     savepoint_state: Mutex<SavepointTransactionState>,
@@ -947,6 +955,7 @@ impl WriteTransaction {
             quick_repair: false,
             post_commit_free: PostCommitFree::Enabled,
             restored_transaction: None,
+            mode: TransactionMode::SingleProcess,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
         })
@@ -1420,6 +1429,14 @@ impl WriteTransaction {
     /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
     /// be reduced below [`Durability::Immediate`]
     pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
+        if matches!(
+            self.mode,
+            TransactionMode::MultiProcessSingleWriter
+                | TransactionMode::MultiProcessMultipleWriters
+        ) && !matches!(durability, Durability::Immediate)
+        {
+            return Err(SetDurabilityError::MultiProcessDurabilityRequired);
+        }
         let persistent_modified = self
             .savepoint_state
             .lock()
@@ -1495,6 +1512,18 @@ impl WriteTransaction {
     }
 
     pub(crate) fn disable_post_commit_free(&mut self) {
+        self.post_commit_free = PostCommitFree::Disabled;
+    }
+
+    pub(crate) fn enable_multiprocess(&mut self, multiple_writers: bool) {
+        self.mode = if multiple_writers {
+            TransactionMode::MultiProcessMultipleWriters
+        } else {
+            TransactionMode::MultiProcessSingleWriter
+        };
+        self.quick_repair = multiple_writers;
+        self.two_phase_commit = true;
+        self.durability = InternalDurability::Immediate;
         self.post_commit_free = PostCommitFree::Disabled;
     }
 
@@ -1639,6 +1668,7 @@ impl WriteTransaction {
     }
 
     fn commit_inner(&mut self) -> Result<(), CommitError> {
+        let _reader_gate = self.transaction_tracker.prepare_commit()?;
         // Covers both the error and the panic-unwind path. Without an allocator state,
         // begin_write() refuses new write transactions and the next open repairs.
         let latch = AllocatorStateLatch::arm(self.mem.clone());
@@ -1650,6 +1680,17 @@ impl WriteTransaction {
     }
 
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
+        if self.mode == TransactionMode::MultiProcessMultipleWriters {
+            self.quick_repair = true;
+        }
+        if matches!(
+            self.mode,
+            TransactionMode::MultiProcessSingleWriter
+                | TransactionMode::MultiProcessMultipleWriters
+        ) {
+            self.two_phase_commit = true;
+            self.durability = InternalDurability::Immediate;
+        }
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;

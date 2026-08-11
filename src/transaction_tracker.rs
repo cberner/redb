@@ -1,5 +1,6 @@
+use crate::multiprocess::{LockedFile, MultiProcessTracker, MultiProcessWriteMode};
 use crate::tree_store::TransactionalMemory;
-use crate::{Key, Result, Savepoint, TypeName, Value};
+use crate::{DatabaseError, Key, Result, Savepoint, TypeName, Value};
 #[cfg(feature = "logging")]
 use log::debug;
 use std::cmp::Ordering;
@@ -80,6 +81,8 @@ struct State {
     live_read_transactions: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
     live_write_transaction: Option<TransactionId>,
+    write_transaction_pending: bool,
+    commit_in_progress: bool,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
     // Subset of valid_savepoints that are persistent
     persistent_savepoints: BTreeSet<SavepointId>,
@@ -100,6 +103,21 @@ struct State {
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
+    multi_process: Option<MultiProcessTracker>,
+}
+
+pub(crate) struct CommitGuard {
+    tracker: Arc<TransactionTracker>,
+    lock: Option<LockedFile>,
+}
+
+impl Drop for CommitGuard {
+    fn drop(&mut self) {
+        if self.lock.is_some() {
+            self.tracker.state.lock().unwrap().commit_in_progress = false;
+            self.lock.take();
+        }
+    }
 }
 
 impl TransactionTracker {
@@ -110,6 +128,8 @@ impl TransactionTracker {
                 live_read_transactions: BTreeMap::default(),
                 next_transaction_id,
                 live_write_transaction: None,
+                write_transaction_pending: false,
+                commit_in_progress: false,
                 valid_savepoints: BTreeMap::default(),
                 persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: HashMap::default(),
@@ -117,21 +137,78 @@ impl TransactionTracker {
                 deferred_close: None,
             }),
             live_write_transaction_available: Condvar::new(),
+            multi_process: None,
         }
     }
 
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+    pub(crate) fn new_multiprocess(
+        next_transaction_id: TransactionId,
+        lock_directory: &std::path::Path,
+        write_mode: MultiProcessWriteMode,
+    ) -> Result<Self, DatabaseError> {
+        let mut tracker = Self::new(next_transaction_id);
+        tracker.multi_process = Some(MultiProcessTracker::new(lock_directory, write_mode)?);
+        Ok(tracker)
+    }
+
+    pub(crate) fn start_write_transaction(
+        &self,
+        mem: &TransactionalMemory,
+    ) -> Result<(TransactionId, bool)> {
         let mut state = self.state.lock().unwrap();
-        while state.live_write_transaction.is_some() {
+        while state.write_transaction_pending {
             state = self.live_write_transaction_available.wait(state).unwrap();
         }
-        assert!(state.live_write_transaction.is_none());
+        state.write_transaction_pending = true;
+
+        if self.multi_process.is_none() {
+            let transaction_id = state.next_transaction_id.increment();
+            state.live_write_transaction = Some(transaction_id);
+            return Ok((transaction_id, false));
+        }
+        drop(state);
+
+        let multi_process = self.multi_process.as_ref().unwrap();
+        let reload_allocator = match multi_process.lock_writer() {
+            Ok(reload_allocator) => reload_allocator,
+            Err(error) => {
+                self.cancel_pending_write();
+                return Err(error);
+            }
+        };
+        if reload_allocator {
+            let reload_result = (|| {
+                let _reader_gate = multi_process.lock_reader_gate_exclusive()?;
+                mem.reload_multiprocess_write()
+            })();
+            if let Err(error) = reload_result {
+                let _ = multi_process.abandon_writer();
+                self.cancel_pending_write();
+                return Err(error);
+            }
+        }
+
+        let last_committed = match mem.get_last_committed_transaction_id() {
+            Ok(id) => id,
+            Err(error) => {
+                if reload_allocator {
+                    let _ = multi_process.abandon_writer();
+                } else {
+                    let _ = multi_process.end_write_transaction();
+                }
+                self.cancel_pending_write();
+                return Err(error);
+            }
+        };
+
+        let mut state = self.state.lock().unwrap();
+        state.next_transaction_id = last_committed;
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
         debug!("Beginning write transaction id={transaction_id:?}");
         state.live_write_transaction = Some(transaction_id);
 
-        transaction_id
+        Ok((transaction_id, reload_allocator))
     }
 
     // Returns the deferred close, if the Database was dropped while this transaction was live.
@@ -143,6 +220,10 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.live_write_transaction.unwrap(), id);
         state.live_write_transaction = None;
+        state.write_transaction_pending = false;
+        if let Some(multi_process) = &self.multi_process {
+            multi_process.end_write_transaction().unwrap();
+        }
         self.live_write_transaction_available.notify_one();
         state.deferred_close.take()
     }
@@ -162,6 +243,45 @@ impl TransactionTracker {
         } else {
             false
         }
+    }
+
+    pub(crate) fn multiprocess_writer_initialized(&self) {
+        self.multi_process.as_ref().unwrap().writer_initialized();
+    }
+
+    pub(crate) fn is_multiprocess(&self) -> bool {
+        self.multi_process.is_some()
+    }
+
+    pub(crate) fn multiple_writers(&self) -> bool {
+        self.multi_process
+            .as_ref()
+            .is_some_and(MultiProcessTracker::multiple_writers)
+    }
+
+    fn cancel_pending_write(&self) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.write_transaction_pending);
+        assert!(state.live_write_transaction.is_none());
+        state.write_transaction_pending = false;
+        self.live_write_transaction_available.notify_one();
+    }
+
+    pub(crate) fn prepare_commit(self: &Arc<Self>) -> Result<CommitGuard> {
+        let lock = self
+            .multi_process
+            .as_ref()
+            .map(MultiProcessTracker::prepare_commit)
+            .transpose()?;
+        if lock.is_some() {
+            let mut state = self.state.lock()?;
+            assert!(!state.commit_in_progress);
+            state.commit_in_progress = true;
+        }
+        Ok(CommitGuard {
+            tracker: self.clone(),
+            lock,
+        })
     }
 
     pub(crate) fn clear_pending_non_durable_commits(&self) {
@@ -273,7 +393,28 @@ impl TransactionTracker {
         &self,
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
-        let mut state = self.state.lock()?;
+        let (mut state, _reader_gate) = loop {
+            let mut state = self.state.lock()?;
+            while state.write_transaction_pending && state.live_write_transaction.is_none() {
+                state = self.live_write_transaction_available.wait(state)?;
+            }
+
+            let Some(multi_process) = &self.multi_process else {
+                break (state, None);
+            };
+            drop(state);
+            let reader_gate = multi_process.lock_reader_gate_shared()?;
+            let state = self.state.lock()?;
+            if state.write_transaction_pending && state.live_write_transaction.is_none() {
+                drop(state);
+                drop(reader_gate);
+                continue;
+            }
+            break (state, Some(reader_gate));
+        };
+        if self.multi_process.is_some() && state.live_write_transaction.is_none() {
+            mem.reload_multiprocess_read()?;
+        }
         let id = mem.get_last_committed_transaction_id()?;
         state
             .live_read_transactions
@@ -281,16 +422,93 @@ impl TransactionTracker {
             .and_modify(|x| *x += 1)
             .or_insert(1);
 
+        if let Some(multi_process) = &self.multi_process
+            && let Err(error) = multi_process
+                .publish_oldest_reader(state.live_read_transactions.keys().next().copied())
+        {
+            let ref_count = state.live_read_transactions.get_mut(&id).unwrap();
+            *ref_count -= 1;
+            if *ref_count == 0 {
+                state.live_read_transactions.remove(&id);
+            }
+            return Err(error);
+        }
+
         Ok(id)
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
+        let commit_in_progress = self.state.lock().unwrap().commit_in_progress;
+        let reader_gate = if commit_in_progress {
+            None
+        } else {
+            self.multi_process
+                .as_ref()
+                .map(MultiProcessTracker::lock_reader_gate_shared)
+        };
+        let may_publish = reader_gate.as_ref().is_none_or(|result| result.is_ok());
+        let _reader_gate = reader_gate.and_then(std::result::Result::ok);
         let mut state = self.state.lock().unwrap();
         let ref_count = state.live_read_transactions.get_mut(&id).unwrap();
         *ref_count -= 1;
         if *ref_count == 0 {
             state.live_read_transactions.remove(&id);
         }
+        if may_publish && let Some(multi_process) = &self.multi_process {
+            let _ = multi_process
+                .publish_oldest_reader(state.live_read_transactions.keys().next().copied());
+        }
+    }
+
+    pub(crate) fn synchronize_persistent_savepoints(
+        &self,
+        next_savepoint: Option<SavepointId>,
+        savepoints: &[(SavepointId, TransactionId)],
+    ) -> Result {
+        let _reader_gate = self
+            .multi_process
+            .as_ref()
+            .map(MultiProcessTracker::lock_reader_gate_shared)
+            .transpose()?;
+        let mut state = self.state.lock()?;
+
+        let previous: Vec<(SavepointId, TransactionId)> = state
+            .persistent_savepoints
+            .iter()
+            .filter_map(|id| {
+                state
+                    .valid_savepoints
+                    .get(id)
+                    .map(|transaction| (*id, *transaction))
+            })
+            .collect();
+        for (id, transaction) in previous {
+            state.persistent_savepoints.remove(&id);
+            state.valid_savepoints.remove(&id);
+            let count = state.live_read_transactions.get_mut(&transaction).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                state.live_read_transactions.remove(&transaction);
+            }
+        }
+
+        if let Some(next_savepoint) = next_savepoint {
+            state.next_savepoint_id = next_savepoint;
+        }
+        for (id, transaction) in savepoints {
+            state
+                .live_read_transactions
+                .entry(*transaction)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            state.valid_savepoints.insert(*id, *transaction);
+            state.persistent_savepoints.insert(*id);
+        }
+        if let Some(multi_process) = &self.multi_process {
+            multi_process
+                .publish_oldest_reader(state.live_read_transactions.keys().next().copied())?;
+        }
+        Ok(())
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
@@ -399,13 +617,24 @@ impl TransactionTracker {
     }
 
     pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
-        self.state
+        let local = self
+            .state
             .lock()
             .unwrap()
             .live_read_transactions
             .keys()
             .next()
-            .copied()
+            .copied();
+        let external = self
+            .multi_process
+            .as_ref()
+            .and_then(MultiProcessTracker::external_oldest_reader);
+        match (local, external) {
+            (Some(local), Some(external)) => Some(local.min(external)),
+            (Some(local), None) => Some(local),
+            (None, Some(external)) => Some(external),
+            (None, None) => None,
+        }
     }
 
     // Returns the transaction id of the oldest non-durable transaction which has not been processed

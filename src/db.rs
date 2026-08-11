@@ -1,3 +1,7 @@
+use crate::multiprocess::{
+    DATABASE_FILE_NAME, INITIALIZATION_LOCK_FILE_NAME, LOCK_DIRECTORY_NAME, MultiProcessWriteMode,
+    PROTOCOL_FILE_NAME, PROTOCOL_TEMP_FILE_NAME, READER_GATE_FILE_NAME, open_lock_file,
+};
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
@@ -12,6 +16,7 @@ use crate::{ReadTransaction, Result, WriteTransaction};
 use std::fmt::{Debug, Display, Formatter};
 
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
@@ -530,6 +535,7 @@ impl ReadOnlyDatabase {
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
+    multi_process: bool,
 }
 
 impl Sealed for Database {}
@@ -559,6 +565,33 @@ impl Database {
     /// Opens an existing redb database.
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
+    }
+
+    /// Opens the database directory for access from multiple processes.
+    ///
+    /// The directory must have been initialized by [`Self::create_multiprocess`]. By default, the
+    /// first database handle to begin a write transaction retains writer ownership until it is
+    /// dropped, while read transactions remain concurrent across all processes. Every process
+    /// accessing the directory must use the multi-process API.
+    ///
+    /// Multi-process write transactions always use immediate durability and two-phase commit, so
+    /// [`crate::Durability::None`] is not supported. Use
+    /// [`Builder::set_multiprocess_multiple_writers`] when separate processes must alternate as
+    /// the writer; that mode also requires quick repair. [`Self::check_integrity`] is not yet
+    /// available for multi-process handles.
+    pub fn open_multiprocess(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        Self::builder().open_multiprocess(path)
+    }
+
+    /// Opens or creates a database directory for access from multiple processes.
+    ///
+    /// The directory contains the database file and the lock files used to coordinate
+    /// transactions. The default is optimized for one long-lived writer process. Use
+    /// [`Builder::set_multiprocess_multiple_writers`] to create a database that permits writer
+    /// handoff after every transaction. Use [`Self::open_multiprocess`] when the directory must
+    /// already exist. See [`Self::open_multiprocess`] for the current prototype limitations.
+    pub fn create_multiprocess(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        Self::builder().create_multiprocess(path)
     }
 
     pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {
@@ -618,6 +651,9 @@ impl Database {
     /// been made durable are made durable if the check passes, or rolled back if the database must
     /// be repaired.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
+        if self.multi_process {
+            return Err(DatabaseError::TransactionInProgress);
+        }
         if Arc::get_mut(&mut self.mem).is_none() {
             return Err(DatabaseError::TransactionInProgress);
         }
@@ -731,7 +767,7 @@ impl Database {
             Ok(true) => {
                 let live_allocator_hash = self.mem.allocator_hash();
                 let live_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
-                match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
+                match Self::rebuild_allocator_state(&self.mem, &|_| {}) {
                     // Only a durable root can be rewritten from here, so a live root whose table
                     // count was recomputed must be rolled back and repaired by the reload below
                     Ok(roots) if roots != live_roots => Ok(None),
@@ -950,9 +986,7 @@ impl Database {
     }
 
     #[cfg(debug_assertions)]
-    fn mark_allocated_page_for_debug(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
-    ) -> Result {
+    fn mark_allocated_page_for_debug(mem: &Arc<TransactionalMemory>) -> Result {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
@@ -1050,7 +1084,7 @@ impl Database {
     // counts are stored in the commit slot rather than in a page, so no page checksum covers
     // them; recounting here is what lets the rest of the codebase trust them.
     fn rebuild_allocator_state(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
+        mem: &Arc<TransactionalMemory>,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
         mem.reset_allocator_state()?;
@@ -1148,7 +1182,7 @@ impl Database {
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
-            Self::mark_allocated_page_for_debug(&mut mem)?;
+            Self::mark_allocated_page_for_debug(&mem)?;
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -1174,6 +1208,7 @@ impl Database {
         let db = Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+            multi_process: false,
         };
 
         // Restore the tracker state for any persistent savepoints
@@ -1199,6 +1234,30 @@ impl Database {
         txn.abort()?;
 
         Ok(db)
+    }
+
+    fn new_multiprocess(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        cache_size: usize,
+        lock_directory: &Path,
+        write_mode: MultiProcessWriteMode,
+    ) -> Result<Self, DatabaseError> {
+        let mem = Arc::new(TransactionalMemory::new_multiprocess(
+            file, page_size, cache_size,
+        )?);
+
+        let next_transaction_id = mem.get_last_committed_transaction_id()?;
+        let transaction_tracker = Arc::new(TransactionTracker::new_multiprocess(
+            next_transaction_id,
+            lock_directory,
+            write_mode,
+        )?);
+        Ok(Self {
+            mem,
+            transaction_tracker,
+            multi_process: true,
+        })
     }
 
     fn get_allocator_state_table(
@@ -1275,28 +1334,85 @@ fn begin_write_with_allocation_policy(
 ) -> Result<WriteTransaction, TransactionError> {
     // Fail early if there has been an I/O error -- nothing can be committed in that case
     mem.check_io_errors()?;
-    let guard = TransactionGuard::new_write(
-        transaction_tracker.start_write_transaction(),
-        transaction_tracker.clone(),
-    );
+    let (transaction_id, reload_allocator) = transaction_tracker.start_write_transaction(mem)?;
+    let guard = TransactionGuard::new_write(transaction_id, transaction_tracker.clone());
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption. Returning drops the guard,
     // releasing the slot.
     mem.check_io_errors()?;
+
+    if transaction_tracker.is_multiprocess() && reload_allocator {
+        let allocator_result: Result = (|| {
+            if let Some(tree) = Database::get_allocator_state_table(mem)? {
+                mem.load_allocator_state(&tree)?;
+                #[cfg(debug_assertions)]
+                Database::mark_allocated_page_for_debug(mem)?;
+            } else if transaction_tracker.multiple_writers() {
+                return Err(StorageError::Corrupted(
+                    "multiple-writer database is missing allocator state".to_string(),
+                ));
+            } else {
+                let live_roots = [mem.get_data_root(), mem.get_system_root()];
+                let rebuilt_roots = Database::rebuild_allocator_state(mem, &|_| {}).map_err(
+                    |error| match error {
+                        DatabaseError::Storage(error) => error,
+                        DatabaseError::RepairAborted => unreachable!(),
+                        other => StorageError::Corrupted(other.to_string()),
+                    },
+                )?;
+                if rebuilt_roots != live_roots {
+                    return Err(StorageError::Corrupted(
+                        "multi-process database root metadata requires repair".to_string(),
+                    ));
+                }
+            }
+            transaction_tracker.multiprocess_writer_initialized();
+            Ok(())
+        })();
+        if let Err(error) = allocator_result {
+            drop(guard);
+            return Err(error.into());
+        }
+    }
+
     if !mem.allocator_state_loaded() {
         return Err(StorageError::Corrupted(
             "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
         )
         .into());
     }
-    WriteTransaction::new(
+    let mut transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
         mem.clone(),
         allocation_policy,
     )
-    .map_err(|e| e.into())
+    .map_err(TransactionError::from)?;
+
+    if transaction_tracker.is_multiprocess() {
+        transaction.enable_multiprocess(transaction_tracker.multiple_writers());
+        let synchronize_result = (|| {
+            let next_savepoint = transaction.next_persistent_savepoint_id()?;
+            let mut savepoints = vec![];
+            for id in transaction.list_persistent_savepoints()? {
+                let savepoint = transaction.get_persistent_savepoint(id)?;
+                savepoints.push((savepoint.get_id(), savepoint.get_transaction_id()));
+            }
+            transaction_tracker.synchronize_persistent_savepoints(next_savepoint, &savepoints)?;
+            Ok::<(), SavepointError>(())
+        })();
+        if let Err(error) = synchronize_result {
+            return Err(match error {
+                SavepointError::Storage(error) => error.into(),
+                SavepointError::InvalidSavepoint | SavepointError::ImmediateDurabilityRequired => {
+                    unreachable!()
+                }
+            });
+        }
+    }
+
+    Ok(transaction)
 }
 
 fn ensure_allocator_state_table_and_trim(
@@ -1327,6 +1443,14 @@ fn ensure_allocator_state_table_and_trim(
 // transaction can be started concurrently and the commit in here cannot block on the
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
+    if transaction_tracker.is_multiprocess() {
+        if mem.close_multiprocess().is_err() {
+            #[cfg(feature = "logging")]
+            warn!("Failed to close multi-process database file.");
+        }
+        return;
+    }
+
     if !thread::panicking()
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
@@ -1392,6 +1516,7 @@ pub struct Builder {
     page_size: usize,
     region_size: Option<u64>,
     cache_size: usize,
+    multiprocess_multiple_writers: bool,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -1401,6 +1526,7 @@ impl Builder {
     /// ## Defaults
     ///
     /// - `cache_size_bytes`: 1GiB
+    /// - multiple writers for multi-process databases: disabled
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
@@ -1410,6 +1536,7 @@ impl Builder {
             page_size: PAGE_SIZE,
             region_size: None,
             cache_size: 1024 * 1024 * 1024,
+            multiprocess_multiple_writers: false,
             repair_callback: Box::new(|_| {}),
         }
     }
@@ -1446,6 +1573,18 @@ impl Builder {
     /// Set the amount of memory (in bytes) used for caching data
     pub fn set_cache_size(&mut self, bytes: usize) -> &mut Self {
         self.cache_size = bytes;
+        self
+    }
+
+    /// Enable writer handoff between processes for multi-process databases.
+    ///
+    /// By default, the first handle to begin a write transaction retains exclusive writer
+    /// ownership until that handle is dropped. Enabling this option allows a different process to
+    /// become the writer after every transaction, at the cost of storing a quick-repair allocator
+    /// snapshot with every commit. The mode is recorded when the database is created, and all
+    /// processes opening it must configure the same value.
+    pub fn set_multiprocess_multiple_writers(&mut self, enabled: bool) -> &mut Self {
+        self.multiprocess_multiple_writers = enabled;
         self
     }
 
@@ -1490,6 +1629,143 @@ impl Builder {
             self.cache_size,
             &self.repair_callback,
         )
+    }
+
+    /// Opens or creates a directory-backed database that can be used by multiple processes.
+    ///
+    /// The configured multiple-writer setting is recorded when a new database is created and must
+    /// match the setting used by every later open.
+    pub fn create_multiprocess(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        self.open_multiprocess_internal(path.as_ref(), true)
+    }
+
+    /// Opens an existing directory-backed database that can be used by multiple processes.
+    ///
+    /// The configured multiple-writer setting must match the mode recorded when the database was
+    /// created.
+    pub fn open_multiprocess(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        self.open_multiprocess_internal(path.as_ref(), false)
+    }
+
+    fn open_multiprocess_internal(
+        &self,
+        path: &Path,
+        create: bool,
+    ) -> Result<Database, DatabaseError> {
+        if create {
+            std::fs::create_dir_all(path)?;
+        } else if !path.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "multi-process database directory does not exist",
+            )
+            .into());
+        }
+
+        let lock_directory = path.join(LOCK_DIRECTORY_NAME);
+        if create {
+            std::fs::create_dir_all(&lock_directory)?;
+        } else if !lock_directory.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "multi-process database lock directory does not exist",
+            )
+            .into());
+        }
+
+        let write_mode = if self.multiprocess_multiple_writers {
+            MultiProcessWriteMode::MultipleWriters
+        } else {
+            MultiProcessWriteMode::SingleWriter
+        };
+        let initialization = open_lock_file(&lock_directory.join(INITIALIZATION_LOCK_FILE_NAME))?;
+        initialization.lock()?;
+        let result = (|| {
+            let database_path = path.join(DATABASE_FILE_NAME);
+            let protocol_path = lock_directory.join(PROTOCOL_FILE_NAME);
+            let protocol_exists = protocol_path.exists();
+            if protocol_exists {
+                let contents = std::fs::read(&protocol_path)?;
+                let Some(recorded_mode) = MultiProcessWriteMode::from_protocol_contents(&contents)
+                else {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "unsupported multi-process database protocol",
+                    )
+                    .into());
+                };
+                if recorded_mode != write_mode {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "multi-process database writer mode does not match Builder configuration",
+                    )
+                    .into());
+                }
+            }
+            if !create && !protocol_exists {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "multi-process database initialization is incomplete",
+                )
+                .into());
+            }
+            let mut options = OpenOptions::new();
+            options.read(true).write(true);
+            if create {
+                options.create(true).truncate(false);
+            }
+            let file = options.open(&database_path)?;
+
+            if !protocol_exists {
+                let initializer = Database::new(
+                    Box::new(FileBackend::new_unlocked(file)),
+                    true,
+                    self.page_size,
+                    self.region_size,
+                    self.cache_size,
+                    &self.repair_callback,
+                )?;
+                drop(initializer);
+                let protocol_temp_path = lock_directory.join(PROTOCOL_TEMP_FILE_NAME);
+                let mut protocol = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&protocol_temp_path)?;
+                protocol.write_all(write_mode.protocol_contents())?;
+                protocol.sync_all()?;
+                drop(protocol);
+                std::fs::rename(protocol_temp_path, &protocol_path)?;
+            } else {
+                drop(file);
+            }
+
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(database_path)?;
+            let reader_gate = open_lock_file(&lock_directory.join(READER_GATE_FILE_NAME))?;
+            reader_gate.lock_shared()?;
+            let result = Database::new_multiprocess(
+                Box::new(FileBackend::new_unlocked(file)),
+                self.page_size,
+                self.cache_size,
+                &lock_directory,
+                write_mode,
+            );
+            let unlock_result = reader_gate.unlock();
+            match (result, unlock_result) {
+                (Ok(database), Ok(())) => Ok(database),
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(error.into()),
+            }
+        })();
+        let unlock_result = initialization.unlock();
+        match (result, unlock_result) {
+            (Ok(database), Ok(())) => Ok(database),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error.into()),
+        }
     }
 
     /// Opens an existing redb database.
@@ -1558,6 +1834,44 @@ mod test {
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    #[cfg(not(target_os = "wasi"))]
+    fn multiprocess_quick_repair_follows_writer_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let single_writer = Database::create_multiprocess(root.path().join("single")).unwrap();
+        single_writer.begin_write().unwrap().commit().unwrap();
+        assert!(single_writer.mem.used_two_phase_commit());
+        assert!(
+            Database::get_allocator_state_table(&single_writer.mem)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut transaction = single_writer.begin_write().unwrap();
+        transaction.set_quick_repair(true);
+        transaction.commit().unwrap();
+        assert!(
+            Database::get_allocator_state_table(&single_writer.mem)
+                .unwrap()
+                .is_some()
+        );
+
+        let mut builder = Database::builder();
+        builder.set_multiprocess_multiple_writers(true);
+        let multiple_writers = builder
+            .create_multiprocess(root.path().join("multiple"))
+            .unwrap();
+        let mut transaction = multiple_writers.begin_write().unwrap();
+        transaction.set_quick_repair(false);
+        transaction.commit().unwrap();
+        assert!(multiple_writers.mem.used_two_phase_commit());
+        assert!(
+            Database::get_allocator_state_table(&multiple_writers.mem)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[derive(Debug)]
     struct FailingBackend {

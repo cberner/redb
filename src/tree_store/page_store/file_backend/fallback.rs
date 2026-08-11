@@ -21,6 +21,12 @@ impl FileBackend {
             file: Mutex::new(file),
         })
     }
+
+    pub(crate) fn new_unlocked(file: File) -> Self {
+        Self {
+            file: Mutex::new(file),
+        }
+    }
 }
 
 impl StorageBackend for FileBackend {

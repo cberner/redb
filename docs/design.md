@@ -10,6 +10,70 @@ serializable, in which all writes are applied sequentially.
 
 Each table is a key-value mapping providing an interface similar to `BTreeMap`.
 
+# Multi-process protocol
+
+`Database::create_multiprocess()` and `Database::open_multiprocess()` use a directory instead of a
+single database path. The directory has this layout:
+
+```text
+database.redb
+locks/
+    protocol-v1
+    initialization.lock
+    writer.lock
+    reader-gate.lock
+    reader-slot-<process id>-<sequence>.lock
+```
+
+The implementation only uses safe Rust, ordinary file reads and writes, and the locking methods on
+`std::fs::File`. The locks are advisory on platforms where the standard library exposes advisory
+locks, so every process accessing the directory must use the multi-process API.
+
+`protocol-v1` records one of two writer modes. All processes must configure the mode that was chosen
+when the database was created. In the default single-writer mode, the first database handle to begin
+a write transaction locks `writer.lock` and retains it until that handle is dropped. Its first write
+loads a valid allocator snapshot when one is available, or reconstructs the allocator by walking the
+database once. Later transactions reuse that in-memory allocator, so commits do not enable quick
+repair.
+
+`Builder::set_multiprocess_multiple_writers(true)` selects multiple-writer mode. In this mode,
+`writer.lock` is held only for the lifetime of each write transaction. The process reloads the latest
+committed header and allocator after acquiring it, permitting writer handoff after every transaction.
+These commits include quick-repair allocator snapshots so the next process can load the allocator
+without reconstructing it.
+
+Both modes require immediate durability and two-phase commit; `Durability::None` is rejected. Any
+number of processes can hold database handles and read concurrently in either mode. In single-writer
+mode, a second handle that requests a write waits until the owning database handle is dropped, not
+merely until its current write transaction finishes.
+
+Each open `Database` creates a unique reader-slot file, locks it exclusively for the lifetime of the
+handle, and stores the oldest transaction needed by its local readers and savepoints in the file.
+Several read transactions in one handle therefore require only one slot, while any number of handles
+and processes may create additional slots. A process crash releases the slot lock. Slot files left by
+a crash are cleaned up during later writer scans; cleanly closed handles remove their own slots.
+
+Reader registration follows this sequence:
+
+1. Acquire a shared lock on `reader-gate.lock`.
+2. Reload the latest committed database header, unless this handle owns the current writer.
+3. Add the snapshot to the local transaction tracker and publish the local oldest snapshot.
+4. Release `reader-gate.lock`.
+
+The writer takes `reader-gate.lock` exclusively immediately before commit, scans every actively
+locked reader slot, and holds the gate through page reclamation and publication of the commit. This
+closes the race where a reader could observe a snapshot just before the writer reuses one of its
+pages. Existing readers continue running while the gate is held; only the short registration and
+de-registration operations may wait.
+
+`Database::check_integrity()` is not currently supported on a multi-process handle, because its
+repair path needs stronger coordination than an ordinary write transaction.
+
+`initialization.lock` serializes directory initialization and opening a partially initialized
+directory. `protocol-v1` is written only after creation has produced a complete initial database and
+includes the selected writer mode. Its absence makes `open_multiprocess()` reject a partially
+initialized directory, while a later `create_multiprocess()` may safely finish initialization.
+
 # File format
 Logically, a redb database file consists of some metadata, and several B+trees:
 * pending free tree: mapping from transaction ids to the list of pages they freed

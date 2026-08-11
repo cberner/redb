@@ -1,5 +1,6 @@
 *
 !src/
+!benches/
 !crates/
 !tests/
 !examples/

@@ -28,6 +28,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
+fn database_error_to_storage(error: DatabaseError) -> StorageError {
+    match error {
+        DatabaseError::Storage(error) => error,
+        other => StorageError::Corrupted(other.to_string()),
+    }
+}
+
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
 const NO_HEADER: u32 = 0;
@@ -501,6 +508,13 @@ pub(crate) struct TransactionalMemory {
     region_header_with_padding_size: u64,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum OpenMode {
+    ReadOnly,
+    ReadWrite,
+    Multiprocess,
+}
+
 impl TransactionalMemory {
     pub(crate) fn new(
         file: Box<dyn StorageBackend>,
@@ -510,6 +524,44 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         cache_size: usize,
         read_only: bool,
+    ) -> Result<Self, DatabaseError> {
+        let open_mode = if read_only {
+            OpenMode::ReadOnly
+        } else {
+            OpenMode::ReadWrite
+        };
+        Self::new_internal(
+            file,
+            allow_initialize,
+            page_size,
+            requested_region_size,
+            cache_size,
+            open_mode,
+        )
+    }
+
+    pub(crate) fn new_multiprocess(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        cache_size: usize,
+    ) -> Result<Self, DatabaseError> {
+        Self::new_internal(
+            file,
+            false,
+            page_size,
+            None,
+            cache_size,
+            OpenMode::Multiprocess,
+        )
+    }
+
+    fn new_internal(
+        file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
+        page_size: usize,
+        requested_region_size: Option<u64>,
+        cache_size: usize,
+        open_mode: OpenMode,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -601,21 +653,30 @@ impl TransactionalMemory {
         let unrepaired =
             UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
-        if needs_recovery && read_only {
-            return Err(DatabaseError::RepairAborted);
-        }
-        let (header, _) = unrepaired.finalize(file_len)?;
-        if needs_recovery {
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
-        }
+        let header = if open_mode == OpenMode::Multiprocess {
+            unrepaired.finalize_multiprocess_read(file_len)?
+        } else {
+            let needs_recovery = unrepaired.recovery_required(file_len);
+            if needs_recovery && open_mode == OpenMode::ReadOnly {
+                return Err(DatabaseError::RepairAborted);
+            }
+            let (header, _) = unrepaired.finalize(file_len)?;
+            if needs_recovery {
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
+            header
+        };
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
+        if open_mode == OpenMode::Multiprocess {
+            assert!(layout.len() <= storage.raw_file_len()?);
+        } else {
+            assert_eq!(layout.len(), storage.raw_file_len()?);
+        }
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
@@ -727,6 +788,49 @@ impl TransactionalMemory {
         self.unpersisted.lock().unwrap().clear();
 
         Ok(was_clean)
+    }
+
+    pub(crate) fn reload_multiprocess_read(&self) -> Result {
+        self.reload_multiprocess(false)
+    }
+
+    pub(crate) fn reload_multiprocess_write(&self) -> Result {
+        self.reload_multiprocess(true)
+    }
+
+    fn reload_multiprocess(&self, reset_allocator: bool) -> Result {
+        self.storage.invalidate_cache_all();
+
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(database_error_to_storage)?;
+        let file_len = self.storage.raw_file_len()?;
+        let (header, was_clean) = if reset_allocator {
+            unrepaired.finalize(file_len)?
+        } else {
+            (unrepaired.finalize_multiprocess_read(file_len)?, true)
+        };
+        if !was_clean {
+            if !reset_allocator {
+                return Err(StorageError::Corrupted(
+                    "multi-process database requires writer recovery".to_string(),
+                ));
+            }
+            self.storage
+                .write(0, DB_HEADER_SIZE, true)?
+                .mem_mut()
+                .copy_from_slice(&header.to_bytes(true));
+            self.storage.flush()?;
+        }
+
+        let mut state = self.state.lock()?;
+        state.header = header;
+        state.read_from_secondary = false;
+        if reset_allocator {
+            state.allocators = None;
+            self.unpersisted.lock()?.clear();
+        }
+        Ok(())
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
@@ -922,6 +1026,9 @@ impl TransactionalMemory {
 
     pub(crate) fn load_allocator_state(&self, tree: &AllocatorStateTree) -> Result {
         assert!(self.is_valid_allocator_state(tree)?);
+
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
 
         // Load the allocator state
         let mut region_allocators = vec![];
@@ -1563,6 +1670,10 @@ impl TransactionalMemory {
         // called even if the shutdown writes above failed
         let close_result = self.storage.close();
         shutdown_result.and(close_result)
+    }
+
+    pub(crate) fn close_multiprocess(&self) -> Result {
+        self.storage.close()
     }
 
     fn flush_shutdown_header(&self) -> Result {

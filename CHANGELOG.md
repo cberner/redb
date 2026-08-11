@@ -21,6 +21,11 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
+* Add a prototype directory-backed multi-process interface with
+  `Database::create_multiprocess()` and `Database::open_multiprocess()`. It supports one write
+  transaction and any number of concurrent read transactions across processes. One writer process
+  is the default; `Builder::set_multiprocess_multiple_writers()` enables writer handoff between
+  processes.
 * `Durability::None` commits are about 2x faster.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files
