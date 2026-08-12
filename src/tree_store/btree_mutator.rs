@@ -835,6 +835,37 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     });
                 }
 
+                // A same-size replacement leaves every leaf offset unchanged. Preserve copy-on-
+                // write by cloning the committed page, then patch only the value bytes.
+                if found && accessor.entry(position).unwrap().value().len() == value.len() {
+                    let page_number = page.get_page_number();
+                    // Only committed pages reach here: sufficient_replace_inplace_space() is
+                    // always satisfied when the value length is unchanged, so an uncommitted
+                    // page took the in-place path above.
+                    debug_assert!(!self.page_allocator.uncommitted(page_number));
+                    let (value_start, value_end) = accessor.value_range(position).unwrap();
+                    let mut new_page = self
+                        .page_allocator
+                        .allocate(page.memory().len(), self.allocated)?;
+                    new_page.memory_mut().copy_from_slice(page.memory());
+                    new_page.memory_mut()[value_start..value_end].copy_from_slice(value);
+                    let new_page_number = new_page.get_page_number();
+                    let inserted_value =
+                        AccessGuardMutInPlace::new(new_page, value_start, value.len());
+                    // Deferred, not conditional_free()'d: the old value returned below borrows
+                    // this page, and releasing it now would let the allocator hand it out again
+                    // while that guard is still reading it.
+                    self.freed.push(page_number);
+                    let old_value = AccessGuard::with_page(page, value_start..value_end);
+                    return Ok(InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value,
+                        old_value: Some(old_value),
+                    });
+                }
+
                 // Fast-path for a key greater than every key in the tree, when the rightmost
                 // leaf is too full to take it: leave that leaf packed and start a new one
                 // holding only the new pair. Splitting evenly instead would strand half of a
@@ -1029,7 +1060,32 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     });
                 }
 
-                // A child was added, or we couldn't use the fast-path above
+                // Without a split, only one child pointer and checksum changed. Preserve copy-on-
+                // write by cloning the committed branch, then patch those fields.
+                if sub_result.additional_sibling.is_none() {
+                    let page_number = page.get_page_number();
+                    let mut new_page = self
+                        .page_allocator
+                        .allocate(page.memory().len(), self.allocated)?;
+                    new_page.memory_mut().copy_from_slice(page.memory());
+                    BranchMutator::new(new_page.memory_mut()).write_child_page(
+                        child_index,
+                        sub_result.new_root,
+                        sub_result.root_checksum,
+                    );
+                    let new_page_number = new_page.get_page_number();
+                    drop(page);
+                    self.conditional_free(page_number);
+                    return Ok(InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    });
+                }
+
+                // A child was added, so rebuild the branch and split it if necessary.
                 let mut builder = BranchBuilder::new(
                     self.page_allocator,
                     self.allocated,

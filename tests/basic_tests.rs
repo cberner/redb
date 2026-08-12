@@ -1599,6 +1599,50 @@ fn insert_overwrite() {
 }
 
 #[test]
+fn same_size_overwrite_preserves_snapshot() {
+    const DEFINITION: TableDefinition<u64, [u8; 32]> = TableDefinition::new("x");
+    const ELEMENTS: u64 = 10_000;
+
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(DEFINITION).unwrap();
+        for key in 0..ELEMENTS {
+            table.insert(&key, &[0; 32]).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let old_read = db.begin_read().unwrap();
+    let old_table = old_read.open_table(DEFINITION).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(DEFINITION).unwrap();
+        for key in 0..ELEMENTS {
+            let old_value = table.insert(&key, &[1; 32]).unwrap().unwrap();
+            assert_eq!(old_value.value(), [0; 32]);
+        }
+    }
+    write_txn.commit().unwrap();
+
+    for key in (0..ELEMENTS).step_by(101) {
+        assert_eq!(old_table.get(&key).unwrap().unwrap().value(), [0; 32]);
+    }
+    drop(old_table);
+    drop(old_read);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEFINITION).unwrap();
+    for key in (0..ELEMENTS).step_by(101) {
+        assert_eq!(table.get(&key).unwrap().unwrap().value(), [1; 32]);
+    }
+    drop(table);
+    drop(read_txn);
+    assert!(db.check_integrity().unwrap());
+}
+
+#[test]
 fn insert_reserve() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
@@ -1613,9 +1657,30 @@ fn insert_reserve() {
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
+    {
+        let table = read_txn.open_table(def).unwrap();
+        assert_eq!(
+            value.as_bytes(),
+            table.get("hello").unwrap().unwrap().value()
+        );
+    }
+    drop(read_txn);
+
+    // Reserving over an existing key, at the length it already has
+    let replacement = "earth";
+    assert_eq!(replacement.len(), value.len());
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(def).unwrap();
+        let mut reserved = table.insert_reserve("hello", replacement.len()).unwrap();
+        reserved.as_mut().copy_from_slice(replacement.as_bytes());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(def).unwrap();
     assert_eq!(
-        value.as_bytes(),
+        replacement.as_bytes(),
         table.get("hello").unwrap().unwrap().value()
     );
 }
