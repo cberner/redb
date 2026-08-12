@@ -35,11 +35,10 @@ use core::marker::PhantomData;
 use core::mem;
 use core::mem::size_of;
 use core::ops::{RangeBounds, RangeFull};
+use core::panic;
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::{debug, warn};
-use std::panic;
-use std::thread;
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
@@ -2545,7 +2544,7 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        if !self.completed && !thread::panicking() && !self.mem.storage_failure() {
+        if !self.completed && !crate::panicking() && !self.mem.storage_failure() {
             #[allow(unused_variables)]
             if let Err(error) = self.abort_inner() {
                 #[cfg(feature = "logging")]

@@ -74,10 +74,12 @@ compile_error!(
 // no-op for std builds.
 extern crate alloc;
 
+#[cfg(not(redb_no_std))]
+pub use db::ReadOnlyDatabase;
 pub use db::{
-    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
-    ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
-    UntypedMultimapTableHandle, UntypedTableHandle,
+    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadableDatabase,
+    RepairSession, StorageBackend, TableDefinition, TableHandle, UntypedMultimapTableHandle,
+    UntypedTableHandle,
 };
 pub use error::{
     CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
@@ -120,6 +122,19 @@ mod transactions;
 mod tree_store;
 mod tuple_types;
 mod types;
+
+// Whether the current thread is unwinding from a panic. redb's Drop impls use it to soften
+// assertions that would otherwise turn a panic into an abort. A no_std program aborts on panic
+// rather than unwinding, so its Drop impls never run while panicking.
+#[cfg(not(redb_no_std))]
+pub(crate) fn panicking() -> bool {
+    std::thread::panicking()
+}
+
+#[cfg(redb_no_std)]
+pub(crate) fn panicking() -> bool {
+    false
+}
 
 #[cfg(test)]
 fn create_tempfile() -> tempfile::NamedTempFile {

@@ -27,7 +27,6 @@ use core::marker::PhantomData;
 use core::ops::Bound;
 #[cfg(not(feature = "experimental-api-5"))]
 use core::ops::RangeBounds;
-use std::thread;
 
 /// Informational storage stats about a table
 #[derive(Debug)]
@@ -106,7 +105,7 @@ impl<'txn> RetainPanicGuard<'txn> {
 
 impl Drop for RetainPanicGuard<'_> {
     fn drop(&mut self) {
-        if !self.disarmed && thread::panicking() {
+        if !self.disarmed && crate::panicking() {
             self.transaction.poison();
         }
     }

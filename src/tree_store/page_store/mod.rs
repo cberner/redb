@@ -4,6 +4,7 @@ mod bitmap;
 mod buddy_allocator;
 mod cached_file;
 mod fast_hash;
+#[cfg(not(redb_no_std))]
 pub mod file_backend;
 mod header;
 mod layout;
@@ -15,6 +16,7 @@ mod savepoint;
 mod xxh3;
 
 pub use backends::InMemoryBackend;
+#[cfg(not(redb_no_std))]
 pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTracker};
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
