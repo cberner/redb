@@ -1,3 +1,4 @@
+use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
@@ -9,7 +10,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use std::sync::Mutex;
 
 // Forward compatibility feature in case alignment can be supported in the future
 // See https://github.com/cberner/redb/issues/360

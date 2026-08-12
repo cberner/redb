@@ -1,5 +1,6 @@
 use crate::db::TransactionGuard;
 use crate::error::TableError;
+use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
 use crate::tree_store::multimap_btree::{
@@ -22,7 +23,6 @@ use core::cmp::max;
 use core::mem;
 use core::mem::size_of;
 use core::ops::RangeFull;
-use std::sync::Mutex;
 use std::thread;
 
 #[derive(Debug)]

@@ -2,6 +2,7 @@
 use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
+use crate::sync::Mutex;
 #[cfg(feature = "experimental-api-5")]
 use crate::tree_store::BtreeCursor;
 #[cfg(feature = "experimental_cursor")]
@@ -26,7 +27,6 @@ use core::marker::PhantomData;
 use core::ops::Bound;
 #[cfg(not(feature = "experimental-api-5"))]
 use core::ops::RangeBounds;
-use std::sync::Mutex;
 use std::thread;
 
 /// Informational storage stats about a table

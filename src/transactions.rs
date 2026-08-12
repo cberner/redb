@@ -2,6 +2,7 @@ use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
+use crate::sync::Mutex;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 #[cfg(debug_assertions)]
@@ -38,7 +39,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::{debug, warn};
 use std::panic;
-use std::sync::Mutex;
 use std::thread;
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;

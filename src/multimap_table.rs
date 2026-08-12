@@ -3,6 +3,7 @@ use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
+use crate::sync::Mutex;
 #[cfg(feature = "experimental-api-5")]
 use crate::table::bound_to_bytes;
 use crate::table::{OwnedAccessGuard, ReadableTableMetadata, TableStats};
@@ -30,7 +31,6 @@ use core::mem;
 #[cfg(not(feature = "experimental-api-5"))]
 use core::ops::RangeBounds;
 use core::ops::{Bound, Range, RangeFull};
-use std::sync::Mutex;
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
     // Kept alive so any Drop side-effects on `data` (e.g. `remove_on_drop`) still run.

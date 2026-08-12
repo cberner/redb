@@ -1,3 +1,4 @@
+use crate::sync::{Condvar, Mutex};
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;
@@ -9,7 +10,6 @@ use core::mem;
 use core::mem::size_of;
 #[cfg(feature = "logging")]
 use log::debug;
-use std::sync::{Condvar, Mutex};
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);

@@ -1,4 +1,5 @@
 use crate::db::TransactionGuard;
+use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
@@ -28,7 +29,6 @@ use core::ops::Bound;
 use core::ops::RangeBounds;
 #[cfg(feature = "logging")]
 use log::trace;
-use std::sync::Mutex;
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,

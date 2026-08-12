@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
@@ -16,7 +17,6 @@ use core::cmp::max;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
-use std::sync::Mutex;
 
 pub(crate) fn multimap_btree_stats(
     root: Option<PageNumber>,

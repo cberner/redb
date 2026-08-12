@@ -1,4 +1,5 @@
 use crate::AccessGuard;
+use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, LEAF, LeafAccessor, OwnedEntryBuffer, leaf_below_merge_threshold,
     leaf_fits_one_page, retained_after_removals,
@@ -19,7 +20,6 @@ use core::marker::PhantomData;
 use core::ops::Bound;
 use core::ops::Bound::{Excluded, Included, Unbounded};
 use core::ops::Range;
-use std::sync::Mutex;
 
 #[derive(Clone)]
 struct Branch {
