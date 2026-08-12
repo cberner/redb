@@ -5,7 +5,7 @@ use crate::sealed::Sealed;
 use crate::sync::Mutex;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, not(redb_no_std)))]
 use crate::tree_store::PageNumberHashSet;
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
@@ -1013,7 +1013,7 @@ impl WriteTransaction {
                 .is_some())
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(all(debug_assertions, not(redb_no_std)))]
     pub fn print_allocated_page_debug(&self) {
         let mut all_allocated = PageNumberHashSet::from_iter(self.mem.all_allocated_pages());
 
@@ -2499,6 +2499,7 @@ impl WriteTransaction {
     }
 
     #[allow(dead_code)]
+    #[cfg(not(redb_no_std))]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
         let mut tables = self.tables.lock().unwrap();

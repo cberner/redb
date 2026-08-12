@@ -1,3 +1,4 @@
+#![cfg_attr(redb_no_std, no_std)]
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 #![allow(
     clippy::if_not_else,
@@ -57,21 +58,16 @@
 //! }
 //! ```
 //!
+//! # Crate features
+//!
+//! - `std`: enabled by default. With `experimental-api-5` on, disable it to build redb as a
+//!   `no_std` crate; see the README for what that mode requires and leaves out.
+//!
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md
 
-// `redb_no_std` is set by build.rs when the redb 5 API preview is enabled and "std" is not. It is
-// not a complete build mode yet, so it still fails loudly rather than silently producing a build
-// that links against the standard library.
-#[cfg(redb_no_std)]
-compile_error!(
-    "redb requires the standard library: no_std is not supported yet. Enable the \"std\" feature; \
-     it is on by default, so add features = [\"std\"] if you set default-features = false."
-);
-
-// Everything redb needs from the standard library that is not core is imported through `alloc`, so
-// that the crate can eventually be built without std. `alloc` is a subset of `std`, so this is a
-// no-op for std builds.
+// Everything redb uses beyond core comes through `alloc`, a subset of std, so this is a no-op for
+// std builds.
 extern crate alloc;
 
 #[cfg(not(redb_no_std))]
@@ -130,9 +126,24 @@ mod tree_store;
 mod tuple_types;
 mod types;
 
-// Whether the current thread is unwinding from a panic. redb's Drop impls use it to soften
-// assertions that would otherwise turn a panic into an abort. A no_std program aborts on panic
-// rather than unwinding, so its Drop impls never run while panicking.
+// core cannot tell whether the current thread is unwinding, and redb's Drop impls consult that in
+// opposite ways, so neither constant is safe to assume. Restricted to panic = "abort" instead,
+// where nothing unwinds and panicking() below is vacuously correct.
+#[cfg(all(redb_no_std, panic = "unwind"))]
+compile_error!(
+    "redb without the standard library requires panic = \"abort\": it cannot detect unwinding, \
+     and its Drop impls depend on being able to. Set panic = \"abort\" in the profile, or enable \
+     the \"std\" feature."
+);
+
+// Rejected here rather than at the AtomicU64 use site, so that the error names the feature
+// responsible instead of an unresolved import.
+#[cfg(all(feature = "cache_metrics", not(target_has_atomic = "64")))]
+compile_error!(
+    "the \"cache_metrics\" feature requires a target with 64-bit atomics: its counters are \
+     AtomicU64. Disable the feature on this target."
+);
+
 #[cfg(not(redb_no_std))]
 pub(crate) fn panicking() -> bool {
     std::thread::panicking()

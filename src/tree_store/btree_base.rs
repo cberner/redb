@@ -483,6 +483,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
+    #[cfg(not(redb_no_std))]
     pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
         let mut i = 0;
         while let Some(entry) = self.entry(i) {
@@ -1795,6 +1796,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         }
     }
 
+    #[cfg(not(redb_no_std))]
     pub(super) fn print_node<K: Key>(&self) {
         eprint!(
             "Internal[ (page={:?}), child_0={:?}",

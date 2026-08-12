@@ -561,6 +561,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(not(redb_no_std))]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.read_tree()?.print_debug(include_values)
     }
@@ -1239,6 +1240,7 @@ impl<K: Key, V: Value> Btree<K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(not(redb_no_std))]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         if let Some(p) = self.root.map(|x| x.root) {
             let mut pages = vec![self.mem.get_page(p, self.hint)?];

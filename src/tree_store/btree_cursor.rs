@@ -12,6 +12,7 @@ use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 #[cfg(feature = "experimental_cursor")]
 use alloc::boxed::Box;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;

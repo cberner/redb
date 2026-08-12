@@ -42,8 +42,9 @@ redb-derive = { path = "./crates/redb-derive" }
 
 [features]
 default = ["std"]
-# Enables linking against the Rust standard library. Currently a no-op, since building without it
-# is not supported yet; it exists so that dependents can opt out ahead of a future no_std mode
+# Enables linking against the Rust standard library. Turning it off requires "experimental-api-5",
+# and builds redb as a no_std crate; alloc is still required. Without "experimental-api-5" it is a
+# no-op, so that dependents who already set default-features = false keep the std build
 std = []
 # Enables log messages
 logging = ["dep:log"]

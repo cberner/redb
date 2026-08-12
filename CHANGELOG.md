@@ -1,6 +1,16 @@
 # redb - Changelog
 
 ## 5.0.0 - 2026-XX-XX
+* Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
+  `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
+  target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend
+  and everything that opens a database from a path or a `File` are unavailable in that mode, as is
+  `ReadOnlyDatabase`; storage is supplied through `Builder::create_with_backend()`, and
+  `StorageBackend` reports failures as `redb::io::Error`, a module redb makes public only in that
+  mode; with std it stays private and the type is `std::io::Error`, as before. The `cache_metrics`,
+  `chrono_v0_4` and `uuid` features are unavailable there: the first needs 64-bit atomics, and the
+  other two link against the standard library. Leaving `experimental-api-5` off keeps the std build
+  regardless of the `std` feature, as before.
 * Behind the `experimental-api-5` feature flag, the range taking methods --
   `ReadableTable::range()`, `ReadOnlyTable::range_owned()`, `Table::retain_in()`,
   `Table::extract_from_if()`, and their multimap equivalents -- take a `KeyRange` instead of a

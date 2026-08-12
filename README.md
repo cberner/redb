@@ -46,6 +46,14 @@ are any future changes to it.
 * Crash-safe by default
 * Savepoints and rollbacks
 
+## `no_std`
+
+Turning off the `std` feature, with `experimental-api-5` on, builds redb without the standard
+library. It needs `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3
+and above, but not Cortex-M0. There is no filesystem, so storage is supplied by implementing
+`StorageBackend` and passing it to `Builder::create_with_backend()`. The `cache_metrics`,
+`chrono_v0_4` and `uuid` features are unavailable.
+
 ## Development
 
 [`just`](https://github.com/casey/just) and rootless
