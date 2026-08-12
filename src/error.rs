@@ -1,3 +1,4 @@
+use crate::io;
 use crate::sync::PoisonError;
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
@@ -6,7 +7,6 @@ use alloc::format;
 use alloc::string::String;
 use core::fmt::{Display, Formatter};
 use core::panic;
-use std::io;
 
 /// General errors directly from the storage layer
 #[derive(Debug)]

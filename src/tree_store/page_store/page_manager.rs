@@ -1,3 +1,4 @@
+use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
@@ -24,7 +25,6 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
-use std::io::ErrorKind;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -535,12 +535,18 @@ impl TransactionalMemory {
         if initial_storage_len > 0 {
             // File already exists check that the magic number matches
             if magic_number != MAGICNUMBER {
-                return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+                return Err(StorageError::Io(io::invalid_data(
+                    "Not a redb database: magic number mismatch",
+                ))
+                .into());
             }
         } else {
             // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
             if !allow_initialize {
-                return Err(StorageError::Io(ErrorKind::InvalidData.into()).into());
+                return Err(StorageError::Io(io::invalid_data(
+                    "Database file is empty and creating a new database was not requested",
+                ))
+                .into());
             }
         }
 
