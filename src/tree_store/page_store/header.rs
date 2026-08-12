@@ -6,7 +6,9 @@ use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
-use std::mem::size_of;
+use alloc::format;
+use alloc::string::ToString;
+use core::mem::size_of;
 
 // Database layout:
 //
@@ -576,11 +578,11 @@ mod test {
     };
     use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
+    use alloc::sync::Arc;
+    use core::mem::size_of;
+    use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::fs::OpenOptions;
     use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
-    use std::mem::size_of;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -855,7 +857,7 @@ mod test {
         let primary_txn_id =
             super::get_u64(&header[primary_offset + super::TRANSACTION_ID_OFFSET..]);
         let id_offset = secondary_offset + super::TRANSACTION_ID_OFFSET;
-        header[id_offset..id_offset + std::mem::size_of::<u64>()]
+        header[id_offset..id_offset + core::mem::size_of::<u64>()]
             .copy_from_slice(&(primary_txn_id + 1).to_le_bytes());
         corrupt_slot_checksum(&mut header, secondary_offset);
 
@@ -1036,20 +1038,20 @@ mod test {
     // allocating it -- used to simulate an externally created (e.g. sparse) file.
     #[derive(Clone, Debug, Default)]
     struct LenOverrideBackend {
-        data: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-        fake_len: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        data: alloc::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        fake_len: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
     }
 
     impl LenOverrideBackend {
         fn set_fake_len(&self, len: u64) {
             self.fake_len
-                .store(len, std::sync::atomic::Ordering::Release);
+                .store(len, core::sync::atomic::Ordering::Release);
         }
     }
 
     impl StorageBackend for LenOverrideBackend {
         fn len(&self) -> Result<u64, std::io::Error> {
-            let fake = self.fake_len.load(std::sync::atomic::Ordering::Acquire);
+            let fake = self.fake_len.load(core::sync::atomic::Ordering::Acquire);
             if fake == 0 {
                 Ok(self.data.lock().unwrap().len() as u64)
             } else {
@@ -1392,7 +1394,7 @@ mod test {
         // Test that magic number is not valid utf-8
         #[allow(invalid_from_utf8)]
         {
-            assert!(std::str::from_utf8(&MAGICNUMBER).is_err());
+            assert!(core::str::from_utf8(&MAGICNUMBER).is_err());
         }
         // Test there is a octet with high-bit set
         assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));

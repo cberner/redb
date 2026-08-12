@@ -4,13 +4,15 @@ use crate::tree_store::page_store::{
 use crate::tree_store::{PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::collections::VecDeque;
-use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ops::Range;
-use std::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::Range;
 use std::thread;
 
 pub(crate) const LEAF: u8 = 1;

@@ -1,6 +1,6 @@
 use crate::tree_store::PageNumber;
+use core::hash::{BuildHasherDefault, Hasher};
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hasher};
 
 // See "Computationally easy, spectrally good multipliers for congruential pseudorandom number generators" by Steele & Vigna
 const K: u64 = 0xf135_7aea_2e62_a9c5;

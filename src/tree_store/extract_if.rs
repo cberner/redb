@@ -2,8 +2,10 @@ use crate::tree_store::btree_cursor::RangeMut;
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result, StorageError};
-use std::collections::Bound;
-use std::sync::{Arc, Mutex};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::ops::Bound;
+use std::sync::Mutex;
 
 type ExtractItem<'a, K, V> = (AccessGuard<'a, K>, AccessGuard<'a, V>);
 type AdvanceInner<T, R> = fn(&mut T) -> Result<Option<R>>;

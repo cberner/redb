@@ -14,10 +14,12 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
-use std::cmp::{max, min};
-use std::marker::PhantomData;
-use std::ops::Range;
-use std::sync::Arc;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::{max, min};
+use core::marker::PhantomData;
+use core::ops::Range;
 
 #[derive(Debug)]
 enum DeletionResult {
@@ -512,7 +514,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         // propagating; a matching stored separator proves the
                         // bound unchanged, which None expresses upward.
                         let carried = if stored.is_none() {
-                            std::mem::take(&mut nodes[0].2)
+                            core::mem::take(&mut nodes[0].2)
                         } else {
                             None
                         };

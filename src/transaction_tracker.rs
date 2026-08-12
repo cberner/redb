@@ -1,13 +1,16 @@
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
+use alloc::collections::BTreeSet;
+use alloc::collections::btree_map::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::mem;
+use core::mem::size_of;
 #[cfg(feature = "logging")]
 use log::debug;
-use std::cmp::Ordering;
-use std::collections::btree_map::BTreeMap;
-use std::collections::{BTreeSet, HashMap};
-use std::mem;
-use std::mem::size_of;
-use std::sync::{Arc, Condvar, Mutex};
+use std::collections::HashMap;
+use std::sync::{Condvar, Mutex};
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);
@@ -360,8 +363,8 @@ impl TransactionTracker {
             .unwrap()
             .valid_savepoints
             .range((
-                std::ops::Bound::Excluded(id),
-                std::ops::Bound::Unbounded::<SavepointId>,
+                core::ops::Bound::Excluded(id),
+                core::ops::Bound::Unbounded::<SavepointId>,
             ))
             .map(|(x, _)| *x)
             .collect()

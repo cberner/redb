@@ -5,10 +5,11 @@ use crate::tree_store::page_store::PageHint;
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
-use std::borrow::Borrow;
-use std::cmp::Ordering;
-use std::collections::Bound;
-use std::ops::RangeBounds;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::ops::Bound;
+use core::ops::RangeBounds;
 
 #[derive(Clone)]
 enum Slot<C> {
