@@ -506,6 +506,7 @@ directory rather than a single file:
 |------|----------|
 | `data.redb` | the database, in the ordinary redb file format |
 | `write.lock` | empty; held exclusively by the process that has the database open |
+| `metadata` | a magic number and a format version, so that a directory can be recognized |
 
 The point of the directory is to move exclusion off the database file. An ordinary `Database` takes
 an exclusive advisory lock on the file itself, which is what stops a second process opening it --
@@ -535,3 +536,54 @@ running; tying it to the backend gives it exactly the lifetime of the open file.
 
 A platform without file locking cannot support any of this safely, so opening fails there rather
 than warning and continuing as `Database` does.
+
+`metadata` is what makes a directory recognizable as one of these, and what gives the layout a
+version to change later. It holds a magic number and a format version, and is checked on the way in:
+a marker from a version this build does not know is refused rather than guessed at, and so is a
+`metadata` file that is not a marker at all -- pointing `create()` at a directory that already has
+one is a mistake, and overwriting whatever was there would be a destructive way to report it.
+Reading is bounded to the marker's own length plus one byte, since a mistyped path can point at a
+directory whose `metadata` is any size at all, and a file that merely starts with the marker is not
+one.
+
+The marker must be an ordinary file, checked before it is opened. `File::open` follows a symlink, so
+one aimed at a valid marker elsewhere would otherwise vouch for a directory holding nothing of
+redb's, and it blocks on a FIFO rather than failing, so a directory holding one under this name
+could hang the call instead of being refused. That closes the door rather than locking it: between
+the check and the open the entry could be replaced, and doing better needs `O_NOFOLLOW`, which `std`
+does not expose portably.
+
+Being that strict is only safe because the marker is written under a temporary name and renamed into
+place, so it is either absent or complete and never something in between. A `create()` that dies
+partway through leaves the directory recoverable rather than wedged, and the next one finishes the
+job. The directory is fsynced after the rename so the entry survives a crash, as is the *parent*
+directory, on every `create()` -- syncing entries inside a directory whose own entry was never
+flushed would lose the lot. That happens unconditionally rather than only when this call created the
+directory, because finding it already there says nothing about whether anyone flushed it: a process
+that made it and died before syncing leaves an entry the next process would wrongly assume durable,
+and nothing can serialize that window, since the lock lives inside the directory and so cannot cover
+the directory's own creation. The guarantee stops there: the database
+directory's own entry is made durable, not an arbitrary prefix of the path it was reached by. If
+`create()` had to make ancestors of it along the way, those are the caller's directories, and their
+durability is the same concern any other file placed in them would have.
+
+Both syncs are best-effort about a directory this process cannot open. Flushing one needs read
+permission on it, while everything else here needs only the ability to traverse it and to change its
+entries, so a directory that is searchable but not readable -- the database directory or its parent
+-- would otherwise turn `create()` into an error on a database `open()` handles perfectly well. One
+that cannot be opened cannot be made durable by any other means either, so skipping the fsync gives
+up nothing that failing the call would have saved.
+
+All of this directory flushing holds on Unix only. Off it, `std` exposes no directory handle to
+sync, and no way to make the rename itself write-through, so this is a known gap rather than a
+solved problem: a power loss just after `create()` returned can lose the marker while keeping the
+database file, leaving a directory the next `open()` refuses until someone calls `create()` again.
+No data is lost, but it is a failure the caller has no way to anticipate.
+
+The marker goes in last, once the database file has turned out to be usable, so that a `create()`
+pointed at a directory which turns out not to hold a database fails without having converted it into
+one of these on the way out. It is only written when the directory does not already carry one: it
+was validated on the way in, under the lock, so a marker that is there is byte-for-byte what would
+be written, and rewriting it would fail in a directory whose entries cannot be changed even though
+everything the caller asked for is already in place. `create()` is open-or-create, and should not
+become an error where `open()` would have worked.

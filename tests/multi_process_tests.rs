@@ -71,6 +71,7 @@ fn create_makes_a_directory() {
 
     assert!(path.join("data.redb").is_file());
     assert!(path.join("write.lock").is_file());
+    assert!(path.join("metadata").is_file());
 }
 
 #[test]
@@ -133,8 +134,7 @@ fn opening_something_that_is_not_a_database_fails() {
     std::fs::create_dir(&empty).unwrap();
     assert!(MultiProcessDatabase::open(&empty).is_err());
 
-    // A directory holding a plain redb database is not one of these either -- there is no lock
-    // file in it, which is all that identifies one at this step
+    // A directory holding a plain redb database is not one of these either -- it has no marker
     let plain = dir.path().join("plain");
     std::fs::create_dir(&plain).unwrap();
     drop(Database::create(plain.join("data.redb")).unwrap());
@@ -161,9 +161,9 @@ fn the_builder_configures_the_database() {
     assert_eq!(Some(1), read(&db, 0));
 }
 
-/// A create() that made the directory but died before the database file was initialized must not
-/// leave the directory permanently unopenable: a later create() finishes the job, exactly as it
-/// would for a `Database` whose file was created and then not written to.
+/// A create() that made the directory and the marker but died before the database file was
+/// initialized must not leave the directory permanently unopenable: a later create() finishes the
+/// job, exactly as it would for a `Database` whose file was created and then not written to.
 #[test]
 fn an_interrupted_create_can_be_redone() {
     let dir = tempdir();
@@ -174,6 +174,29 @@ fn an_interrupted_create_can_be_redone() {
     let db = MultiProcessDatabase::create(&path).unwrap();
     write(&db, 0, 1);
     assert_eq!(Some(1), read(&db, 0));
+}
+
+/// `Path::parent` is lexical, so a path ending in `..` names a child of the real directory rather
+/// than its parent. Deciding which directory to fsync on that would flush the wrong one, and the
+/// database directory's own entry would not be durable after `create()` returned.
+#[test]
+fn a_path_that_walks_back_up_still_works() {
+    let dir = tempdir();
+    let nested = dir.path().join("a").join("b");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let path = nested.join("..").join("db");
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+    assert_eq!(Some(1), read(&db, 0));
+    drop(db);
+
+    // the database is where the path actually pointed, not where a lexical reading would put it
+    assert!(dir.path().join("a").join("db").join("data.redb").is_file());
+    assert_eq!(
+        Some(1),
+        read(&MultiProcessDatabase::open(&path).unwrap(), 0)
+    );
 }
 
 /// The write lock is invisible to a process that reaches past the directory and opens the database
@@ -313,4 +336,32 @@ fn a_process_that_dies_releases_the_lock() {
     assert_eq!(Some(9), read(&db, 0));
     write(&db, 0, 10);
     assert_eq!(Some(10), read(&db, 0));
+}
+
+/// A directory can be searchable and writable without being readable, and everything this type does
+/// in one apart from flushing the directory itself works there. `create()` is open-or-create, so it
+/// should behave the way `open()` does rather than failing on a database that is already complete.
+#[test]
+#[cfg(unix)]
+fn a_directory_that_cannot_be_read_still_opens() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir();
+    let path = db_path(&dir);
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        write(&db, 0, 7);
+    }
+
+    let readable = std::fs::metadata(&path).unwrap().permissions();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o311)).unwrap();
+
+    let opened = MultiProcessDatabase::open(&path).map(|db| read(&db, 0));
+    let created = MultiProcessDatabase::create(&path).map(|db| read(&db, 0));
+
+    // Restored before the assertions, so that a failure does not also leave the directory
+    // unreadable for whatever has to clean it up
+    std::fs::set_permissions(&path, readable).unwrap();
+    assert_eq!(Some(7), opened.unwrap());
+    assert_eq!(Some(7), created.unwrap());
 }

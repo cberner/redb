@@ -22,10 +22,13 @@
 
 ## 4.2.0 - 2026-XX-XX
 * Add `MultiProcessDatabase` behind the new `experimental-multiprocess` feature. It stores a
-  database in a directory, alongside the lock file that coordinates the processes using it, and
-  takes its exclusion from that lock file rather than from a lock on the database file. This is the
+  database in a directory -- `data.redb` beside a `write.lock` and a `metadata` marker -- and takes
+  its exclusion from the lock file rather than from a lock on the database file. The marker carries
+  a magic number and a format version, so a directory is recognized as one of these rather than
+  guessed at, and a directory written by a later redb is refused rather than misread. This is the
   first step of an incomplete feature: only one process may have the database open, so it has no
-  advantage over `Database` yet.
+  advantage over `Database` yet, and the directory layout may change incompatibly while the feature
+  is experimental.
 * `Durability::None` commits are about 2x faster.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files
