@@ -1,0 +1,316 @@
+//! Tests for the multi-process database interface.
+//!
+//! At this step the interface allows only one process to have the database open, so what there is
+//! to test is the directory layout and the lock file that enforces that. The lock is exercised
+//! both from a second handle in this process -- file locks belong to the open file description
+//! rather than the process, so a second handle is excluded exactly as a second process is -- and
+//! from a real child process, which is what the lock is ultimately for.
+
+#![cfg(all(feature = "experimental-multiprocess", not(target_os = "wasi")))]
+
+use redb::{
+    Database, DatabaseError, MultiProcessDatabase, ReadOnlyDatabase, ReadableDatabase,
+    TableDefinition, WriteTransaction,
+};
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use tempfile::TempDir;
+
+const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+fn tempdir() -> TempDir {
+    TempDir::new().unwrap()
+}
+
+fn db_path(dir: &TempDir) -> PathBuf {
+    dir.path().join("db")
+}
+
+fn write(db: &MultiProcessDatabase, key: u64, value: u64) {
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        table.insert(&key, &value).unwrap();
+    }
+    txn.commit().unwrap();
+}
+
+fn read(db: &MultiProcessDatabase, key: u64) -> Option<u64> {
+    let txn = db.begin_read().unwrap();
+    let table = txn.open_table(TABLE).unwrap();
+    table.get_owned(key).unwrap().map(|value| value.value())
+}
+
+#[test]
+fn create_and_reopen() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        write(&db, 0, 1);
+        assert_eq!(Some(1), read(&db, 0));
+    }
+
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(1), read(&db, 0));
+    write(&db, 0, 2);
+    drop(db);
+
+    // create() on an existing database opens it rather than starting over
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    assert_eq!(Some(2), read(&db, 0));
+}
+
+#[test]
+fn create_makes_a_directory() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    assert!(path.join("data.redb").is_file());
+    assert!(path.join("write.lock").is_file());
+}
+
+#[test]
+fn a_second_handle_is_rejected() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    assert!(matches!(
+        MultiProcessDatabase::open(&path),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+    assert!(matches!(
+        MultiProcessDatabase::create(&path),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    // Once the first handle is gone the directory can be opened again
+    drop(db);
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(1), read(&db, 0));
+}
+
+/// A live write transaction keeps the database open past the point where the handle is dropped, so
+/// the lock has to outlive the handle too -- otherwise another process could start writing while
+/// this transaction is still running.
+#[test]
+fn the_lock_outlives_a_handle_dropped_during_a_write() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    let txn: WriteTransaction = db.begin_write().unwrap();
+    drop(db);
+
+    assert!(matches!(
+        MultiProcessDatabase::open(&path),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    {
+        let mut table = txn.open_table(TABLE).unwrap();
+        table.insert(&0, &2).unwrap();
+    }
+    txn.commit().unwrap();
+
+    // ... and is released once the transaction that was keeping it open finishes
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(2), read(&db, 0));
+}
+
+#[test]
+fn opening_something_that_is_not_a_database_fails() {
+    let dir = tempdir();
+    assert!(MultiProcessDatabase::open(dir.path().join("missing")).is_err());
+
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    assert!(MultiProcessDatabase::open(&empty).is_err());
+
+    // A directory holding a plain redb database is not one of these either -- there is no lock
+    // file in it, which is all that identifies one at this step
+    let plain = dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    drop(Database::create(plain.join("data.redb")).unwrap());
+    assert!(MultiProcessDatabase::open(&plain).is_err());
+}
+
+#[test]
+fn open_does_not_create() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    assert!(MultiProcessDatabase::open(&path).is_err());
+    assert!(!path.exists());
+}
+
+#[test]
+fn the_builder_configures_the_database() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::builder()
+        .set_cache_size(1024 * 1024)
+        .create(&path)
+        .unwrap();
+    write(&db, 0, 1);
+    assert_eq!(Some(1), read(&db, 0));
+}
+
+/// A create() that made the directory but died before the database file was initialized must not
+/// leave the directory permanently unopenable: a later create() finishes the job, exactly as it
+/// would for a `Database` whose file was created and then not written to.
+#[test]
+fn an_interrupted_create_can_be_redone() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    drop(MultiProcessDatabase::create(&path).unwrap());
+    std::fs::write(path.join("data.redb"), []).unwrap();
+
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+    assert_eq!(Some(1), read(&db, 0));
+}
+
+/// The write lock is invisible to a process that reaches past the directory and opens the database
+/// file itself, so that file carries the ordinary exclusive lock as well. Readers are turned away
+/// along with writers: nothing yet stops the process holding the directory from freeing pages that
+/// a `ReadOnlyDatabase` in another process is still reading.
+#[test]
+fn an_ordinary_database_cannot_open_the_data_file() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    let data = path.join("data.redb");
+    assert!(matches!(
+        Database::open(&data),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+    assert!(matches!(
+        Database::create(&data),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+    assert!(matches!(
+        ReadOnlyDatabase::open(&data),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    // ... and once the directory is closed the database file is an ordinary redb database again
+    drop(db);
+    assert_eq!(
+        Some(1),
+        ReadOnlyDatabase::open(&data)
+            .unwrap()
+            .begin_read()
+            .unwrap()
+            .open_table(TABLE)
+            .unwrap()
+            .get_owned(0)
+            .unwrap()
+            .map(|value| value.value())
+    );
+}
+
+// --------------------------------------------------------------------------------------------
+// Tests that need a real process
+// --------------------------------------------------------------------------------------------
+
+/// Entry point for the child processes the tests below spawn. Ignored so that it only runs when
+/// named explicitly, and does nothing unless the parent asked for a role.
+#[test]
+#[ignore]
+fn child_process_worker() {
+    let Ok(role) = env::var("REDB_MP_ROLE") else {
+        return;
+    };
+    let path = PathBuf::from(env::var("REDB_MP_PATH").unwrap());
+    match role.as_str() {
+        // Expects to be turned away by the lock the parent holds
+        "rejected" => {
+            assert!(matches!(
+                MultiProcessDatabase::open(&path),
+                Err(DatabaseError::DatabaseAlreadyOpen)
+            ));
+        }
+        // Expects to get in, and leaves a value behind for the parent to find
+        "writer" => {
+            let db = MultiProcessDatabase::open(&path).unwrap();
+            write(&db, 0, 7);
+        }
+        // Opens the database and dies without closing it, leaving the lock to the operating system
+        "crasher" => {
+            let db = MultiProcessDatabase::open(&path).unwrap();
+            write(&db, 0, 9);
+            std::process::abort();
+        }
+        other => panic!("unknown role {other}"),
+    }
+}
+
+fn run_child(role: &str, path: &Path) -> std::process::ExitStatus {
+    Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "child_process_worker",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("REDB_MP_ROLE", role)
+        .env("REDB_MP_PATH", path)
+        .status()
+        .unwrap()
+}
+
+#[test]
+fn a_child_process_cannot_open_a_database_this_one_holds() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    assert!(run_child("rejected", &path).success());
+
+    // The child's failed open must not have disturbed anything
+    write(&db, 0, 2);
+    assert_eq!(Some(2), read(&db, 0));
+}
+
+#[test]
+fn a_child_process_can_open_a_database_this_one_has_closed() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        write(&db, 0, 1);
+    }
+
+    assert!(run_child("writer", &path).success());
+
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(7), read(&db, 0));
+}
+
+#[test]
+fn a_process_that_dies_releases_the_lock() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        write(&db, 0, 1);
+    }
+
+    assert!(!run_child("crasher", &path).success());
+
+    // Nothing has to clean up after it: the operating system dropped its lock when it died
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(9), read(&db, 0));
+    write(&db, 0, 10);
+    assert_eq!(Some(10), read(&db, 0));
+}

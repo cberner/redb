@@ -496,3 +496,42 @@ Therefore, we make only a few assumptions about the guarantees provided by the u
    a range of bytes in a file, no bytes outside of that range will change,
    even if the write occurs just before a crash or power failure. sqlite makes this same
    assumption, by default, in all modern versions.
+
+# Multi-process access (in progress)
+
+`MultiProcessDatabase`, behind the `experimental-multiprocess` feature, stores a database in a
+directory rather than a single file:
+
+| file | contents |
+|------|----------|
+| `data.redb` | the database, in the ordinary redb file format |
+| `write.lock` | empty; held exclusively by the process that has the database open |
+
+The point of the directory is to move exclusion off the database file. An ordinary `Database` takes
+an exclusive advisory lock on the file itself, which is what stops a second process opening it --
+and which also stops any other process reading it. A multi-process database takes an exclusive lock
+on `write.lock`, before it touches anything else in the directory, so that the process which gets
+it has the directory to itself, including while it is being created. That is the lock later steps
+build on: it is what will exclude other *writers* once readers are allowed in.
+
+Until then the database file keeps its ordinary exclusive lock too. `write.lock` is only visible to
+a process that goes through `MultiProcessDatabase`, and one that reaches past the directory to open
+`data.redb` directly would not be looking at it, so the file needs a lock of its own. It has to be
+the exclusive one: a shared lock would let a `ReadOnlyDatabase` in, and nothing yet stops the
+process holding the directory from freeing pages that such a reader is still using. So today the
+restriction is the same as a `Database`'s -- one process, and `DatabaseError::DatabaseAlreadyOpen`
+for the rest -- and the directory is scaffolding rather than a relaxation of it.
+
+That constraint on the database file's lock is worth recording, because it shapes what comes next.
+Making room for readers means *removing* this lock rather than weakening it: on Windows a shared
+range denies writes to every process including the one holding the lock, so a writer cannot hold a
+shared lock on a file it writes to at all. All reader/writer coordination therefore has to live in
+the directory's own lock files.
+
+The lock is held by the storage backend rather than beside the `Database`, because a live write
+transaction keeps the database open past the point where the handle is dropped. A lock released
+when the handle went away would let another process start writing while that transaction was still
+running; tying it to the backend gives it exactly the lifetime of the open file.
+
+A platform without file locking cannot support any of this safely, so opening fails there rather
+than warning and continuing as `Database` does.
