@@ -89,6 +89,8 @@ pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
+#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+pub use multiprocess::{MultiProcessBuilder, MultiProcessDatabase};
 #[cfg(feature = "experimental-api-5")]
 pub use table::Cursor;
 #[cfg(feature = "experimental_cursor")]
@@ -116,6 +118,9 @@ mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
 mod multimap_table;
+// Needs std::fs and std::path, like the rest of the file-backed API
+#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+mod multiprocess;
 mod sealed;
 mod sync;
 mod table;
