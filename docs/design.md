@@ -614,3 +614,98 @@ call had just finished while losing the `write.lock` beside it -- and the next `
 its own completed work as somebody else's and refuse it. That would be worse than the state the rule
 exists to catch: `open()` will not touch an unmarked directory either, so the database would be
 unopenable by any route.
+
+Like the rule below, this reads the directory's contents rather than proving anything, and assumes
+nothing else is writing into it -- which is the contract the directory carries anyway.
+
+## What a call that fails leaves behind
+
+The rule the rest of this follows is that **a call which fails never leaves a marker behind**, so a
+directory that is not a multi-process database is never turned into one by a call that did not
+succeed. Three things follow.
+
+An existing directory with no marker at all is only accepted by `create()` if everything in it is a
+*regular file* named like something `create()` itself writes -- `data.redb`, `data.redb.tmp`,
+`write.lock`, `metadata`, `metadata.tmp`. That is what an interrupted create looks like; a directory
+with anything else in it is a mistyped path, and turning it into a database would be the same kind
+of surprise as overwriting a `metadata` file. The check applies *only* when the marker is absent: a
+directory that is already a database opens whatever else has appeared in it, or a stray `.DS_Store`
+would be enough to lock its owner out. Since it needs no lock, `create()` runs it before taking one,
+so the mistyped-path case leaves nothing behind at all.
+
+Listing a directory needs read permission on it, which nothing else here does, so a directory that is
+searchable but not readable would otherwise be one `open()` handles and `create()` refuses to finish
+after an interruption. That listing is skipped there rather than failing the call: it guards against
+mistyped paths rather than carrying a safety property, and the rules that do -- a foreign `metadata`,
+a non-regular file under one of these names, a `data.redb` with no `write.lock` beside it -- all
+still apply, none of them needing a listing.
+
+Every one of these names must be an ordinary file -- `data.redb`, `write.lock` and `metadata` alike,
+wherever they are checked. All of the opens traverse symlinks, so one planted under a name redb
+trusts would be written through to whatever it points at, outside the directory entirely, and a
+`metadata` symlink pointing at a valid marker elsewhere would vouch for a directory holding nothing
+of redb's. The temporary files are unlinked and created afresh rather than truncated in place, for
+the same reason. This closes the door rather than locking it: between the check and the open an
+entry could be replaced, and doing better needs `O_NOFOLLOW`, which `std` does not offer portably.
+
+`data.redb` gets the same temporary-name treatment as the marker, for the same reason. redb writes a
+new database's header with the magic number zeroed, flushes, and only then writes the magic, so that
+a crash during initialization leaves a file it will refuse rather than half a database. That refusal
+is what makes the state dangerous here: under its own name, a file that is neither empty nor a
+database is indistinguishable from something this call was pointed at by mistake, so refusing it
+forever is the only safe reading, and the directory is wedged. Initialized under `data.redb.tmp` and
+renamed into place once `Database` has accepted it, the same file is unambiguously an unfinished
+attempt of this database's own, which the next `create()` throws away and redoes. `data.redb`
+therefore exists only when it is a database that was finished.
+
+Two things follow from `data.redb` meaning "a database that was finished". A file with nothing in it
+does not qualify, so an empty one is discarded and redone through the temporary name rather than
+initialized where it lies -- otherwise the header bytes would land under the final name and a crash
+before the magic number was written would produce exactly the file this indirection exists to avoid.
+And "is the name free?" has to be asked with `symlink_metadata` rather than `Path::exists`, which
+follows the link and so reports a dangling symlink as an absent file: deciding on that would let the
+promoting rename replace a symlink instead of the regular-file check refusing it.
+
+An empty `data.redb` is only wreckage if nobody is holding it. A process that reached past the
+directory could have created and locked it a moment ago, and unlinking it would leave that process
+writing to an inode nothing points at while this one publishes a different database, so the file's
+own lock is taken before it is discarded and a held one gives `DatabaseAlreadyOpen` instead. That
+lock is held across the unlink rather than released before it: the unlink succeeds whether or not
+someone has taken the file in between, so letting go first would reopen the window it exists to
+close.
+
+The corollary is that a temporary file is only ever moved into place by the call that wrote it.
+Which name the database file was opened under is carried forward from the open rather than worked
+out again from what is on disk, because a `data.redb.tmp` present at the end is this call's own only
+if this call made it, and nothing about the file itself says so. Promoting on mere presence would
+replace a good database with wreckage and leave the handle just returned writing to an inode nothing
+points at.
+
+A call that opened the database under its own name therefore promotes nothing, and clears any
+temporary it finds -- but only once `Database` has accepted the file. On the way out rather than the
+way in, so that a `create()` pointed by mistake at a directory that turns out not to hold a database
+fails without having deleted a file it did not put there. The temporary name is redb's, so a
+directory holding one gets past the check below, but that is not a licence to remove it before there
+is any evidence the directory is redb's too. That clearing is tidying rather than part of opening the
+database, so a failure to remove it is ignored: `Database` has already accepted the file, promotion
+keys on the name this call recorded rather than on what is lying about, and a directory whose entries
+cannot be changed should not turn `create()` into an error where `open()` succeeds.
+
+There is one state where a temporary is neither wreckage nor this call's own work. A marked directory
+has already held a finished database, since the marker goes in *after* the promoting rename, so a
+missing `data.redb` with a temporary beside it means that rename did not survive -- the temporary is
+the database. Nothing about the files distinguishes that from an unfinished attempt, and discarding
+it would lose data rather than an abandoned effort, so `create()` refuses and says what to rename.
+This is reachable only where a directory sync did not happen: off Unix, where there is none, or in a
+directory that could not be opened to flush.
+
+`open()` creates nothing whatsoever, down to not making the lock file in a directory it is about to
+reject, and `create()` does the same for the case it can check without the lock. It cannot do so in
+general: the lock has to be taken before the directory is read, because it is the only thing
+serializing two processes creating the same directory at once, so a `create()` that gets as far as
+validating the database file has already made an empty `write.lock`. Removing it on the way out
+would be worse than leaving it. Another process can have opened that same file and be waiting on the
+lock; unlinking it and releasing would leave that process holding a lock on an unlinked inode while
+a third creates a fresh `write.lock` and locks it successfully, so both would believe they had the
+directory. An inert empty file is the smaller cost, and it is inert precisely because the marker is
+what confers meaning.
