@@ -1,3 +1,4 @@
+use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
@@ -24,7 +25,6 @@ use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
 use std::io::ErrorKind;
-use std::sync::Mutex;
 use std::thread;
 
 // The region header is optional in the v3 file format
@@ -787,12 +787,12 @@ impl TransactionalMemory {
     pub(crate) fn invalidate_allocator_state(&self) {
         self.state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(crate::sync::PoisonError::into_inner)
             .allocators = None;
         #[cfg(debug_assertions)]
         self.allocated_pages
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(crate::sync::PoisonError::into_inner)
             .clear();
     }
 

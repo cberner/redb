@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::sync::Mutex;
 use crate::tree_store::page_store::cached_file::WritablePage;
 #[cfg(debug_assertions)]
 use crate::tree_store::page_store::fast_hash::PageNumberHashMap;
@@ -12,7 +13,6 @@ use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Mutex;
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PAIR_LENGTH: usize = 3 * 1024 * 1024 * 1024 + 768 * 1024 * 1024;

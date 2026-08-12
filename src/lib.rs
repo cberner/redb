@@ -113,6 +113,7 @@ mod error;
 mod key_range;
 mod multimap_table;
 mod sealed;
+mod sync;
 mod table;
 mod transaction_tracker;
 mod transactions;

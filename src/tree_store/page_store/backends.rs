@@ -1,9 +1,9 @@
 use crate::StorageBackend;
+use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use std::io;
 use std::io::Error;
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
