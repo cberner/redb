@@ -4,11 +4,13 @@ use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
 use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
+#[cfg(debug_assertions)]
+use crate::tree_store::PageNumberHashSet;
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageResolver,
-    PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut, TableType,
-    TransactionalMemory,
+    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageNumberHashMap,
+    PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut,
+    TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -29,12 +31,12 @@ use core::borrow::Borrow;
 use core::cmp::min;
 use core::fmt::{Debug, Display, Formatter};
 use core::marker::PhantomData;
+use core::mem;
 use core::mem::size_of;
 use core::ops::{RangeBounds, RangeFull};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::{debug, warn};
-use std::collections::{HashMap, HashSet};
 use std::panic;
 use std::sync::Mutex;
 use std::thread;
@@ -602,7 +604,7 @@ impl SystemNamespace {
 }
 
 struct TableNamespace {
-    open_tables: HashMap<String, &'static panic::Location<'static>>,
+    open_tables: BTreeMap<String, &'static panic::Location<'static>>,
     allocated_pages: Arc<PageTracker>,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
     table_tree: TableTreeMut,
@@ -626,7 +628,7 @@ impl TableNamespace {
             allocated.clone(),
         );
         Self {
-            open_tables: HashMap::default(),
+            open_tables: BTreeMap::default(),
             table_tree,
             freed_pages,
             allocated_pages: allocated,
@@ -802,7 +804,7 @@ impl TableNamespace {
 // Transaction-local savepoint lifecycle state.
 #[derive(Default)]
 struct SavepointTransactionState {
-    created_persistent: HashSet<(SavepointId, TransactionId)>,
+    created_persistent: BTreeSet<(SavepointId, TransactionId)>,
     deleted_persistent: Vec<(SavepointId, TransactionId)>,
     invalidated: BTreeSet<SavepointId>,
 }
@@ -855,7 +857,7 @@ impl SavepointTransactionState {
         // Persistent savepoints created during this transaction: their
         // on-disk entries will be rolled back by rollback_uncommitted_writes(),
         // but the shared tracker registration must be released explicitly.
-        for (savepoint, transaction) in self.created_persistent.drain() {
+        for (savepoint, transaction) in mem::take(&mut self.created_persistent) {
             tracker.deallocate_savepoint(savepoint, transaction);
         }
         // Deleted-persistent entries will be rolled back on disk, so the
@@ -1014,8 +1016,7 @@ impl WriteTransaction {
 
     #[cfg(debug_assertions)]
     pub fn print_allocated_page_debug(&self) {
-        let mut all_allocated: HashSet<PageNumber> =
-            HashSet::from_iter(self.mem.all_allocated_pages());
+        let mut all_allocated = PageNumberHashSet::from_iter(self.mem.all_allocated_pages());
 
         self.mem.debug_check_allocator_consistency();
 
@@ -2175,7 +2176,7 @@ impl WriteTransaction {
         let page_allocator = table_tree.page_allocator().clone();
 
         // Calculate how many of them can be relocated to lower pages, starting from the last page
-        let mut relocation_map = HashMap::new();
+        let mut relocation_map = PageNumberHashMap::default();
         for path in highest_pages.into_values().rev() {
             if relocation_map.contains_key(&path.page_number()) {
                 continue;

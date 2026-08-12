@@ -13,7 +13,7 @@ use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeCursorRange, BtreeExtractIf,
-    PageAllocator, PageHint, PageNumber, PageResolver, PageTracker,
+    PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageResolver, PageTracker,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
@@ -28,7 +28,6 @@ use core::ops::Bound;
 use core::ops::RangeBounds;
 #[cfg(feature = "logging")]
 use log::trace;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub(crate) struct BtreeStats {
@@ -278,7 +277,7 @@ impl UntypedBtreeMut {
 
     pub(crate) fn relocate(
         &mut self,
-        relocation_map: &HashMap<PageNumber, PageNumber>,
+        relocation_map: &PageNumberHashMap<PageNumber>,
     ) -> Result<bool> {
         if let Some(root) = self.get_root()
             && let Some((new_root, new_checksum)) =
@@ -294,7 +293,7 @@ impl UntypedBtreeMut {
     fn relocate_helper(
         &mut self,
         page_number: PageNumber,
-        relocation_map: &HashMap<PageNumber, PageNumber>,
+        relocation_map: &PageNumberHashMap<PageNumber>,
     ) -> Result<Option<(PageNumber, Checksum)>> {
         let old_page = self.page_allocator.get_page(page_number, PageHint::None)?;
         let mut new_page = if let Some(new_page_number) = relocation_map.get(&page_number) {
@@ -425,7 +424,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
 
     pub(crate) fn relocate(
         &mut self,
-        relocation_map: &HashMap<PageNumber, PageNumber>,
+        relocation_map: &PageNumberHashMap<PageNumber>,
     ) -> Result<bool> {
         let mut tree = UntypedBtreeMut::new(
             self.get_root(),

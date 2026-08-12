@@ -1,13 +1,14 @@
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
-use crate::tree_store::{BtreeHeader, PageAllocator, PageHint, PageNumber, PageResolver};
+use crate::tree_store::{
+    BtreeHeader, PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageResolver,
+};
 use crate::{Key, Result, TableError, TypeName, Value};
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 // Forward compatibility feature in case alignment can be supported in the future
@@ -236,7 +237,7 @@ impl InternalTableDefinition {
         &mut self,
         page_allocator: PageAllocator,
         freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-        relocation_map: &HashMap<PageNumber, PageNumber>,
+        relocation_map: &PageNumberHashMap<PageNumber>,
     ) -> Result<Option<BtreeHeader>> {
         let original_root = self.private_get_root();
         let relocated_root = match self {

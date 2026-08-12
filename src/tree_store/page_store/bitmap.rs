@@ -390,10 +390,10 @@ impl U64GroupedBitmap {
 #[cfg(test)]
 mod test {
     use crate::tree_store::page_store::bitmap::BtreeBitmap;
+    use alloc::collections::BTreeSet;
     use rand::prelude::IteratorRandom;
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
-    use std::collections::HashSet;
 
     #[test]
     fn alloc() {
@@ -523,7 +523,7 @@ mod test {
         for i in 0..num_pages {
             allocator.clear(i);
         }
-        let mut allocated = HashSet::new();
+        let mut allocated = BTreeSet::new();
 
         for _ in 0..(num_pages * 2) {
             if rng.random_bool(0.75) {

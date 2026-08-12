@@ -4,7 +4,7 @@ use crate::tree_store::btree_base::{BtreeHeader, Checksum};
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
-use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet};
+use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet, Shrink};
 use crate::tree_store::page_store::header::{
     DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
 };
@@ -23,10 +23,6 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
-#[cfg(debug_assertions)]
-use std::collections::HashMap;
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::sync::Mutex;
 use std::thread;
@@ -363,7 +359,7 @@ struct UnpersistedState {
 impl UnpersistedState {
     fn clear(&mut self) {
         self.pages.clear();
-        self.pages.shrink_to_fit();
+        self.pages.shrink();
         self.allocations.clear();
         self.allocation_txn.clear();
         self.data_freed.clear();
@@ -490,10 +486,10 @@ pub(crate) struct TransactionalMemory {
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
-    open_dirty_pages: Arc<Mutex<HashSet<PageNumber>>>,
+    open_dirty_pages: Arc<Mutex<PageNumberHashSet>>,
     // Reference counts of PageImpls that are outstanding
     #[cfg(debug_assertions)]
-    read_page_ref_counts: Arc<Mutex<HashMap<PageNumber, u64>>>,
+    read_page_ref_counts: Arc<Mutex<PageNumberHashMap<u64>>>,
     // Set of all allocated pages for debugging assertions
     #[cfg(debug_assertions)]
     allocated_pages: Arc<Mutex<PageNumberHashSet>>,
@@ -630,9 +626,9 @@ impl TransactionalMemory {
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
-            open_dirty_pages: Arc::new(Mutex::new(HashSet::new())),
+            open_dirty_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             #[cfg(debug_assertions)]
-            read_page_ref_counts: Arc::new(Mutex::new(HashMap::new())),
+            read_page_ref_counts: Arc::new(Mutex::new(PageNumberHashMap::default())),
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             page_size: page_size.try_into().unwrap(),

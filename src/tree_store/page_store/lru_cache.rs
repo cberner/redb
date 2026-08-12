@@ -1,4 +1,4 @@
-use crate::tree_store::page_store::fast_hash::FastHashMapU64;
+use crate::tree_store::page_store::fast_hash::{FastHashMapU64, Shrink};
 use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -95,7 +95,7 @@ impl<T> LRUCache<T> {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.cache.shrink_to_fit();
+        self.cache.shrink();
         self.cache.clear();
         self.lru_queue.shrink_to_fit();
         self.lru_queue.clear();

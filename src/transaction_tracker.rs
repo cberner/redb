@@ -9,7 +9,6 @@ use core::mem;
 use core::mem::size_of;
 #[cfg(feature = "logging")]
 use log::debug;
-use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
@@ -91,7 +90,7 @@ struct State {
     // Therefore, we hold a read transaction on their nearest durable ancestor
     //
     // Maps non-durable transaction id -> durable ancestor
-    pending_non_durable_commits: HashMap<TransactionId, TransactionId>,
+    pending_non_durable_commits: BTreeMap<TransactionId, TransactionId>,
     // Non-durable commits which have NOT been processed in the freed table
     unprocessed_freed_non_durable_commits: BTreeSet<TransactionId>,
     // Set when the Database was dropped while a write transaction was live. That transaction
@@ -115,7 +114,7 @@ impl TransactionTracker {
                 live_write_transaction: None,
                 valid_savepoints: BTreeMap::default(),
                 persistent_savepoints: BTreeSet::default(),
-                pending_non_durable_commits: HashMap::default(),
+                pending_non_durable_commits: BTreeMap::default(),
                 unprocessed_freed_non_durable_commits: BTreeSet::default(),
                 deferred_close: None,
             }),

@@ -7,8 +7,8 @@ use crate::tree_store::multimap_btree::{
 };
 use crate::tree_store::{
     Btree, BtreeCursorRange, BtreeMut, InternalTableDefinition, PageAllocator, PageHint,
-    PageNumber, PageNumberHashSet, PageResolver, PageTracker, RawBtree, TableType,
-    multimap_btree_stats,
+    PageNumber, PageNumberHashMap, PageNumberHashSet, PageResolver, PageTracker, RawBtree,
+    TableType, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
@@ -22,7 +22,6 @@ use core::cmp::max;
 use core::mem;
 use core::mem::size_of;
 use core::ops::RangeFull;
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::thread;
 
@@ -694,7 +693,7 @@ impl TableTreeMut {
 
     pub(crate) fn relocate_tables(
         &mut self,
-        relocation_map: &HashMap<PageNumber, PageNumber>,
+        relocation_map: &PageNumberHashMap<PageNumber>,
     ) -> Result {
         for entry in self.tree.range::<RangeFull, &str>(&(..))? {
             let entry = entry?;
