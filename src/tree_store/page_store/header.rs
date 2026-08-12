@@ -1032,6 +1032,109 @@ mod test {
         );
     }
 
+    // Re-checksums the slot, so the page number is indistinguishable from one redb wrote itself
+    fn overwrite_root_page_order(path: &std::path::Path, root_offset: usize, order: u8) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        // The page number is the first field of the serialized BtreeHeader
+        let offset = slot + root_offset;
+        let root = super::get_u64(&header[offset..]);
+        let root = (root & !(0b1_1111 << 59)) | (u64::from(order) << 59);
+        header[offset..offset + size_of::<u64>()].copy_from_slice(&root.to_le_bytes());
+        let checksum = super::xxh3_checksum(&header[slot..slot + super::SLOT_CHECKSUM_OFFSET]);
+        let checksum_offset = slot + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset..checksum_offset + size_of::<super::Checksum>()]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // An oversized page order sizes a multi-terabyte read buffer, whose failed allocation aborts
+    // the process. See https://github.com/cberner/redb/issues/1331
+    #[test]
+    fn oversized_root_page_order_is_reported_as_corruption() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, 31);
+
+        // Debug builds walk the data tree while opening; release builds reach it via the check
+        let err = match Database::create(tmpfile.path()) {
+            Ok(mut db) => db.check_integrity().unwrap_err(),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    fn patch_god_byte(path: &std::path::Path, patch: impl FnOnce(&mut u8)) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        patch(&mut header[GOD_BYTE_OFFSET]);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // A torn commit slot can carry an invalid page number. Repair must treat that as a bad primary
+    // and fall back to the secondary, as it does for a checksum mismatch.
+    #[test]
+    fn repair_falls_back_to_secondary_on_invalid_primary_root() {
+        let tmpfile = crate::create_tempfile();
+        {
+            let db = Database::create(tmpfile.path()).unwrap();
+            for (key, value) in [("k", "v"), ("k2", "v2")] {
+                let txn = db.begin_write().unwrap();
+                txn.open_table(X).unwrap().insert(key, value).unwrap();
+                txn.commit().unwrap();
+            }
+        }
+        // Give the primary slot a root with an impossible order, leaving its checksum valid, then
+        // mark the file as a crashed 1-phase commit so that a full repair runs
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, 31);
+        patch_god_byte(tmpfile.path(), |god_byte| {
+            *god_byte |= RECOVERY_REQUIRED;
+            *god_byte &= !TWO_PHASE_COMMIT;
+        });
+
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(X).unwrap();
+        assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
+        assert_eq!(table.get("k2").unwrap().unwrap().value(), "v2");
+    }
+
+    // The read-only open walks the system tree to load the allocator state
+    #[test]
+    fn oversized_system_root_page_order_is_reported_as_corruption_read_only() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        overwrite_root_page_order(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, 31);
+
+        let Err(err) = crate::ReadOnlyDatabase::open(tmpfile.path()) else {
+            panic!("expected the open to fail");
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
     // A backend that can report a `len()` larger than the data it actually holds, without
     // allocating it -- used to simulate an externally created (e.g. sparse) file.
     #[derive(Clone, Debug, Default)]

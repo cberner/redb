@@ -35,6 +35,9 @@
   could be slower than writing from a single thread; they now scale with the number of threads.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
+* Fix a process abort when reading a database file containing a corrupted page number. Such a page
+  could attempt a multi-terabyte allocation, which aborts the process rather than failing;
+  `StorageError::Corrupted` is now returned instead.
 * Add an experimental cursor API, behind the `experimental_cursor` feature flag:
   `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
   between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
