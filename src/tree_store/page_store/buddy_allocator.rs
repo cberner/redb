@@ -1,10 +1,10 @@
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
+#[cfg(test)]
+use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use core::cmp::min;
 use core::mem::size_of;
-#[cfg(test)]
-use std::collections::HashSet;
 
 const MAX_ORDER_OFFSET: usize = 0;
 const PADDING: usize = 3;
@@ -198,14 +198,14 @@ impl BuddyAllocator {
         #[cfg(test)]
         // Check the result against the free index to be sure it matches
         {
-            let mut free_check = HashSet::new();
+            let mut free_check = PageNumberHashSet::default();
             for i in 0..self.len() {
                 if self.find_free_order(i).is_none() {
                     free_check.insert(PageNumber::new(region, i, 0));
                 }
             }
 
-            let mut check_result = HashSet::new();
+            let mut check_result = PageNumberHashSet::default();
             for page in allocated_pages {
                 check_result.extend(page.to_order0());
             }

@@ -6,7 +6,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeStats, Page, PageAllocator, PageHint, PageNumber,
-    PageResolver, PageTracker, RawBtree,
+    PageNumberHashMap, PageResolver, PageTracker, RawBtree,
 };
 use crate::types::{Key, TypeName, Value};
 use alloc::sync::Arc;
@@ -16,7 +16,6 @@ use core::cmp::max;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
-use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub(crate) fn multimap_btree_stats(
@@ -204,7 +203,7 @@ pub(super) fn relocate_subtrees(
     value_size: Option<usize>,
     page_allocator: PageAllocator,
     freed_pages: Arc<Mutex<Vec<PageNumber>>>,
-    relocation_map: &HashMap<PageNumber, PageNumber>,
+    relocation_map: &PageNumberHashMap<PageNumber>,
 ) -> Result<(PageNumber, Checksum)> {
     let old_page = page_allocator.get_page(root.0, PageHint::None)?;
     let mut new_page = if let Some(new_page_number) = relocation_map.get(&root.0) {

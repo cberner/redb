@@ -1,5 +1,7 @@
 use crate::Result;
 use crate::tree_store::page_store::cached_file::WritablePage;
+#[cfg(debug_assertions)]
+use crate::tree_store::page_store::fast_hash::PageNumberHashMap;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use alloc::sync::Arc;
@@ -10,10 +12,6 @@ use core::marker::PhantomData;
 use core::mem;
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-#[cfg(debug_assertions)]
-use std::collections::HashMap;
-#[cfg(debug_assertions)]
-use std::collections::HashSet;
 use std::sync::Mutex;
 
 pub(crate) const MAX_VALUE_LENGTH: usize = 3 * 1024 * 1024 * 1024;
@@ -183,7 +181,7 @@ pub struct PageImpl {
     pub(super) mem: Arc<[u8]>,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
-    pub(super) open_pages: Arc<Mutex<HashMap<PageNumber, u64>>>,
+    pub(super) open_pages: Arc<Mutex<PageNumberHashMap<u64>>>,
 }
 
 impl PageImpl {
@@ -248,7 +246,7 @@ pub(crate) struct PageMut<'txn> {
     pub(super) page_number: PageNumber,
     pub(super) _lifetime: PhantomData<&'txn ()>,
     #[cfg(debug_assertions)]
-    pub(super) open_pages: Arc<Mutex<HashSet<PageNumber>>>,
+    pub(super) open_pages: Arc<Mutex<PageNumberHashSet>>,
 }
 
 impl PageMut<'_> {
