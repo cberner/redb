@@ -1,8 +1,9 @@
 use crate::sealed::Sealed;
 use crate::tree_store::encode_bounds;
 use crate::types::Key;
-use std::borrow::Borrow;
-use std::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
 /// A range of keys, accepted by the range taking methods of a table
 ///

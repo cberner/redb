@@ -5,10 +5,12 @@ use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
 use Bound::{Excluded, Included, Unbounded};
-use std::borrow::Borrow;
-use std::collections::Bound;
-use std::marker::PhantomData;
-use std::ops::{Range, RangeBounds};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+use core::ops::Bound;
+use core::ops::{Range, RangeBounds};
 
 pub(crate) struct EntryGuard<K: Key, V: Value> {
     page: PageImpl,

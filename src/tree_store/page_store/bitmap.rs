@@ -1,5 +1,7 @@
 use crate::tree_store::page_store::xxh3_checksum;
-use std::mem::size_of;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::mem::size_of;
 
 const HEIGHT_OFFSET: usize = 0;
 const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();

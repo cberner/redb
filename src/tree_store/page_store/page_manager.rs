@@ -14,17 +14,20 @@ use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
 use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
-use std::cmp::{max, min};
-use std::collections::BTreeMap;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::{max, min};
+use core::convert::TryInto;
+use core::marker::PhantomData;
+use core::mem;
 #[cfg(debug_assertions)]
 use std::collections::HashMap;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
-use std::convert::TryInto;
 use std::io::ErrorKind;
-use std::marker::PhantomData;
-use std::mem;
-use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 

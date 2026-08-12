@@ -69,6 +69,11 @@ compile_error!(
      it is on by default, so add features = [\"std\"] if you set default-features = false."
 );
 
+// Everything redb needs from the standard library that is not core is imported through `alloc`, so
+// that the crate can eventually be built without std. `alloc` is a subset of `std`, so this is a
+// no-op for std builds.
+extern crate alloc;
+
 pub use db::{
     Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
     ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
@@ -98,7 +103,7 @@ pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransact
 pub use tree_store::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace, Savepoint};
 pub use types::{Key, MutInPlaceValue, TypeName, Value};
 
-pub type Result<T = (), E = StorageError> = std::result::Result<T, E>;
+pub type Result<T = (), E = StorageError> = core::result::Result<T, E>;
 
 pub mod backends;
 mod complex_types;

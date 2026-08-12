@@ -12,12 +12,19 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{DatabaseStats, Result};
-use std::cmp::max;
-use std::collections::{BTreeMap, HashMap};
-use std::mem::size_of;
-use std::ops::RangeFull;
-use std::sync::{Arc, Mutex};
-use std::{mem, thread};
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::max;
+use core::mem;
+use core::mem::size_of;
+use core::ops::RangeFull;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::thread;
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -347,7 +354,8 @@ impl TableTreeMut {
     }
 
     pub(crate) fn flush_table_root_updates(&mut self) -> Result<&mut Self> {
-        for (name, (new_root, new_length, dirty)) in std::mem::take(&mut self.pending_table_updates)
+        for (name, (new_root, new_length, dirty)) in
+            core::mem::take(&mut self.pending_table_updates)
         {
             // Bypass .get_table() since the table types are dynamic
             let mut definition = self.tree.get(&name.as_str())?.unwrap().value();

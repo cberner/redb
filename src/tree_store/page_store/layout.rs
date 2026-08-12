@@ -1,4 +1,4 @@
-use std::ops::Range;
+use core::ops::Range;
 
 fn round_up_to_multiple_of(value: u64, multiple: u64) -> u64 {
     if value.is_multiple_of(multiple) {

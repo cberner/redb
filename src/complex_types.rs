@@ -1,4 +1,6 @@
 use crate::types::{TypeName, Value};
+use alloc::format;
+use alloc::vec::Vec;
 
 // Encode len as a varint and store it at the end of output
 pub(super) fn encode_varint_len(len: usize, output: &mut Vec<u8>) {

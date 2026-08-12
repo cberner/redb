@@ -1,18 +1,22 @@
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, DatabaseError, Result, StorageBackend, StorageError};
-use std::ops::{Index, IndexMut};
-use std::slice::SliceIndex;
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::ops::{Index, IndexMut};
+use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use core::sync::atomic::AtomicU64;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 // Allocates an `Arc<[u8]>` in one step. `Arc::<[u8]>::from(vec![0; len])` would
 // allocate the Vec and then allocate a new Arc and memcpy into it.
 fn zero_filled_arc(len: usize) -> Arc<[u8]> {
     // This is documented to do a single allocation: https://doc.rust-lang.org/std/sync/struct.Arc.html#iterators-of-known-length
-    std::iter::repeat_n(0u8, len).collect()
+    core::iter::repeat_n(0u8, len).collect()
 }
 
 pub(super) struct WritablePage {
@@ -840,8 +844,8 @@ mod test {
     use crate::backends::InMemoryBackend;
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug)]
     struct CountingBackend {

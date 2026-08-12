@@ -1,8 +1,12 @@
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
-use std::fmt::{Display, Formatter};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use core::fmt::{Display, Formatter};
+use std::io;
+use std::panic;
 use std::sync::PoisonError;
-use std::{io, panic};
 
 /// General errors directly from the storage layer
 #[derive(Debug)]
@@ -49,7 +53,7 @@ impl From<StorageError> for Error {
 }
 
 impl Display for StorageError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             StorageError::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
@@ -87,7 +91,7 @@ impl Display for StorageError {
     }
 }
 
-impl std::error::Error for StorageError {}
+impl core::error::Error for StorageError {}
 
 /// Errors related to opening tables
 #[derive(Debug)]
@@ -168,7 +172,7 @@ impl From<StorageError> for TableError {
 }
 
 impl Display for TableError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             TableError::TypeDefinitionChanged {
                 name,
@@ -211,7 +215,7 @@ impl Display for TableError {
     }
 }
 
-impl std::error::Error for TableError {}
+impl core::error::Error for TableError {}
 
 /// Errors related to opening a database
 #[derive(Debug)]
@@ -254,7 +258,7 @@ impl From<StorageError> for DatabaseError {
 }
 
 impl Display for DatabaseError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             DatabaseError::UpgradeRequired(actual) => {
                 write!(
@@ -279,7 +283,7 @@ impl Display for DatabaseError {
     }
 }
 
-impl std::error::Error for DatabaseError {}
+impl core::error::Error for DatabaseError {}
 
 /// Errors related to savepoints
 #[derive(Debug)]
@@ -317,7 +321,7 @@ impl From<StorageError> for SavepointError {
 }
 
 impl Display for SavepointError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             SavepointError::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")
@@ -333,7 +337,7 @@ impl Display for SavepointError {
     }
 }
 
-impl std::error::Error for SavepointError {}
+impl core::error::Error for SavepointError {}
 
 /// Errors related to compaction
 #[derive(Debug)]
@@ -367,7 +371,7 @@ impl From<StorageError> for CompactionError {
 }
 
 impl Display for CompactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             CompactionError::PersistentSavepointExists => {
                 write!(
@@ -392,7 +396,7 @@ impl Display for CompactionError {
     }
 }
 
-impl std::error::Error for CompactionError {}
+impl core::error::Error for CompactionError {}
 
 /// Errors related to transactions
 #[derive(Debug)]
@@ -411,7 +415,7 @@ impl From<SetDurabilityError> for Error {
 }
 
 impl Display for SetDurabilityError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             SetDurabilityError::PersistentSavepointModified => {
                 write!(
@@ -423,7 +427,7 @@ impl Display for SetDurabilityError {
     }
 }
 
-impl std::error::Error for SetDurabilityError {}
+impl core::error::Error for SetDurabilityError {}
 
 /// Errors related to transactions
 #[derive(Debug)]
@@ -462,7 +466,7 @@ impl From<StorageError> for TransactionError {
 }
 
 impl Display for TransactionError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             TransactionError::Storage(storage) => storage.fmt(f),
             TransactionError::ReadTransactionStillInUse(_) => {
@@ -472,7 +476,7 @@ impl Display for TransactionError {
     }
 }
 
-impl std::error::Error for TransactionError {}
+impl core::error::Error for TransactionError {}
 
 /// Errors related to committing transactions
 #[derive(Debug)]
@@ -509,7 +513,7 @@ impl From<StorageError> for CommitError {
 }
 
 impl Display for CommitError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             CommitError::Storage(storage) => storage.fmt(f),
             CommitError::TransactionPoisoned => {
@@ -519,7 +523,7 @@ impl Display for CommitError {
     }
 }
 
-impl std::error::Error for CommitError {}
+impl core::error::Error for CommitError {}
 
 /// Superset of all other errors that can occur. Convenience enum so that users can convert all errors into a single type
 #[derive(Debug)]
@@ -599,7 +603,7 @@ impl From<io::Error> for Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
@@ -724,4 +728,4 @@ impl Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}

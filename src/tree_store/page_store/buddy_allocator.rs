@@ -1,10 +1,10 @@
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
-use std::cmp::min;
+use core::cmp::min;
+use core::mem::size_of;
 #[cfg(test)]
 use std::collections::HashSet;
-use std::mem::size_of;
 
 const MAX_ORDER_OFFSET: usize = 0;
 const PADDING: usize = 3;

@@ -9,13 +9,18 @@ use crate::{
     StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
-use std::fmt::{Debug, Display, Formatter};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use core::fmt::{Debug, Display, Formatter};
 
+use alloc::sync::Arc;
+use core::marker::PhantomData;
 use std::fs::{File, OpenOptions};
-use std::marker::PhantomData;
+use std::io;
 use std::path::Path;
-use std::sync::Arc;
-use std::{io, thread};
+use std::thread;
 
 use crate::error::TransactionError;
 use crate::sealed::{Sealed, SealedInApi5};
@@ -32,30 +37,30 @@ use log::{debug, warn};
 /// Implements persistent storage for a database.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
-    fn len(&self) -> std::result::Result<u64, io::Error>;
+    fn len(&self) -> core::result::Result<u64, io::Error>;
 
     /// Reads the specified array of bytes from the storage.
     ///
     /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` must be returned.
-    fn read(&self, offset: u64, out: &mut [u8]) -> std::result::Result<(), io::Error>;
+    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), io::Error>;
 
     /// Sets the length of the storage.
     ///
     /// New positions in the storage must be initialized to zero.
-    fn set_len(&self, len: u64) -> std::result::Result<(), io::Error>;
+    fn set_len(&self, len: u64) -> core::result::Result<(), io::Error>;
 
     /// Syncs all buffered data with the persistent storage.
-    fn sync_data(&self) -> std::result::Result<(), io::Error>;
+    fn sync_data(&self) -> core::result::Result<(), io::Error>;
 
     /// Writes the specified array to the storage.
-    fn write(&self, offset: u64, data: &[u8]) -> std::result::Result<(), io::Error>;
+    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), io::Error>;
 
     /// Release any resources held by the backend
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once when the database is closed: when the [`Database`] is dropped, or, if a
     /// [`WriteTransaction`] was live at that point, when that transaction completes
-    fn close(&self) -> std::result::Result<(), io::Error> {
+    fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
 }
@@ -155,7 +160,7 @@ impl<K: Key + 'static, V: Value + 'static> Clone for TableDefinition<'_, K, V> {
 impl<K: Key + 'static, V: Value + 'static> Copy for TableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Value + 'static> Display for TableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -215,7 +220,7 @@ impl<K: Key + 'static, V: Key + 'static> Clone for MultimapTableDefinition<'_, K
 impl<K: Key + 'static, V: Key + 'static> Copy for MultimapTableDefinition<'_, K, V> {}
 
 impl<K: Key + 'static, V: Key + 'static> Display for MultimapTableDefinition<'_, K, V> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "{}<{}, {}>",
@@ -1439,7 +1444,7 @@ impl Builder {
     #[cfg(any(fuzzing, test))]
     pub fn set_page_size(&mut self, size: usize) -> &mut Self {
         assert!(size.is_power_of_two());
-        self.page_size = std::cmp::max(size, 512);
+        self.page_size = core::cmp::max(size, 512);
         self
     }
 
@@ -1541,8 +1546,8 @@ impl Builder {
     }
 }
 
-impl std::fmt::Debug for Database {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for Database {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Database").finish()
     }
 }
@@ -1554,10 +1559,10 @@ mod test {
         CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
         StorageError, TableDefinition, TransactionError,
     };
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU64, Ordering};
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[derive(Debug)]
     struct FailingBackend {

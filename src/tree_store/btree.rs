@@ -17,14 +17,19 @@ use crate::tree_store::{
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result};
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::max;
+use core::marker::PhantomData;
+use core::ops::Bound;
+use core::ops::RangeBounds;
 #[cfg(feature = "logging")]
 use log::trace;
-use std::borrow::Borrow;
-use std::cmp::max;
-use std::collections::{Bound, HashMap};
-use std::marker::PhantomData;
-use std::ops::RangeBounds;
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 pub(crate) struct BtreeStats {
     pub(crate) tree_height: u32,

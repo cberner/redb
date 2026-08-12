@@ -18,13 +18,19 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
-use std::borrow::Borrow;
-use std::marker::PhantomData;
-use std::mem;
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+use core::mem;
 #[cfg(not(feature = "experimental-api-5"))]
-use std::ops::RangeBounds;
-use std::ops::{Bound, Range, RangeFull};
-use std::sync::{Arc, Mutex};
+use core::ops::RangeBounds;
+use core::ops::{Bound, Range, RangeFull};
+use std::sync::Mutex;
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
     // Kept alive so any Drop side-effects on `data` (e.g. `remove_on_drop`) still run.

@@ -9,12 +9,17 @@ use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTracker};
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
-use std::cmp::Ordering;
-use std::collections::Bound;
-use std::collections::Bound::{Excluded, Included, Unbounded};
-use std::marker::PhantomData;
-use std::ops::Range;
-use std::sync::{Arc, Mutex};
+#[cfg(feature = "experimental_cursor")]
+use alloc::boxed::Box;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use core::marker::PhantomData;
+use core::ops::Bound;
+use core::ops::Bound::{Excluded, Included, Unbounded};
+use core::ops::Range;
+use std::sync::Mutex;
 
 #[derive(Clone)]
 struct Branch {
@@ -1307,7 +1312,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // Takes the pending batch in ascending order; backward scans record their
     // batch in decreasing order.
     fn take_removals_ascending(&mut self) -> Vec<usize> {
-        let mut removed_indexes = std::mem::take(&mut self.state.removed_indexes);
+        let mut removed_indexes = core::mem::take(&mut self.state.removed_indexes);
         if removed_indexes.first() > removed_indexes.last() {
             removed_indexes.reverse();
         }
@@ -1957,7 +1962,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
         &mut self,
         operation: impl FnOnce(&mut CursorMut<'a, '_, K, V>) -> Result<R>,
     ) -> Result<R> {
-        let mut cursor = self.tree.cursor(std::mem::take(&mut self.state));
+        let mut cursor = self.tree.cursor(core::mem::take(&mut self.state));
         let result = operation(&mut cursor);
         self.state = cursor.into_state();
         self.tree.drain_freed();
@@ -2180,7 +2185,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         let mut state = self.seek_end(direction)?;
         if matches!(self.end_ref(direction), EndState::Pending(_)) {
             let EndState::Pending(batch) =
-                std::mem::replace(self.end_mut(direction), EndState::Parked(Unbounded))
+                core::mem::replace(self.end_mut(direction), EndState::Parked(Unbounded))
             else {
                 unreachable!();
             };
@@ -2246,7 +2251,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             EndState::Pending(ParkedBatch {
                 bound,
                 leaf_bytes: position.leaf.page.to_arc(),
-                removed_indexes: std::mem::take(&mut state.removed_indexes),
+                removed_indexes: core::mem::take(&mut state.removed_indexes),
             })
         };
         let result = if state.leaf_run_rewrite.is_some() {
@@ -2315,7 +2320,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         operation: impl FnOnce(&mut CursorMut<'a, '_, K, V>) -> Result<R>,
     ) -> Result<R> {
         let end = self.end_mut(direction);
-        let EndState::Live(state) = std::mem::replace(end, EndState::Parked(Unbounded)) else {
+        let EndState::Live(state) = core::mem::replace(end, EndState::Parked(Unbounded)) else {
             unreachable!("end must be live");
         };
         let mut cursor = self.tree.cursor(state);
