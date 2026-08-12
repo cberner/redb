@@ -21,6 +21,11 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ## 4.2.0 - 2026-XX-XX
+* Add `MultiProcessDatabase` behind the new `experimental-multiprocess` feature. It stores a
+  database in a directory, alongside the lock file that coordinates the processes using it, and
+  takes its exclusion from that lock file rather than from a lock on the database file. This is the
+  first step of an incomplete feature: only one process may have the database open, so it has no
+  advantage over `Database` yet.
 * `Durability::None` commits are about 2x faster.
 * Writes that do not split a page are faster: about 15% for single-key `Durability::None` commits,
   and about 6% for batched writes.

@@ -1143,7 +1143,7 @@ impl Database {
         root.map(|header| BtreeHeader::new(header.root, header.checksum, length))
     }
 
-    fn new(
+    pub(crate) fn new(
         file: Box<dyn StorageBackend>,
         allow_initialize: bool,
         page_size: usize,

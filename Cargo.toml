@@ -54,6 +54,9 @@ experimental_cursor = ["experimental-api-5"]
 # Unstable additions and changes to the public API, planned for redb 5. May change incompatibly, or
 # be removed, in any release
 experimental-api-5 = []
+# Incomplete support for using a database from several processes. May change incompatibly, or be
+# removed, in any release
+experimental-multiprocess = []
 
 [profile.bench]
 debug = true
