@@ -15,6 +15,7 @@ const DATA_FILE_NAME: &str = "data.redb";
 const WRITE_LOCK_FILE_NAME: &str = "write.lock";
 const METADATA_FILE_NAME: &str = "metadata";
 const METADATA_TMP_FILE_NAME: &str = "metadata.tmp";
+const DATA_TMP_FILE_NAME: &str = "data.redb.tmp";
 
 const MAGIC: [u8; 8] = [b'r', b'e', b'd', b'b', b'M', b'P', b'r', b'o'];
 const FORMAT_VERSION: u32 = 1;
@@ -98,6 +99,12 @@ fn sync_parent(root: &Path) -> Result<(), DatabaseError> {
     sync_dir(&parent_of(&root))
 }
 
+/// Whether a name is taken, by anything at all -- including a symlink that resolves to nothing,
+/// which `Path::exists` reports as absent because it follows the link.
+fn occupied(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
 /// Refuses anything that is not an ordinary file under one of this database's own names.
 ///
 /// The opens that follow all traverse symlinks, so a planted one would be read or written through
@@ -120,6 +127,19 @@ fn require_regular_file(path: &Path) -> Result<(), DatabaseError> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(StorageError::Io(err).into()),
     }
+}
+
+/// Which name [`DatabaseDir::open`] put the database file under.
+///
+/// Carried from the open to [`DatabaseDir::promote_data`] rather than worked out again from what is
+/// on disk. A temporary file that is there at the end of a `create()` is this call's own only if
+/// this call made it, and nothing about the file itself says so.
+#[derive(Clone, Copy)]
+pub(super) enum DataLocation {
+    /// `data.redb`, which is where a database that was already finished lives.
+    Final,
+    /// `data.redb.tmp`, which is where one being initialized lives until it is renamed into place.
+    Temporary,
 }
 
 /// The paths that make up a multi-process database directory.
@@ -150,6 +170,10 @@ impl DatabaseDir {
         self.root.join(METADATA_TMP_FILE_NAME)
     }
 
+    fn data_tmp_file(&self) -> PathBuf {
+        self.root.join(DATA_TMP_FILE_NAME)
+    }
+
     /// Takes the write lock, which excludes every other process from the database. Held for as
     /// long as this process has it open.
     ///
@@ -167,6 +191,10 @@ impl DatabaseDir {
     /// these -- so it is left in place.
     fn acquire_write_lock(&self, create: bool) -> Result<File, DatabaseError> {
         let path = self.write_lock_file();
+        // Before opening, for the same reason as the marker and the database file: `create(true)`
+        // would otherwise follow a symlink left under this name and make its target, and the
+        // directory lock would then be taken on a file whose identity was never checked
+        require_regular_file(&path)?;
         let file = if create {
             open_or_create(&path)
         } else {
@@ -191,12 +219,23 @@ impl DatabaseDir {
     }
 
     /// Opens the directory, creating it if `create` is set, and returns a backend for the database
-    /// file that holds the write lock for as long as the database is open.
+    /// file that holds the write lock for as long as the database is open, along with which of the
+    /// two names that file is under.
     ///
     /// A directory being created is not marked as one of these yet -- the caller does that with
     /// [`Self::write_metadata`], once the database file has turned out to be usable.
-    pub(super) fn open(&self, create: bool) -> Result<Box<dyn StorageBackend>, DatabaseError> {
+    pub(super) fn open(
+        &self,
+        create: bool,
+    ) -> Result<(Box<dyn StorageBackend>, DataLocation), DatabaseError> {
         if create {
+            // Checked here as well as under the lock further down, which is the authoritative one.
+            // Doing it first means the overwhelmingly common case -- a mistyped path -- is refused
+            // without even the lock file having been made, and doing it only when there is no
+            // marker keeps it away from directories that are already databases
+            if !self.metadata_file().exists() {
+                self.reject_foreign_directory()?;
+            }
             std::fs::create_dir_all(&self.root).map_err(StorageError::Io)?;
             // Everything below syncs entries *inside* this directory, which does not help if the
             // directory's own entry in its parent is lost -- a crash after create() returned would
@@ -221,12 +260,73 @@ impl DatabaseDir {
         let write_lock = self.acquire_write_lock(create)?;
         self.read_metadata(create)?;
 
+        // A database being made for the first time is initialized under a temporary name and
+        // renamed into place by `promote_data`, the same way the marker is. redb deliberately
+        // writes the header with the magic number zeroed, flushes, and only then writes the magic,
+        // so a crash partway through initialization leaves a file that is not empty and not a
+        // database either -- and `Database::new` refuses such a file whether or not `create` is
+        // set. Under its own name that file would be indistinguishable from something this call
+        // was pointed at by mistake, and refusing it forever is the only safe reading. Under the
+        // temporary name it is unambiguously an unfinished attempt of ours, so it can be thrown
+        // away and redone
+        let (path, location) = if create {
+            // `symlink_metadata` rather than `exists()`, which follows the link and so reports a
+            // dangling symlink as an absent file -- the question here is whether the name is
+            // occupied at all, since one that is gets checked by `require_regular_file` below
+            // instead of being quietly replaced by the promoting rename
+            match std::fs::symlink_metadata(self.data_file()) {
+                // A database file with nothing in it got as far as being created and no further,
+                // so it is discarded and redone under the temporary name. Initializing it in place
+                // would put the header bytes under the final name, and a crash in the window
+                // before the magic number is written leaves exactly the file this indirection
+                // exists to avoid -- one that is neither empty nor a database, under a name that
+                // must then be refused forever
+                Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {
+                    // Empty means an attempt that got as far as creating the file -- but only if
+                    // nobody is holding it. A process that reached past the directory could have
+                    // created and locked it a moment ago, and unlinking it would leave that
+                    // process writing to an inode nothing points at while this one publishes a
+                    // different database. Taking the lock first turns that into the same
+                    // `DatabaseAlreadyOpen` a second handle would get
+                    let existing = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(self.data_file())
+                        .map_err(StorageError::Io)?;
+                    match existing.try_lock() {
+                        Ok(()) => {}
+                        Err(TryLockError::WouldBlock) => {
+                            return Err(DatabaseError::DatabaseAlreadyOpen);
+                        }
+                        Err(TryLockError::Error(err)) => return Err(lock_unsupported(err)),
+                    }
+                    // Still held across the unlink. Dropping the handle first would reopen the
+                    // window the lock is here to close: a direct opener could take the file in
+                    // between, and the unlink would succeed anyway, leaving it writing to an inode
+                    // nothing points at
+                    std::fs::remove_file(self.data_file()).map_err(StorageError::Io)?;
+                    drop(existing);
+                    self.discard_data_tmp()?;
+                    (self.data_tmp_file(), DataLocation::Temporary)
+                }
+                Ok(_) => (self.data_file(), DataLocation::Final),
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    self.discard_data_tmp()?;
+                    (self.data_tmp_file(), DataLocation::Temporary)
+                }
+                Err(err) => return Err(StorageError::Io(err).into()),
+            }
+        } else {
+            (self.data_file(), DataLocation::Final)
+        };
+
+        require_regular_file(&path)?;
         let data = OpenOptions::new()
             .read(true)
             .write(true)
             .create(create)
             .truncate(false)
-            .open(self.data_file())
+            .open(path)
             .map_err(StorageError::Io)?;
         // The ordinary exclusive lock, the same one a Database takes. The write lock above is what
         // other multi-process handles look at, but a process that reaches past the directory and
@@ -237,7 +337,56 @@ impl DatabaseDir {
         // the lock they have to replace
         let data = FileBackend::new(data)?;
 
-        Ok(Box::new(DirectoryBackend { data, write_lock }))
+        Ok((Box::new(DirectoryBackend { data, write_lock }), location))
+    }
+
+    /// Moves a freshly initialized database file into place, if this call was the one that made it.
+    ///
+    /// Called once [`crate::Database`] has accepted the file, so that `data.redb` exists only when
+    /// it is a database that was finished. `location` is what [`Self::open`] did, rather than
+    /// something read back off disk: which name the database file is under is a fact this call
+    /// established, and the presence of a temporary file says nothing about who left it there.
+    ///
+    /// The write lock is still held, so nothing can be looking at either name.
+    pub(super) fn promote_data(&self, location: DataLocation) -> Result<(), DatabaseError> {
+        let tmp = self.data_tmp_file();
+        if matches!(location, DataLocation::Final) {
+            // The database was opened under its own name, so anything under the temporary one is
+            // the wreckage of an earlier attempt -- a database that was finished is at `data.redb`
+            // -- and clearing it is what keeps a later call from moving it over a good database.
+            //
+            // Done here rather than on the way in, so that a `create()` pointed at a directory
+            // that turns out not to hold a database fails without having deleted a file it did not
+            // put there. Everything above this point leaves the directory as it found it
+            return self.discard_data_tmp();
+        }
+        // This call initialized the temporary, which it does only when there was no database file.
+        // One appearing in the meantime means something reached past the directory and made it,
+        // and renaming over it would destroy a database this call never opened -- so this fails
+        // rather than finishing
+        if occupied(&self.data_file()) {
+            return Err(StorageError::Io(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "the database file appeared while it was being initialized",
+            ))
+            .into());
+        }
+        std::fs::rename(&tmp, self.data_file()).map_err(StorageError::Io)?;
+        sync_dir(&self.root)?;
+
+        Ok(())
+    }
+
+    /// Throws away a temporary database file left by an earlier attempt.
+    ///
+    /// Unlinks rather than truncates, so a symlink left under this name is removed rather than
+    /// followed and written through.
+    fn discard_data_tmp(&self) -> Result<(), DatabaseError> {
+        match std::fs::remove_file(self.data_tmp_file()) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(StorageError::Io(err).into()),
+        }
     }
 
     /// Writes the marker that says this directory holds a multi-process database.
@@ -297,6 +446,50 @@ impl DatabaseDir {
         self.write_metadata()
     }
 
+    /// Refuses a directory that holds anything this database did not put there.
+    ///
+    /// Only consulted when there is no marker: a directory with one is this database's, and a stray
+    /// file appearing next to it -- `.DS_Store`, an editor's scratch file -- must not stop it
+    /// opening. Without a marker the only reason to accept a directory that already exists is that
+    /// a `create()` was interrupted partway through, and such a directory holds nothing but the
+    /// files `create()` itself makes. Anything else is a path this call was pointed at by mistake.
+    fn reject_foreign_directory(&self) -> Result<(), DatabaseError> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(StorageError::Io(err).into()),
+        };
+
+        for entry in entries {
+            let entry = entry.map_err(StorageError::Io)?;
+            let name = entry.file_name();
+            let named_like_ours = [
+                DATA_FILE_NAME,
+                DATA_TMP_FILE_NAME,
+                WRITE_LOCK_FILE_NAME,
+                METADATA_FILE_NAME,
+                METADATA_TMP_FILE_NAME,
+            ]
+            .iter()
+            .any(|known| name == *known);
+            // The name is not enough. `file_type()` reports the entry itself rather than what it
+            // points at, so a symlink wearing one of these names is caught here -- otherwise
+            // opening `data.redb` with `create` would follow it and initialize a database over
+            // whatever it pointed at, somewhere outside this directory entirely
+            let ours = named_like_ours && entry.file_type().map_err(StorageError::Io)?.is_file();
+            if !ours {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "refusing to create a multi-process database in a directory that holds files \
+                     it did not write",
+                ))
+                .into());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Checks that this directory holds a multi-process database, tolerating a missing marker when
     /// one is being created.
     ///
@@ -320,7 +513,7 @@ impl DatabaseDir {
                     ))
                     .into());
                 }
-                return Ok(());
+                return self.reject_foreign_directory();
             }
             Err(err) => return Err(StorageError::Io(err).into()),
         };
@@ -397,12 +590,13 @@ impl StorageBackend for DirectoryBackend {
 mod test {
     use super::*;
 
-    /// The whole create sequence, which is split between here and the caller: the marker is
-    /// written only once [`crate::Database`] has accepted the database file. These tests are about
-    /// the lock and the marker rather than the database, so they stand in for that middle step by
-    /// doing nothing.
+    /// The whole create sequence, which is split between here and the caller: the database file is
+    /// moved into place and the marker written only once [`crate::Database`] has accepted the file.
+    /// These tests are about the lock and the marker rather than the database, so they stand in for
+    /// that middle step by doing nothing -- the file they promote is simply empty.
     fn create(dir: &DatabaseDir) -> Box<dyn StorageBackend> {
-        let backend = dir.open(true).unwrap();
+        let (backend, location) = dir.open(true).unwrap();
+        dir.promote_data(location).unwrap();
         dir.write_metadata().unwrap();
         backend
     }
@@ -421,7 +615,7 @@ mod test {
         // Closing the backend is what releases the lock, since that is when redb has finished
         // with the file
         first.close().unwrap();
-        let _second = dir.open(false).unwrap();
+        let _second = dir.open(false).unwrap().0;
     }
 
     #[test]
@@ -520,6 +714,59 @@ mod test {
         let borrowed = DatabaseDir::new(&borrowed);
         assert!(borrowed.open(false).is_err());
         assert!(borrowed.open(true).is_err());
+    }
+
+    /// A database file with nothing in it never gets initialized under its own name: doing so
+    /// would put the header bytes there, and a crash before the magic number was written would
+    /// leave a file that has to be refused forever. It is discarded and redone under the temporary
+    /// name like any other unfinished attempt.
+    #[test]
+    fn an_empty_data_file_is_redone_through_the_temporary_name() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("db");
+        let dir = DatabaseDir::new(&path);
+        create(&dir).close().unwrap();
+        std::fs::write(path.join(DATA_FILE_NAME), []).unwrap();
+
+        let (backend, location) = dir.open(true).unwrap();
+        assert!(!path.join(DATA_FILE_NAME).exists());
+        assert!(path.join(DATA_TMP_FILE_NAME).is_file());
+
+        // ... and promoting puts it back under the name it belongs under
+        dir.promote_data(location).unwrap();
+        assert!(path.join(DATA_FILE_NAME).is_file());
+        assert!(!path.join(DATA_TMP_FILE_NAME).exists());
+        backend.close().unwrap();
+    }
+
+    /// An empty database file is only wreckage if nobody is holding it. One that a process
+    /// reached past the directory to create and lock is live, and unlinking it would leave that
+    /// process writing to an inode nothing points at.
+    #[test]
+    fn an_empty_data_file_someone_is_holding_is_not_discarded() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("db");
+        let dir = DatabaseDir::new(&path);
+        create(&dir).close().unwrap();
+        std::fs::write(path.join(DATA_FILE_NAME), []).unwrap();
+
+        let held = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join(DATA_FILE_NAME))
+            .unwrap();
+        held.try_lock().unwrap();
+
+        assert!(matches!(
+            dir.open(true),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        assert!(path.join(DATA_FILE_NAME).is_file());
+
+        // ... and once it is let go, the empty file is wreckage again
+        held.unlock().unwrap();
+        drop(held);
+        dir.open(true).unwrap().0.close().unwrap();
     }
 
     #[test]

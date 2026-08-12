@@ -240,6 +240,236 @@ fn an_ordinary_database_cannot_open_the_data_file() {
     );
 }
 
+/// A directory that already holds something else is a mistyped path, not a database waiting to be
+/// made. The only reason to accept an existing directory without a marker is an interrupted
+/// `create()`, and such a directory holds nothing but the files `create()` itself writes.
+#[test]
+fn create_refuses_a_directory_holding_other_files() {
+    let dir = tempdir();
+    let path = dir.path().join("not-a-db");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("notes.txt"), b"hello").unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+
+    // Nothing at all this time -- the check runs before the lock file would be made
+    assert_eq!(1, std::fs::read_dir(&path).unwrap().count());
+}
+
+/// The names `create()` will adopt have to be its own files and not symlinks wearing those names.
+/// Opening `data.redb` with `create` set follows a symlink, so without this a directory planted
+/// with one would have a database initialized over whatever it pointed at.
+#[cfg(unix)]
+#[test]
+fn create_refuses_a_directory_of_symlinks() {
+    let dir = tempdir();
+    let outside = dir.path().join("precious");
+    std::fs::write(&outside, b"not redb's to touch").unwrap();
+
+    for name in ["data.redb", "metadata.tmp"] {
+        let path = dir.path().join(format!("planted-{name}"));
+        std::fs::create_dir(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, path.join(name)).unwrap();
+
+        assert!(MultiProcessDatabase::create(&path).is_err());
+        assert_eq!(
+            b"not redb's to touch",
+            &std::fs::read(&outside).unwrap()[..],
+            "followed the {name} symlink"
+        );
+    }
+}
+
+/// A symlink that resolves to nothing is still a symlink, and `Path::exists` reports it as an
+/// absent file. Deciding on that would have `create()` treat the name as free and let the
+/// promoting rename replace it, so the check has to ask whether the name is taken rather than
+/// whether it resolves.
+#[cfg(unix)]
+#[test]
+fn create_refuses_a_dangling_data_file_symlink() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    drop(MultiProcessDatabase::create(&path).unwrap());
+
+    std::fs::remove_file(path.join("data.redb")).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("nowhere"), path.join("data.redb")).unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+    assert!(MultiProcessDatabase::open(&path).is_err());
+    // and the symlink is still a symlink, not a database written over the top of it
+    assert!(
+        std::fs::symlink_metadata(path.join("data.redb"))
+            .unwrap()
+            .is_symlink()
+    );
+}
+
+/// ... but only when there is no marker. A directory that is already a database stays openable
+/// whatever else turns up in it, or a stray `.DS_Store` would be enough to lock its owner out.
+#[test]
+fn a_stray_file_does_not_stop_an_existing_database_opening() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    drop(MultiProcessDatabase::create(&path).unwrap());
+    std::fs::write(path.join(".DS_Store"), b"junk").unwrap();
+
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    write(&db, 0, 1);
+    drop(db);
+
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    assert_eq!(Some(1), read(&db, 0));
+}
+
+/// The file-type rule covers a directory that is already a database too, not just the recovery
+/// path. `create()` on an existing database still rewrites the marker, and a `metadata` that is a
+/// symlink would vouch for a directory holding nothing of redb's.
+#[cfg(unix)]
+#[test]
+fn symlinks_are_refused_in_a_directory_that_has_a_marker() {
+    let dir = tempdir();
+    let outside = dir.path().join("precious");
+    std::fs::write(&outside, b"not redb's to touch").unwrap();
+
+    // Rewriting the marker must not be written through a planted temporary
+    let rewritten = db_path(&dir);
+    drop(MultiProcessDatabase::create(&rewritten).unwrap());
+    std::os::unix::fs::symlink(&outside, rewritten.join("metadata.tmp")).unwrap();
+    drop(MultiProcessDatabase::create(&rewritten).unwrap());
+    assert_eq!(
+        b"not redb's to touch",
+        &std::fs::read(&outside).unwrap()[..]
+    );
+
+    // And a marker that is a symlink is not a marker, however valid the bytes it points at
+    let borrowed = dir.path().join("borrowed");
+    std::fs::create_dir(&borrowed).unwrap();
+    std::os::unix::fs::symlink(rewritten.join("metadata"), borrowed.join("metadata")).unwrap();
+    std::fs::write(borrowed.join("data.redb"), []).unwrap();
+    assert!(MultiProcessDatabase::open(&borrowed).is_err());
+    assert!(MultiProcessDatabase::create(&borrowed).is_err());
+
+    // The lock file is held to the same rule: the directory lock is worth nothing if it is taken
+    // on a file that turned out to be a pointer somewhere else
+    let relinked = dir.path().join("relinked");
+    drop(MultiProcessDatabase::create(&relinked).unwrap());
+    std::fs::remove_file(relinked.join("write.lock")).unwrap();
+    std::os::unix::fs::symlink(&outside, relinked.join("write.lock")).unwrap();
+    assert!(MultiProcessDatabase::open(&relinked).is_err());
+    assert!(MultiProcessDatabase::create(&relinked).is_err());
+    assert_eq!(
+        b"not redb's to touch",
+        &std::fs::read(&outside).unwrap()[..]
+    );
+}
+
+/// `open()` does not create anything, and that has to hold for a directory that exists but is not
+/// one of these: it must be left exactly as it was found rather than gaining a lock file on the
+/// way to the error.
+#[test]
+fn open_does_not_touch_a_directory_it_rejects() {
+    let dir = tempdir();
+    let path = dir.path().join("not-a-db");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("notes.txt"), b"hello").unwrap();
+
+    assert!(MultiProcessDatabase::open(&path).is_err());
+    assert_eq!(1, std::fs::read_dir(&path).unwrap().count());
+}
+
+/// The marker is what makes a directory one of these, so `create()` must not install it in a
+/// directory it then fails on -- that would convert someone else's directory as a side effect of
+/// refusing it, and every later open would read it as a database.
+///
+/// Unlike `open()`, `create()` cannot leave the directory completely untouched: the lock has to be
+/// taken before the directory can be read, so an empty `write.lock` is already there by the time
+/// validation fails. That file means nothing without a marker beside it, and unlinking it would
+/// break the exclusion it provides, so the guarantee is about the marker rather than about the
+/// directory being pristine.
+#[test]
+fn create_does_not_mark_a_directory_it_rejects() {
+    let dir = tempdir();
+    let path = dir.path().join("not-a-db");
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("data.redb"), b"this is not a redb database").unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+    assert!(!path.join("metadata").exists());
+
+    // ... and the file it refused to read is still there, byte for byte
+    assert_eq!(
+        b"this is not a redb database",
+        &std::fs::read(path.join("data.redb")).unwrap()[..]
+    );
+
+    // Nothing beyond the lock file it had to take to check at all
+    let mut left: Vec<_> = std::fs::read_dir(&path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    left.sort();
+    assert_eq!(vec!["data.redb", "write.lock"], left);
+
+    // ... and having refused it once, it refuses it again rather than reading its own lock file as
+    // evidence that the directory is one of these
+    assert!(MultiProcessDatabase::create(&path).is_err());
+    assert!(MultiProcessDatabase::open(&path).is_err());
+}
+
+/// redb writes a new database's header with the magic number zeroed, flushes, and only then writes
+/// the magic, so a crash during initialization leaves a file that is neither empty nor a database.
+/// `Database::new` refuses such a file whether or not `create` is set, so under the name
+/// `data.redb` it would wedge the directory for good -- indistinguishable from a file this call was
+/// pointed at by mistake. Initializing under a temporary name is what keeps the two apart.
+#[test]
+fn an_initialization_that_crashed_partway_can_be_redone() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    drop(MultiProcessDatabase::create(&path).unwrap());
+
+    // Exactly what such a crash leaves: no marker, no data.redb, and a temporary file that is not
+    // empty and has no magic number
+    std::fs::remove_file(path.join("metadata")).unwrap();
+    std::fs::rename(path.join("data.redb"), path.join("data.redb.tmp")).unwrap();
+    let mut partial = std::fs::read(path.join("data.redb.tmp")).unwrap();
+    partial[0..9].fill(0);
+    std::fs::write(path.join("data.redb.tmp"), &partial).unwrap();
+
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+    assert_eq!(Some(1), read(&db, 0));
+    drop(db);
+
+    assert!(path.join("data.redb").is_file());
+    assert!(!path.join("data.redb.tmp").exists());
+}
+
+/// A temporary file only ever means "an attempt that did not finish", so one sitting next to a
+/// database that *did* finish must not be moved over it. Promoting on the mere presence of a
+/// temporary would swap a good database for wreckage, and leave the handle this call returns
+/// writing to an inode nothing points at any more.
+#[test]
+fn a_stale_temporary_does_not_replace_the_database() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 42);
+    drop(db);
+
+    std::fs::write(path.join("data.redb.tmp"), b"stale wreckage").unwrap();
+
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    assert_eq!(Some(42), read(&db, 0));
+    write(&db, 1, 43);
+    drop(db);
+
+    // ... and what this call wrote is in the database the directory actually points at
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(42), read(&db, 0));
+    assert_eq!(Some(43), read(&db, 1));
+    assert!(!path.join("data.redb.tmp").exists());
+}
+
 // --------------------------------------------------------------------------------------------
 // Tests that need a real process
 // --------------------------------------------------------------------------------------------
@@ -364,4 +594,47 @@ fn a_directory_that_cannot_be_read_still_opens() {
     std::fs::set_permissions(&path, readable).unwrap();
     assert_eq!(Some(7), opened.unwrap());
     assert_eq!(Some(7), created.unwrap());
+}
+
+/// A `create()` that is going to fail must fail without having deleted anything. The temporary name
+/// is redb's, so a directory holding one gets past the foreign-directory check, but a `create()`
+/// pointed there by mistake still has no business removing a file it did not put there.
+#[test]
+fn a_failed_create_leaves_a_temporary_file_alone() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    std::fs::create_dir(&path).unwrap();
+    // Under redb's own names, but not redb's: a mistyped path, not a database
+    std::fs::write(path.join("data.redb"), b"not a database").unwrap();
+    std::fs::write(path.join("data.redb.tmp"), b"someone else's file").unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+    assert_eq!(
+        b"someone else's file".to_vec(),
+        std::fs::read(path.join("data.redb.tmp")).unwrap()
+    );
+}
+
+/// The other half of that: once the database *has* been accepted, a temporary file next to it is
+/// the wreckage of an earlier attempt and is cleared, so that a later `create()` can never find one
+/// to move over a database that was finished.
+#[test]
+fn a_successful_create_clears_a_stale_temporary_file() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        write(&db, 0, 7);
+    }
+    std::fs::write(path.join("data.redb.tmp"), b"wreckage").unwrap();
+
+    {
+        let db = MultiProcessDatabase::create(&path).unwrap();
+        assert_eq!(Some(7), read(&db, 0));
+    }
+    assert!(!path.join("data.redb.tmp").exists());
+
+    // And the database is still the one that was there, rather than whatever the temporary held
+    let db = MultiProcessDatabase::open(&path).unwrap();
+    assert_eq!(Some(7), read(&db, 0));
 }

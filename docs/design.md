@@ -587,3 +587,77 @@ was validated on the way in, under the lock, so a marker that is there is byte-f
 be written, and rewriting it would fail in a directory whose entries cannot be changed even though
 everything the caller asked for is already in place. `create()` is open-or-create, and should not
 become an error where `open()` would have worked.
+
+## What a call that fails leaves behind
+
+The rule the rest of this follows is that **a call which fails never leaves a marker behind**, so a
+directory that is not a multi-process database is never turned into one by a call that did not
+succeed. Three things follow.
+
+An existing directory with no marker at all is only accepted by `create()` if everything in it is a
+*regular file* named like something `create()` itself writes -- `data.redb`, `data.redb.tmp`,
+`write.lock`, `metadata`, `metadata.tmp`. That is what an interrupted create looks like; a directory
+with anything else in it is a mistyped path, and turning it into a database would be the same kind
+of surprise as overwriting a `metadata` file. The check applies *only* when the marker is absent: a
+directory that is already a database opens whatever else has appeared in it, or a stray `.DS_Store`
+would be enough to lock its owner out. Since it needs no lock, `create()` runs it before taking one,
+so the mistyped-path case leaves nothing behind at all.
+
+Every one of these names must be an ordinary file -- `data.redb`, `write.lock` and `metadata` alike,
+wherever they are checked. All of the opens traverse symlinks, so one planted under a name redb
+trusts would be written through to whatever it points at, outside the directory entirely, and a
+`metadata` symlink pointing at a valid marker elsewhere would vouch for a directory holding nothing
+of redb's. The temporary files are unlinked and created afresh rather than truncated in place, for
+the same reason. This closes the door rather than locking it: between the check and the open an
+entry could be replaced, and doing better needs `O_NOFOLLOW`, which `std` does not offer portably.
+
+`data.redb` gets the same temporary-name treatment as the marker, for the same reason. redb writes a
+new database's header with the magic number zeroed, flushes, and only then writes the magic, so that
+a crash during initialization leaves a file it will refuse rather than half a database. That refusal
+is what makes the state dangerous here: under its own name, a file that is neither empty nor a
+database is indistinguishable from something this call was pointed at by mistake, so refusing it
+forever is the only safe reading, and the directory is wedged. Initialized under `data.redb.tmp` and
+renamed into place once `Database` has accepted it, the same file is unambiguously an unfinished
+attempt of this database's own, which the next `create()` throws away and redoes. `data.redb`
+therefore exists only when it is a database that was finished.
+
+Two things follow from `data.redb` meaning "a database that was finished". A file with nothing in it
+does not qualify, so an empty one is discarded and redone through the temporary name rather than
+initialized where it lies -- otherwise the header bytes would land under the final name and a crash
+before the magic number was written would produce exactly the file this indirection exists to avoid.
+And "is the name free?" has to be asked with `symlink_metadata` rather than `Path::exists`, which
+follows the link and so reports a dangling symlink as an absent file: deciding on that would let the
+promoting rename replace a symlink instead of the regular-file check refusing it.
+
+An empty `data.redb` is only wreckage if nobody is holding it. A process that reached past the
+directory could have created and locked it a moment ago, and unlinking it would leave that process
+writing to an inode nothing points at while this one publishes a different database, so the file's
+own lock is taken before it is discarded and a held one gives `DatabaseAlreadyOpen` instead. That
+lock is held across the unlink rather than released before it: the unlink succeeds whether or not
+someone has taken the file in between, so letting go first would reopen the window it exists to
+close.
+
+The corollary is that a temporary file is only ever moved into place by the call that wrote it.
+Which name the database file was opened under is carried forward from the open rather than worked
+out again from what is on disk, because a `data.redb.tmp` present at the end is this call's own only
+if this call made it, and nothing about the file itself says so. Promoting on mere presence would
+replace a good database with wreckage and leave the handle just returned writing to an inode nothing
+points at.
+
+A call that opened the database under its own name therefore promotes nothing, and clears any
+temporary it finds -- but only once `Database` has accepted the file. On the way out rather than the
+way in, so that a `create()` pointed by mistake at a directory that turns out not to hold a database
+fails without having deleted a file it did not put there. The temporary name is redb's, so a
+directory holding one gets past the check below, but that is not a licence to remove it before there
+is any evidence the directory is redb's too.
+
+`open()` creates nothing whatsoever, down to not making the lock file in a directory it is about to
+reject, and `create()` does the same for the case it can check without the lock. It cannot do so in
+general: the lock has to be taken before the directory is read, because it is the only thing
+serializing two processes creating the same directory at once, so a `create()` that gets as far as
+validating the database file has already made an empty `write.lock`. Removing it on the way out
+would be worse than leaving it. Another process can have opened that same file and be waiting on the
+lock; unlinking it and releasing would leave that process holding a lock on an unlinked inode while
+a third creates a fresh `write.lock` and locks it successfully, so both would believe they had the
+directory. An inert empty file is the smaller cost, and it is inert precisely because the marker is
+what confers meaning.
