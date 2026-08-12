@@ -1,3 +1,4 @@
+use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -21,7 +22,6 @@ use alloc::sync::Arc;
 use core::marker::PhantomData;
 #[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
-use std::io;
 #[cfg(not(redb_no_std))]
 use std::path::Path;
 
@@ -39,6 +39,8 @@ use log::{debug, warn};
 
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
+///
+/// Failures are reported as [`io::Error`], which is [`std::io::Error`] whenever std is available.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, io::Error>;

@@ -1,11 +1,11 @@
 use crate::StorageBackend;
+use crate::io;
+#[cfg(not(redb_no_std))]
+use crate::io::Error;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use std::io;
-#[cfg(not(redb_no_std))]
-use std::io::Error;
 
 #[cfg(not(redb_no_std))]
 #[derive(Debug)]
@@ -53,7 +53,7 @@ pub struct InMemoryBackend(RwLock<Vec<u8>>);
 
 impl InMemoryBackend {
     fn out_of_range() -> io::Error {
-        io::Error::new(io::ErrorKind::InvalidInput, "Index out-of-range.")
+        io::invalid_input("Index out-of-range.")
     }
 }
 
