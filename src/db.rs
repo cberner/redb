@@ -41,6 +41,13 @@ use log::{debug, warn};
 /// Implements persistent storage for a database.
 ///
 /// Failures are reported as [`io::Error`], which is [`std::io::Error`] whenever std is available.
+///
+/// A backend for a multi-process database must satisfy one requirement beyond the rest of this
+/// trait: a [`read`](Self::read) of a range that another process is writing at the same time must
+/// not observe a partially completed write of it. That applies only to the database header, the
+/// sole range ever read while it is being written; every other page is copy-on-write, and the
+/// protocol keeps one from being rewritten while another process can still reach it. Regular files
+/// satisfy this, since POSIX requires read/write atomicity of them.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, io::Error>;
@@ -1153,7 +1160,7 @@ impl Database {
         root.map(|header| BtreeHeader::new(header.root, header.checksum, length))
     }
 
-    fn new(
+    pub(crate) fn new(
         file: Box<dyn StorageBackend>,
         allow_initialize: bool,
         page_size: usize,

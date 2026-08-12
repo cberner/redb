@@ -74,6 +74,11 @@
   ineligible for further savepoints, so a second savepoint in the same transaction failed with
   `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
   savepoint, makes a transaction savepoint-ineligible now.
+* Add `MultiProcessDatabase` behind the new `experimental-multiprocess` feature. It stores a
+  database in a directory, alongside the lock file that coordinates the processes using it, and
+  takes its exclusion from that lock file rather than from a lock on the database file. This is the
+  first step of an incomplete feature: only one process may have the database open, so it has no
+  advantage over `Database` yet.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

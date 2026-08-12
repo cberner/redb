@@ -83,6 +83,8 @@ pub use error::{
 };
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
+#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+pub use multi_process::{MultiProcessBuilder, MultiProcessDatabase};
 #[cfg(feature = "experimental-api-5")]
 pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
@@ -116,6 +118,9 @@ pub mod io;
 mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
+// Needs std::fs and std::path, like the rest of the file-backed API
+#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+mod multi_process;
 mod multimap_table;
 mod sealed;
 mod sync;
