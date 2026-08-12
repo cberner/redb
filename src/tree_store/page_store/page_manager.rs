@@ -18,6 +18,7 @@ use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -681,6 +682,7 @@ impl TransactionalMemory {
     }
 
     #[cfg(debug_assertions)]
+    #[cfg_attr(redb_no_std, expect(dead_code))]
     pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
         self.allocated_pages
             .lock()
@@ -691,6 +693,7 @@ impl TransactionalMemory {
     }
 
     #[cfg(debug_assertions)]
+    #[cfg_attr(redb_no_std, expect(dead_code))]
     pub(crate) fn debug_check_allocator_consistency(&self) {
         let state = self.state.lock().unwrap();
         let allocators = state.allocators();

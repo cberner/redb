@@ -543,6 +543,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     }
 
     #[allow(dead_code)]
+    #[cfg(not(redb_no_std))]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
     }

@@ -59,6 +59,14 @@ test_all_no_sandbox: pre_all_no_sandbox
 clear_podman_cache:
     podman volume rm --force redb-sandbox-target
 
+build_no_std:
+    rustup target add thumbv7em-none-eabihf
+    # cargo pkgid below needs a lockfile, which a fresh checkout of a library does not have. Only
+    # created when missing, so that running this does not re-resolve an existing one.
+    [ -f Cargo.lock ] || cargo generate-lockfile
+    # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
+    cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
+
 test_wasi:
     rustup install nightly-2025-07-26 --target wasm32-wasip1-threads
     # cargo pkgid below needs a lockfile, which a fresh checkout of a library does not have. Only

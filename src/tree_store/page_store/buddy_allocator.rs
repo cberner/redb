@@ -3,6 +3,8 @@ use crate::tree_store::page_store::bitmap::BtreeBitmap;
 #[cfg(test)]
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::cmp::min;
 use core::mem::size_of;
 

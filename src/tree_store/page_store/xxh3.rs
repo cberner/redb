@@ -60,7 +60,7 @@ pub fn hash64_with_seed(data: &[u8], seed: u64) -> u64 {
     if data.len() <= 240 {
         hash64_0to240(data, &DEFAULT_SECRET, seed)
     } else {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(redb_no_std)))]
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
@@ -87,7 +87,7 @@ pub fn hash128_with_seed(data: &[u8], seed: u64) -> u128 {
     if data.len() <= 240 {
         hash128_0to240(data, &DEFAULT_SECRET, seed)
     } else {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(redb_no_std)))]
         if is_x86_feature_detected!("avx2") {
             unsafe {
                 return hash128_large_avx2(data, seed);
