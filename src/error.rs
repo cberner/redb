@@ -5,8 +5,8 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use core::fmt::{Display, Formatter};
+use core::panic;
 use std::io;
-use std::panic;
 
 /// General errors directly from the storage layer
 #[derive(Debug)]

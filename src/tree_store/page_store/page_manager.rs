@@ -25,7 +25,6 @@ use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
 use std::io::ErrorKind;
-use std::thread;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -1583,7 +1582,7 @@ impl TransactionalMemory {
     }
 
     fn flush_shutdown_header(&self) -> Result {
-        if self.storage.check_io_errors().is_ok() && !thread::panicking() {
+        if self.storage.check_io_errors().is_ok() && !crate::panicking() {
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
             // an allocator state describing what it wrote. Without one there is nothing to assert.

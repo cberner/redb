@@ -13,7 +13,6 @@ use core::cmp::Ordering;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use core::ops::Range;
-use std::thread;
 
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
@@ -260,7 +259,7 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                     let mut mutator =
                         LeafMutator::new(mut_page.memory_mut(), fixed_key_size, V::fixed_width());
                     mutator.remove(position);
-                } else if !thread::panicking() {
+                } else if !crate::panicking() {
                     unreachable!();
                 }
             }
@@ -1203,7 +1202,7 @@ impl<'a> RawLeafBuilder<'a> {
 
 impl Drop for RawLeafBuilder<'_> {
     fn drop(&mut self) {
-        if !thread::panicking() {
+        if !crate::panicking() {
             assert_eq!(self.pairs_written, self.num_pairs);
             assert_eq!(
                 self.key_section_start() + self.provisioned_key_bytes,
@@ -2204,7 +2203,7 @@ impl<'b> RawBranchBuilder<'b> {
 
 impl Drop for RawBranchBuilder<'_> {
     fn drop(&mut self) {
-        if !thread::panicking() {
+        if !crate::panicking() {
             assert_eq!(self.keys_written, self.num_keys);
         }
     }

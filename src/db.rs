@@ -1,7 +1,9 @@
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
+#[cfg(not(redb_no_std))]
+use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -17,10 +19,11 @@ use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
+#[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
 use std::io;
+#[cfg(not(redb_no_std))]
 use std::path::Path;
-use std::thread;
 
 use crate::error::TransactionError;
 use crate::sealed::{Sealed, SealedInApi5};
@@ -29,6 +32,7 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
+#[cfg(not(redb_no_std))]
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, warn};
@@ -375,6 +379,8 @@ pub trait ReadableDatabase: SealedInApi5 {
     fn cache_stats(&self) -> CacheStats;
 }
 
+// Unavailable without std: every route to one goes through a path, and the file-backed API is
+// gated out below.
 /// A redb database opened in read-only mode
 ///
 /// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database
@@ -415,13 +421,16 @@ pub trait ReadableDatabase: SealedInApi5 {
 /// # Ok(())
 /// # }
 /// ```
+#[cfg(not(redb_no_std))]
 pub struct ReadOnlyDatabase {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
 }
 
+#[cfg(not(redb_no_std))]
 impl Sealed for ReadOnlyDatabase {}
 
+#[cfg(not(redb_no_std))]
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let id = self
@@ -440,8 +449,10 @@ impl ReadableDatabase for ReadOnlyDatabase {
     }
 }
 
+#[cfg(not(redb_no_std))]
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
+    #[cfg(not(redb_no_std))]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
     }
@@ -557,11 +568,13 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(not(redb_no_std))]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
 
     /// Opens an existing redb database.
+    #[cfg(not(redb_no_std))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -1335,7 +1348,7 @@ fn ensure_allocator_state_table_and_trim(
 // transaction can be started concurrently and the commit in here cannot block on the
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
-    if !thread::panicking()
+    if !crate::panicking()
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
         #[cfg(feature = "logging")]
@@ -1468,6 +1481,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
+    #[cfg(not(redb_no_std))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -1487,6 +1501,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
+    #[cfg(not(redb_no_std))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -1505,6 +1520,7 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
+    #[cfg(not(redb_no_std))]
     pub fn open_read_only(
         &self,
         path: impl AsRef<Path>,
@@ -1522,6 +1538,7 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
+    #[cfg(not(redb_no_std))]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::new(file)?),

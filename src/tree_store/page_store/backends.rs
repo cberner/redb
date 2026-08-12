@@ -1,21 +1,26 @@
 use crate::StorageBackend;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use std::io;
+#[cfg(not(redb_no_std))]
 use std::io::Error;
 
+#[cfg(not(redb_no_std))]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
     inner: Box<dyn StorageBackend>,
 }
 
+#[cfg(not(redb_no_std))]
 impl ReadOnlyBackend {
     pub fn new(inner: Box<dyn StorageBackend>) -> Self {
         Self { inner }
     }
 }
 
+#[cfg(not(redb_no_std))]
 impl StorageBackend for ReadOnlyBackend {
     fn len(&self) -> Result<u64, Error> {
         self.inner.len()

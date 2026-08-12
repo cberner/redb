@@ -23,7 +23,6 @@ use core::cmp::max;
 use core::mem;
 use core::mem::size_of;
 use core::ops::RangeFull;
-use std::thread;
 
 #[derive(Debug)]
 #[repr(transparent)]
@@ -799,7 +798,7 @@ impl TableTreeMut {
 
 impl Drop for TableTreeMut {
     fn drop(&mut self) {
-        if thread::panicking() {
+        if crate::panicking() {
             return;
         }
         assert!(self.allocated_pages.is_empty());
