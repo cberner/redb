@@ -1000,11 +1000,22 @@ impl Database {
         Ok(())
     }
 
+    // Whether the primary slot's trees verify. A Corrupted error counts as "they do not", so that
+    // a torn slot carrying an invalid page number falls back to the secondary like any other bad
+    // primary, rather than aborting the repair. Other errors (e.g. I/O) still propagate.
+    fn primary_verifies(mem: &Arc<TransactionalMemory>) -> Result<bool> {
+        match Self::verify_primary_checksums(mem.clone()) {
+            Ok(verified) => Ok(verified),
+            Err(StorageError::Corrupted(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     fn do_repair(
         mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
-        if !Self::verify_primary_checksums(mem.clone())? {
+        if !Self::primary_verifies(mem)? {
             if mem.used_two_phase_commit() {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Primary is corrupted despite 2-phase commit".to_string(),
@@ -1023,7 +1034,7 @@ impl Database {
             // have poisoned it with pages that just got rolled back by repair_primary_corrupted(), since
             // that rolls back a partially committed transaction.
             mem.clear_read_cache();
-            if !Self::verify_primary_checksums(mem.clone())? {
+            if !Self::primary_verifies(mem)? {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Failed to repair database. All roots are corrupted".to_string(),
                 )));
@@ -1069,10 +1080,7 @@ impl Database {
                 untracked,
                 PageResolver::new(mem.clone()),
             )?;
-            tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
-                Ok(())
-            })?;
+            tables.visit_all_pages(|path| mem.mark_page_allocated(path.page_number()))?;
             Self::with_recounted_length(root, tables.count_tables()?)
         };
 
@@ -1092,26 +1100,21 @@ impl Database {
                 untracked,
                 PageResolver::new(mem.clone()),
             )?;
-            system_tables.visit_all_pages(|path| {
-                mem.mark_page_allocated(path.page_number());
-                Ok(())
-            })?;
+            system_tables.visit_all_pages(|path| mem.mark_page_allocated(path.page_number()))?;
             Self::with_recounted_length(root, system_tables.count_tables()?)
         };
 
         Self::visit_freed_tree(system_root, DATA_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
-            Ok(())
+            mem.mark_page_allocated(page)
         })?;
         Self::visit_freed_tree(system_root, SYSTEM_FREED_TABLE, mem.clone(), |page| {
-            mem.mark_page_allocated(page);
-            Ok(())
+            mem.mark_page_allocated(page)
         })?;
         // Non-durable commits hold their data-freed records in memory rather than in
         // DATA_FREED_TABLE, so the walk above does not reach those pages. They are still allocated
         // until a commit processes the records, so mark them like any other freed-table page.
         for page in mem.unpersisted_data_freed_pages() {
-            mem.mark_page_allocated(page);
+            mem.mark_page_allocated(page)?;
         }
         #[cfg(debug_assertions)]
         {

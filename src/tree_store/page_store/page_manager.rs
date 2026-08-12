@@ -641,6 +641,17 @@ impl TransactionalMemory {
         })
     }
 
+    // An order read from a corrupted file would otherwise size a multi-terabyte read buffer, whose
+    // failed allocation aborts the process instead of returning an error.
+    fn check_page_order(page: PageNumber) -> Result<()> {
+        if page.page_order > MAX_MAX_PAGE_ORDER {
+            return Err(StorageError::Corrupted(format!(
+                "Page {page:?} has order greater than the maximum of {MAX_MAX_PAGE_ORDER}"
+            )));
+        }
+        Ok(())
+    }
+
     pub(crate) fn cache_stats(&self) -> CacheStats {
         self.storage.cache_stats()
     }
@@ -793,13 +804,18 @@ impl TransactionalMemory {
         self.state.lock().unwrap().allocators.is_some()
     }
 
-    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) {
-        let mut state = self.state.lock().unwrap();
+    // The freed tables name pages that no page walk ever reads, so this is the only place those
+    // page numbers are validated.
+    pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result<()> {
+        Self::check_page_order(page_number)?;
+        let mut state = self.state.lock()?;
         let region_index = page_number.region;
         let allocator = state.get_region_mut(region_index);
         allocator.record_alloc(page_number.page_index, page_number.page_order);
         #[cfg(debug_assertions)]
         assert!(self.allocated_pages.lock().unwrap().insert(page_number));
+
+        Ok(())
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
@@ -1062,6 +1078,7 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
+        Self::check_page_order(page_number)?;
         let range = page_number.address_range(
             self.page_size.into(),
             self.region_size,
@@ -1095,6 +1112,7 @@ impl TransactionalMemory {
 
     // NOTE: the caller must ensure that the read cache has been invalidated or stale reads my occur
     pub(crate) fn get_page_mut<'txn>(&self, page_number: PageNumber) -> Result<PageMut<'txn>> {
+        Self::check_page_order(page_number)?;
         #[cfg(debug_assertions)]
         {
             assert!(
@@ -1670,6 +1688,47 @@ mod test {
         // The poison stays set, so later accesses fail rather than trust the state
         assert!(mem.state.is_poisoned());
         assert!(mem.get_last_committed_transaction_id().is_err());
+    }
+
+    // A page order read from a corrupted file can be far larger than any real page, which the read
+    // path would use to size its buffer.
+    #[test]
+    fn oversized_page_order_is_rejected() {
+        use super::TransactionalMemory;
+        use crate::StorageError;
+        use crate::tree_store::page_store::base::PageHint;
+        use crate::tree_store::{InMemoryBackend, Page, PageNumber, PageTracker};
+
+        let page_size = 4096;
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            Some(64 * page_size as u64),
+            0,
+            false,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+
+        let valid = mem.allocate_helper(1, false).unwrap();
+        let valid_page = valid.get_page_number();
+        drop(valid);
+
+        // order = 31, which would be read as a 2^31 page (8TiB) allocation
+        let bad_order = PageNumber::from_le_bytes((31u64 << 59).to_le_bytes());
+
+        assert!(matches!(
+            mem.get_page(bad_order, PageHint::None),
+            Err(StorageError::Corrupted(_))
+        ));
+        assert!(matches!(
+            mem.mark_page_allocated(bad_order),
+            Err(StorageError::Corrupted(_))
+        ));
+        mem.get_page(valid_page, PageHint::None).unwrap();
+
+        mem.free(valid_page, &PageTracker::ignore());
     }
 
     // Freeing pages that buddy-merge into a higher order must re-mark the region tracker at the
