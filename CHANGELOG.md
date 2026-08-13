@@ -35,6 +35,9 @@
   could be slower than writing from a single thread; they now scale with the number of threads.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
+* Fix a process abort when reading a database file whose branch pages form a cycle, or an
+  arbitrarily long chain. Descending the tree recursed until the stack overflowed, which aborts the
+  process rather than failing; `StorageError::Corrupted` is now returned instead.
 * Fix a process abort when reading a database file containing a corrupted page number. Such a page
   could attempt a multi-terabyte allocation, which aborts the process rather than failing;
   `StorageError::Corrupted` is now returned instead.

@@ -1,7 +1,7 @@
 use crate::db::TransactionGuard;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, LeafPageMut, branch_checksum, leaf_checksum,
+    LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, branch_checksum, leaf_checksum,
 };
 #[cfg(feature = "experimental-api-5")]
 use crate::tree_store::btree_cursor::BtreeCursor;
@@ -16,7 +16,7 @@ use crate::tree_store::{
     PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageResolver, PageTracker,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
-use crate::{AccessGuard, Result};
+use crate::{AccessGuard, Result, StorageError};
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -67,6 +67,10 @@ impl PagePath {
         &self.path[..self.path.len() - 1]
     }
 
+    pub(crate) fn depth(&self) -> usize {
+        self.path.len()
+    }
+
     pub(crate) fn page_number(&self) -> PageNumber {
         self.path[self.path.len() - 1]
     }
@@ -113,6 +117,11 @@ impl UntypedBtree {
     where
         F: FnMut(&PagePath) -> Result,
     {
+        if path.depth() > MAX_BTREE_DEPTH {
+            return Err(crate::StorageError::Corrupted(
+                "Btree exceeded maximum depth".to_string(),
+            ));
+        }
         visitor(&path)?;
         let page = self.mem.get_page(path.page_number(), self.hint)?;
 
@@ -950,7 +959,7 @@ impl RawBtree {
         expected_checksum: Checksum,
         visited: &mut Vec<PageNumber>,
     ) -> Result<bool> {
-        if visited.contains(&page_number) {
+        if visited.len() >= MAX_BTREE_DEPTH || visited.contains(&page_number) {
             return Ok(false);
         }
         visited.push(page_number);
@@ -1083,42 +1092,54 @@ impl<K: Key, V: Value> Btree<K, V> {
 
     // Returns the value for the queried key, if present
     fn get_helper(&self, page: &PageImpl, query: &[u8]) -> Result<Option<AccessGuard<'static, V>>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                if let Some(entry_index) = accessor.find_key::<K>(query) {
-                    let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuard::with_page(page.clone(), start..end);
-                    Ok(Some(guard))
-                } else {
-                    Ok(None)
+        let mut descended: Option<PageImpl> = None;
+        for _ in 0..MAX_BTREE_DEPTH {
+            let page = descended.as_ref().unwrap_or(page);
+            let child_page = match page.memory()[0] {
+                LEAF => {
+                    let accessor =
+                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                    return Ok(accessor.find_key::<K>(query).map(|entry_index| {
+                        let (start, end) = accessor.value_range(entry_index).unwrap();
+                        AccessGuard::with_page(page.clone(), start..end)
+                    }));
                 }
-            }
-            BRANCH => {
-                let accessor = BranchAccessor::new(page, K::fixed_width());
-                let (_, child_page) = accessor.child_for_key::<K>(query);
-                let child_page = self.mem.get_page(child_page, self.hint)?;
-                self.get_helper(&child_page, query)
-            }
-            _ => unreachable!(),
+                BRANCH => {
+                    let accessor = BranchAccessor::new(page, K::fixed_width());
+                    accessor.child_for_key::<K>(query).1
+                }
+                _ => unreachable!(),
+            };
+            descended = Some(self.mem.get_page(child_page, self.hint)?);
         }
+        Err(StorageError::Corrupted(
+            "Btree exceeded maximum depth".to_string(),
+        ))
     }
 
     pub(crate) fn first(
         &self,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if let Some(ref root) = self.cached_root {
-            self.first_helper(root.clone())
+            self.first_helper(root.clone(), 0)
         } else {
             Ok(None)
         }
     }
 
+    // Recursive, unlike the other descents: consuming the leaf page into the returned guards is a
+    // move out of the loop variable, which costs a conditional drop flag and measurably worse
+    // codegen. Bounded by depth instead.
     fn first_helper(
         &self,
         page: PageImpl,
+        depth: usize,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(StorageError::Corrupted(
+                "Btree exceeded maximum depth".to_string(),
+            ));
+        }
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -1131,7 +1152,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(0).unwrap();
-                self.first_helper(self.mem.get_page(child_page, self.hint)?)
+                self.first_helper(self.mem.get_page(child_page, self.hint)?, depth + 1)
             }
             _ => unreachable!(),
         }
@@ -1141,16 +1162,23 @@ impl<K: Key, V: Value> Btree<K, V> {
         &self,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if let Some(ref root) = self.cached_root {
-            self.last_helper(root.clone())
+            self.last_helper(root.clone(), 0)
         } else {
             Ok(None)
         }
     }
 
+    // Recursive for the same reason as first_helper()
     fn last_helper(
         &self,
         page: PageImpl,
+        depth: usize,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
+        if depth > MAX_BTREE_DEPTH {
+            return Err(StorageError::Corrupted(
+                "Btree exceeded maximum depth".to_string(),
+            ));
+        }
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
@@ -1164,7 +1192,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(accessor.count_children() - 1).unwrap();
-                self.last_helper(self.mem.get_page(child_page, self.hint)?)
+                self.last_helper(self.mem.get_page(child_page, self.hint)?, depth + 1)
             }
             _ => unreachable!(),
         }
