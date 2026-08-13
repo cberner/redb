@@ -17,6 +17,12 @@ use core::ops::Range;
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
 
+// Descending a btree recurses once per level, so a corrupted file whose branch pages form a cycle,
+// or a crafted chain of them, overflows the stack -- which aborts rather than unwinding. No real
+// tree comes close to this depth: the page format addresses 4PiB, and branches hold enough children
+// that even a minimally filled tree over it is only tens of levels deep.
+pub(crate) const MAX_BTREE_DEPTH: usize = 128;
+
 pub(super) type Checksum = u128;
 // Dummy value. Final value will be computed during commit
 pub(super) const DEFERRED: Checksum = 999;

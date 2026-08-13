@@ -1,8 +1,8 @@
 use crate::AccessGuard;
 use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, LEAF, LeafAccessor, OwnedEntryBuffer, leaf_below_merge_threshold,
-    leaf_fits_one_page, retained_after_removals,
+    BRANCH, BranchAccessor, LEAF, LeafAccessor, MAX_BTREE_DEPTH, OwnedEntryBuffer,
+    leaf_below_merge_threshold, leaf_fits_one_page, retained_after_removals,
 };
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -141,32 +141,38 @@ fn descend_to_position<K: Key + 'static, V: Value + 'static, F>(
 where
     F: FnMut(PageNumber) -> Result<PageImpl>,
 {
-    match page.memory()[0] {
-        LEAF => {
-            let (position, len) = {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                (
-                    lower_bound_entry::<K>(&accessor, position),
-                    accessor.num_pairs(),
-                )
-            };
-            Ok(Leaf {
-                page,
-                position,
-                len,
-            })
-        }
-        BRANCH => {
-            let (child_index, child_page) = {
+    let mut page = page;
+    loop {
+        let (child_index, child_page) = match page.memory()[0] {
+            LEAF => {
+                let (leaf_position, len) = {
+                    let accessor =
+                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                    (
+                        lower_bound_entry::<K>(&accessor, position),
+                        accessor.num_pairs(),
+                    )
+                };
+                return Ok(Leaf {
+                    page,
+                    position: leaf_position,
+                    len,
+                });
+            }
+            BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_index = child_to_visit::<K>(&accessor, position);
                 (child_index, accessor.child_page(child_index).unwrap())
-            };
-            path.push(Branch::new(page, child_index));
-            let child = get_page(child_page)?;
-            descend_to_position::<K, V, F>(child, position, path, get_page)
+            }
+            _ => unreachable!(),
+        };
+        if path.len() >= MAX_BTREE_DEPTH {
+            return Err(StorageError::Corrupted(
+                "Btree exceeded maximum depth".to_string(),
+            ));
         }
-        _ => unreachable!(),
+        path.push(Branch::new(page, child_index));
+        page = get_page(child_page)?;
     }
 }
 
