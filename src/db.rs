@@ -41,6 +41,17 @@ use log::{debug, warn};
 /// Implements persistent storage for a database.
 ///
 /// Failures are reported as [`io::Error`], which is [`std::io::Error`] whenever std is available.
+///
+/// An error from [`len`](Self::len), [`read`](Self::read), [`set_len`](Self::set_len) or
+/// [`sync_data`](Self::sync_data) takes the database out of service: redb records it and never
+/// retries, so a call that starts after that fails with [`StorageError::PreviousIo`] instead of
+/// reaching the backend. [`write`](Self::write) is the same except on cache writeback redb
+/// issues as best effort, which a backend cannot distinguish, so it should assume every error it
+/// returns is permanent and retry transient conditions -- a short read, a busy device, an
+/// interrupted system call -- internally.
+///
+/// Methods take `&self` and may be called concurrently, hence the `Send + Sync` bound; a backend
+/// over storage that is not inherently shareable supplies its own interior mutability.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, io::Error>;
@@ -66,6 +77,9 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once: when the [`Database`] is dropped, or, if a [`WriteTransaction`] was live at that
     /// point, when that transaction completes, or if opening the database fails
+    ///
+    /// It is called even after another method has failed, so a backend can rely on it to release
+    /// whatever it holds.
     fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
