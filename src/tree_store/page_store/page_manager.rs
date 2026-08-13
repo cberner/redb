@@ -804,9 +804,31 @@ impl TransactionalMemory {
     pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result<()> {
         Self::check_page_order(page_number)?;
         let mut state = self.state.lock()?;
-        let region_index = page_number.region;
-        let allocator = state.get_region_mut(region_index);
-        allocator.record_alloc(page_number.page_index, page_number.page_order);
+        // Unlike the read path, this is only reached while rebuilding the allocator state, and the
+        // state lock is already held, so validating against the layout costs nothing here
+        let layout = state.header.layout();
+        if page_number.region >= layout.num_regions() {
+            return Err(StorageError::Corrupted(format!(
+                "Page {page_number:?} is in region {}, but the database has {} region(s)",
+                page_number.region,
+                layout.num_regions()
+            )));
+        }
+        let region_pages = u64::from(layout.region_layout(page_number.region).num_pages());
+        // Cannot overflow: page_index is at most 2^32, and the order was bounded above
+        let end_page = (u64::from(page_number.page_index) + 1) << page_number.page_order;
+        if end_page > region_pages {
+            return Err(StorageError::Corrupted(format!(
+                "Page {page_number:?} extends past the end of its region, which has {region_pages} pages"
+            )));
+        }
+
+        let allocator = state.get_region_mut(page_number.region);
+        if !allocator.record_alloc(page_number.page_index, page_number.page_order) {
+            return Err(StorageError::Corrupted(format!(
+                "Page {page_number:?} overlaps a page that is already allocated"
+            )));
+        }
         #[cfg(debug_assertions)]
         assert!(self.allocated_pages.lock().unwrap().insert(page_number));
 
@@ -1683,6 +1705,56 @@ mod test {
         // The poison stays set, so later accesses fail rather than trust the state
         assert!(mem.state.is_poisoned());
         assert!(mem.get_last_committed_transaction_id().is_err());
+    }
+
+    // Rebuilding the allocator state feeds mark_page_allocated() page numbers straight out of the
+    // freed tables, which no page walk ever reads. A corrupted entry has to be reported rather than
+    // indexing the region allocators, tripping the bitmap's bounds assertion, or walking the buddy
+    // allocator past its maximum order. See https://github.com/cberner/redb/issues/1333
+    #[test]
+    fn mark_page_allocated_rejects_corrupt_page_numbers() {
+        use super::{MAX_PAGE_INDEX, TransactionalMemory};
+        use crate::StorageError;
+        use crate::tree_store::page_store::base::MAX_REGIONS;
+        use crate::tree_store::{InMemoryBackend, PageNumber};
+
+        let page_size = 4096;
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            Some(64 * page_size as u64),
+            0,
+            false,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+
+        let corrupt = [
+            // Past the end of the layout, which would index the region allocators out of bounds
+            PageNumber::new(MAX_REGIONS - 1, 0, 0),
+            // Past the end of its region, which the bitmap asserts on
+            PageNumber::new(0, MAX_PAGE_INDEX, 0),
+            // An order no region can have
+            PageNumber::from_le_bytes((31u64 << 59).to_le_bytes()),
+        ];
+        for page in corrupt {
+            assert!(
+                matches!(
+                    mem.mark_page_allocated(page),
+                    Err(StorageError::Corrupted(_))
+                ),
+                "{page:?} was not rejected"
+            );
+        }
+
+        // Naming the same page twice walks the allocator up past its maximum order looking for a
+        // parent to split
+        mem.mark_page_allocated(PageNumber::new(0, 0, 0)).unwrap();
+        assert!(matches!(
+            mem.mark_page_allocated(PageNumber::new(0, 0, 0)),
+            Err(StorageError::Corrupted(_))
+        ));
     }
 
     // A page order read from a corrupted file can be far larger than any real page, which the read
