@@ -64,8 +64,8 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Release any resources held by the backend
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
-    /// once when the database is closed: when the [`Database`] is dropped, or, if a
-    /// [`WriteTransaction`] was live at that point, when that transaction completes
+    /// once: when the [`Database`] is dropped, or, if a [`WriteTransaction`] was live at that
+    /// point, when that transaction completes, or if opening the database fails
     fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }

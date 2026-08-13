@@ -165,6 +165,9 @@
   leaf page, instead of splitting the full one in half and leaving space behind that no later
   insert can use. A table loaded in key order occupies about half as many pages as before, and
   loads faster.
+* `StorageBackend::close()` is now also called when opening a database fails, so that a backend
+  can release what it holds on that path. Previously it was called only for a database that
+  finished opening.
 
 ### redb-derive (unreleased)
 * Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
