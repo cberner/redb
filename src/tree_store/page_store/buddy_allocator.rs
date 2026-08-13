@@ -262,7 +262,7 @@ impl BuddyAllocator {
                 if processed_pages + order_size > self.len() {
                     break;
                 }
-                self.record_alloc_inner(page, order);
+                assert!(self.record_alloc_inner(page, order));
                 processed_pages += order_size;
             }
             // Allocate the remaining space, at the highest order
@@ -270,7 +270,7 @@ impl BuddyAllocator {
                 let order_size = 2u32.pow(order.into());
                 while processed_pages + order_size <= self.len() {
                     let page = processed_pages / order_size;
-                    self.record_alloc_inner(page, order);
+                    assert!(self.record_alloc_inner(page, order));
                     processed_pages += order_size;
                 }
             }
@@ -389,19 +389,33 @@ impl BuddyAllocator {
         }
     }
 
-    // `page_number` must be free
-    pub(crate) fn record_alloc(&mut self, page_number: u32, order: u8) {
-        assert!(order <= self.max_order);
+    // `page_number` must be free. Returns false if it cannot be marked allocated: the order is too
+    // large for this region, the page is out of range, or the space is already in use. Rebuilding
+    // the allocator state feeds this page numbers read from the file, where any of the three means
+    // the file is corrupt; the callers that compute page numbers themselves assert instead.
+    #[must_use]
+    pub(crate) fn record_alloc(&mut self, page_number: u32, order: u8) -> bool {
         // Split parent pages as necessary, and update the free index
-        self.record_alloc_inner(page_number, order);
+        self.record_alloc_inner(page_number, order)
     }
 
-    pub(crate) fn record_alloc_inner(&mut self, page_number: u32, order: u8) {
+    #[must_use]
+    pub(crate) fn record_alloc_inner(&mut self, page_number: u32, order: u8) -> bool {
+        // Marking a page that is already allocated walks up the orders looking for a free parent to
+        // split, so running off the top is how a duplicate or overlapping page number shows up
+        if order > self.max_order {
+            return false;
+        }
         let allocator = self.get_order_free_mut(order);
+        if page_number >= allocator.len() {
+            return false;
+        }
         if allocator.get(page_number) {
             // Need to split parent page
             let upper_page = next_higher_order(page_number);
-            self.record_alloc_inner(upper_page, order + 1);
+            if !self.record_alloc_inner(upper_page, order + 1) {
+                return false;
+            }
             let allocator = self.get_order_free_mut(order);
 
             let (free1, free2) = (upper_page * 2, upper_page * 2 + 1);
@@ -414,6 +428,8 @@ impl BuddyAllocator {
         } else {
             allocator.set(page_number);
         }
+
+        true
     }
 
     /// data must have been initialized by `Self::init_new()`
@@ -466,7 +482,7 @@ mod test {
         assert_eq!(allocator.count_allocated_pages(), 0);
 
         for page in 0..num_pages {
-            allocator.record_alloc(page, 0);
+            assert!(allocator.record_alloc(page, 0));
         }
         assert_eq!(allocator.count_allocated_pages(), num_pages);
 

@@ -35,6 +35,9 @@
   could be slower than writing from a single thread; they now scale with the number of threads.
 * Fix a panic when opening a database containing a corrupted persistent savepoint record;
   `StorageError::Corrupted` is now returned instead.
+* Fix a panic while repairing a database file containing a malformed freed-page record, which left
+  the file permanently unopenable because both `Database::open` and `check_integrity()` run the same
+  repair. `StorageError::Corrupted` is now returned instead.
 * Fix a process abort when reading a database file whose branch pages form a cycle, or an
   arbitrarily long chain. Descending the tree recursed until the stack overflowed, which aborts the
   process rather than failing; `StorageError::Corrupted` is now returned instead.
