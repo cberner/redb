@@ -126,6 +126,16 @@ struct CheckedBackend {
     closed: AtomicBool,
 }
 
+// Covers the open paths that fail before there is a Database to drop. Drop cannot report the
+// error, but the open is already failing.
+impl Drop for CheckedBackend {
+    fn drop(&mut self) {
+        if !self.closed.load(Ordering::Acquire) {
+            let _ = self.file.close();
+        }
+    }
+}
+
 impl CheckedBackend {
     fn new(file: Box<dyn StorageBackend>) -> Self {
         Self {

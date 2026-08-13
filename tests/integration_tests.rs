@@ -484,6 +484,71 @@ fn close_called_exactly_once_on_shutdown_io_error() {
     }
 }
 
+// close() is also called when opening fails, before there is a Database to drop.
+#[test]
+fn close_called_exactly_once_when_open_fails() {
+    use std::sync::atomic::AtomicU64;
+
+    #[derive(Debug)]
+    struct CountingBackend {
+        data: Vec<u8>,
+        len_fails: bool,
+        close_calls: Arc<AtomicU64>,
+    }
+
+    impl StorageBackend for CountingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            if self.len_fails {
+                return Err(std::io::Error::other("injected fault"));
+            }
+            Ok(self.data.len() as u64)
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            let start = usize::try_from(offset).unwrap();
+            out.copy_from_slice(&self.data[start..start + out.len()]);
+            Ok(())
+        }
+
+        fn set_len(&self, _len: u64) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn close(&self) -> Result<(), std::io::Error> {
+            self.close_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // Not a redb database, so the magic number check rejects it
+    let close_calls = Arc::new(AtomicU64::new(0));
+    let backend = CountingBackend {
+        data: vec![0xAB; 4096],
+        len_fails: false,
+        close_calls: close_calls.clone(),
+    };
+    assert!(Database::builder().create_with_backend(backend).is_err());
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+
+    // Fails earlier still, on the first call the backend receives
+    let close_calls = Arc::new(AtomicU64::new(0));
+    let backend = CountingBackend {
+        data: Vec::new(),
+        len_fails: true,
+        close_calls: close_calls.clone(),
+    };
+    assert!(Database::builder().create_with_backend(backend).is_err());
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+}
+
 #[test]
 fn mixed_durable_commit() {
     let tmpfile = create_tempfile();
