@@ -61,6 +61,9 @@ clear_podman_cache:
 
 test_wasi:
     rustup install nightly-2025-07-26 --target wasm32-wasip1-threads
+    # cargo pkgid below needs a lockfile, which a fresh checkout of a library does not have. Only
+    # created when missing, so that running this does not re-resolve an existing one.
+    [ -f Cargo.lock ] || cargo generate-lockfile
     # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
     cargo +nightly-2025-07-26 test -p $(cargo pkgid) --target=wasm32-wasip1-threads -- --nocapture
     cargo +nightly-2025-07-26 test -p redb-derive --target=wasm32-wasip1-threads -- --nocapture
