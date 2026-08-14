@@ -88,14 +88,16 @@ fn nosync_writes<T: BenchDatabase + Send + Sync>(
 
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::txns(NOSYNC_WRITES, duration);
     println!(
-        "{}: Wrote {} individual items in {}ms, with nosync",
+        "{}: Wrote {} individual items in {}ms ({}), with nosync",
         T::db_type_name(),
         NOSYNC_WRITES,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
 
-    ResultType::Duration(duration)
+    result
 }
 
 pub fn benchmark<T: BenchDatabase + Send + Sync>(
@@ -120,13 +122,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
 
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::keys(BULK_ELEMENTS, duration);
     println!(
-        "{}: Bulk loaded {} items in {}ms",
+        "{}: Bulk loaded {} items in {}ms ({})",
         T::db_type_name(),
         BULK_ELEMENTS,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("bulk load".to_string(), ResultType::Duration(duration)));
+    results.push(("bulk load".to_string(), result));
 
     let start = Instant::now();
     {
@@ -142,16 +146,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
 
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::txns(INDIVIDUAL_WRITES, duration);
     println!(
-        "{}: Wrote {} individual items in {}ms",
+        "{}: Wrote {} individual items in {}ms ({})",
         T::db_type_name(),
         INDIVIDUAL_WRITES,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push((
-        "individual writes".to_string(),
-        ResultType::Duration(duration),
-    ));
+    results.push(("individual writes".to_string(), result));
 
     let start = Instant::now();
     {
@@ -169,14 +172,18 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
 
     let end = Instant::now();
     let duration = end - start;
+    // Batches are large enough that the rate of keys written, rather than of commits, is
+    // what the phase measures
+    let result = ResultType::keys(BATCH_WRITES * BATCH_SIZE, duration);
     println!(
-        "{}: Wrote {} batches of {} items in {}ms",
+        "{}: Wrote {} batches of {} items in {}ms ({})",
         T::db_type_name(),
         BATCH_WRITES,
         BATCH_SIZE,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("batch writes".to_string(), ResultType::Duration(duration)));
+    results.push(("small batch writes".to_string(), result));
 
     if connection.set_sync(false) {
         let result = nosync_writes::<T>(&connection, &mut rng);
@@ -204,8 +211,9 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             assert_eq!(len, elements as u64);
             let end = Instant::now();
             let duration = end - start;
-            println!("{}: len() in {}ms", T::db_type_name(), duration.as_millis());
-            results.push(("len()".to_string(), ResultType::Duration(duration)));
+            let result = ResultType::Latency(duration);
+            println!("{}: len() in {}", T::db_type_name(), result.with_unit());
+            results.push(("len()".to_string(), result));
         }
 
         for _ in 0..READ_ITERATIONS {
@@ -223,13 +231,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             assert_eq!(checksum, expected_checksum);
             let end = Instant::now();
             let duration = end - start;
+            let result = ResultType::keys(NUM_READS, duration);
             println!(
-                "{}: Random read {} items in {}ms",
+                "{}: Random read {} items in {}ms ({})",
                 T::db_type_name(),
                 NUM_READS,
-                duration.as_millis()
+                duration.as_millis(),
+                result.with_unit()
             );
-            results.push(("random reads".to_string(), ResultType::Duration(duration)));
+            results.push(("random reads".to_string(), result));
         }
 
         for _ in 0..SCAN_ITERATIONS {
@@ -251,17 +261,18 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             assert!(value_sum > 0);
             let end = Instant::now();
             let duration = end - start;
+            // Rated per range read, rather than per key, because the keys after the first
+            // are reached by stepping the iterator rather than by a lookup
+            let result = ResultType::scans(NUM_SCANS, duration);
             println!(
-                "{}: Random range read {} x {} elements in {}ms",
+                "{}: Random range read {} x {} elements in {}ms ({})",
                 T::db_type_name(),
                 NUM_SCANS,
                 SCAN_LEN,
-                duration.as_millis()
+                duration.as_millis(),
+                result.with_unit()
             );
-            results.push((
-                "random range reads".to_string(),
-                ResultType::Duration(duration),
-            ));
+            results.push(("random range reads".to_string(), result));
         }
     }
     drop(txn);
@@ -296,17 +307,16 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
 
         let end = Instant::now();
         let duration = end - start;
+        let result = ResultType::keys(elements, duration);
         println!(
-            "{}: Random read ({} threads) {} items in {}ms",
+            "{}: Random read ({} threads) {} items in {}ms ({})",
             T::db_type_name(),
             num_threads,
             elements,
-            duration.as_millis()
+            duration.as_millis(),
+            result.with_unit()
         );
-        results.push((
-            format!("random reads ({num_threads} threads)"),
-            ResultType::Duration(duration),
-        ));
+        results.push((format!("random reads ({num_threads} threads)"), result));
     }
 
     let start = Instant::now();
@@ -325,13 +335,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
 
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::keys(deletes, duration);
     println!(
-        "{}: Removed {} items in {}ms",
+        "{}: Removed {} items in {}ms ({})",
         T::db_type_name(),
         deletes,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("removals".to_string(), ResultType::Duration(duration)));
+    results.push(("removals".to_string(), result));
 
     // Retain benchmark: drop every other entry via a predicate, commit the transaction, and
     // then repopulate with the same number of random entries so downstream phases (uncompacted
@@ -354,13 +366,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     };
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::keys(removed as usize, duration);
     println!(
-        "{}: Retain removed {} items in {}ms",
+        "{}: Retain removed {} items in {}ms ({})",
         T::db_type_name(),
         removed,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("retain".to_string(), ResultType::Duration(duration)));
+    results.push(("retain".to_string(), result));
 
     // Repopulate with `removed` fresh random entries so subsequent phases operate on a
     // table comparable in size to the pre-retain state.
@@ -410,13 +424,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     };
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::keys(extracted as usize, duration);
     println!(
-        "{}: extract_if removed {} items in {}ms",
+        "{}: extract_if removed {} items in {}ms ({})",
         T::db_type_name(),
         extracted,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("extract_if".to_string(), ResultType::Duration(duration)));
+    results.push(("extract_if".to_string(), result));
 
     {
         let mut txn = connection.write_transaction();
@@ -491,23 +507,28 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         };
         (timed_pops, applied_pops, duration)
     };
+    // `duration` covers POP_REMOVALS pops in both cases: it is extrapolated from the sample
+    // when the benchmark stopped early
+    let result = ResultType::keys(POP_REMOVALS, duration);
     if timed_pops == POP_REMOVALS as u64 {
         println!(
-            "{}: Popped {} items in {}ms",
+            "{}: Popped {} items in {}ms ({})",
             T::db_type_name(),
             timed_pops,
-            duration.as_millis()
+            duration.as_millis(),
+            result.with_unit()
         );
     } else {
         println!(
-            "{}: Popped {} sampled items, estimated {} items in {}ms",
+            "{}: Popped {} sampled items, estimated {} items in {}ms ({})",
             T::db_type_name(),
             timed_pops,
             POP_REMOVALS,
-            duration.as_millis()
+            duration.as_millis(),
+            result.with_unit()
         );
     }
-    results.push(("pop".to_string(), ResultType::Duration(duration)));
+    results.push(("pop".to_string(), result));
 
     let mut txn = connection.write_transaction();
     let mut inserter = txn.get_inserter();
@@ -579,13 +600,15 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     drop(inserter);
     txn.commit().unwrap();
     let duration = start.elapsed();
+    let result = ResultType::keys(SORTED_ELEMENTS, duration);
     println!(
-        "{}: Loaded {} sorted items in {}ms",
+        "{}: Loaded {} sorted items in {}ms ({})",
         T::db_type_name(),
         SORTED_ELEMENTS,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("sorted inserts".to_string(), ResultType::Duration(duration)));
+    results.push(("sorted inserts".to_string(), result));
 
     results
 }
@@ -599,11 +622,104 @@ fn database_size(path: &Path) -> u64 {
     size
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone)]
+pub enum ThroughputUnit {
+    /// A single key/value pair inserted, read, or removed
+    Key,
+    /// A single committed write transaction
+    Transaction,
+    /// A single range read, which visits several keys
+    Scan,
+}
+
+impl ThroughputUnit {
+    fn abbreviation(self) -> &'static str {
+        match self {
+            ThroughputUnit::Key => "key/s",
+            ThroughputUnit::Transaction => "txn/s",
+            ThroughputUnit::Scan => "scan/s",
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
 pub enum ResultType {
-    Duration(Duration),
+    /// `count` units of work in `duration`. Reported as a rate, so that phases which do
+    /// different amounts of work can still be compared against each other
+    Throughput {
+        count: u64,
+        duration: Duration,
+        unit: ThroughputUnit,
+    },
+    /// Time taken by a phase that is a single call rather than a loop
+    Latency(Duration),
     SizeInBytes(u64),
     NA,
+}
+
+impl ResultType {
+    pub fn keys(count: usize, duration: Duration) -> Self {
+        ResultType::Throughput {
+            count: count as u64,
+            duration,
+            unit: ThroughputUnit::Key,
+        }
+    }
+
+    pub fn txns(count: usize, duration: Duration) -> Self {
+        ResultType::Throughput {
+            count: count as u64,
+            duration,
+            unit: ThroughputUnit::Transaction,
+        }
+    }
+
+    pub fn scans(count: usize, duration: Duration) -> Self {
+        ResultType::Throughput {
+            count: count as u64,
+            duration,
+            unit: ThroughputUnit::Scan,
+        }
+    }
+
+    fn rate(&self) -> f64 {
+        match self {
+            ResultType::Throughput {
+                count, duration, ..
+            } => *count as f64 / duration.as_secs_f64(),
+            _ => 0.0,
+        }
+    }
+
+    // Unit to name in the row title, or None when the value already carries its own unit
+    fn unit_label(&self) -> Option<&'static str> {
+        match self {
+            ResultType::Throughput { unit, .. } => Some(unit.abbreviation()),
+            ResultType::Latency(_) | ResultType::SizeInBytes(_) | ResultType::NA => None,
+        }
+    }
+
+    // Higher is better for throughput, lower is better for latency and size. N/A is never
+    // better, and a row never mixes result kinds
+    fn is_better_than(&self, other: &ResultType) -> bool {
+        match (self, other) {
+            (ResultType::Throughput { .. }, ResultType::Throughput { .. }) => {
+                self.rate() > other.rate()
+            }
+            (ResultType::Latency(a), ResultType::Latency(b)) => a < b,
+            (ResultType::SizeInBytes(a), ResultType::SizeInBytes(b)) => a < b,
+            _ => false,
+        }
+    }
+
+    // Same as `Display`, but names the unit. Used for the per-phase output, which has no
+    // row title to carry it
+    pub fn with_unit(&self) -> String {
+        match self {
+            ResultType::Throughput { unit, .. } => format!("{self} {}", unit.abbreviation()),
+            _ => self.to_string(),
+        }
+    }
 }
 
 impl std::fmt::Display for ResultType {
@@ -612,13 +728,98 @@ impl std::fmt::Display for ResultType {
 
         match self {
             ResultType::NA => write!(f, "N/A"),
-            ResultType::Duration(d) => write!(f, "{:?}ms", d.as_millis()),
+            ResultType::Throughput { .. } => write!(f, "{}", format_rate(self.rate())),
+            ResultType::Latency(d) => write!(f, "{}", format_duration(*d)),
             ResultType::SizeInBytes(s) => {
                 let b = Byte::from_u64(*s).get_appropriate_unit(UnitType::Binary);
                 write!(f, "{b:.2}")
             }
         }
     }
+}
+
+// Three significant digits with an SI suffix, e.g. "938", "9.20K", "293K", "1.09M", so that
+// the results table stays narrow enough to read
+fn format_rate(rate: f64) -> String {
+    const SUFFIXES: [&str; 4] = ["", "K", "M", "G"];
+
+    let mut value = rate;
+    let mut suffix = 0;
+    while value >= 1000.0 && suffix + 1 < SUFFIXES.len() {
+        value /= 1000.0;
+        suffix += 1;
+    }
+    let precision = if value < 10.0 {
+        2
+    } else if value < 100.0 {
+        1
+    } else {
+        0
+    };
+    let suffix = SUFFIXES[suffix];
+
+    format!("{value:.precision$}{suffix}")
+}
+
+// Rounded to the nearest millisecond
+fn format_duration(duration: Duration) -> String {
+    let millis = (duration.as_nanos() + 500_000) / 1_000_000;
+    format!("{millis}ms")
+}
+
+// Prints `results` as a markdown table with one column per database, marking the best result
+// in each row. Rates are named once in the row title, rather than repeated in every cell
+// where they would make the table too wide to read; times and sizes carry their own unit.
+pub fn print_results_table(results: &[(&str, Vec<(String, ResultType)>)]) {
+    let (_, first) = results.first().expect("no results to print");
+
+    let mut table = comfy_table::Table::new();
+    table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
+    table.set_width(100);
+    let mut header = vec![""];
+    header.extend(results.iter().map(|(name, _)| *name));
+    table.set_header(header);
+
+    for (i, (name, _)) in first.iter().enumerate() {
+        let row: Vec<&ResultType> = results.iter().map(|(_, r)| &r[i].1).collect();
+
+        // A database that doesn't support the phase reports N/A, so take the unit from the
+        // first one that ran it
+        let label = match row.iter().find_map(|result| result.unit_label()) {
+            Some(unit) => format!("{name} ({unit})"),
+            None => name.clone(),
+        };
+
+        // Nothing to compare against when only one database was benchmarked
+        let mut best: Option<usize> = None;
+        if results.len() > 1 {
+            for (j, result) in row.iter().enumerate() {
+                if matches!(result, ResultType::NA) {
+                    continue;
+                }
+                if best.is_none_or(|previous| result.is_better_than(row[previous])) {
+                    best = Some(j);
+                }
+            }
+        }
+
+        // Anything that renders the same as the best result is a tie at the precision shown,
+        // so highlight all of them rather than picking one arbitrarily
+        let best = best.map(|j| row[j].to_string());
+        let mut cells = vec![label];
+        cells.extend(row.iter().map(|result| {
+            let value = result.to_string();
+            if best.as_deref() == Some(value.as_str()) {
+                format!("**{value}**")
+            } else {
+                value
+            }
+        }));
+        table.add_row(cells);
+    }
+
+    println!();
+    println!("{table}");
 }
 
 pub trait BenchDatabase {

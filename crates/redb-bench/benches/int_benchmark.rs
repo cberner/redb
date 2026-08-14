@@ -10,7 +10,7 @@ use common::*;
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const ELEMENTS: usize = 1_000_000;
 
@@ -24,7 +24,7 @@ fn random_data(count: usize) -> Vec<(u32, u64)> {
     pairs
 }
 
-fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
+fn benchmark<T: BenchDatabase>(db: T) -> Vec<(String, ResultType)> {
     let mut results = Vec::new();
     let pairs = random_data(1_000_000);
     let mut written = 0;
@@ -48,13 +48,15 @@ fn benchmark<T: BenchDatabase>(db: T) -> Vec<(&'static str, Duration)> {
 
     let end = Instant::now();
     let duration = end - start;
+    let result = ResultType::keys(ELEMENTS, duration);
     println!(
-        "{}: Bulk loaded {} (u32, u64) pairs in {}ms",
+        "{}: Bulk loaded {} (u32, u64) pairs in {}ms ({})",
         T::db_type_name(),
         ELEMENTS,
-        duration.as_millis()
+        duration.as_millis(),
+        result.with_unit()
     );
-    results.push(("bulk load", duration));
+    results.push(("bulk load".to_string(), result));
 
     results
 }
@@ -100,25 +102,9 @@ fn main() {
         benchmark(table)
     };
 
-    let mut rows = Vec::new();
-
-    for (benchmark, _duration) in &redb_results {
-        rows.push(vec![benchmark.to_string()]);
-    }
-
-    for results in [redb_results, lmdb_results, rocksdb_results] {
-        for (i, (_benchmark, duration)) in results.iter().enumerate() {
-            rows[i].push(format!("{}ms", duration.as_millis()));
-        }
-    }
-
-    let mut table = comfy_table::Table::new();
-    table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb"]);
-    for row in rows {
-        table.add_row(row);
-    }
-
-    println!();
-    println!("{table}");
+    print_results_table(&[
+        ("redb", redb_results),
+        ("lmdb", lmdb_results),
+        ("rocksdb", rocksdb_results),
+    ]);
 }

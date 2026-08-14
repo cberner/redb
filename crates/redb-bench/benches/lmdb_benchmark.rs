@@ -92,53 +92,11 @@ fn main() {
 
     fs::remove_dir_all(&tmpdir).unwrap();
 
-    let mut rows = Vec::new();
-
-    for (benchmark, _duration) in &redb_results {
-        rows.push(vec![benchmark.to_string()]);
-    }
-
-    let results = [
-        redb_results,
-        lmdb_results,
-        rocksdb_results,
-        fjall_results,
-        sqlite_results,
-    ];
-
-    let mut identified_smallests = vec![vec![false; results.len()]; rows.len()];
-    for (i, identified_smallests_row) in identified_smallests.iter_mut().enumerate() {
-        let mut smallest = None;
-        for (j, _) in identified_smallests_row.iter().enumerate() {
-            let (_, rt) = &results[j][i];
-            smallest = match smallest {
-                Some((_, prev)) if rt < prev => Some((j, rt)),
-                Some((pi, prev)) => Some((pi, prev)),
-                None => Some((j, rt)),
-            };
-        }
-        let (j, _rt) = smallest.unwrap();
-        identified_smallests_row[j] = true;
-    }
-
-    for (j, results) in results.iter().enumerate() {
-        for (i, (_benchmark, result_type)) in results.iter().enumerate() {
-            rows[i].push(if identified_smallests[i][j] {
-                format!("**{result_type}**")
-            } else {
-                result_type.to_string()
-            });
-        }
-    }
-
-    let mut table = comfy_table::Table::new();
-    table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
-    table.set_width(100);
-    table.set_header(["", "redb", "lmdb", "rocksdb", "fjall", "sqlite"]);
-    for row in rows {
-        table.add_row(row);
-    }
-
-    println!();
-    println!("{table}");
+    print_results_table(&[
+        ("redb", redb_results),
+        ("lmdb", lmdb_results),
+        ("rocksdb", rocksdb_results),
+        ("fjall", fjall_results),
+        ("sqlite", sqlite_results),
+    ]);
 }
