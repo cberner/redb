@@ -28,11 +28,7 @@ fn main() {
     let table = RedbBenchDatabase::new(&mut db);
     let results = benchmark(table, tmpfile.path());
 
-    for (name, result) in &results {
-        if name.ends_with("size") {
-            println!("{name}: {result}");
-        }
-    }
+    print_results_table(&[("redb", results)]);
 
     fs::remove_dir_all(&tmpdir).unwrap();
 }
