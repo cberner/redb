@@ -191,6 +191,16 @@ impl PageAllocator {
         self.allocated_since_commit.take_all()
     }
 
+    // Makes unpersisted pages mutable in place during an irreversible commit. This must not be
+    // called while the transaction can still abort, because rollback_all() frees adopted pages.
+    pub(crate) fn adopt_unpersisted(&self, pages: impl IntoIterator<Item = PageNumber>) {
+        for page in pages {
+            if self.mem.unpersisted(page) {
+                self.allocated_since_commit.insert(page);
+            }
+        }
+    }
+
     /// Reverses every allocation made since the last commit: drains the
     /// allocated-since-commit set and frees each page.
     pub(crate) fn rollback_all(&self) {
@@ -226,6 +236,14 @@ impl PageAllocator {
     pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {
         self.allocated_since_commit.remove(page);
         self.mem.free(page, allocated);
+    }
+
+    pub(crate) fn free_committed_batch(&self, pages: &[PageNumber]) {
+        #[cfg(debug_assertions)]
+        for page in pages {
+            debug_assert!(!self.uncommitted(*page));
+        }
+        self.mem.free_committed_batch(pages);
     }
 
     pub(crate) fn free_if_uncommitted(&self, page: PageNumber, allocated: &PageTracker) -> bool {
@@ -354,6 +372,9 @@ struct UnpersistedState {
     // here for the same reason as `allocations` -- the commits that freed them are volatile, so a
     // crash that loses the records also rolls back the commits they describe.
     data_freed: BTreeMap<TransactionId, Vec<PageNumber>>,
+    // System-tree pages allocated by the post-commit epilogue. A following durable commit can
+    // adopt these after it becomes irreversible and update them in place instead of CoWing them.
+    post_commit_allocations: PageNumberHashSet,
 }
 
 impl UnpersistedState {
@@ -363,6 +384,7 @@ impl UnpersistedState {
         self.allocations.clear();
         self.allocation_txn.clear();
         self.data_freed.clear();
+        self.post_commit_allocations.clear();
     }
 
     fn contains(&self, page: PageNumber) -> bool {
@@ -482,6 +504,9 @@ impl UnpersistedState {
 
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
+    // System pages freed while constructing a post-commit root. They remain allocated until both
+    // durable slots have advanced past the root that references them.
+    post_commit_freed_system: Mutex<BTreeMap<TransactionId, Vec<PageNumber>>>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
@@ -629,6 +654,7 @@ impl TransactionalMemory {
 
         Ok(Self {
             unpersisted: Mutex::new(UnpersistedState::default()),
+            post_commit_freed_system: Mutex::new(BTreeMap::new()),
             storage,
             state: Mutex::new(state),
             #[cfg(debug_assertions)]
@@ -743,6 +769,7 @@ impl TransactionalMemory {
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
         self.unpersisted.lock().unwrap().clear();
+        self.post_commit_freed_system.lock().unwrap().clear();
 
         Ok(was_clean)
     }
@@ -1201,6 +1228,15 @@ impl TransactionalMemory {
         Ok(state.header.primary_slot().transaction_id)
     }
 
+    pub(crate) fn get_durable_secondary_transaction_id(&self) -> TransactionId {
+        self.state
+            .lock()
+            .unwrap()
+            .header
+            .secondary_slot()
+            .transaction_id
+    }
+
     // True when a non-durable commit has been made visible to readers but not yet flushed to the
     // durable primary slot.
     pub(crate) fn pending_non_durable_commit(&self) -> bool {
@@ -1237,6 +1273,48 @@ impl TransactionalMemory {
 
     pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {
         self.free_helper(page, allocated);
+    }
+
+    // Frees pages that are known to predate the current write transaction. Keeping the allocator
+    // lock across the batch avoids lock traffic when a large transaction makes millions of pages
+    // eligible at once.
+    pub(crate) fn free_committed_batch(&self, pages: &[PageNumber]) {
+        #[cfg(debug_assertions)]
+        {
+            let read_pages = self.read_page_ref_counts.lock().unwrap();
+            let dirty_pages = self.open_dirty_pages.lock().unwrap();
+            let mut allocated_pages = self.allocated_pages.lock().unwrap();
+            for page in pages {
+                assert!(!read_pages.contains_key(page));
+                assert!(allocated_pages.remove(page));
+                assert!(!dirty_pages.contains(page));
+            }
+        }
+
+        let mut state = self.state.lock().unwrap();
+        for page in pages {
+            let freed_order = state
+                .get_region_mut(page.region)
+                .free(page.page_index, page.page_order);
+            state
+                .get_region_tracker_mut()
+                .mark_free(freed_order, page.region);
+        }
+        drop(state);
+
+        for page in pages {
+            let address_range = page.address_range(
+                self.page_size.into(),
+                self.region_size,
+                self.region_header_with_padding_size,
+                self.page_size,
+            );
+            let len: usize = (address_range.end - address_range.start)
+                .try_into()
+                .unwrap();
+            self.storage.invalidate_cache(address_range.start, len);
+            self.storage.cancel_pending_write(address_range.start, len);
+        }
     }
 
     fn free_helper(&self, page: PageNumber, allocated: &PageTracker) {
@@ -1307,6 +1385,90 @@ impl TransactionalMemory {
         &self,
     ) -> BTreeMap<TransactionId, PageNumberHashSet> {
         self.unpersisted.lock().unwrap().take_allocations()
+    }
+
+    pub(crate) fn record_post_commit_allocations(
+        &self,
+        pages: impl IntoIterator<Item = PageNumber>,
+    ) {
+        self.unpersisted
+            .lock()
+            .unwrap()
+            .post_commit_allocations
+            .extend(pages);
+    }
+
+    pub(crate) fn take_post_commit_allocations(&self) -> PageNumberHashSet {
+        mem::take(&mut self.unpersisted.lock().unwrap().post_commit_allocations)
+    }
+
+    pub(crate) fn record_post_commit_system_freed(
+        &self,
+        transaction_id: TransactionId,
+        pages: Vec<PageNumber>,
+    ) {
+        if !pages.is_empty() {
+            self.post_commit_freed_system
+                .lock()
+                .unwrap()
+                .entry(transaction_id)
+                .or_default()
+                .extend(pages);
+        }
+    }
+
+    pub(crate) fn take_all_post_commit_system_freed(&self) -> Vec<PageNumber> {
+        mem::take(&mut *self.post_commit_freed_system.lock().unwrap())
+            .into_values()
+            .flatten()
+            .collect()
+    }
+
+    pub(crate) fn take_post_commit_system_freed_before(
+        &self,
+        transaction_id: TransactionId,
+    ) -> Vec<PageNumber> {
+        let mut pending = self.post_commit_freed_system.lock().unwrap();
+        let retained = pending.split_off(&transaction_id);
+        mem::replace(&mut *pending, retained)
+            .into_values()
+            .flatten()
+            .collect()
+    }
+
+    pub(crate) fn post_commit_system_freed_pages(&self) -> Vec<PageNumber> {
+        self.post_commit_freed_system
+            .lock()
+            .unwrap()
+            .values()
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    pub(crate) fn post_commit_system_freed(&self) -> Vec<(TransactionId, Vec<PageNumber>)> {
+        self.post_commit_freed_system
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(transaction_id, pages)| (*transaction_id, pages.clone()))
+            .collect()
+    }
+
+    pub(crate) fn restore_post_commit_system_freed(
+        &self,
+        pending: Vec<(TransactionId, Vec<PageNumber>)>,
+    ) -> Result {
+        for (_, pages) in &pending {
+            for page in pages {
+                self.mark_page_allocated(*page)?;
+            }
+        }
+        self.post_commit_freed_system
+            .lock()
+            .unwrap()
+            .extend(pending);
+        Ok(())
     }
 
     // Returns all unpersisted data-tree pages allocated strictly after `transaction_id`. Used
@@ -1856,9 +2018,7 @@ mod test {
 
         // Free everything in region 0. The order-0 pages buddy-merge back into larger blocks, so
         // region 0 regains free space above order 0.
-        for page in region0_pages {
-            mem.free(page, &ignore);
-        }
+        mem.free_committed_batch(&region0_pages);
 
         // An order-1 allocation must reuse region 0's merged free block. Before the fix the tracker
         // still marked region 0 full above order 0, so find_free skipped it and this landed in a

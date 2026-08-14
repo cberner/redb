@@ -177,6 +177,35 @@ impl StorageBackend for SharedInMemoryBackend {
     }
 }
 
+#[derive(Debug)]
+struct WriteCountingBackend {
+    inner: InMemoryBackend,
+    writes: Arc<AtomicU64>,
+}
+
+impl StorageBackend for WriteCountingBackend {
+    fn len(&self) -> Result<u64, std::io::Error> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), std::io::Error> {
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.inner.write(offset, data)
+    }
+}
+
 /// Returns pairs of key, value
 fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut pairs = vec![];
@@ -604,37 +633,8 @@ fn non_durable_commit_persistence() {
 // in the in-memory cache, visible to readers, and only written out by a later durable commit
 #[test]
 fn non_durable_commit_issues_no_backend_writes() {
-    #[derive(Debug)]
-    struct CountingBackend {
-        inner: InMemoryBackend,
-        writes: Arc<AtomicU64>,
-    }
-
-    impl StorageBackend for CountingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
-            self.inner.len()
-        }
-
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
-            self.inner.read(offset, out)
-        }
-
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
-            self.inner.set_len(len)
-        }
-
-        fn sync_data(&self) -> Result<(), std::io::Error> {
-            self.inner.sync_data()
-        }
-
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
-            self.writes.fetch_add(1, Ordering::SeqCst);
-            self.inner.write(offset, data)
-        }
-    }
-
     let writes = Arc::new(AtomicU64::new(0));
-    let backend = CountingBackend {
+    let backend = WriteCountingBackend {
         inner: InMemoryBackend::new(),
         writes: writes.clone(),
     };
@@ -677,6 +677,43 @@ fn non_durable_commit_issues_no_backend_writes() {
     }
     txn.commit().unwrap();
     assert!(writes.load(Ordering::SeqCst) > writes_before);
+}
+
+// Reclaiming the previous version of a page after a durable overwrite must not create a second
+// system-tree root that adds metadata writes to the following commit.
+#[test]
+fn durable_overwrite_does_not_write_post_commit_metadata() {
+    const COMMITS: u64 = 20;
+
+    let writes = Arc::new(AtomicU64::new(0));
+    let backend = WriteCountingBackend {
+        inner: InMemoryBackend::new(),
+        writes: writes.clone(),
+    };
+    let db = Database::builder().create_with_backend(backend).unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let writes_before = writes.load(Ordering::SeqCst);
+    for value in 1..=COMMITS {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(U64_TABLE).unwrap();
+            table.insert(&0, &value).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+
+    let commit_writes = writes.load(Ordering::SeqCst) - writes_before;
+    assert!(
+        commit_writes <= 5 * COMMITS,
+        "{COMMITS} durable overwrites issued {commit_writes} backend writes"
+    );
 }
 
 fn test_persistence(durability: Durability) {

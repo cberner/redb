@@ -34,6 +34,8 @@
 * `Durability::None` commits are about 2x faster.
 * Writes that do not split a page are faster: about 15% for single-key `Durability::None` commits,
   and about 6% for batched writes.
+* Avoid extra metadata writes during small durable commits and reduce allocator overhead when
+  reclaiming many pages at once.
 * Commits now flush table root updates in a deterministic order, removing a source of
   nondeterminism that could make identical operation sequences produce differing database files
 * Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates

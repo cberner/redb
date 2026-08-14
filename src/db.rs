@@ -701,9 +701,11 @@ impl Database {
         }
 
         // No pending commit, or fall-through: verify and repair the durable state. Capture the
-        // allocator hash to compare against the rebuild below; with the pending case handled above,
-        // the live and durable states are identical here, so this is a valid check.
+        // allocator hash to compare against the rebuild below. The logical roots match the durable
+        // state here, and any fallback-slot page hold is restored after the rebuild.
         let allocator_hash = self.mem.allocator_hash();
+        let live_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
+        let post_commit_system_freed = self.mem.post_commit_system_freed();
         let mem = Arc::get_mut(&mut self.mem).unwrap();
         let mut was_clean = mem.clear_cache_and_reload()?;
 
@@ -713,6 +715,14 @@ impl Database {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
+
+        // Pages retained solely for the fallback durable slot are a legitimate difference from a
+        // rebuild of the primary root. Restore that hold only if reload found the roots it belongs
+        // to; otherwise the on-disk state changed and normal repair accounting applies.
+        if live_roots == old_roots && old_roots == new_roots {
+            self.mem
+                .restore_post_commit_system_freed(post_commit_system_freed)?;
+        }
 
         if old_roots != new_roots
             || allocator_hash != self.mem.allocator_hash()
@@ -1129,6 +1139,11 @@ impl Database {
         // DATA_FREED_TABLE, so the walk above does not reach those pages. They are still allocated
         // until a commit processes the records, so mark them like any other freed-table page.
         for page in mem.unpersisted_data_freed_pages() {
+            mem.mark_page_allocated(page)?;
+        }
+        // The post-commit system root is non-durable, so pages retained only for its durable
+        // ancestor are tracked in memory until both durable slots advance past that ancestor.
+        for page in mem.post_commit_system_freed_pages() {
             mem.mark_page_allocated(page)?;
         }
         #[cfg(debug_assertions)]

@@ -1672,6 +1672,14 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
+        // commit() has taken ownership of the transaction and will invalidate the allocator on
+        // any later failure, so post-commit system pages no longer need copy-on-write rollback.
+        // Adopting them here lets the durable system-tree updates below overwrite them in place.
+        if self.durability == InternalDurability::Immediate {
+            let pages = self.mem.take_post_commit_allocations();
+            self.page_allocator().adopt_unpersisted(pages);
+        }
+
         // A non-durable commit keeps its freed-page records in memory rather than writing them to
         // DATA_FREED_TABLE, which would mutate the system tree on every commit. durable_commit()
         // writes the accumulated records out.
@@ -1935,6 +1943,15 @@ impl WriteTransaction {
                 .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
 
             if self.quick_repair {
+                let pending = self.mem.take_all_post_commit_system_freed();
+                if !pending.is_empty() {
+                    self.store_system_freed_pages(
+                        system_tree,
+                        self.transaction_id,
+                        Arc::new(Mutex::new(pending)),
+                        None,
+                    )?;
+                }
                 system_tree.create_table_and_flush_table_root(
                     ALLOCATOR_STATE_TABLE_NAME,
                     |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
@@ -1988,6 +2005,15 @@ impl WriteTransaction {
         // Mark any pending non-durable commits as fully committed.
         self.transaction_tracker.clear_pending_non_durable_commits();
 
+        // A one-phase commit may need its secondary slot for recovery. Once that slot has moved
+        // past an older root, pages held only for that root can be returned to the allocator.
+        if !self.quick_repair {
+            let secondary = self.mem.get_durable_secondary_transaction_id();
+            for page in self.mem.take_post_commit_system_freed_before(secondary) {
+                page_allocator.free(page, &PageTracker::ignore());
+            }
+        }
+
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
         for page in system_freed_pages.lock().unwrap().drain(..) {
@@ -2031,41 +2057,42 @@ impl WriteTransaction {
             free_until = free_until.min(TransactionId::new(savepoint_horizon).next());
         }
 
-        let mut freed_any = false;
-        let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
+        let (system_root, post_commit_system_freed, extracted_data_transactions) = {
             let mut system_tables = self.system_tables.lock().unwrap();
             let system_freed_pages = system_tables.system_freed_pages();
+            let mut pages_to_free = vec![];
             let extracted_data_transactions = self.extract_freed_pages(
                 &mut system_tables,
                 DATA_FREED_TABLE,
                 free_until,
                 |page| {
-                    freed_any = true;
                     // See process_freed_pages(): free_until excludes pages that are still needed
                     // by a live reader or pending non-durable commit.
                     debug_assert!(!self.mem.unpersisted(page));
-                    page_allocator.free(page, &PageTracker::ignore());
+                    pages_to_free.push(page);
                 },
             )?;
-            if !freed_any {
+            if pages_to_free.is_empty() {
                 return Ok(());
             }
+            page_allocator.free_committed_batch(&pages_to_free);
 
             let system_tree = system_tables.table_tree.flush_table_root_updates()?;
-            let stored_system_freed_pages = self.store_system_freed_pages(
-                system_tree,
-                epilogue_transaction,
-                system_freed_pages,
-                None,
-            )?;
+            let system_root = system_tree.finalize_dirty_checksums()?;
+            let post_commit_system_freed = system_freed_pages.lock().unwrap().drain(..).collect();
             (
-                system_tree.finalize_dirty_checksums()?,
-                stored_system_freed_pages,
+                system_root,
+                post_commit_system_freed,
                 extracted_data_transactions,
             )
         };
 
+        self.mem
+            .record_post_commit_system_freed(self.transaction_id, post_commit_system_freed);
+
         let epilogue_allocations = page_allocator.take_allocated_since_commit();
+        self.mem
+            .record_post_commit_allocations(epilogue_allocations.iter().copied());
         self.mem.non_durable_commit(
             user_root,
             system_root,
@@ -2077,7 +2104,7 @@ impl WriteTransaction {
         self.transaction_tracker.register_non_durable_commit(
             epilogue_transaction,
             self.transaction_id,
-            stored_system_freed_pages,
+            false,
         );
         // The epilogue only extracts DATA_FREED_TABLE entries. It is still correct to clear these
         // ids from the non-durable scan set: ordinary non-durable commits filter unpersisted
@@ -2228,13 +2255,14 @@ impl WriteTransaction {
         assert_eq!(PageNumber::serialized_size(), 8);
 
         let page_allocator = self.page_allocator();
-        let mut free_page = |page| {
+        let mut pages_to_free = vec![];
+        let mut collect_page = |page| {
             // These pages cannot be unpersisted: free_until is bounded by
             // oldest_live_read_transaction, which pins back to the durable_ancestor of every
             // pending non-durable commit (see register_non_durable_commit). As a result, no entry
             // whose pages are still unpersisted is eligible for processing here.
             debug_assert!(!self.mem.unpersisted(page));
-            page_allocator.free(page, &PageTracker::ignore());
+            pages_to_free.push(page);
         };
 
         let extracted_transactions = {
@@ -2243,16 +2271,17 @@ impl WriteTransaction {
                 &mut system_tables,
                 DATA_FREED_TABLE,
                 free_until,
-                &mut free_page,
+                &mut collect_page,
             )?;
             extracted_transactions.extend(self.extract_freed_pages(
                 &mut system_tables,
                 SYSTEM_FREED_TABLE,
                 free_until,
-                &mut free_page,
+                &mut collect_page,
             )?);
             extracted_transactions
         };
+        page_allocator.free_committed_batch(&pages_to_free);
         self.transaction_tracker
             .mark_non_durable_freed_pages_processed(extracted_transactions);
 
