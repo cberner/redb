@@ -18,14 +18,14 @@ use std::{fs, mem, thread};
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
 
-const READ_ITERATIONS: usize = 2;
+const READ_ITERATIONS: usize = 3;
 const BULK_ELEMENTS: usize = 5_000_000;
 const SORTED_ELEMENTS: usize = 1_000_000;
 const INDIVIDUAL_WRITES: usize = 1_000;
 const NOSYNC_WRITES: usize = 50_000;
 const BATCH_WRITES: usize = 100;
 const BATCH_SIZE: usize = 1000;
-const SCAN_ITERATIONS: usize = 2;
+const SCAN_ITERATIONS: usize = 3;
 const NUM_READS: usize = 1_000_000;
 const NUM_SCANS: usize = 500_000;
 const SCAN_LEN: usize = 10;
@@ -67,6 +67,14 @@ fn make_rng_shards(shards: usize, elements: usize) -> Vec<fastrand::Rng> {
     }
 
     rngs
+}
+
+// Middle timing of the sorted samples, so that a cold cache on the first iteration, or a
+// stray outlier, does not skew the reported rate. With an even number of samples this is
+// the upper of the two middle ones.
+fn median_duration(durations: &mut [Duration]) -> Duration {
+    durations.sort_unstable();
+    durations[durations.len() / 2]
 }
 
 #[inline(never)]
@@ -184,6 +192,9 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         result.with_unit()
     );
     results.push(("small batch writes".to_string(), result));
+    // Sorted inserts have to run last, to keep the size measurements comparable, but belong
+    // with the other write phases in the results
+    let sorted_inserts_row = results.len();
 
     if connection.set_sync(false) {
         let result = nosync_writes::<T>(&connection, &mut rng);
@@ -216,7 +227,8 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             results.push(("len()".to_string(), result));
         }
 
-        for _ in 0..READ_ITERATIONS {
+        let mut read_durations = [Duration::ZERO; READ_ITERATIONS];
+        for read_duration in &mut read_durations {
             let mut rng = make_rng();
             let start = Instant::now();
             let mut checksum = 0u64;
@@ -229,20 +241,22 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
                 expected_checksum += value[0] as u64;
             }
             assert_eq!(checksum, expected_checksum);
-            let end = Instant::now();
-            let duration = end - start;
-            let result = ResultType::keys(NUM_READS, duration);
-            println!(
-                "{}: Random read {} items in {}ms ({})",
-                T::db_type_name(),
-                NUM_READS,
-                duration.as_millis(),
-                result.with_unit()
-            );
-            results.push(("random reads".to_string(), result));
+            *read_duration = start.elapsed();
         }
+        let duration = median_duration(&mut read_durations);
+        let result = ResultType::keys(NUM_READS, duration);
+        println!(
+            "{}: Random read {} items in {}ms ({}), median of {} runs",
+            T::db_type_name(),
+            NUM_READS,
+            duration.as_millis(),
+            result.with_unit(),
+            READ_ITERATIONS
+        );
+        results.push(("random reads".to_string(), result));
 
-        for _ in 0..SCAN_ITERATIONS {
+        let mut scan_durations = [Duration::ZERO; SCAN_ITERATIONS];
+        for scan_duration in &mut scan_durations {
             let mut rng = make_rng();
             let start = Instant::now();
             let mut reader = txn.get_reader();
@@ -259,21 +273,22 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
                 }
             }
             assert!(value_sum > 0);
-            let end = Instant::now();
-            let duration = end - start;
-            // Rated per range read, rather than per key, because the keys after the first
-            // are reached by stepping the iterator rather than by a lookup
-            let result = ResultType::scans(NUM_SCANS, duration);
-            println!(
-                "{}: Random range read {} x {} elements in {}ms ({})",
-                T::db_type_name(),
-                NUM_SCANS,
-                SCAN_LEN,
-                duration.as_millis(),
-                result.with_unit()
-            );
-            results.push(("random range reads".to_string(), result));
+            *scan_duration = start.elapsed();
         }
+        // Rated per range read, rather than per key, because the keys after the first
+        // are reached by stepping the iterator rather than by a lookup
+        let duration = median_duration(&mut scan_durations);
+        let result = ResultType::scans(NUM_SCANS, duration);
+        println!(
+            "{}: Random range read {} x {} elements in {}ms ({}), median of {} runs",
+            T::db_type_name(),
+            NUM_SCANS,
+            SCAN_LEN,
+            duration.as_millis(),
+            result.with_unit(),
+            SCAN_ITERATIONS
+        );
+        results.push(("random range reads".to_string(), result));
     }
     drop(txn);
 
@@ -576,7 +591,8 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
     // through the fastest sorted-insert path the database offers. The keys extend the
     // largest possible random key by a suffix so they sort past every existing entry,
     // and the pairs are precomputed so the timing covers only the load. Runs after the
-    // size measurements so those stay comparable with historical results.
+    // size measurements so those stay comparable with historical results, but is reported
+    // among the other write phases.
     let sorted_pairs: Vec<([u8; KEY_SIZE + 8], Vec<u8>)> = (0..SORTED_ELEMENTS as u64)
         .map(|i| {
             let mut key = [0xFFu8; KEY_SIZE + 8];
@@ -608,7 +624,7 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         duration.as_millis(),
         result.with_unit()
     );
-    results.push(("sorted inserts".to_string(), result));
+    results.insert(sorted_inserts_row, ("sorted inserts".to_string(), result));
 
     results
 }
