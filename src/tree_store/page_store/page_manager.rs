@@ -40,7 +40,6 @@ const MAX_USABLE_REGION_SPACE: u64 = 4 * 1024 * 1024 * 1024;
 #[allow(clippy::cast_possible_truncation)]
 pub(crate) const MAX_MAX_PAGE_ORDER: u8 = (MAX_PAGE_INDEX + 1).ilog2() as u8;
 pub(super) const MIN_USABLE_PAGES: u32 = 10;
-const MIN_DESIRED_USABLE_BYTES: u64 = 1024 * 1024;
 
 pub(super) const INITIAL_REGIONS: u32 = 1000; // Enough for a 4TiB database
 
@@ -576,10 +575,8 @@ impl TransactionalMemory {
                     .len();
 
             // Make sure that there is enough room to allocate the region tracker into a page
-            let size: u64 = max(
-                MIN_DESIRED_USABLE_BYTES,
-                page_size as u64 * u64::from(MIN_USABLE_PAGES),
-            );
+            let size = page_size as u64 * u64::from(MIN_USABLE_PAGES);
+
             let tracker_space =
                 (page_size * region_tracker_required_bytes.div_ceil(page_size)) as u64;
             let starting_size = size + tracker_space;
