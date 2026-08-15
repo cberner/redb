@@ -55,6 +55,9 @@ experimental_cursor = ["experimental-api-5"]
 # Unstable additions and changes to the public API, planned for redb 5. May change incompatibly, or
 # be removed, in any release
 experimental-api-5 = []
+# Deprecation warnings on APIs that redb 5 will remove. May change incompatibly, or be removed,
+# in any release
+experimental-pre-api-5-deprecations = []
 
 [profile.bench]
 debug = true

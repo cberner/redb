@@ -1,3 +1,7 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed.
+#![allow(deprecated)]
+
 #[cfg(feature = "experimental-api-5")]
 use redb::ReadableTable;
 use redb::{ReadableDatabase, ReadableTableMetadata};

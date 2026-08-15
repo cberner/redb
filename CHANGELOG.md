@@ -94,6 +94,12 @@
   `OwnedMultimapRange` types. These keep the read transaction alive until they are dropped,
   including the guards yielded by the iterators, which may outlive the iterator that produced
   them.
+* Deprecate `ReadOnlyTable::get()`, `ReadOnlyTable::range()`, `ReadOnlyMultimapTable::get()`,
+  and `ReadOnlyMultimapTable::range()` in favor of the `_owned` variants. Contrary to their
+  documentation, the guards they return do not keep the transaction alive: holding one after
+  dropping the `ReadTransaction` allows concurrent writers to reclaim the referenced pages,
+  which panics the writer's `commit()` in debug builds. The deprecation warnings are gated
+  behind the `experimental-pre-api-5-deprecations` feature flag.
 * Fix a crash during a transaction that grows the database file leaving the database permanently
   unopenable afterward.
 * Fix a potential deadlock when removing a value from a multimap table causes its value-set to

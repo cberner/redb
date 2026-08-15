@@ -1207,9 +1207,23 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the guards yielded by the returned
+    /// iterator do not keep the transaction alive. If they outlive the
+    /// [`crate::ReadTransaction`], concurrent writers may reclaim the pages they reference,
+    /// which panics in debug builds. Use [`ReadableMultimapTable::get()`] instead, or
+    /// [`Self::get_owned()`] if the iterator and its guards need to keep the transaction alive.
+    ///
+    /// Enabling the `experimental-pre-api-5-deprecations` feature marks this method deprecated.
     #[cfg(not(feature = "experimental-api-5"))]
+    #[cfg_attr(
+        feature = "experimental-pre-api-5-deprecations",
+        deprecated(
+            since = "4.2.0",
+            note = "the yielded guards do not keep the transaction alive, and can crash debug builds if they outlive the transaction; use ReadableMultimapTable::get(), or get_owned() if the iterator and its guards need to keep the transaction alive"
+        )
+    )]
     pub fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'static, V>> {
         self.get_inner(key)
     }
@@ -1253,9 +1267,24 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         ))
     }
 
-    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the entries yielded by the returned
+    /// iterator do not keep the transaction alive. If they outlive the
+    /// [`crate::ReadTransaction`], concurrent writers may reclaim the pages they reference,
+    /// which panics in debug builds. Use [`ReadableMultimapTable::range()`] instead, or
+    /// [`Self::range_owned()`] if the iterator and its entries need to keep the transaction
+    /// alive.
+    ///
+    /// Enabling the `experimental-pre-api-5-deprecations` feature marks this method deprecated.
     #[cfg(not(feature = "experimental-api-5"))]
+    #[cfg_attr(
+        feature = "experimental-pre-api-5-deprecations",
+        deprecated(
+            since = "4.2.0",
+            note = "the yielded entries do not keep the transaction alive, and can crash debug builds if they outlive the transaction; use ReadableMultimapTable::range(), or range_owned() if the iterator and its entries need to keep the transaction alive"
+        )
+    )]
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<MultimapRange<'static, K, V>>
     where
         KR: Borrow<K::SelfType<'a>>,
