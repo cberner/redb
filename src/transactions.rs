@@ -1672,6 +1672,14 @@ impl WriteTransaction {
         let (user_root, allocated_pages, data_freed) =
             self.tables.lock().unwrap().table_tree.flush_and_close()?;
 
+        // From here a durable commit is irreversible: it either completes or leaves the allocator
+        // state invalidated, so nothing rolls back what it claims. That is what lets it take over
+        // the epilogue's pages, which no durable root names and it is about to supersede.
+        if self.durability == InternalDurability::Immediate {
+            let pages = self.mem.take_post_commit_allocations();
+            self.page_allocator().adopt_unpersisted(pages);
+        }
+
         // A non-durable commit keeps its freed-page records in memory rather than writing them to
         // DATA_FREED_TABLE, which would mutate the system tree on every commit. durable_commit()
         // writes the accumulated records out.
@@ -2066,6 +2074,8 @@ impl WriteTransaction {
         };
 
         let epilogue_allocations = page_allocator.take_allocated_since_commit();
+        self.mem
+            .record_post_commit_allocations(epilogue_allocations.iter().copied());
         self.mem.non_durable_commit(
             user_root,
             system_root,
