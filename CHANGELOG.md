@@ -48,7 +48,7 @@
 * Add `Key::separator()`, which returns a short slice that separates two keys. Internal btree
   nodes store the result instead of a whole key, so more children fit in each node and lookups
   touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
-  implementations unchanged; `&[u8]` keys now store minimal prefixes.
+  implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
 
 ## 4.2.0 - 2026-08-17
 

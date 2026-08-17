@@ -3290,6 +3290,71 @@ fn custom_ordering() {
     assert!(iter.next().is_none());
 }
 
+// Separators cut on a character boundary, so multi-byte keys must still route and round-trip
+#[test]
+fn str_keys_with_multibyte_characters() {
+    const TABLE: TableDefinition<&str, u64> = TableDefinition::new("multibyte");
+    // A shared prefix, then characters of every UTF-8 length for a naive cut to land inside
+    let suffixes = [
+        "a",
+        "\u{7f}",
+        "\u{80}",
+        "\u{e9}",
+        "\u{7ff}",
+        "\u{800}",
+        "\u{ffff}",
+        "\u{1d11e}",
+        "\u{10ffff}",
+    ];
+    let mut keys = vec![];
+    for outer in &suffixes {
+        for inner in &suffixes {
+            keys.push(format!("shared-prefix-{outer}{inner}-{outer}{inner}"));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        // Enough copies to force several levels of branch nodes
+        for i in 0..200u64 {
+            for (j, key) in keys.iter().enumerate() {
+                table
+                    .insert(format!("{key}-{i:04}").as_str(), &(i * 1000 + j as u64))
+                    .unwrap();
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 2);
+    for i in 0..200u64 {
+        for (j, key) in keys.iter().enumerate() {
+            let value = table
+                .get(format!("{key}-{i:04}").as_str())
+                .unwrap()
+                .unwrap();
+            assert_eq!(value.value(), i * 1000 + j as u64);
+        }
+    }
+    // The iteration order must still match the sorted key order
+    let mut expected: Vec<String> = (0..200u64)
+        .flat_map(|i| keys.iter().map(move |key| format!("{key}-{i:04}")))
+        .collect();
+    expected.sort();
+    let mut iter = table.iter().unwrap();
+    for key in &expected {
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), key.as_str());
+    }
+    assert!(iter.next().is_none());
+}
+
 // Branch keys are separators, which need not be valid encodings: nothing may deserialize them
 #[test]
 fn branch_separators_are_not_deserialized() {
