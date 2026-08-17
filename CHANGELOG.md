@@ -30,155 +30,6 @@
   entries. The type reserves the constructors' signatures in the trait; navigation methods will
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
-## 4.2.0 - 2026-XX-XX
-* `Durability::None` commits are about 2x faster.
-* Writes that do not split a page are faster: about 15% for single-key `Durability::None` commits,
-  and about 6% for batched writes.
-* Commits now flush table root updates in a deterministic order, removing a source of
-  nondeterminism that could make identical operation sequences produce differing database files
-* Add a `std` feature, enabled by default, in preparation for a future `no_std` mode. It gates
-  nothing yet, so building with `default-features = false` still links against the standard
-  library. Under the `experimental-api-5` feature flag, which collects the changes planned for
-  redb 5, turning it off is instead a compile error until `no_std` is supported.
-* Improve write performance when tables of a single `WriteTransaction` are modified concurrently
-  from multiple threads. Writes to separate tables previously serialized on internal locks and
-  could be slower than writing from a single thread; they now scale with the number of threads.
-* Fix a panic when opening a database containing a corrupted persistent savepoint record;
-  `StorageError::Corrupted` is now returned instead.
-* Fix a panic while repairing a database file containing a malformed freed-page record, which left
-  the file permanently unopenable because both `Database::open` and `check_integrity()` run the same
-  repair. `StorageError::Corrupted` is now returned instead.
-* Fix a process abort when reading a database file whose branch pages form a cycle, or an
-  arbitrarily long chain. Descending the tree recursed until the stack overflowed, which aborts the
-  process rather than failing; `StorageError::Corrupted` is now returned instead.
-* Fix a process abort when reading a database file containing a corrupted page number. Such a page
-  could attempt a multi-terabyte allocation, which aborts the process rather than failing;
-  `StorageError::Corrupted` is now returned instead.
-* Add an experimental cursor API, behind the `experimental_cursor` feature flag:
-  `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
-  between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
-  through its `insert_before()` method can be around 3x faster than calling `insert()` with the
-  same data; `insert_after()` inserts through the gap in descending order at the same speed. The
-  feature is unstable and may change incompatibly, or be removed, in any release.
-* Add a read-only counterpart to the experimental cursor API. Behind the new `experimental-api-5`
-  feature flag, which collects trait additions planned for redb 5, `ReadableTable::lower_bound()`
-  and `ReadableTable::upper_bound()` return a `Cursor` pointing at a gap between entries. The
-  cursor's `peek_next()`, `peek_prev()`, `next()`, and `prev()` methods, which mirror the standard
-  library's `BTreeMap` cursors, are behind the `experimental_cursor` feature flag (which enables
-  `experimental-api-5`); the split lets the trait surface stabilize before the cursor's own
-  methods settle.
-* Add `next()` and `prev()` to the experimental `CursorMut`, moving the cursor over the entries
-  around its gap like their read-only `Cursor` counterparts. Pending buffered inserts are applied
-  before the cursor moves.
-* Add `remove_next()` and `remove_prev()` to the experimental `CursorMut`, removing and returning
-  the entry after or before the cursor's gap without moving it. Pending buffered inserts are
-  applied first, so an entry just inserted through the cursor can be removed.
-* Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
-  are enabled, when called while a table is open and modified in the same transaction.
-* Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
-  `WriteTransaction` now keeps the database open: the transaction remains usable after the
-  `Database` is dropped, and the database closes when the transaction commits, aborts, or is
-  dropped.
-* Fix a panic, including one raised while dropping a `Database`, after `check_integrity()` returned
-  an error. Such a database now refuses to begin a write transaction or to re-run the check,
-  returning `StorageError::Corrupted`, and is no longer recorded as cleanly shut down.
-* Harden against errors and panics raised part way through `WriteTransaction::commit()`: the
-  database now refuses further write transactions until it is closed and reopened (which
-  repairs it), instead of risking corruption from continued use after the failed commit.
-* `check_integrity()` now recomputes the table counts stored alongside the data and system roots,
-  repairing a file whose counts disagree with its trees. Such a file previously passed the check
-  and then panicked, including from `Database::drop`.
-* Add `ReadOnlyTable::get_owned()`, `ReadOnlyTable::range_owned()`,
-  `ReadOnlyMultimapTable::get_owned()`, and `ReadOnlyMultimapTable::range_owned()`, which
-  return the new `OwnedAccessGuard`, `OwnedRange`, `OwnedMultimapValue`, and
-  `OwnedMultimapRange` types. These keep the read transaction alive until they are dropped,
-  including the guards yielded by the iterators, which may outlive the iterator that produced
-  them.
-* Fix a crash during a transaction that grows the database file leaving the database permanently
-  unopenable afterward.
-* Fix a potential deadlock when removing a value from a multimap table causes its value-set to
-  shrink from a subtree back to inline storage, while another table of the same write transaction
-  is used concurrently from a different thread.
-* Avoid unnecessary write amplification when removing a value that is not present from a multimap
-  table. Such a removal is now a no-op.
-* Fix a crash during a commit that resizes the database file leaving the database permanently
-  unopenable, and reporting corruption on subsequent opens, even though every committed transaction
-  was intact and fully recoverable.
-* Optimize `Table::retain()` and `Table::retain_in()`. Some benchmarks on large tables show a
-  30-100x speedup, depending on the fraction of entries retained.
-* Optimize `Table::extract_if()` and `Table::extract_from_if()`. Benchmarks on large tables show
-  an 18-65x speedup, depending on the fraction of entries extracted, and iterating the extract
-  iterator from both ends no longer degrades the removal batching.
-* After the extract iterator returns an error, later calls keep returning an error instead of
-  continuing.
-* Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
-  types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
-  `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
-  / `VacantEntry` accessors.
-* `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
-  now poison the write transaction if their predicate panics, causing `WriteTransaction::commit()`
-  to return `CommitError::TransactionPoisoned`. They also poison the
-  transaction if an internal error prevents removals from being applied.
-* Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
-  entries.
-* Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
-* Enable file space reclamation during non-durable transactions performed while a savepoint exists.
-* Reuse pages freed by a durable write transaction in the next write transaction when no
-  live read transaction or savepoint still needs them. Previously, pages were not reused for one
-  additional transaction.
-* Fix a bug where calling `compact()` on a database could cause the file to grow
-  rather than shrink in some cases.
-* Fix a bug where the database file could grow unnecessarily instead of reusing freed space, and
-  where `compact()` could stop before fully shrinking the file.
-* Enforce the maximum value size limit when replacing a value in place via `Table::get_mut()`
-  or `Entry::and_modify()`. Previously these paths could bypass the limit that `Table::insert()`
-  and the `entry()` accessors enforce, returning `StorageError::ValueTooLarge` only inconsistently.
-* Fix a panic in `insert()` when a single leaf page accumulated 65536 entries via in-place
-  appends, e.g. by inserting a large value and then many small values in ascending key order
-  within the same transaction.
-* `StorageBackend::close()` is now called when the `Database` is dropped even if an I/O error
-  occurs during shutdown. Previously a shutdown I/O error could skip the `close()` call, leaking
-  any resources the backend releases there.
-* `compact()` now returns `CompactionError::PersistentSavepointExists` or
-  `CompactionError::EphemeralSavepointExists` instead of the misleading
-  `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
-* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
-  in debug builds) after a persistent savepoint was deleted or restored.
-* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
-  in debug builds) when an ephemeral `Savepoint` was dropped from another thread while the same
-  write transaction was committing.
-* Fix a leak of database space when an ephemeral `Savepoint` was created from one thread while the
-  same write transaction was first accessing a table from another thread, and that savepoint was
-  later restored. The leaked space was only reclaimed by a full repair.
-* Fix a panic when opening a database file that was externally extended to an invalid size; such
-  files are now rejected with `StorageError::Corrupted`.
-* Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the
-  file now return an error instead of looping forever.
-* `check_integrity()` now returns `DatabaseError::TransactionInProgress` when an ephemeral
-  `Savepoint` is still alive. Previously the check could invalidate the pages such a savepoint
-  referenced while leaving it marked valid, so restoring it afterward could corrupt the database.
-* Fix `Database::check_integrity()` silently discarding transactions committed with
-  `Durability::None` that had not yet been made durable by a later commit; a passing check now
-  preserves them (making them durable) instead of rolling them back.
-* Fix a bug that could silently roll back or corrupt durably committed transactions if a crash
-  occurred while recovering from an earlier crash. Triggering it required two crashes -- one
-  interrupting a commit and another during the subsequent repair on the next open -- and it did
-  not affect transactions committed with two-phase commit.
-* Fix new composite types (`Option`, `Vec`, tuples, and arrays) of a user-defined type sharing a
-  type identity with the same composite of a built-in type when the two happened to have the same
-  name. A table using such a composite of a user type can no longer be silently opened under the
-  built-in composite (and vice versa); the mismatch is now reported as `TableError::TableTypeMismatch`.
-  Existing databases created by older versions remain readable. If an older database already used
-  such a colliding composite name, its stored type identity remains ambiguous and may still open
-  under either spelling.
-* Optimize inserting in ascending key order. An insert past the table's last key now starts a new
-  leaf page, instead of splitting the full one in half and leaving space behind that no later
-  insert can use. A table loaded in key order occupies about half as many pages as before, and
-  loads faster.
-* `StorageBackend::close()` is now also called when opening a database fails, so that a backend
-  can release what it holds on that path. Previously it was called only for a database that
-  finished opening.
-
 ### redb-derive (unreleased)
 * Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
   `as_bytes`, or `type_name` on field types, instead of the `Value` trait methods. The
@@ -193,12 +44,125 @@
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
 
-### Python bindings
-* Add `Database.create(path)` for creating or opening a database file.
-* Add `Database.begin_write()`, which returns a `WriteTransaction`
-  context manager. Exiting the `with` block commits the transaction on success
-  and aborts it if an exception propagates out of the block.
-* The minimum supported Python version is now 3.8 (Python 3.7 is end-of-life).
+## 4.2.0 - 2026-08-17
+
+### New features
+* Add an experimental cursor API, behind the `experimental_cursor` feature flag:
+  `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
+  between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
+  through its `insert_before()` method can be around 3x faster than calling `insert()` with the
+  same data; `insert_after()` inserts through the gap in descending order at the same speed.
+  `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` return a read-only `Cursor`.
+  The feature is unstable and may change incompatibly, or be removed, in any release.
+* Add `ReadOnlyTable::get_owned()`, `ReadOnlyTable::range_owned()`,
+  `ReadOnlyMultimapTable::get_owned()`, and `ReadOnlyMultimapTable::range_owned()`, which
+  return the new `OwnedAccessGuard`, `OwnedRange`, `OwnedMultimapValue`, and
+  `OwnedMultimapRange` types. These keep the read transaction alive until they are dropped,
+  including the guards yielded by the iterators, which may outlive the iterator that produced
+  them.
+* Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
+  types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
+  `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
+  / `VacantEntry` accessors.
+* Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
+  entries.
+
+### Optimizations
+* Improve write performance: `Durability::None` commits are about 2x faster, and writes that do not
+  split a page are about 15% faster for single-key `Durability::None` commits and about 6% faster
+  for batched writes.
+* Improve write performance when tables of a single `WriteTransaction` are modified concurrently
+  from multiple threads. Writes to separate tables previously serialized on internal locks and
+  could be slower than writing from a single thread; they now scale with the number of threads.
+  Up to about 4x faster.
+* Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
+* Optimize inserting in ascending key order. A table loaded in key order occupies about half as
+  much space, and loads faster.
+* Optimize `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and
+  `Table::extract_from_if()`. Benchmarks on large tables show a 30-100x speedup for retaining and
+  an 18-65x speedup for extracting, depending on the fraction of entries affected. Iterating an
+  extract iterator from both ends no longer degrades removal batching.
+* Avoid unnecessary write amplification when removing a value that is not present from a multimap
+  table. Such a removal is now a no-op.
+
+### Minor improvements
+* `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
+  now poison the write transaction if their predicate panics or an internal error prevents
+  removals from being applied, causing `WriteTransaction::commit()` to return
+  `CommitError::TransactionPoisoned`. After an extract iterator returns an error, later calls keep
+  returning an error instead of continuing.
+* Enable file space reclamation during non-durable transactions performed while a savepoint exists.
+* Reuse pages freed by a durable write transaction in the next write transaction when no live read
+  transaction or savepoint still needs them. Previously, pages were not reused for one additional
+  transaction.
+* `compact()` now returns `CompactionError::PersistentSavepointExists` or
+  `CompactionError::EphemeralSavepointExists` instead of the misleading
+  `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
+* `StorageBackend::close()` is now called when opening a database fails and when an I/O error occurs
+  while dropping a `Database`, allowing backends to release their resources on both paths.
+
+### Bug fixes
+* Return `StorageError::Corrupted` instead of panicking when opening or repairing a database with a
+  corrupted persistent savepoint record or malformed freed-page record.
+* Return `StorageError::Corrupted` instead of aborting the process when branch pages form a cycle or
+  arbitrarily long chain, or when a corrupted page number could cause a multi-terabyte allocation.
+* Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
+  are enabled, when called while a table is open and modified in the same transaction.
+* Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
+  `WriteTransaction` now keeps the database open: the transaction remains usable after the
+  `Database` is dropped, and the database closes when the transaction commits, aborts, or is
+  dropped.
+* Fix a panic, including one raised while dropping a `Database`, after `check_integrity()` returned
+  an error. Such a database now refuses to begin a write transaction or to re-run the check,
+  returning `StorageError::Corrupted`, and is no longer recorded as cleanly shut down.
+* Harden against errors and panics raised part way through `WriteTransaction::commit()`: the
+  database now refuses further write transactions until it is closed and reopened (which
+  repairs it), instead of risking corruption from continued use after the failed commit.
+* Fix a case where `check_integrity()` failed to repair the database when the table length was
+  corrupted. Such a file previously passed the check and then panicked, including from
+  `Database::drop`.
+* Fix a potential deadlock when removing a value from a multimap table causes its value-set to
+  shrink from a subtree back to inline storage, while another table of the same write transaction
+  is used concurrently from a different thread.
+* Fix crashes while growing or resizing the database file that could leave it permanently
+  unopenable or reported as corrupted on subsequent opens, even though every committed transaction
+  was intact and fully recoverable.
+* Fix cases where the database file could grow instead of reusing freed space, and where
+  `compact()` could grow the file or stop before fully shrinking it.
+* Fix `Table::get_mut()` and `Entry::and_modify()` to enforce the maximum value size limit.
+  Previously these paths could bypass the limit that `Table::insert()` and the `entry()` accessors
+  enforce.
+* Fix a panic in `insert()` when a single leaf page accumulated 65536 entries via in-place
+  appends, e.g. by inserting a large value and then many small values in ascending key order
+  within the same transaction.
+* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
+  in debug builds) after a persistent savepoint was deleted or restored, or when an ephemeral
+  `Savepoint` was dropped from another thread while the same write transaction was committing.
+* Fix a leak of database space when an ephemeral `Savepoint` was created from one thread while the
+  same write transaction was first accessing a table from another thread, and that savepoint was
+  later restored. The leaked space was only reclaimed by a full repair.
+* Fix a panic when opening a database file that was externally extended to an invalid size; such
+  files are now rejected with `StorageError::Corrupted`.
+* Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the
+  file now return an error instead of looping forever.
+* Fix `check_integrity()` so that it now returns `DatabaseError::TransactionInProgress` when an
+  ephemeral `Savepoint` is still alive. Previously the check could invalidate the pages such a
+  savepoint referenced while leaving it marked valid, so restoring it afterward could corrupt the
+  database.
+* Fix `Database::check_integrity()` silently discarding transactions committed with
+  `Durability::None` that had not yet been made durable by a later commit; a passing check now
+  preserves them (making them durable) instead of rolling them back.
+* Fix a bug that could silently roll back or corrupt durably committed transactions if a crash
+  occurred while recovering from an earlier crash. Triggering it required two crashes -- one
+  interrupting a commit and another during the subsequent repair on the next open -- and it did
+  not affect transactions committed with two-phase commit.
+* Fix new composite types (`Option`, `Vec`, tuples, and arrays) of a user-defined type sharing a
+  type identity with the same composite of a built-in type when the two happened to have the same
+  name. A table using such a composite of a user type can no longer be silently opened under the
+  built-in composite (and vice versa); the mismatch is now reported as `TableError::TableTypeMismatch`.
+  Existing databases created by older versions remain readable. If an older database already used
+  such a colliding composite name, its stored type identity remains ambiguous and may still open
+  under either spelling.
 
 ## 4.1.0 - 2026-04-19
 **This release contains a large number of bug fixes discovered by AI coding agents**
