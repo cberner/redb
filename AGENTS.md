@@ -18,7 +18,8 @@ install these if you are touching `crates/redb-python`.
 
 ## Before completing a task
 
-**Always run `just test` and confirm it passes before telling the user you are done.**
+**Always run `just test` and confirm it passes before telling the user you are done with a code change --
+this is NOT necessary for non-code changes or when generating a report or analysis that did not involve committing a change.**
 This target runs `cargo deny check licenses` during network-enabled dependency
 preparation, then disables networking and runs `cargo fmt --check`,
 `cargo clippy --all-targets --all-features`, and `cargo test --all-features` with
