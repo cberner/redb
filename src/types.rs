@@ -613,11 +613,32 @@ impl Value for &str {
     }
 }
 
+// `index` advanced to the next character boundary, or the end. Only a character's trailing bytes
+// match `10xx_xxxx`, so this needs no deserialization, unlike `str::is_char_boundary()`.
+fn round_up_to_char_boundary(utf8: &[u8], mut index: usize) -> usize {
+    while index < utf8.len() && utf8[index] & 0b1100_0000 == 0b1000_0000 {
+        index += 1;
+    }
+    index
+}
+
 impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         let str1 = Self::from_bytes(data1);
         let str2 = Self::from_bytes(data2);
         str1.cmp(str2)
+    }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+        debug_assert!(left < right);
+        // `str` orders as its bytes, but `compare()` deserializes, so the cut must keep it valid
+        let common_bytes = left.iter().zip(right).take_while(|(x, y)| x == y).count();
+        let separator_len = round_up_to_char_boundary(right, common_bytes + 1);
+        if separator_len < left.len() && separator_len < right.len() {
+            &right[..separator_len]
+        } else {
+            left
+        }
     }
 }
 
@@ -659,6 +680,11 @@ impl Key for String {
         let str1 = core::str::from_utf8(data1).unwrap();
         let str2 = core::str::from_utf8(data2).unwrap();
         str1.cmp(str2)
+    }
+
+    // Encoded the same way as `&str`, so it separates the same way
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+        <&str as Key>::separator(left, right)
     }
 }
 
@@ -808,6 +834,74 @@ mod tests {
             assert_eq!(separator, expected);
             assert!(<&[u8] as Key>::compare(left, separator).is_le());
             assert!(<&[u8] as Key>::compare(separator, right).is_lt());
+        }
+    }
+
+    // The byte test must agree with the standard library's definition, at every index
+    #[test]
+    fn round_up_to_char_boundary_matches_std() {
+        let sample: String = [
+            'a',
+            '\u{0}',
+            '\u{7f}',
+            '\u{80}',
+            '\u{e9}',
+            '\u{7ff}',
+            '\u{800}',
+            'b',
+            '\u{ffff}',
+            '\u{1d11e}',
+            '\u{10ffff}',
+            'c',
+        ]
+        .iter()
+        .collect();
+        let bytes = sample.as_bytes();
+        for index in 0..=bytes.len() {
+            let rounded = round_up_to_char_boundary(bytes, index);
+            assert!(
+                sample.is_char_boundary(rounded),
+                "index {index} rounded to {rounded}"
+            );
+            assert!(rounded >= index);
+            // Nothing between `index` and `rounded` may be a boundary, or it was not the next one
+            for skipped in index..rounded {
+                assert!(
+                    !sample.is_char_boundary(skipped),
+                    "skipped boundary {skipped}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn str_separator() {
+        // (left, right, the shortest separator that is still valid UTF-8)
+        let cases: &[(&str, &str, &str)] = &[
+            ("abc0suffix", "abc1suffix", "abc1"),
+            // Nothing is shorter than `left` and still above it
+            ("abc", "abd-suffix", "abc"),
+            ("abc", "abc-suffix", "abc"),
+            // A cut inside a two byte character keeps the whole character
+            ("aaaaaa", "a\u{e9}zz", "a\u{e9}"),
+            // ...and inside a four byte one
+            ("aaaaaaaa", "a\u{1d11e}zz", "a\u{1d11e}"),
+            // Keeping the whole character would reach `right` itself, so `left` wins
+            ("a\u{e9}", "a\u{ea}", "a\u{e9}"),
+            ("", "\u{0}", ""),
+        ];
+
+        for &(left, right, expected) in cases {
+            let separator = <&str as Key>::separator(left.as_bytes(), right.as_bytes());
+            assert_eq!(separator, expected.as_bytes());
+            // A separator is passed back through `compare()`, which deserializes it
+            assert!(core::str::from_utf8(separator).is_ok());
+            assert!(<&str as Key>::compare(left.as_bytes(), separator).is_le());
+            assert!(<&str as Key>::compare(separator, right.as_bytes()).is_lt());
+            assert_eq!(
+                <String as Key>::separator(left.as_bytes(), right.as_bytes()),
+                separator
+            );
         }
     }
 
