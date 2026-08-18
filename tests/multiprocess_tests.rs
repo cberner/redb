@@ -10,7 +10,7 @@
 
 use redb::{
     Database, DatabaseError, Durability, MultiProcessDatabase, ReadableDatabase, ReadableTable,
-    ReadableTableMetadata, TableDefinition, WriteTransaction, WriterMode,
+    ReadableTableMetadata, SavepointError, TableDefinition, WriteTransaction, WriterMode,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -1038,32 +1038,55 @@ fn non_durable_commits_work_with_a_single_writer_process() {
     assert!(db.last_durable_commit().unwrap() > durable);
 }
 
+/// Every savepoint id in multi-writer mode comes from the counter stored in the database, which
+/// is what keeps ids collision-free across processes. An ephemeral savepoint's id lives only in
+/// its own process, where another writer cannot see it, so that mode refuses to create one --
+/// persistent savepoints are the supported form there.
 #[test]
-fn an_ephemeral_savepoint_holds_pages_back_across_handles() {
+fn an_ephemeral_savepoint_is_refused_when_any_process_may_write() {
     let dir = tempdir();
     let path = db_path(&dir);
-    let first = create(&path, WriterMode::MultiWriterProcess);
-    write_generation(&first, 1);
+    let db = create(&path, WriterMode::MultiWriterProcess);
+    write_generation(&db, 1);
+
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.ephemeral_savepoint(),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+    // ... while a persistent savepoint, whose id comes from the shared counter, is fine
+    let id = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(txn.delete_persistent_savepoint(id).unwrap());
+    txn.commit().unwrap();
+}
+
+/// The single-writer mode has no cross-process id problem -- only one process ever hands out
+/// savepoint ids -- so ephemeral savepoints work exactly as they do in a single-process database.
+#[test]
+fn an_ephemeral_savepoint_works_with_a_single_writer_process() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = create(&path, WriterMode::SingleWriterProcess);
+    write_generation(&db, 1);
 
     let savepoint = {
-        let txn = first.begin_write().unwrap();
+        let txn = db.begin_write().unwrap();
         let savepoint = txn.ephemeral_savepoint().unwrap();
         txn.commit().unwrap();
         savepoint
     };
 
-    // Another handle churns the pages the savepoint needs
-    let second = open(&path);
     for generation in 2..20 {
-        write_generation(&second, generation);
+        write_generation(&db, generation);
     }
 
-    // Restoring it must still find them
-    let mut txn = first.begin_write().unwrap();
+    let mut txn = db.begin_write().unwrap();
     txn.restore_savepoint(&savepoint).unwrap();
     txn.commit().unwrap();
-    assert_eq!(1, read_generation(&first.begin_read().unwrap()));
-    assert_eq!(1, read_generation(&second.begin_read().unwrap()));
+    assert_eq!(1, read_generation(&db.begin_read().unwrap()));
 }
 
 #[test]
@@ -1152,6 +1175,73 @@ fn concurrent_writers_from_many_threads_and_handles() {
             );
         }
     }
+}
+
+/// A persistent savepoint lives in the database, not in the process that made it, so a writer that
+/// has never heard of one must still hold its pages back -- and must be able to restore it.
+#[test]
+fn a_persistent_savepoint_is_shared_between_handles() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    // Opened first, so it has no way of knowing about the savepoint the other handle is about to
+    // create except by reading it out of the database
+    let second = create(&path, WriterMode::MultiWriterProcess);
+    write_generation(&second, 1);
+
+    let savepoint_id = {
+        let first = open(&path);
+        let txn = first.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        // The handle that created it is gone entirely
+        id
+    };
+
+    // Enough churn that the savepoint's pages would be long gone if they were not held back
+    for generation in 2..30 {
+        write_generation(&second, generation);
+    }
+    assert_eq!(29, read_generation(&second.begin_read().unwrap()));
+
+    let mut txn = second.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+    assert_eq!(1, read_generation(&second.begin_read().unwrap()));
+
+    // And it can be deleted from a third handle, which never saw it created either
+    let third = open(&path);
+    let txn = third.begin_write().unwrap();
+    assert!(txn.delete_persistent_savepoint(savepoint_id).unwrap());
+    txn.commit().unwrap();
+    let txn = second.begin_write().unwrap();
+    assert_eq!(0, txn.list_persistent_savepoints().unwrap().count());
+    txn.abort().unwrap();
+}
+
+/// Savepoint ids are handed out from a counter that lives in the database, so two handles must not
+/// be able to allocate the same one.
+#[test]
+fn persistent_savepoint_ids_do_not_collide_between_handles() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let first = create(&path, WriterMode::MultiWriterProcess);
+    write_generation(&first, 1);
+    let second = open(&path);
+
+    let mut ids = vec![];
+    for handle in [&first, &second, &first, &second] {
+        let txn = handle.begin_write().unwrap();
+        ids.push(txn.persistent_savepoint().unwrap());
+        txn.commit().unwrap();
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(4, ids.len(), "two handles allocated the same savepoint id");
+
+    let txn = first.begin_write().unwrap();
+    assert_eq!(4, txn.list_persistent_savepoints().unwrap().count());
+    txn.abort().unwrap();
 }
 
 /// Dropping a handle must not wait on another process's write transaction. Closing writes an

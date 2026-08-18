@@ -50,10 +50,10 @@ use std::sync::Arc;
 /// * [`Durability::None`](crate::Durability) is rejected in
 ///   [`WriterMode::MultiWriterProcess`], since a non-durable commit is only visible to the process
 ///   that made it.
-/// * Persistent savepoints are only supported in [`WriterMode::SingleWriterProcess`]. One lives in
-///   the database rather than in any one process, so a writer that opened before another created
-///   it has never heard of it and would reclaim the pages it holds. Ephemeral savepoints work in
-///   both modes.
+/// * Ephemeral savepoints are rejected in [`WriterMode::MultiWriterProcess`]: every savepoint id
+///   in that mode comes from a counter stored in the database, so that two processes cannot hand
+///   out the same id, and an ephemeral savepoint's id would live only in the process that made
+///   it. Persistent savepoints work in both modes.
 /// * Compaction and [`Database::check_integrity`] are not available.
 /// * Every commit is 2-phase, which costs an extra `fsync`: a reader in another process would
 ///   otherwise be able to see a header naming pages that are not in the file yet.

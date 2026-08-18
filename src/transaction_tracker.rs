@@ -181,11 +181,12 @@ impl TransactionTracker {
         self.process.is_some()
     }
 
-    // True when the post-commit free epilogue must be skipped: it publishes its work as a
-    // non-durable commit, which is invisible to every other process and is thrown away as soon as
-    // one of them takes the write lock
+    // The post-commit free epilogue publishes its work as a non-durable commit, which is
+    // invisible to other processes, and its horizon is clamped to what the next commit frees
+    // anyway -- so for a multi-process database it buys nothing and costs a system tree update
+    // per commit.
     pub(crate) fn defers_post_commit_free(&self) -> bool {
-        self.write_lock_is_shared()
+        self.process.is_some()
     }
 
     // False when a non-durable commit would be invisible to, and silently discarded by, the next
@@ -436,9 +437,87 @@ impl TransactionTracker {
     // older pin, which costs reclamation but is never unsafe -- and this runs on drop paths that
     // have nowhere to report an error to.
     fn publish_pinned(&self, state: &State) {
-        if let Some(process) = &self.process {
-            let _ = process.publish_pinned(state.oldest_pinned());
+        let _ = self.try_publish_pinned(state);
+    }
+
+    fn try_publish_pinned(&self, state: &State) -> Result<()> {
+        match &self.process {
+            Some(process) => process.publish_pinned(state.oldest_pinned()),
+            None => Ok(()),
         }
+    }
+
+    // Replaces the persistent savepoints this process knows about with the ones the file names.
+    //
+    // A persistent savepoint lives in the database, so a process that opened before another
+    // created one has never heard of it and would reclaim the pages it needs. Adopting the file's
+    // set also picks up the savepoint id counter, so two processes cannot allocate the same id.
+    // The caller must hold the cross-process write lock, which is what makes it safe to drop the
+    // previous set's page references before adding the new one's.
+    pub(crate) fn adopt_persistent_savepoints(
+        &self,
+        next_savepoint: Option<SavepointId>,
+        savepoints: &[(SavepointId, TransactionId)],
+    ) -> Result<()> {
+        let mut state = self.state.lock()?;
+        let previous: Vec<(SavepointId, TransactionId)> = state
+            .persistent_savepoints
+            .iter()
+            .filter_map(|id| state.valid_savepoints.get(id).map(|txn| (*id, *txn)))
+            .collect();
+        for (id, transaction) in &previous {
+            state.persistent_savepoints.remove(id);
+            state.valid_savepoints.remove(id);
+            let count = state.live_read_transactions.get_mut(transaction).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                state.live_read_transactions.remove(transaction);
+            }
+        }
+
+        if let Some(next_savepoint) = next_savepoint {
+            // Only ever forwards: this process may have handed out higher ids to ephemeral
+            // savepoints, which are still live and must not be handed out again
+            state.next_savepoint_id = state.next_savepoint_id.max(next_savepoint);
+        }
+        for (id, transaction) in savepoints {
+            state
+                .live_read_transactions
+                .entry(*transaction)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            state.valid_savepoints.insert(*id, *transaction);
+            state.persistent_savepoints.insert(*id);
+        }
+        // Unlike the drop paths, this lowers the pinned transaction, so a failure to publish it
+        // would let another process free pages these savepoints need
+        if let Err(err) = self.try_publish_pinned(&state) {
+            // The pin was not moved down to cover the adopted set, so the tracker must not claim
+            // it either: the swap is undone, leaving state and pin agreeing on the previous set,
+            // and the begin_write that needed the adoption fails. The id counter stays advanced,
+            // which is always safe -- it only ever moves forward
+            for (id, transaction) in savepoints {
+                state.persistent_savepoints.remove(id);
+                state.valid_savepoints.remove(id);
+                let count = state.live_read_transactions.get_mut(transaction).unwrap();
+                *count -= 1;
+                if *count == 0 {
+                    state.live_read_transactions.remove(transaction);
+                }
+            }
+            for (id, transaction) in &previous {
+                state
+                    .live_read_transactions
+                    .entry(*transaction)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+                state.valid_savepoints.insert(*id, *transaction);
+                state.persistent_savepoints.insert(*id);
+            }
+            return Err(err);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {

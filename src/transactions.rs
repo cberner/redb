@@ -1170,7 +1170,9 @@ impl WriteTransaction {
             return Err(SavepointError::ImmediateDurabilityRequired);
         }
 
-        let mut savepoint = self.ephemeral_savepoint()?;
+        // Through the inner constructor: the savepoint made here becomes persistent below, so the
+        // restriction on user-held ephemeral savepoints does not apply to it
+        let mut savepoint = self.ephemeral_savepoint_inner()?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
 
@@ -1295,8 +1297,22 @@ impl WriteTransaction {
     /// This savepoint will be freed as soon as the returned [`Savepoint`] is dropped.
     ///
     /// Returns [`SavepointError::InvalidSavepoint`] if the transaction is "dirty" (a data
-    /// table has been opened, renamed, or deleted, or a savepoint has been restored)
+    /// table has been opened, renamed, or deleted, or a savepoint has been restored), or if the
+    /// database is a multi-process database in
+    /// [`WriterMode::MultiWriterProcess`](crate::WriterMode) -- an ephemeral savepoint lives only
+    /// in this process, and its id would collide with the persistent ids other writers hand out
+    /// from the shared counter. Use [`Self::persistent_savepoint`] there instead.
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
+        // In the shared-write-lock mode every savepoint id comes from the counter stored in the
+        // database, which is what keeps ids collision-free across processes -- and an ephemeral
+        // savepoint's id lives only in this process's counter
+        if self.transaction_tracker.write_lock_is_shared() {
+            return Err(SavepointError::InvalidSavepoint);
+        }
+        self.ephemeral_savepoint_inner()
+    }
+
+    fn ephemeral_savepoint_inner(&self) -> Result<Savepoint, SavepointError> {
         // Serialize the dirty check and savepoint registration against
         // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
         // a concurrent first table-open (legal since `WriteTransaction: Sync`) can read the
@@ -2001,13 +2017,10 @@ impl WriteTransaction {
             .unwrap()
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
+        // Freeing the pages this transaction allocated also drops their buffered writes, so
+        // nothing is left that a later flush could write over pages another process has since
+        // taken
         self.page_allocator().rollback_all();
-        if self.transaction_tracker.write_lock_is_shared() {
-            // The buffered writes belong to pages this transaction allocated, which are about to
-            // become free for another process to allocate. Flushing them later would overwrite
-            // whatever that process put there
-            self.mem.discard_buffered_writes();
-        }
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -2137,8 +2150,8 @@ impl WriteTransaction {
             .oldest_live_read_transaction()?
             .map_or(epilogue_transaction, |x| x.next());
         // Clamp the free horizon to what a read transaction another process is about to register
-        // may still need. Without this the epilogue's own transaction id, which is one past the
-        // commit that is in the file, would let a page that snapshot reaches be reclaimed
+        // may still need. This epilogue only runs for a single-process database, which has no such
+        // reader, but the clamp costs nothing and keeps the bound in one place
         if let Some(limit) = self
             .transaction_tracker
             .cross_process_free_limit(&self.mem)?
