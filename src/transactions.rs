@@ -735,7 +735,12 @@ impl TableNamespace {
         #[cfg(feature = "logging")]
         debug!("Renaming table: {name} to {new_name}");
         self.set_dirty(transaction);
-        self.inner_rename(name, new_name, TableType::Normal)
+        let result = self.inner_rename(name, new_name, TableType::Normal);
+        // A half-renamed catalog must not be committed, so any storage error poisons
+        if matches!(result, Err(TableError::Storage(_))) {
+            transaction.poison();
+        }
+        result
     }
 
     #[track_caller]
@@ -748,7 +753,12 @@ impl TableNamespace {
         #[cfg(feature = "logging")]
         debug!("Renaming multimap table: {name} to {new_name}");
         self.set_dirty(transaction);
-        self.inner_rename(name, new_name, TableType::Multimap)
+        let result = self.inner_rename(name, new_name, TableType::Multimap);
+        // See rename_table(): a half-renamed catalog must not be committed
+        if matches!(result, Err(TableError::Storage(_))) {
+            transaction.poison();
+        }
+        result
     }
 
     #[track_caller]
@@ -769,7 +779,12 @@ impl TableNamespace {
         #[cfg(feature = "logging")]
         debug!("Deleting table: {name}");
         self.set_dirty(transaction);
-        self.inner_delete(name, TableType::Normal)
+        let result = self.inner_delete(name, TableType::Normal);
+        // The catalog removal is not error-atomic part way through, so any storage error poisons
+        if matches!(result, Err(TableError::Storage(_))) {
+            transaction.poison();
+        }
+        result
     }
 
     #[track_caller]
@@ -781,7 +796,12 @@ impl TableNamespace {
         #[cfg(feature = "logging")]
         debug!("Deleting multimap table: {name}");
         self.set_dirty(transaction);
-        self.inner_delete(name, TableType::Multimap)
+        let result = self.inner_delete(name, TableType::Multimap);
+        // See delete_table(): a partial catalog removal must not be committed
+        if matches!(result, Err(TableError::Storage(_))) {
+            transaction.poison();
+        }
+        result
     }
 
     pub(crate) fn close_table<K: Key + 'static, V: Value + 'static>(
@@ -1281,6 +1301,11 @@ impl WriteTransaction {
     /// Restore the state of the database to the given [`Savepoint`]
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
+    ///
+    /// A failure partway through restoring poisons the transaction, so a half-restored state
+    /// can never be committed: [`Self::commit`] rolls the transaction back and returns
+    /// [`CommitError::TransactionPoisoned`]. After an I/O error the storage layer is latched
+    /// and [`Self::commit`] reports that failure instead; reopening the database repairs it.
     pub fn restore_savepoint(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         // Reject a Savepoint that is from a different Database
         if core::ptr::from_ref(self.transaction_tracker.as_ref()) != savepoint.db_address() {
@@ -1317,6 +1342,17 @@ impl WriteTransaction {
         assert_eq!(self.mem.get_version(), savepoint.get_version());
         self.dirty.store(true, Ordering::Release);
 
+        // From the root swap onward the transaction holds half-restored state which must not be
+        // committed, so any failure poisons the transaction
+        let result = self.restore_savepoint_inner(savepoint);
+        if result.is_err() {
+            self.poison();
+        }
+        result
+    }
+
+    // The mutating phase of restore_savepoint(): the caller poisons the transaction on error
+    fn restore_savepoint_inner(&mut self, savepoint: &Savepoint) -> Result<(), SavepointError> {
         // Restoring a savepoint needs to accomplish the following:
         // 1) restore the table tree. This is trivial, since we have the old root
         // 1a) we also filter the freed tree to remove any pages referenced by the old root
@@ -1342,25 +1378,13 @@ impl WriteTransaction {
             };
             let mut system_tables = self.system_tables.lock().unwrap();
             let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
-            let drain = || -> Result<(), StorageError> {
-                let mut iter = data_freed.extract_from_if(lower.., |_, _| true)?;
-                for entry in &mut iter {
-                    entry?;
-                }
-                // Defensive: exhaustion has already closed the iterator and
-                // surfaced any finalization error through the loop; this only
-                // keeps errors from being swallowed if the loop ever gains an
-                // early exit.
-                iter.close()
-            };
-            let result = drain();
-            if result.is_err() {
-                // The table tree root was already restored above, so a partial
-                // purge must not be committed. System-table extract iterators
-                // carry no poison target, so poison the transaction directly.
-                self.poison();
+            let mut iter = data_freed.extract_from_if(lower.., |_, _| true)?;
+            for entry in &mut iter {
+                entry?;
             }
-            result?;
+            // Defensive: exhaustion already closed the iterator; this only keeps errors from
+            // being swallowed if the loop ever gains an early exit
+            iter.close()?;
             // No need to process the system freed table, because it only rolls forward
         }
 
@@ -1546,6 +1570,9 @@ impl WriteTransaction {
     }
 
     /// Rename the given table
+    ///
+    /// A storage error partway through poisons the transaction, so a half-renamed state can
+    /// never be committed; see [`Self::restore_savepoint`].
     pub fn rename_table(
         &self,
         definition: impl TableHandle,
@@ -1561,6 +1588,9 @@ impl WriteTransaction {
     }
 
     /// Rename the given multimap table
+    ///
+    /// A storage error partway through poisons the transaction, so a half-renamed state can
+    /// never be committed; see [`Self::restore_savepoint`].
     pub fn rename_multimap_table(
         &self,
         definition: impl MultimapTableHandle,
@@ -1578,6 +1608,9 @@ impl WriteTransaction {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
+    ///
+    /// A storage error partway through poisons the transaction, so a half-deleted state can
+    /// never be committed; see [`Self::restore_savepoint`].
     pub fn delete_table(&self, definition: impl TableHandle) -> Result<bool, TableError> {
         let name = definition.name().to_string();
         // Drop the definition so that callers can pass in a `Table` or `MultimapTable` to delete, without getting a TableAlreadyOpen error
@@ -1588,6 +1621,9 @@ impl WriteTransaction {
     /// Delete the given table
     ///
     /// Returns a bool indicating whether the table existed
+    ///
+    /// A storage error partway through poisons the transaction, so a half-deleted state can
+    /// never be committed; see [`Self::restore_savepoint`].
     pub fn delete_multimap_table(
         &self,
         definition: impl MultimapTableHandle,
@@ -1628,9 +1664,10 @@ impl WriteTransaction {
     /// All writes performed in this transaction will be visible to future transactions, and are
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     ///
-    /// Returns [`CommitError::TransactionPoisoned`] if a previous operation panicked and left the
-    /// transaction unable to commit. In that case the transaction is rolled back and the database
-    /// remains usable.
+    /// Returns [`CommitError::TransactionPoisoned`] if a previous operation panicked, or failed
+    /// part way through modifying the transaction, and left it unable to commit. The transaction
+    /// is then rolled back and new transactions may begin, though a corruption error that caused
+    /// the poisoning is in the database itself, and is not repaired by the rollback.
     ///
     /// On any other error the commit did not complete cleanly: the transaction's changes are
     /// applied atomically -- fully or not at all -- but may already have become durable, so they
