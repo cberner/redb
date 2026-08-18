@@ -9,8 +9,9 @@
 #![cfg(all(feature = "experimental-multiprocess", not(target_os = "wasi")))]
 
 use redb::{
-    Database, DatabaseError, Durability, MultiProcessDatabase, ReadableDatabase, ReadableTable,
-    ReadableTableMetadata, SavepointError, TableDefinition, WriteTransaction, WriterMode,
+    Database, DatabaseError, Durability, MultiProcessDatabase, ReadOnlyDatabase, ReadableDatabase,
+    ReadableTable, ReadableTableMetadata, SavepointError, TableDefinition, WriteTransaction,
+    WriterMode,
 };
 use std::env;
 use std::path::{Path, PathBuf};
@@ -230,6 +231,35 @@ fn an_interrupted_create_can_be_redone() {
 // --------------------------------------------------------------------------------------------
 // Tests that need a real process
 // --------------------------------------------------------------------------------------------
+
+/// The database file carries no lock at all -- every process using the directory has it open at
+/// once -- so nothing about the file itself stops an ordinary `Database` from opening it and
+/// writing underneath them. The marker beside it is what turns that away, whether or not any
+/// process currently has the directory open.
+#[test]
+fn an_ordinary_database_cannot_open_the_data_file() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    let db = MultiProcessDatabase::create(&path).unwrap();
+    write(&db, 0, 1);
+
+    let data = path.join("data.redb");
+    for opened in [
+        Database::open(&data).err(),
+        Database::create(&data).err(),
+        ReadOnlyDatabase::open(&data).err(),
+    ] {
+        let message = opened
+            .expect("the data file was opened as an ordinary database")
+            .to_string();
+        assert!(message.contains("multi-process"), "{message}");
+    }
+
+    // ... and still refused once nobody holds the directory, since opening it then is just as
+    // unsafe: the next process to open it properly would find a file some other writer had changed
+    drop(db);
+    assert!(Database::open(&data).is_err());
+}
 
 /// Entry point for the child processes the tests below spawn. Ignored so that it only runs when
 /// named explicitly, and does nothing unless the parent asked for a role.

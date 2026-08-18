@@ -1,5 +1,7 @@
 use crate::io;
 use crate::multiprocess::ProcessCoordinator;
+#[cfg(not(redb_no_std))]
+use crate::multiprocess::reject_multiprocess_data_file;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -1697,6 +1699,7 @@ impl Builder {
     /// * otherwise this function will return an error
     #[cfg(not(redb_no_std))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        reject_multiprocess_data_file(path.as_ref())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1717,6 +1720,7 @@ impl Builder {
     /// Opens an existing redb database.
     #[cfg(not(redb_no_std))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        reject_multiprocess_data_file(path.as_ref())?;
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         Database::new(
@@ -1739,6 +1743,7 @@ impl Builder {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<ReadOnlyDatabase, DatabaseError> {
+        reject_multiprocess_data_file(path.as_ref())?;
         let file = OpenOptions::new().read(true).open(path)?;
 
         ReadOnlyDatabase::new(

@@ -13,6 +13,7 @@ pub(crate) use coordinator::ProcessCoordinator;
 pub use locks::WriterMode;
 #[cfg(not(feature = "experimental-multiprocess"))]
 pub(crate) use locks::WriterMode;
+pub(crate) use locks::reject_multiprocess_data_file;
 
 use crate::db::{OpenParams, RepairSession};
 use crate::sealed::Sealed;

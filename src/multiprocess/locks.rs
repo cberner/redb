@@ -8,6 +8,7 @@ use crate::tree_store::file_backend::{FileBackend, FileLockKind};
 use crate::tree_store::{DB_HEADER_SIZE, MAGICNUMBER, xxh3_checksum};
 use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::vec::Vec;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -163,6 +164,35 @@ fn require_regular_file(path: &Path) -> Result<()> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(StorageError::Io(err)),
     }
+}
+
+/// Refuses a path naming the database file inside a multi-process database directory.
+///
+/// A multi-process database keeps its data in an ordinary redb file with *no* lock on it, so
+/// nothing about the file itself stops [`crate::Database`] from opening it and writing underneath
+/// the processes using it properly; the marker beside it is what says to keep away.
+pub(crate) fn reject_multiprocess_data_file(path: &Path) -> Result<(), DatabaseError> {
+    if path.file_name() != Some(OsStr::new(DATA_FILE_NAME)) || !marker_present(&parent_of(path)) {
+        return Ok(());
+    }
+    Err(StorageError::Io(io::Error::new(
+        ErrorKind::InvalidInput,
+        "this file belongs to a multi-process database; open the directory holding it rather than \
+         the file itself",
+    ))
+    .into())
+}
+
+/// Whether a directory carries a complete multi-process marker. Anything that is not one --
+/// absent, unreadable, the wrong size, a symlink, someone else's file under that name -- answers
+/// no: only a marker this database wrote vouches for the directory.
+fn marker_present(root: &Path) -> bool {
+    let path = root.join(METADATA_FILE_NAME);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == METADATA_LEN as u64 => {}
+        _ => return false,
+    }
+    std::fs::read(&path).is_ok_and(|contents| contents.starts_with(&MAGIC))
 }
 
 /// Which name [`DatabaseDir::open_data`] put the database file under. Carried from the open to

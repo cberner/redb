@@ -95,6 +95,9 @@
   can pick up the previous one's allocator state. Non-durable commits, ephemeral savepoints,
   compaction and integrity checks are not supported in all configurations -- see the type's
   documentation. The directory layout may change incompatibly while the feature is experimental.
+* `Database::open()`, `Database::create()` and `ReadOnlyDatabase::open()` now refuse a `data.redb`
+  that belongs to a `MultiProcessDatabase` directory, which an ordinary handle could otherwise
+  silently corrupt by writing underneath the processes using it.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
