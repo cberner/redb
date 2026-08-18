@@ -1,9 +1,9 @@
-use crate::Result;
 use crate::tree_store::btree_cursor::{Cursor, Position};
 use crate::tree_store::btree_iters::{EntryGuard, bounds_are_empty, encode_bounds};
 use crate::tree_store::page_store::PageHint;
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
+use crate::{Result, StorageError};
 use Bound::{Excluded, Included, Unbounded};
 use alloc::vec::Vec;
 use core::borrow::Borrow;
@@ -53,6 +53,9 @@ pub(crate) struct BtreeCursorRange<K: Key + 'static, V: Value + 'static> {
     hint: PageHint,
     front: Slot<Cursor<K, V>>,
     back: Slot<Cursor<K, V>>,
+    // The ends run on independent cursors and share the termination logic, so the first error
+    // latches the whole range. See Cursor::errored.
+    errored: bool,
 }
 
 impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
@@ -85,6 +88,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
             hint,
             front: Slot::Uninitialized,
             back: Slot::Uninitialized,
+            errored: false,
         })
     }
 
@@ -97,6 +101,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
             hint,
             front: Slot::Exhausted,
             back: Slot::Exhausted,
+            errored: false,
         }
     }
 
@@ -201,6 +206,17 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
     }
 
     fn next_from(&mut self, side: Side) -> Option<Result<EntryGuard<K, V>>> {
+        if self.errored {
+            return Some(Err(StorageError::PreviousIo));
+        }
+        let result = self.next_from_inner(side);
+        if matches!(result, Some(Err(_))) {
+            self.errored = true;
+        }
+        result
+    }
+
+    fn next_from_inner(&mut self, side: Side) -> Option<Result<EntryGuard<K, V>>> {
         match self.prepare(side) {
             Ok(true) => {}
             Ok(false) => return None,

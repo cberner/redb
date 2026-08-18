@@ -51,6 +51,10 @@
   implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
+* Fix iterators silently omitting data when iteration continues after an error. An iterator
+  that yielded `Err(Corrupted)` could yield the rest of the table on later calls, skipping the
+  unreadable entries with no further error. Iterators and read-only cursors now keep returning
+  an error after the first one; re-seeking a cursor resets it.
 
 ## 4.2.0 - 2026-08-17
 
