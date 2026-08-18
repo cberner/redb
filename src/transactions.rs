@@ -1982,13 +1982,10 @@ impl WriteTransaction {
             .unwrap()
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
+        // Freeing the pages this transaction allocated also drops their buffered writes, so
+        // nothing is left that a later flush could write over pages another process has since
+        // taken
         self.page_allocator().rollback_all();
-        if self.transaction_tracker.write_lock_is_shared() {
-            // The buffered writes belong to pages this transaction allocated, which are about to
-            // become free for another process to allocate. Flushing them later would overwrite
-            // whatever that process put there
-            self.mem.discard_buffered_writes();
-        }
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -2122,8 +2119,8 @@ impl WriteTransaction {
             .oldest_live_read_transaction()?
             .map_or(epilogue_transaction, |x| x.next());
         // Clamp the free horizon to what a read transaction another process is about to register
-        // may still need. Without this the epilogue's own transaction id, which is one past the
-        // commit that is in the file, would let a page that snapshot reaches be reclaimed
+        // may still need. This epilogue only runs for a single-process database, which has no such
+        // reader, but the clamp costs nothing and keeps the bound in one place
         if let Some(limit) = self
             .transaction_tracker
             .cross_process_free_limit(&self.mem)?

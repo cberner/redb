@@ -83,9 +83,9 @@
   a later redb is refused rather than misread. Two writer modes are available: one where a single
   process may write, which costs that process nothing on the read path, and one where any process
   may write, which uses quick-repair commits so that each writer can pick up the previous one's
-  allocator state. Non-durable commits, persistent savepoints, compaction and integrity checks are
-  not supported in all configurations -- see the type's documentation. The directory layout may
-  change incompatibly while the feature is experimental.
+  allocator state. Non-durable commits, compaction and integrity checks are not supported in all
+  configurations -- see the type's documentation. The directory layout may change incompatibly
+  while the feature is experimental.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
