@@ -81,12 +81,20 @@
   ineligible for further savepoints, so a second savepoint in the same transaction failed with
   `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
   savepoint, makes a transaction savepoint-ineligible now.
-* Add `MultiProcessDatabase` behind the new `experimental-multiprocess` feature. It stores a
-  database in a directory -- the database file beside a `metadata` marker carrying a magic number,
-  format version, and writer mode, and the lock files that coordinate the processes using it. Only
-  `create()` and `open()` are provided, and only one process may have the database open at a time.
-  `create()` refuses an unmarked directory that already holds other files, such as a plain
-  `Database` stored as `data.redb`, rather than adopting or overwriting them.
+* Add `MultiProcessDatabase` behind the new `experimental-multiprocess` feature: a prototype
+  interface for using a database from several processes at once, with one write transaction at a
+  time across all of them and any number of concurrent readers. The database lives in a directory
+  -- `data.redb` beside the lock files that coordinate the processes using it -- so it must be on a
+  filesystem that supports file locking. A `metadata` marker carries a magic number, a format
+  version, and the writer mode, so a directory is recognized as one of these rather than guessed
+  at, and one written by a later redb is refused rather than misread; `create()` refuses an
+  unmarked directory that already holds other files, such as a plain `Database` stored as
+  `data.redb`, rather than adopting or overwriting them. Two writer modes are
+  available: one where a single process may write, which costs that process nothing on the read
+  path, and one where any process may write, which uses quick-repair commits so that each writer
+  can pick up the previous one's allocator state. Non-durable commits, persistent savepoints,
+  compaction and integrity checks are not supported in all configurations -- see the type's
+  documentation. The directory layout may change incompatibly while the feature is experimental.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

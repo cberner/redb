@@ -55,7 +55,7 @@ const _UNUSED3_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32
 const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
-pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+pub(crate) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
 
 // God byte flags
 const PRIMARY_BIT: u8 = 1;
@@ -78,6 +78,43 @@ const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 
 pub(crate) const PAGE_SIZE: usize = 4096;
+
+/// The commit slots of a header, byte for byte as they sit in the file, and which of them the god
+/// byte selects as primary. A multi-process database's extended header stores a hash over these
+/// bytes, so they are handed out raw rather than parsed.
+#[cfg(not(redb_no_std))]
+pub(crate) struct RawCommitSlots {
+    pub(crate) primary_index: usize,
+    slots: [[u8; TRANSACTION_SIZE]; 2],
+}
+
+#[cfg(not(redb_no_std))]
+impl RawCommitSlots {
+    pub(crate) fn primary(&self) -> &[u8] {
+        &self.slots[self.primary_index]
+    }
+
+    pub(crate) fn slot(&self, index: usize) -> &[u8] {
+        &self.slots[index]
+    }
+}
+
+/// Slices the commit slots out of a serialized header. `data` must hold at least
+/// [`DB_HEADER_SIZE`] bytes.
+#[cfg(not(redb_no_std))]
+pub(super) fn raw_commit_slots(data: &[u8]) -> RawCommitSlots {
+    RawCommitSlots {
+        primary_index: usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT),
+        slots: [
+            data[TRANSACTION_0_OFFSET..TRANSACTION_0_OFFSET + TRANSACTION_SIZE]
+                .try_into()
+                .unwrap(),
+            data[TRANSACTION_1_OFFSET..TRANSACTION_1_OFFSET + TRANSACTION_SIZE]
+                .try_into()
+                .unwrap(),
+        ],
+    }
+}
 
 fn get_u32(data: &[u8]) -> u32 {
     u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap())
@@ -298,6 +335,15 @@ impl UnrepairedDatabaseHeader {
         Ok(recalculated)
     }
 
+    // Select a primary slot, without reconciling the layout against the file length. Used by a
+    // process which only reads the file while another process may be writing to it: the layout is
+    // rewritten on every resize, so it can disagree with the file length at any moment, but such a
+    // process never allocates and so never consults it.
+    pub(super) fn finalize_transaction_slots(mut self) -> Result<DatabaseHeader> {
+        self.select_primary_slot()?;
+        Ok(self.inner)
+    }
+
     fn select_primary_slot(&mut self) -> Result<bool> {
         // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
         // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
@@ -395,6 +441,16 @@ impl DatabaseHeader {
             self.trailing_partial_region_pages = 0;
         }
         self.full_regions = layout.num_full_regions();
+    }
+
+    // Adopt another header's commit slots, leaving the layout alone. Used to pick up commits made
+    // by another process, whose header describes a file this process must not assume anything about
+    // beyond the trees those slots root.
+    #[cfg(not(redb_no_std))]
+    pub(super) fn adopt_transaction_slots(&mut self, other: &DatabaseHeader) {
+        self.primary_slot = other.primary_slot;
+        self.two_phase_commit = other.two_phase_commit;
+        self.transaction_slots.clone_from(&other.transaction_slots);
     }
 
     pub(super) fn primary_slot(&self) -> &TransactionHeader {

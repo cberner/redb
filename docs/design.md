@@ -516,7 +516,14 @@ This sequence is inspired by the PNG magic number.
 `writer mode` is 1 for a single writer process and 2 for multiple writer processes.
 
 All processes hold a shared lock on this file. This is for future format upgrades, so that a process
-can take an exclusive lock to perform a format upgrade.
+can take an exclusive lock to perform a format upgrade. An upgrader must acquire `write.lock` before
+taking this lock exclusively: a process that is part way through opening holds `write.lock` from
+before it reads the marker until after its shared lock on `metadata` is in place, so that ordering
+is what keeps an upgrade from starting -- or swapping the file -- mid-open, and acquiring in the
+opposite order would deadlock against it. A read-only open never takes `write.lock`, so it takes its
+shared lock on `metadata` first, before reading the marker or the header, and validates the marker
+only after the lock is in place: an upgrade that replaced the file before the lock landed is then
+refused by its version rather than read through a stale handle.
 
 ### Writer modes
 
@@ -630,7 +637,9 @@ greater than or equal to the current latest id.
 
 Some features are not supported by directory-structured databases.
 
-* Non-durable commits are not supported since they exist only in the local process's memory.
+* Non-durable commits are not supported in multi-writer mode, since they exist only in the
+  local process's memory. The sole writer of a single-writer database may use them, as it
+  would with an ordinary database.
 * 2-phase commits are always used to ensure that committed pages are flushed before the transaction
   becomes visible to another process. Disabling 2-phase commit is not supported.
 * Read-only processes do not detect database corruption on open. Since 2-phase commit is always used,

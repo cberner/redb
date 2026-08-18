@@ -892,13 +892,24 @@ impl SavepointTransactionState {
 // have returned pages to the allocator that the durable roots still reference through the
 // freed tables; such an allocator state must never be used, or persisted by a clean
 // shutdown, again.
+//
+// Under a shared write lock the commit's writes are dropped as well. They belong to pages that
+// are free in every durable state, and releasing the lock lets another process fill those pages:
+// flushing the buffered copies later would overwrite that process's data, and the read cache's
+// copies would shadow it, since a free page is refilled without the collection that drops stale
+// cache entries. The sole-writer mode keeps both -- there the buffer may also hold non-durable
+// commits that its readers are still being served from.
 struct AllocatorStateLatch {
     mem: Option<Arc<TransactionalMemory>>,
+    shared_write_lock: bool,
 }
 
 impl AllocatorStateLatch {
-    fn arm(mem: Arc<TransactionalMemory>) -> Self {
-        Self { mem: Some(mem) }
+    fn arm(mem: Arc<TransactionalMemory>, shared_write_lock: bool) -> Self {
+        Self {
+            mem: Some(mem),
+            shared_write_lock,
+        }
     }
 
     fn disarm(mut self) {
@@ -909,6 +920,10 @@ impl AllocatorStateLatch {
 impl Drop for AllocatorStateLatch {
     fn drop(&mut self) {
         if let Some(mem) = self.mem.take() {
+            if self.shared_write_lock {
+                mem.discard_buffered_writes();
+                mem.clear_read_cache();
+            }
             mem.invalidate_allocator_state();
         }
     }
@@ -953,6 +968,7 @@ impl WriteTransaction {
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
+        let defer_post_commit_free = transaction_tracker.defers_post_commit_free();
 
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
@@ -974,7 +990,13 @@ impl WriteTransaction {
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
-            post_commit_free: PostCommitFree::Enabled,
+            // The epilogue publishes its work as a non-durable commit, which no other process can
+            // see. Leaving it out costs nothing but deferring those frees to the next transaction
+            post_commit_free: if defer_post_commit_free {
+                PostCommitFree::Disabled
+            } else {
+                PostCommitFree::Enabled
+            },
             restored_transaction: None,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
@@ -1466,6 +1488,11 @@ impl WriteTransaction {
         if persistent_modified && !matches!(durability, Durability::Immediate) {
             return Err(SetDurabilityError::PersistentSavepointModified);
         }
+        if matches!(durability, Durability::None)
+            && !self.transaction_tracker.allows_non_durable_commit()
+        {
+            return Err(SetDurabilityError::NonDurableCommitUnsupported);
+        }
 
         self.durability = match durability {
             Durability::None => InternalDurability::None,
@@ -1692,7 +1719,10 @@ impl WriteTransaction {
     fn commit_inner(&mut self) -> Result<(), CommitError> {
         // Covers both the error and the panic-unwind path. Without an allocator state,
         // begin_write() refuses new write transactions and the next open repairs.
-        let latch = AllocatorStateLatch::arm(self.mem.clone());
+        let latch = AllocatorStateLatch::arm(
+            self.mem.clone(),
+            self.transaction_tracker.write_lock_is_shared(),
+        );
         let result = self.commit_inner_helper();
         if result.is_ok() {
             latch.disarm();
@@ -1701,6 +1731,15 @@ impl WriteTransaction {
     }
 
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
+        // The next process to take the write lock loads the allocator state this writes, rather
+        // than rebuilding it, so it is not optional
+        if self.transaction_tracker.requires_quick_repair() {
+            self.quick_repair = true;
+        }
+        // Ordering that a reader in another process depends on: see requires_two_phase_commit()
+        if self.transaction_tracker.requires_two_phase_commit() {
+            self.two_phase_commit = true;
+        }
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -1963,6 +2002,12 @@ impl WriteTransaction {
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
+        if self.transaction_tracker.write_lock_is_shared() {
+            // The buffered writes belong to pages this transaction allocated, which are about to
+            // become free for another process to allocate. Flushing them later would overwrite
+            // whatever that process put there
+            self.mem.discard_buffered_writes();
+        }
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -1979,10 +2024,16 @@ impl WriteTransaction {
             self.store_data_freed_pages_for(transaction_id, pages)?;
         }
 
-        let free_until_transaction = self
+        let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(self.transaction_id, |x| x.next());
+        if let Some(limit) = self
+            .transaction_tracker
+            .cross_process_free_limit(&self.mem)?
+        {
+            free_until_transaction = free_until_transaction.min(limit);
+        }
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
@@ -2083,8 +2134,17 @@ impl WriteTransaction {
         let epilogue_transaction = self.transaction_id.next();
         let mut free_until = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(epilogue_transaction, |x| x.next());
+        // Clamp the free horizon to what a read transaction another process is about to register
+        // may still need. Without this the epilogue's own transaction id, which is one past the
+        // commit that is in the file, would let a page that snapshot reaches be reclaimed
+        if let Some(limit) = self
+            .transaction_tracker
+            .cross_process_free_limit(&self.mem)?
+        {
+            free_until = free_until.min(limit);
+        }
         // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
         // is also a live read, so absent concurrency `oldest_live_read_transaction()` never
         // exceeds it and this is a no-op. But an ephemeral `Savepoint::drop` racing this commit
@@ -2095,6 +2155,11 @@ impl WriteTransaction {
         if savepoint_horizon != u64::MAX {
             free_until = free_until.min(TransactionId::new(savepoint_horizon).next());
         }
+
+        // As in process_freed_pages(): recorded for the next commit's flip, which is what makes
+        // this epilogue's reuse visible to other processes
+        self.transaction_tracker
+            .record_collection_horizon(free_until)?;
 
         let mut freed_any = false;
         let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
@@ -2293,6 +2358,11 @@ impl WriteTransaction {
     fn process_freed_pages(&mut self, free_until: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
+
+        // Other processes hear about this at the commit flip, which is also the first moment any
+        // page reclaimed below can be visibly reused
+        self.transaction_tracker
+            .record_collection_horizon(free_until)?;
 
         let page_allocator = self.page_allocator();
         let mut free_page = |page| {
@@ -2627,6 +2697,16 @@ impl Drop for WriteTransaction {
             // The abort is skipped while unwinding, leaking this transaction's pages: the
             // session stays usable, but the leak must not outlive the process
             assert!(crate::panicking());
+            // The buffered writes can only be this transaction's, and once the write lock is
+            // released another process may reuse the pages they shadow
+            self.mem.discard_buffered_writes();
+            if self.transaction_tracker.write_lock_is_shared() {
+                // A page of this transaction's can sit in the read cache as well, if it
+                // overflowed the write buffer and was read back. The leaked pages are free in
+                // every committed state, so the next writer fills them without the collection
+                // that normally drops stale cache entries
+                self.mem.clear_read_cache();
+            }
             self.mem.mark_needs_repair();
         }
     }

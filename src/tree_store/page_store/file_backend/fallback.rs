@@ -13,17 +13,34 @@ pub struct FileBackend {
     file: Mutex<File>,
 }
 
+/// Which whole-file advisory lock a [`FileBackend`] takes when it is created.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum FileLockKind {
+    /// Excludes every other opener of the file
+    Exclusive,
+    /// Excludes writers, but not other readers
+    Shared,
+    /// Takes no lock at all. Only for multi-process databases, which exclude concurrent writers
+    /// with their own lock files instead
+    None,
+}
+
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Self::new_internal(file, false)
+        Self::new_internal(file, FileLockKind::Exclusive)
     }
 
-    pub(crate) fn new_internal(file: File, read_only: bool) -> Result<Self, DatabaseError> {
-        let result = if read_only {
-            file.try_lock_shared()
-        } else {
-            file.try_lock()
+    pub(crate) fn new_internal(file: File, lock: FileLockKind) -> Result<Self, DatabaseError> {
+        let result = match lock {
+            FileLockKind::Exclusive => file.try_lock(),
+            FileLockKind::Shared => file.try_lock_shared(),
+            FileLockKind::None => {
+                return Ok(Self {
+                    lock_supported: false,
+                    file: Mutex::new(file),
+                });
+            }
         };
 
         match result {

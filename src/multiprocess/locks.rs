@@ -4,12 +4,13 @@
 //! Everything in here uses only `std::fs` file operations and the advisory file locks exposed by
 //! `std::fs::File`. See `docs/design.md` for the protocol these files implement.
 
-use crate::tree_store::MAGICNUMBER;
-use crate::tree_store::file_backend::FileBackend;
-use crate::{DatabaseError, StorageBackend, StorageError};
+use crate::tree_store::file_backend::{FileBackend, FileLockKind};
+use crate::tree_store::{DB_HEADER_SIZE, MAGICNUMBER, xxh3_checksum};
+use crate::{DatabaseError, Result, StorageBackend, StorageError};
+use alloc::vec::Vec;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const DATA_FILE_NAME: &str = "data.redb";
@@ -17,6 +18,9 @@ const WRITE_LOCK_FILE_NAME: &str = "write.lock";
 const METADATA_FILE_NAME: &str = "metadata";
 const METADATA_TMP_FILE_NAME: &str = "metadata.tmp";
 const DATA_TMP_FILE_NAME: &str = "data.redb.tmp";
+const REGISTRY_FILE_NAME: &str = "registry.lock";
+const EXTENDED_HEADER_FILE_NAME: &str = "extended-header";
+const PINNED_DIR_NAME: &str = "txn";
 
 // The ASCII letters 'redbMP' followed by the same PNG-inspired tail as the database file's own
 // magic number, for the same reasons.
@@ -26,6 +30,8 @@ const MAGIC: [u8; 11] = [
 const FORMAT_VERSION: u8 = 1;
 /// A single process owns `write.lock` for as long as it has the database open.
 const WRITER_MODE_SINGLE: u8 = 1;
+/// `write.lock` is taken per write transaction, so any process may write.
+const WRITER_MODE_MULTI: u8 = 2;
 const METADATA_LEN: usize = 13;
 
 /// A multi-process database cannot be safe without file locks, so unlike [`crate::Database`] it
@@ -42,15 +48,24 @@ fn lock_unsupported(err: io::Error) -> DatabaseError {
     StorageError::Io(err).into()
 }
 
+fn open_or_create(path: &Path) -> Result<File, io::Error> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
 /// Flushes a directory itself, so that an entry a rename just created is durable. Best-effort
 /// about a directory this process cannot open: flushing needs read permission, and nothing else
 /// here does.
 #[cfg(unix)]
-fn sync_dir(root: &Path) -> Result<(), DatabaseError> {
+fn sync_dir(root: &Path) -> Result<()> {
     let dir = match File::open(root) {
         Ok(dir) => dir,
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
-        Err(err) => return Err(StorageError::Io(err).into()),
+        Err(err) => return Err(StorageError::Io(err)),
     };
     dir.sync_all().map_err(StorageError::Io)?;
 
@@ -59,7 +74,7 @@ fn sync_dir(root: &Path) -> Result<(), DatabaseError> {
 
 /// `std` exposes no directory handle to sync off Unix, and no way to make a rename write-through.
 #[cfg(not(unix))]
-fn sync_dir(_root: &Path) -> Result<(), DatabaseError> {
+fn sync_dir(_root: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -138,20 +153,19 @@ fn mark_lock_abandoned(lock: &File) {
 /// here traverse symlinks and would write through them, and a FIFO blocks rather than fails. A
 /// missing file is fine. Best-effort -- the entry can be replaced between this check and the open,
 /// and `std` does not expose `O_NOFOLLOW` portably.
-fn require_regular_file(path: &Path) -> Result<(), DatabaseError> {
+fn require_regular_file(path: &Path) -> Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Ok(()),
         Ok(_) => Err(StorageError::Io(io::Error::new(
             ErrorKind::InvalidData,
             "a multi-process database directory may hold only ordinary files",
-        ))
-        .into()),
+        ))),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(StorageError::Io(err).into()),
+        Err(err) => Err(StorageError::Io(err)),
     }
 }
 
-/// Which name [`DatabaseDir::open`] put the database file under. Carried from the open to
+/// Which name [`DatabaseDir::open_data`] put the database file under. Carried from the open to
 /// [`DatabaseDir::promote_data`] rather than worked out again from disk: a temporary file is this
 /// call's own only if this call made it, and nothing about the file itself says so.
 #[derive(Clone, Copy)]
@@ -162,16 +176,98 @@ pub(super) enum DataLocation {
     Temporary,
 }
 
+/// Which processes may write to a multi-process database.
+///
+/// Fixed when the database is created and recorded in the directory's `metadata` file, so that
+/// every process which opens it agrees on the protocol.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WriterMode {
+    /// Only one process may open the database for writing. That process holds the write lock for
+    /// as long as it is open, so its in-memory state is always authoritative and its own
+    /// transactions run at full single-process speed. Any number of other processes may open the
+    /// database read-only.
+    ///
+    /// A second process opening it for writing fails with
+    /// [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen).
+    SingleWriterProcess,
+    /// Any number of processes may open the database for writing, but only one write transaction
+    /// may be in progress at a time: [`begin_write`](super::MultiProcessDatabase::begin_write)
+    /// blocks until the process holding the write lock finishes.
+    ///
+    /// Every commit is a quick-repair commit, so that the next process to take the write lock can
+    /// load the allocator state from the file instead of rebuilding it.
+    MultiWriterProcess,
+}
+
+impl WriterMode {
+    fn to_byte(self) -> u8 {
+        match self {
+            WriterMode::SingleWriterProcess => WRITER_MODE_SINGLE,
+            WriterMode::MultiWriterProcess => WRITER_MODE_MULTI,
+        }
+    }
+
+    fn from_byte(value: u8) -> Option<Self> {
+        match value {
+            WRITER_MODE_SINGLE => Some(WriterMode::SingleWriterProcess),
+            WRITER_MODE_MULTI => Some(WriterMode::MultiWriterProcess),
+            _ => None,
+        }
+    }
+}
+
+fn lock_error(err: TryLockError) -> StorageError {
+    match err {
+        TryLockError::WouldBlock => StorageError::Io(io::Error::new(
+            ErrorKind::WouldBlock,
+            "a lock this database needs is held by another process",
+        )),
+        TryLockError::Error(err) => unsupported_lock(err),
+    }
+}
+
+fn unsupported_lock(err: io::Error) -> StorageError {
+    match lock_unsupported(err) {
+        DatabaseError::Storage(err) => err,
+        other => StorageError::Io(io::Error::other(other.to_string())),
+    }
+}
+
+fn read_at(file: &File, offset: u64, out: &mut [u8]) -> Result<()> {
+    // Seek-and-read rather than the platform positional APIs, to stay portable; the caller holds a
+    // lock that makes the cursor single threaded
+    let mut handle = file;
+    handle
+        .seek(SeekFrom::Start(offset))
+        .map_err(StorageError::Io)?;
+    handle.read_exact(out).map_err(StorageError::Io)
+}
+
+fn write_at(file: &File, offset: u64, data: &[u8]) -> Result<()> {
+    let mut handle = file;
+    handle
+        .seek(SeekFrom::Start(offset))
+        .map_err(StorageError::Io)?;
+    handle.write_all(data).map_err(StorageError::Io)
+}
+
 /// The paths that make up a multi-process database directory.
-pub(super) struct DatabaseDir {
+#[derive(Debug, Clone)]
+pub(crate) struct DatabaseDir {
     root: PathBuf,
 }
 
 impl DatabaseDir {
     /// Every name `create()` writes after taking the write lock. `metadata` is not among them: the
     /// check that uses this runs only where there is no marker.
-    const WRITTEN_UNDER_THE_LOCK: &'static [&'static str] =
-        &[DATA_FILE_NAME, DATA_TMP_FILE_NAME, METADATA_TMP_FILE_NAME];
+    const WRITTEN_UNDER_THE_LOCK: &'static [&'static str] = &[
+        DATA_FILE_NAME,
+        DATA_TMP_FILE_NAME,
+        METADATA_TMP_FILE_NAME,
+        REGISTRY_FILE_NAME,
+        EXTENDED_HEADER_FILE_NAME,
+        PINNED_DIR_NAME,
+    ];
 
     pub(super) fn new(root: impl AsRef<Path>) -> Self {
         Self {
@@ -179,7 +275,7 @@ impl DatabaseDir {
         }
     }
 
-    fn data_file(&self) -> PathBuf {
+    pub(super) fn data_file(&self) -> PathBuf {
         self.root.join(DATA_FILE_NAME)
     }
 
@@ -199,83 +295,86 @@ impl DatabaseDir {
         self.root.join(DATA_TMP_FILE_NAME)
     }
 
-    /// Takes the write lock, which excludes every other process from the database, and reports
-    /// whether this call created the file. Taken before anything in the directory is read or
-    /// written, so the holder has the directory to itself.
-    ///
-    /// Only `create()` makes the file, and nothing ever unlinks one: another process may be
-    /// waiting on the lock on that same file, and unlinking would let a third process lock a
-    /// fresh `write.lock` while the second holds the old inode. Creation is decided by the open
-    /// itself rather than by a look beforehand, since a snapshot can go stale while another
-    /// `create()` runs to completion, and what the fresh-lock rule may refuse turns on who
-    /// really made the file.
-    fn acquire_write_lock(&self, create: bool) -> Result<(File, bool), DatabaseError> {
-        let path = self.write_lock_file();
-        // Otherwise the create below would follow a symlink left under this name, and the
-        // lock would be taken on a file whose identity was never checked
-        require_regular_file(&path)?;
-        let open_existing = || {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|err| {
-                    if err.kind() == ErrorKind::NotFound {
-                        StorageError::Io(io::Error::new(
-                            ErrorKind::NotFound,
-                            "not a multi-process database directory",
-                        ))
-                    } else {
-                        StorageError::Io(err)
-                    }
-                })
-        };
-        let (file, created) = if create {
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => (file, true),
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => (open_existing()?, false),
-                Err(err) => return Err(StorageError::Io(err).into()),
-            }
-        } else {
-            (open_existing()?, false)
-        };
+    fn registry_file(&self) -> PathBuf {
+        self.root.join(REGISTRY_FILE_NAME)
+    }
 
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(TryLockError::Error(err)) => return Err(lock_unsupported(err)),
-        }
-        if !created {
-            // Re-read through the held lock: the preflight's snapshot can go stale, and a lock
-            // file that gained contents -- an abandonment mark included -- or stopped being a
-            // regular file vouches for nothing
-            let metadata = file.metadata().map_err(StorageError::Io)?;
-            if !metadata.is_file() || metadata.len() > 0 {
+    fn extended_header_file(&self) -> PathBuf {
+        self.root.join(EXTENDED_HEADER_FILE_NAME)
+    }
+
+    fn pinned_dir(&self) -> PathBuf {
+        self.root.join(PINNED_DIR_NAME)
+    }
+
+    /// The file whose *name* is `id`. Nothing is ever read from or written to it: the name carries
+    /// the whole of the data, and the lock on it says whether anyone still needs that transaction.
+    fn pinned_file(&self, id: u64) -> PathBuf {
+        self.pinned_dir().join(id.to_string())
+    }
+
+    /// Creates the files the protocol coordinates through: the `txn/` directory, the empty
+    /// `registry.lock`, and `extended-header`. Idempotent, and safe without the write lock:
+    /// everything here is create-if-absent, and the extended header's initial zeroes read as
+    /// corrupt, which every reader of it handles.
+    pub(super) fn init_protocol_files(&self) -> Result<()> {
+        std::fs::create_dir_all(self.pinned_dir()).map_err(StorageError::Io)?;
+        require_regular_file(&self.registry_file())?;
+        drop(open_or_create(&self.registry_file()).map_err(StorageError::Io)?);
+        require_regular_file(&self.extended_header_file())?;
+        drop(open_or_create(&self.extended_header_file()).map_err(StorageError::Io)?);
+        sync_dir(&self.root)?;
+
+        Ok(())
+    }
+
+    /// The mode an existing database was created with, from its `metadata` file.
+    ///
+    /// Safe to read without any lock: the marker is written once, by rename, and never changed.
+    pub(super) fn mode(&self) -> Result<WriterMode, DatabaseError> {
+        self.read_metadata(false).map(|mode| {
+            mode.expect("read_metadata only reports a missing marker when create is set")
+        })
+    }
+
+    /// The accepting pass for a directory whose lock file this call has just created. A
+    /// pre-existing `write.lock` vouches for redb's other names; a fresh one vouches for nothing,
+    /// so anything already under them arrived while the directory was being claimed -- another
+    /// process reaching past the directory API -- and adopting it would hand this handle a file
+    /// something else is using.
+    pub(super) fn reject_files_beside_a_fresh_lock(&self) -> Result<(), DatabaseError> {
+        let claimed = Self::WRITTEN_UNDER_THE_LOCK.iter().copied();
+        for name in claimed.chain([METADATA_FILE_NAME]) {
+            if occupied(&self.root.join(name))? {
                 return Err(StorageError::Io(io::Error::new(
-                    ErrorKind::InvalidData,
-                    "write.lock is not a multi-process database's lock file",
+                    ErrorKind::AlreadyExists,
+                    "another process put files into the directory while it was being claimed",
                 ))
                 .into());
             }
         }
-        Ok((file, created))
+
+        Ok(())
     }
 
-    /// Opens the directory, creating it if `create` is set, and returns a backend for the database
-    /// file that holds the write lock for as long as the database is open, along with which of the
-    /// two names that file is under.
+    /// Takes the shared lock on `metadata` that every process holds for as long as it has the
+    /// database open. A future version that changes the directory's format will take this lock
+    /// exclusively, so that it upgrades only once nothing is using the database.
+    pub(super) fn lock_metadata_shared(&self) -> Result<File> {
+        require_regular_file(&self.metadata_file())?;
+        let file = File::open(self.metadata_file()).map_err(StorageError::Io)?;
+        file.lock_shared().map_err(unsupported_lock)?;
+        Ok(file)
+    }
+
+    /// Validates the directory and creates it if `create` is set, up to but not including taking
+    /// the write lock. Split from [`Self::open_data`] because the caller decides how the write
+    /// lock is taken, and this is everything that happens before it.
     ///
-    /// A directory being created is not marked as one of these yet -- the caller does that with
-    /// [`Self::write_metadata_if_missing`], once the database file has turned out to be usable.
-    pub(super) fn open(
-        &self,
-        create: bool,
-    ) -> Result<(Box<dyn StorageBackend>, DataLocation), DatabaseError> {
+    /// Returns whether the marker was present during this pass, which only a `create` asks about:
+    /// a marker that was already here before the caller made a lock file is the one thing a fresh
+    /// lock does not have to vouch for.
+    pub(super) fn prepare(&self, create: bool) -> Result<bool, DatabaseError> {
         let mut marked_at_preflight = false;
         if create {
             // All checks run before the directory is touched, so a rejected create() leaves no
@@ -284,7 +383,7 @@ impl DatabaseDir {
             // the authoritative pass
             marked_at_preflight = occupied(&self.metadata_file())?;
             if marked_at_preflight {
-                self.read_metadata(create)?;
+                let _ = self.read_metadata(create)?;
             } else {
                 self.reject_unmarked_database()?;
                 self.reject_foreign_directory()?;
@@ -307,25 +406,29 @@ impl DatabaseDir {
             .into());
         }
 
-        let (write_lock, lock_created) = self.acquire_write_lock(create)?;
-        let mut fresh_claim = false;
+        Ok(marked_at_preflight)
+    }
+
+    /// Opens the database file, once the caller holds the write lock.
+    ///
+    /// The file is returned unlocked: every process needs it open at once, and `write.lock` and
+    /// the reader slots are what keep a page from being reused underneath one of them.
+    ///
+    /// `fresh_claim` says the caller created the lock file and found no marker, so the names
+    /// touched here were just required to be absent; anything under them now arrived while the
+    /// directory was being claimed, and is refused rather than adopted.
+    pub(super) fn open_data(
+        &self,
+        create: bool,
+        fresh_claim: bool,
+    ) -> Result<(File, DataLocation), DatabaseError> {
         if create {
             // The lock file's entry must be durable before anything else is written under these
             // names: its *absence* beside them is what says a directory is not this database's,
             // and a crash could otherwise keep `data.redb` while losing `write.lock`
             sync_dir(&self.root)?;
-            // A marker seen before the lock file was made marks a create() to finish -- a crash
-            // can lose the lock's entry while the marker survives -- and the fresh-lock rule has
-            // nothing to refuse. One that first appears after cannot be another create()'s, since
-            // finishing one needs the lock this call holds, so the rejecting pass below refuses
-            // it like every other name that arrives while the directory is being claimed
-            fresh_claim = lock_created && !marked_at_preflight;
-            if fresh_claim && let Err(err) = self.reject_files_beside_a_fresh_lock() {
-                mark_lock_abandoned(&write_lock);
-                return Err(err);
-            }
         }
-        self.read_metadata(create)?;
+        let _ = self.read_metadata(create)?;
 
         // A database being made for the first time is initialized under a temporary name and
         // renamed into place by `promote_data`, like the marker. A crash during initialization
@@ -339,7 +442,6 @@ impl DatabaseDir {
                 // The fresh-lock pass just required this name to be absent, so anything under it
                 // now arrived while the directory was being claimed, and is refused the same way
                 Ok(_) if fresh_claim => {
-                    mark_lock_abandoned(&write_lock);
                     return Err(StorageError::Io(io::Error::new(
                         ErrorKind::AlreadyExists,
                         "the database file appeared while the directory was being claimed",
@@ -401,7 +503,6 @@ impl DatabaseDir {
         let data = match options.open(path) {
             Ok(data) => data,
             Err(err) if fresh_claim && err.kind() == ErrorKind::AlreadyExists => {
-                mark_lock_abandoned(&write_lock);
                 return Err(StorageError::Io(io::Error::new(
                     ErrorKind::AlreadyExists,
                     "the database file appeared while the directory was being claimed",
@@ -410,24 +511,8 @@ impl DatabaseDir {
             }
             Err(err) => return Err(StorageError::Io(err).into()),
         };
-        // The ordinary exclusive lock, the same one a Database takes: a process that reaches past
-        // the directory and opens this file directly is not looking at the write lock, so the file
-        // needs a lock of its own. Exclusive rather than shared, because nothing coordinates a
-        // reader that attaches this way with the pages this process frees
-        let data = match FileBackend::new(data) {
-            Ok(data) => data,
-            Err(err) => {
-                // On a fresh claim the file was created exclusively just above, so failing to
-                // lock it means something took it in between -- and the lock file left empty
-                // would vouch, on the next create(), for whatever that something makes of it
-                if fresh_claim {
-                    mark_lock_abandoned(&write_lock);
-                }
-                return Err(err);
-            }
-        };
 
-        Ok((Box::new(DirectoryBackend { data, write_lock }), location))
+        Ok((data, location))
     }
 
     /// Moves a freshly initialized database file into place, if this call was the one that made
@@ -437,11 +522,10 @@ impl DatabaseDir {
     pub(super) fn promote_data(&self, location: DataLocation) -> Result<(), DatabaseError> {
         let tmp = self.data_tmp_file();
         if matches!(location, DataLocation::Final) {
-            // The database opened under its own name, so anything under the temporary one is the
-            // wreckage of an earlier attempt. Deleted here rather than on the way in, so a
-            // create() pointed somewhere by mistake fails without having deleted anything; and
-            // tidying only, so a failure is not the caller's problem -- what is left is inert.
-            // Except a finished database, which is never tidied away
+            // Anything under the temporary name is the wreckage of an earlier attempt. Deleted
+            // here rather than on the way in, so a create() pointed somewhere by mistake fails
+            // without having deleted anything; tidying only, so a failure is not the caller's
+            // problem. Except a finished database, which is never tidied away
             if matches!(self.reject_data_tmp_holding_a_database(), Ok(())) {
                 drop(self.discard_data_tmp());
             }
@@ -492,24 +576,6 @@ impl DatabaseDir {
         if matches!(held.try_lock(), Ok(())) {
             let _ = std::fs::remove_file(self.data_tmp_file());
         }
-    }
-
-    /// Writes the marker only if the directory does not already carry one. One that is there was
-    /// validated by [`Self::read_metadata`] on the way in, so it is byte-for-byte what would be
-    /// written.
-    pub(super) fn write_metadata_if_missing(&self) -> Result<(), DatabaseError> {
-        if occupied(&self.metadata_file())? {
-            // Validated here rather than assumed: the write lock keeps redb out, but the claim
-            // that an existing marker is byte-for-byte what would be written has to survive
-            // whatever else was pointed at the directory
-            self.read_metadata(false)?;
-            // This call may still have recreated the lock file or the database file after a crash
-            // lost their entries, and write_metadata() is where the directory would otherwise be
-            // flushed
-            return sync_dir(&self.root);
-        }
-
-        self.write_metadata()
     }
 
     /// Throws away a temporary database file left by an earlier attempt. Unlinks rather than
@@ -650,37 +716,17 @@ impl DatabaseDir {
         Ok(())
     }
 
-    /// The accepting pass for a directory whose lock file this call has just created. A
-    /// pre-existing `write.lock` vouches for redb's other names; a fresh one vouches for nothing,
-    /// so anything already under them arrived while the directory was being claimed -- another
-    /// process reaching past the directory API -- and adopting it would hand this handle a file
-    /// something else is using.
-    fn reject_files_beside_a_fresh_lock(&self) -> Result<(), DatabaseError> {
-        let claimed = Self::WRITTEN_UNDER_THE_LOCK.iter().copied();
-        for name in claimed.chain([METADATA_FILE_NAME]) {
-            if occupied(&self.root.join(name))? {
-                return Err(StorageError::Io(io::Error::new(
-                    ErrorKind::AlreadyExists,
-                    "another process put files into the directory while it was being claimed",
-                ))
-                .into());
-            }
-        }
-
-        Ok(())
-    }
-
     /// Writes the marker that says this directory holds a multi-process database. Called only once
     /// the database file has been initialized, so a failed `create()` never leaves a marker.
     ///
     /// Written under a temporary name and renamed into place, so the marker is either absent or
-    /// complete: a half-written one would be indistinguishable from a foreign file, which
-    /// [`Self::read_metadata`] refuses, and the directory would be wedged.
-    fn write_metadata(&self) -> Result<(), DatabaseError> {
+    /// complete and never in between: a half-written one is indistinguishable from a file that is
+    /// simply not ours, which [`Self::read_metadata`] refuses, and the directory would be wedged.
+    fn write_metadata(&self, mode: WriterMode) -> Result<(), DatabaseError> {
         let mut contents = [0u8; METADATA_LEN];
         contents[0..11].copy_from_slice(&MAGIC);
         contents[11] = FORMAT_VERSION;
-        contents[12] = WRITER_MODE_SINGLE;
+        contents[12] = mode.to_byte();
 
         let tmp = self.metadata_tmp_file();
         // Unlinked and created afresh rather than truncated in place, so a symlink or FIFO left
@@ -761,6 +807,34 @@ impl DatabaseDir {
         Ok(())
     }
 
+    /// Writes the marker only if the directory does not already carry one. One that is there was
+    /// validated by [`Self::read_metadata`] under the lock, so it is byte-for-byte what would be
+    /// written.
+    pub(super) fn write_metadata_if_missing(&self, mode: WriterMode) -> Result<(), DatabaseError> {
+        if occupied(&self.metadata_file())? {
+            // Validated here rather than assumed, and required to carry the mode being created:
+            // the claim that an existing marker is byte-for-byte what would be written has to
+            // survive whatever else was pointed at the directory, and one that validates but
+            // differs can only have arrived from outside while the directory was being claimed
+            let existing = self
+                .read_metadata(false)?
+                .expect("read_metadata only reports a missing marker when create is set");
+            if existing != mode {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "the marker appeared while the directory was being claimed",
+                ))
+                .into());
+            }
+            // This call may still have created other files, and write_metadata() is where the
+            // directory would otherwise be flushed
+            sync_dir(&self.root)?;
+            return Ok(());
+        }
+
+        self.write_metadata(mode)
+    }
+
     /// Refuses a directory that holds anything this database did not put there.
     ///
     /// Only consulted when there is no marker: a directory with one is this database's, and a
@@ -782,18 +856,27 @@ impl DatabaseDir {
         for entry in entries {
             let entry = entry.map_err(StorageError::Io)?;
             let name = entry.file_name();
-            let named_like_ours = [
-                DATA_FILE_NAME,
-                DATA_TMP_FILE_NAME,
-                WRITE_LOCK_FILE_NAME,
-                METADATA_FILE_NAME,
-                METADATA_TMP_FILE_NAME,
-            ]
-            .iter()
-            .any(|known| name == *known);
-            // `file_type()` reports the entry rather than what it points at, so a symlink wearing
-            // one of these names is caught instead of followed
-            let ours = named_like_ours && entry.file_type().map_err(StorageError::Io)?.is_file();
+            // The name is not enough: `file_type()` reports the entry rather than what it points
+            // at, so a symlink wearing one of these names is caught here instead of being followed
+            // and initialized over, somewhere outside this directory entirely
+            let file_type = entry.file_type().map_err(StorageError::Io)?;
+            let ours = if name == PINNED_DIR_NAME {
+                // The only name here that is a directory rather than a file
+                file_type.is_dir()
+            } else {
+                [
+                    DATA_FILE_NAME,
+                    DATA_TMP_FILE_NAME,
+                    WRITE_LOCK_FILE_NAME,
+                    METADATA_FILE_NAME,
+                    METADATA_TMP_FILE_NAME,
+                    REGISTRY_FILE_NAME,
+                    EXTENDED_HEADER_FILE_NAME,
+                ]
+                .iter()
+                .any(|known| name == *known)
+                    && file_type.is_file()
+            };
             if !ours {
                 return Err(StorageError::Io(io::Error::new(
                     ErrorKind::AlreadyExists,
@@ -807,20 +890,12 @@ impl DatabaseDir {
         Ok(())
     }
 
-    /// Takes the shared lock on `metadata` that every process holds for as long as it has the
-    /// database open. A future version that changes the directory's format will take this lock
-    /// exclusively, so that it upgrades only once nothing is using the database.
-    pub(super) fn lock_metadata_shared(&self) -> Result<File, DatabaseError> {
-        let file = File::open(self.metadata_file()).map_err(StorageError::Io)?;
-        file.lock_shared().map_err(lock_unsupported)?;
-        Ok(file)
-    }
-
     /// Checks that this directory holds a multi-process database, tolerating a missing marker when
-    /// one is being created. A directory holding some other `metadata` file is refused rather than
-    /// taken over, even by `create()`: overwriting it would be a destructive way to report a
-    /// mistyped path. The caller must hold the write lock.
-    fn read_metadata(&self, create: bool) -> Result<(), DatabaseError> {
+    /// one is being created, and returns the writer mode the marker records. `None` only ever
+    /// means "no marker yet, and `create` may write one". A directory holding some other
+    /// `metadata` file is refused rather than taken over, even by `create()`: overwriting it would
+    /// be a destructive way to report a mistyped path.
+    pub(super) fn read_metadata(&self, create: bool) -> Result<Option<WriterMode>, DatabaseError> {
         let path = self.metadata_file();
         require_regular_file(&path)?;
         let file = match File::open(&path) {
@@ -843,7 +918,8 @@ impl DatabaseDir {
                     ))
                     .into());
                 }
-                return self.reject_foreign_directory();
+                self.reject_foreign_directory()?;
+                return Ok(None);
             }
             Err(err) => return Err(StorageError::Io(err).into()),
         };
@@ -870,91 +946,647 @@ impl DatabaseDir {
             ))
             .into());
         }
-        let mode = bytes[12];
-        if mode != WRITER_MODE_SINGLE {
+        let Some(mode) = WriterMode::from_byte(bytes[12]) else {
             return Err(StorageError::Io(io::Error::new(
                 ErrorKind::InvalidData,
-                format!("unsupported writer mode: {mode}"),
+                format!("unsupported writer mode: {}", bytes[12]),
             ))
             .into());
-        }
+        };
 
-        Ok(())
+        Ok(Some(mode))
     }
 }
 
-/// The database file, plus the write lock that keeps other processes out of its directory.
+/// The lock on `registry.lock`, which guards cross-process access to `extended-header`, the `txn/`
+/// directory, and the header of `data.redb`: shared to read them, exclusive to write them.
 ///
-/// The lock is held here rather than alongside the [`crate::Database`] because a live write
-/// transaction keeps the database open past the point where the `Database` is dropped: tied to the
-/// backend, the lock lasts exactly as long as the open file, released by `close()`.
-#[derive(Debug)]
-struct DirectoryBackend {
-    data: FileBackend,
-    write_lock: File,
+/// The file itself is empty. Every acquisition opens its own file handle, because advisory locks
+/// belong to the open file description: with a handle per acquisition, any number of threads can
+/// hold the shared lock at once, and dropping one guard never releases another's lock.
+#[derive(Debug, Clone)]
+pub(crate) struct RegistryLock {
+    path: PathBuf,
 }
 
-impl StorageBackend for DirectoryBackend {
+impl RegistryLock {
+    pub(super) fn open(dir: &DatabaseDir) -> Self {
+        Self {
+            path: dir.registry_file(),
+        }
+    }
+
+    fn acquire(&self, exclusive: bool) -> Result<RegistryGuard> {
+        let file = open_or_create(&self.path).map_err(StorageError::Io)?;
+        if exclusive {
+            file.lock().map_err(unsupported_lock)?;
+        } else {
+            file.lock_shared().map_err(unsupported_lock)?;
+        }
+        Ok(RegistryGuard { file })
+    }
+
+    /// Blocks until every writer of the guarded state has finished. Held while reading the header
+    /// of `data.redb`, reading `extended-header`, or pinning a transaction in `txn/`.
+    pub(super) fn shared(&self) -> Result<RegistryGuard> {
+        self.acquire(false)
+    }
+
+    /// Blocks until every other process's reads and pins are complete. Held while writing the
+    /// header of `data.redb` or `extended-header`, or scanning `txn/`.
+    pub(super) fn exclusive(&self) -> Result<RegistryGuard> {
+        self.acquire(true)
+    }
+}
+
+/// A held registry lock. Dropping it releases the lock.
+pub(crate) struct RegistryGuard {
+    file: File,
+}
+
+impl Drop for RegistryGuard {
+    fn drop(&mut self) {
+        // Nothing can be done about a failure, and closing the handle releases the lock anyway;
+        // the explicit unlock only makes it prompt on platforms where the close is lazy about it
+        let _ = self.file.unlock();
+    }
+}
+
+/// `extended-header`: two slots of {transaction collection horizon, hash}, logically an extension
+/// of the commit slots in the header of `data.redb`. The active slot is the one the primary slot
+/// bit in that header selects.
+///
+/// The hash binds a horizon to the commit slot bytes it was written beside. There is no fsync of
+/// this file, so after a crash a slot can pair a stale horizon with a newer commit slot -- and the
+/// hash is how a reader notices, falling back to assuming the worst. The caller must hold the
+/// registry lock: shared to read, exclusive to write.
+pub(super) struct ExtendedHeader {
+    file: File,
+}
+
+/// 8 bytes of horizon, then 16 of hash.
+const EXTENDED_HEADER_SLOT_LEN: usize = 24;
+
+fn extended_header_hash(horizon: u64, commit_slot: &[u8]) -> u128 {
+    let mut bound = Vec::with_capacity(8 + commit_slot.len());
+    bound.extend_from_slice(&horizon.to_le_bytes());
+    bound.extend_from_slice(commit_slot);
+    xxh3_checksum(&bound)
+}
+
+impl ExtendedHeader {
+    pub(super) fn open(dir: &DatabaseDir) -> Result<Self> {
+        require_regular_file(&dir.extended_header_file())?;
+        Ok(Self {
+            file: open_or_create(&dir.extended_header_file()).map_err(StorageError::Io)?,
+        })
+    }
+
+    /// The horizon in `slot`, if the slot's hash matches `commit_slot` -- the corresponding commit
+    /// slot bytes exactly as the caller read them from `data.redb` under this same lock. `None`
+    /// means the slot is torn, stale, or never written, and the caller must assume a horizon of
+    /// its own choosing per the crash rules in `docs/design.md`.
+    pub(super) fn read_horizon(&self, slot: usize, commit_slot: &[u8]) -> Result<Option<u64>> {
+        let mut bytes = [0u8; EXTENDED_HEADER_SLOT_LEN];
+        let offset = (slot * EXTENDED_HEADER_SLOT_LEN) as u64;
+        if read_at(&self.file, offset, &mut bytes).is_err() {
+            // Too short to hold the slot, which is what a freshly created file looks like. Real
+            // I/O errors surface on the next write; misreading one as corruption costs a reread
+            // of the cache, not correctness
+            return Ok(None);
+        }
+        let horizon = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let hash = u128::from_le_bytes(bytes[8..24].try_into().unwrap());
+        if hash != extended_header_hash(horizon, commit_slot) {
+            return Ok(None);
+        }
+        Ok(Some(horizon))
+    }
+
+    /// Writes `slot`, binding `horizon` to `commit_slot`. Not fsynced: a commit's flip does not
+    /// wait on this file, and the hash is what catches a write that never landed.
+    pub(super) fn write_horizon(&self, slot: usize, horizon: u64, commit_slot: &[u8]) -> Result {
+        let mut bytes = [0u8; EXTENDED_HEADER_SLOT_LEN];
+        bytes[0..8].copy_from_slice(&horizon.to_le_bytes());
+        bytes[8..24].copy_from_slice(&extended_header_hash(horizon, commit_slot).to_le_bytes());
+        write_at(&self.file, (slot * EXTENDED_HEADER_SLOT_LEN) as u64, &bytes)
+    }
+}
+
+/// This process's pin in the `txn/` directory, and the scan over everyone's.
+///
+/// A pinned transaction is a file in `txn/` whose *name* is the transaction id, held with a
+/// *shared* lock: every process reading that transaction holds the same file at once, and a writer
+/// fails to take it exclusively for as long as any of them does. Nothing is read from or written
+/// to those files -- the name is the whole of the data. That matters for more than tidiness: a
+/// lock is mandatory on some platforms, so a file another process holds locked cannot be read.
+///
+/// A process pins one file: the oldest transaction it still needs, which protects every newer one
+/// as well, since the scan stops at the lowest locked id.
+pub(super) struct TransactionPins {
+    dir: DatabaseDir,
+    /// The `txn/` file this process holds. Dropping it releases the lock; the file stays, and the
+    /// next writer to scan unlinks it once nobody holds it.
+    pinned: Option<File>,
+    /// The id `pinned` is named for, so that publishing the same value twice does no I/O
+    published: Option<u64>,
+}
+
+impl TransactionPins {
+    pub(super) fn new(dir: &DatabaseDir) -> Self {
+        Self {
+            dir: dir.clone(),
+            pinned: None,
+            published: None,
+        }
+    }
+
+    /// The transaction this process currently pins.
+    pub(super) fn published(&self) -> Option<u64> {
+        self.published
+    }
+
+    /// Pins the oldest transaction this process needs kept alive, or releases the pin. The caller
+    /// must hold the registry lock -- shared is enough: this only adds a file and takes a shared
+    /// lock on it. Releasing does not delete the file: only a writer that holds it exclusively
+    /// may, or a reader could lock a file that is already unlinked and pin nothing.
+    pub(super) fn publish(&mut self, pinned: Option<u64>) -> Result<()> {
+        if pinned == self.published {
+            return Ok(());
+        }
+        let held = if let Some(id) = pinned {
+            let file = open_or_create(&self.dir.pinned_file(id)).map_err(StorageError::Io)?;
+            file.lock_shared().map_err(unsupported_lock)?;
+            Some(file)
+        } else {
+            None
+        };
+        // Assigned rather than taken in two steps, so the new lock is held before the old one is
+        // dropped: a writer scanning in between sees this process at its older, more conservative
+        // id rather than not at all
+        self.pinned = held;
+        self.published = pinned;
+        Ok(())
+    }
+
+    /// The oldest transaction any process still needs, or `None` if nothing is pinned anywhere.
+    ///
+    /// Walks `txn/` from the lowest id up, unlinking every file it can take exclusively -- those
+    /// name transactions nobody is reading any more -- and stopping at the first it cannot, which
+    /// is therefore the oldest still in use. The caller must hold the registry lock exclusively,
+    /// so that no process is part way through pinning.
+    pub(super) fn scan_oldest(&self) -> Result<Option<u64>> {
+        let mut ids = Vec::new();
+        for entry in std::fs::read_dir(self.dir.pinned_dir()).map_err(StorageError::Io)? {
+            let entry = entry.map_err(StorageError::Io)?;
+            // The name is the whole of the data, so anything that does not parse as one is not
+            // ours and is left alone
+            if let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u64>().ok())
+            {
+                ids.push(id);
+            }
+        }
+        ids.sort_unstable();
+
+        for id in ids {
+            // Our own pin. Checked by id rather than trusted to the try-lock below, because on
+            // platforms that emulate these locks per process rather than per open file, taking it
+            // again through a second handle would succeed -- and unlink a file we are still using
+            if Some(id) == self.published {
+                return Ok(Some(id));
+            }
+            let path = self.dir.pinned_file(id);
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                // Cleaned up by someone else between the listing and here
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => return Err(StorageError::Io(err)),
+            };
+            match file.try_lock() {
+                // Nobody needs this transaction any more, so the file is litter. Unlinked while
+                // the lock is held, so that a reader cannot open it in between and end up holding
+                // an inode nothing points at
+                Ok(()) => {
+                    let removed = std::fs::remove_file(&path);
+                    let _ = file.unlock();
+                    match removed {
+                        Ok(()) => {}
+                        Err(err) if err.kind() == ErrorKind::NotFound => {}
+                        Err(err) => return Err(StorageError::Io(err)),
+                    }
+                }
+                // A live reader holds it, and it is the lowest, so it is the horizon
+                Err(TryLockError::WouldBlock) => return Ok(Some(id)),
+                Err(err) => return Err(lock_error(err)),
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+/// The storage backend of a multi-process database: a [`FileBackend`] that takes the registry
+/// lock exclusively around every write to the database header.
+///
+/// This is the writing half of the protocol's rule that the header is read and written only under
+/// `registry.lock`. Placing it in the backend catches every header write there is, repair
+/// included, and the lock is taken per physical write, never across an fsync.
+///
+/// Lock order: a header write can start under a write-buffer stripe lock, so code holding the
+/// registry lock must never wait on the write path. The reader-side sections only read the file,
+/// read `extended-header`, and lock `txn/` files, none of which touches the write buffer.
+pub(crate) struct HeaderGuardedBackend {
+    inner: FileBackend,
+    registry: RegistryLock,
+}
+
+impl HeaderGuardedBackend {
+    pub(super) fn new(file: File, registry: RegistryLock) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            // No file lock: `write.lock` and the files in `txn/` do that job, and every process
+            // needs the database file open at once
+            inner: FileBackend::new_internal(file, FileLockKind::None)?,
+            registry,
+        })
+    }
+}
+
+impl std::fmt::Debug for HeaderGuardedBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderGuardedBackend")
+            .finish_non_exhaustive()
+    }
+}
+
+impl StorageBackend for HeaderGuardedBackend {
     fn len(&self) -> Result<u64, io::Error> {
-        self.data.len()
+        self.inner.len()
     }
 
     fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
-        self.data.read(offset, out)
+        self.inner.read(offset, out)
     }
 
     fn set_len(&self, len: u64) -> Result<(), io::Error> {
-        self.data.set_len(len)
+        self.inner.set_len(len)
     }
 
     fn sync_data(&self) -> Result<(), io::Error> {
-        self.data.sync_data()
+        self.inner.sync_data()
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        self.data.write(offset, data)
+        if offset < DB_HEADER_SIZE as u64 {
+            let _guard = self.registry.exclusive().map_err(|err| match err {
+                StorageError::Io(err) => err,
+                other => io::Error::other(other.to_string()),
+            })?;
+            return self.inner.write(offset, data);
+        }
+        self.inner.write(offset, data)
     }
 
     fn close(&self) -> Result<(), io::Error> {
-        // Both run: a file that failed to close must not also leave the directory locked against
-        // every other process
-        let closed = self.data.close();
-        let unlocked = self.write_lock.unlock();
-
-        closed.and(unlocked)
+        self.inner.close()
     }
 }
 
-#[cfg(test)]
+/// `write.lock`: held exclusively by the process which owns the single logical writer.
+pub(crate) struct WriteLock {
+    file: File,
+    held: bool,
+    created: bool,
+}
+
+impl WriteLock {
+    pub(super) fn open(dir: &DatabaseDir) -> Result<Self> {
+        let path = dir.write_lock_file();
+        // Otherwise the create below would follow a symlink left under this name, and the lock
+        // would be taken on a file whose identity was never checked
+        require_regular_file(&path)?;
+        // Creation is decided by the open itself rather than by a look beforehand, since a
+        // snapshot can go stale while another create() runs to completion, and what the
+        // fresh-lock rule may refuse turns on who really made the file
+        let (file, created) = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => (file, true),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(StorageError::Io)?;
+                // Re-read through the opened handle: the check above can go stale, and a lock
+                // file that gained contents -- an abandonment mark included -- or stopped being
+                // a regular file vouches for nothing
+                let metadata = file.metadata().map_err(StorageError::Io)?;
+                if !metadata.is_file() || metadata.len() > 0 {
+                    return Err(StorageError::Io(io::Error::new(
+                        ErrorKind::InvalidData,
+                        "write.lock is not a multi-process database's lock file",
+                    )));
+                }
+                (file, false)
+            }
+            Err(err) => return Err(StorageError::Io(err)),
+        };
+        Ok(Self {
+            file,
+            held: false,
+            created,
+        })
+    }
+
+    /// Whether this handle's own open is what made the lock file.
+    pub(super) fn created(&self) -> bool {
+        self.created
+    }
+
+    /// Takes the lock, failing rather than blocking if another process holds it.
+    pub(super) fn try_acquire(&mut self) -> Result<bool> {
+        assert!(!self.held);
+        match self.file.try_lock() {
+            Ok(()) => {
+                self.held = true;
+                Ok(true)
+            }
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(err) => Err(lock_error(err)),
+        }
+    }
+
+    /// Takes the lock, blocking until the process holding it releases it.
+    pub(super) fn acquire(&mut self) -> Result<()> {
+        assert!(!self.held);
+        self.file.lock().map_err(unsupported_lock)?;
+        self.held = true;
+        Ok(())
+    }
+
+    pub(super) fn release(&mut self) {
+        if self.held {
+            let _ = self.file.unlock();
+            self.held = false;
+        }
+    }
+
+    /// See [`mark_lock_abandoned`].
+    pub(super) fn mark_abandoned(&self) {
+        mark_lock_abandoned(&self.file);
+    }
+
+    pub(super) fn is_held(&self) -> bool {
+        self.held
+    }
+}
+
+// Not under WASI, which has no file locking: these all take one, and the module itself is
+// compiled there because the coordinator is woven into the transaction tracker
+#[cfg(all(test, not(target_os = "wasi")))]
 mod test {
     use super::*;
 
+    /// Everything a caller does to the directory itself when opening, in order. The write lock is
+    /// not taken here: it belongs to the coordinator rather than to the directory, and the tests
+    /// that are about it take it themselves.
+    fn open(dir: &DatabaseDir, create: bool) -> Result<(File, DataLocation), DatabaseError> {
+        dir.prepare(create)?;
+        dir.open_data(create, false)
+    }
+
     /// The whole create sequence, which is split between here and the caller: the database file is
     /// moved into place and the marker written only once [`crate::Database`] has accepted the file.
-    /// These tests are about the lock and the marker rather than the database, so they stand in for
-    /// that middle step by doing nothing -- the file they promote is simply empty.
-    fn create(dir: &DatabaseDir) -> Box<dyn StorageBackend> {
-        let (backend, location) = dir.open(true).unwrap();
+    /// These tests are about the lock files and the marker rather than the database, so they stand
+    /// in for that middle step by doing nothing -- the file they promote is simply empty.
+    fn create(dir: &DatabaseDir) -> File {
+        dir.prepare(true).unwrap();
+        let mut lock = WriteLock::open(dir).unwrap();
+        assert!(lock.try_acquire().unwrap());
+        dir.init_protocol_files().unwrap();
+        let (file, location) = dir.open_data(true, false).unwrap();
         dir.promote_data(location).unwrap();
-        dir.write_metadata_if_missing().unwrap();
-        backend
+        dir.write_metadata(WriterMode::MultiWriterProcess).unwrap();
+        file
+    }
+
+    /// Pins `pinned`, standing in for another process holding that transaction: the lock belongs
+    /// to the open file rather than to the process, so a second handle here is excluded exactly as
+    /// a second process would be.
+    fn pin(dir: &DatabaseDir, pinned: u64) -> TransactionPins {
+        let registry = RegistryLock::open(dir);
+        let mut pins = TransactionPins::new(dir);
+        let guard = registry.shared().unwrap();
+        pins.publish(Some(pinned)).unwrap();
+        drop(guard);
+        pins
+    }
+
+    /// Scans as a writer would: under the exclusive registry lock.
+    fn scan(dir: &DatabaseDir, pins: &TransactionPins) -> Option<u64> {
+        let guard = RegistryLock::open(dir).exclusive().unwrap();
+        let oldest = pins.scan_oldest().unwrap();
+        drop(guard);
+        oldest
     }
 
     #[test]
     fn the_write_lock_excludes_other_handles() {
         let tmpdir = tempfile::tempdir().unwrap();
         let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
 
+        let mut first = WriteLock::open(&dir).unwrap();
+        assert!(first.try_acquire().unwrap());
+
+        let mut second = WriteLock::open(&dir).unwrap();
+        assert!(!second.try_acquire().unwrap());
+
+        first.release();
+        assert!(second.try_acquire().unwrap());
+    }
+
+    /// The database file itself is left unlocked: every process using the database has it open at
+    /// once, and `write.lock` and the files in `txn/` are what keep a page from being reused
+    /// underneath one of them.
+    #[test]
+    fn the_database_file_is_not_locked() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
         let first = create(&dir);
-        assert!(matches!(
-            dir.open(false),
-            Err(DatabaseError::DatabaseAlreadyOpen)
-        ));
 
-        // Closing the backend is what releases the lock, since that is when redb has finished
-        // with the file
-        first.close().unwrap();
-        let _second = dir.open(false).unwrap().0;
+        let second = open(&dir, false).unwrap().0;
+        drop(second);
+        drop(first);
+    }
+
+    #[test]
+    fn a_pinned_transaction_holds_the_horizon() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        let mut reader = pin(&dir, 5);
+        let writer = TransactionPins::new(&dir);
+        assert_eq!(Some(5), scan(&dir, &writer));
+
+        // Letting go of it is what releases the horizon, and the next scan unlinks the file
+        let guard = RegistryLock::open(&dir).shared().unwrap();
+        reader.publish(None).unwrap();
+        drop(guard);
+        assert_eq!(None, scan(&dir, &writer));
+        assert!(!dir.pinned_file(5).exists());
+    }
+
+    /// A process that pins its own transaction and then scans keeps its own file: it is still
+    /// reading that transaction.
+    #[test]
+    fn a_scan_does_not_clean_up_its_own_pin() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        let pins = pin(&dir, 5);
+        assert_eq!(Some(5), scan(&dir, &pins));
+        assert!(dir.pinned_file(5).is_file());
+    }
+
+    /// The whole point of naming the files after transactions and locking them: a process that
+    /// dies leaves its file behind, and the next writer to walk the directory takes it exclusively
+    /// -- which nobody is preventing any more -- and unlinks it.
+    #[test]
+    fn a_pin_left_by_a_dead_process_is_cleaned_up() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        // What a process that exited without unlinking leaves: the file, and no lock on it
+        std::fs::write(dir.pinned_file(7), []).unwrap();
+
+        let writer = TransactionPins::new(&dir);
+        assert_eq!(None, scan(&dir, &writer));
+        assert!(!dir.pinned_file(7).exists());
+    }
+
+    /// The scan stops at the first file it cannot take, so a live pin hides the ones above it. They
+    /// cost nothing: a later scan reaches them once this one is let go.
+    #[test]
+    fn the_scan_stops_at_the_oldest_live_pin() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        std::fs::write(dir.pinned_file(3), []).unwrap();
+        let _live = pin(&dir, 9);
+        std::fs::write(dir.pinned_file(11), []).unwrap();
+
+        let writer = TransactionPins::new(&dir);
+        assert_eq!(Some(9), scan(&dir, &writer));
+        assert!(!dir.pinned_file(3).exists());
+        assert!(dir.pinned_file(11).is_file());
+    }
+
+    /// The name is the whole of the data, so a name that is not a transaction id is not one of
+    /// these files and is left alone rather than being deleted or read as an id.
+    #[test]
+    fn a_name_that_is_not_a_transaction_id_is_ignored() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        let foreign = dir.pinned_dir().join("notanid");
+        std::fs::write(&foreign, b"someone else's").unwrap();
+
+        let writer = TransactionPins::new(&dir);
+        assert_eq!(None, scan(&dir, &writer));
+        assert!(foreign.is_file());
+    }
+
+    /// Moving a pin forward takes the new lock before dropping the old one, so a writer scanning
+    /// in between sees the older id rather than nothing.
+    #[test]
+    fn moving_a_pin_forward_releases_the_old_one() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+
+        let mut reader = pin(&dir, 4);
+        let guard = RegistryLock::open(&dir).shared().unwrap();
+        reader.publish(Some(6)).unwrap();
+        drop(guard);
+
+        let writer = TransactionPins::new(&dir);
+        assert_eq!(Some(6), scan(&dir, &writer));
+        assert!(!dir.pinned_file(4).exists());
+    }
+
+    /// The registry lock is what a writer holds while scanning, so a pin and a scan can never
+    /// interleave. Each acquisition has its own file handle, which is what makes a shared and an
+    /// exclusive acquisition conflict even inside one process.
+    #[test]
+    fn the_registry_lock_excludes_a_scan_from_a_pinning_reader() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+        let registry = RegistryLock::open(&dir);
+
+        let shared = registry.shared().unwrap();
+        // A second shared acquisition coexists...
+        let also_shared = registry.shared().unwrap();
+        // ... and an exclusive one cannot be taken until both are released. Probed with try_lock
+        // through a raw handle, since RegistryLock::exclusive would rightly block
+        let probe = File::open(dir.registry_file()).unwrap();
+        assert!(matches!(probe.try_lock(), Err(TryLockError::WouldBlock)));
+        drop(shared);
+        drop(also_shared);
+        probe.try_lock().unwrap();
+    }
+
+    /// The extended header round-trips a horizon, keyed to the commit slot bytes it was written
+    /// beside: the same slot read against different commit slot bytes is reported as invalid, not
+    /// as a horizon.
+    #[test]
+    fn the_extended_header_binds_the_horizon_to_the_commit_slot() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let dir = DatabaseDir::new(tmpdir.path().join("db"));
+        drop(create(&dir));
+        let eh = ExtendedHeader::open(&dir).unwrap();
+
+        // Never written: nothing verifies
+        assert_eq!(None, eh.read_horizon(0, b"slot zero").unwrap());
+
+        eh.write_horizon(0, 41, b"slot zero").unwrap();
+        eh.write_horizon(1, 42, b"slot one").unwrap();
+        assert_eq!(Some(41), eh.read_horizon(0, b"slot zero").unwrap());
+        assert_eq!(Some(42), eh.read_horizon(1, b"slot one").unwrap());
+
+        // A slot paired with commit slot bytes it was not written beside is stale, which is
+        // exactly what a crash between the extended header write and the flip leaves behind
+        assert_eq!(None, eh.read_horizon(0, b"slot one").unwrap());
+
+        // Torn bytes fail the hash too
+        std::fs::write(dir.extended_header_file(), [0xab; 30]).unwrap();
+        assert_eq!(None, eh.read_horizon(0, b"slot zero").unwrap());
+        assert_eq!(None, eh.read_horizon(1, b"slot one").unwrap());
+    }
+
+    #[test]
+    fn the_marker_records_the_writer_mode() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let path = tmpdir.path().join("db");
+        let dir = DatabaseDir::new(&path);
+        drop(create(&dir));
+        assert_eq!(WriterMode::MultiWriterProcess, dir.mode().unwrap());
+
+        std::fs::remove_file(path.join(METADATA_FILE_NAME)).unwrap();
+        dir.write_metadata(WriterMode::SingleWriterProcess).unwrap();
+        assert_eq!(WriterMode::SingleWriterProcess, dir.mode().unwrap());
     }
 
     #[test]
@@ -966,12 +1598,12 @@ mod test {
         // these, so it has to be what this turns on rather than the lock file's absence
         std::fs::write(path.join(WRITE_LOCK_FILE_NAME), []).unwrap();
         let dir = DatabaseDir::new(&path);
-        assert!(dir.open(false).is_err());
+        assert!(open(&dir, false).is_err());
 
         // An empty file where the marker should be is rejected too, rather than being read as a
         // database with a zero version
         std::fs::write(path.join(METADATA_FILE_NAME), []).unwrap();
-        assert!(dir.open(false).is_err());
+        assert!(open(&dir, false).is_err());
     }
 
     /// A `create()` that died while writing the marker leaves the partial copy under the temporary
@@ -981,12 +1613,12 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("db");
         let dir = DatabaseDir::new(&path);
-        create(&dir).close().unwrap();
+        drop(create(&dir));
 
         std::fs::remove_file(path.join(METADATA_FILE_NAME)).unwrap();
         std::fs::write(path.join(METADATA_TMP_FILE_NAME), &MAGIC[0..4]).unwrap();
 
-        create(&dir).close().unwrap();
+        drop(create(&dir));
         assert_eq!(
             METADATA_LEN,
             std::fs::read(path.join(METADATA_FILE_NAME)).unwrap().len()
@@ -1003,7 +1635,7 @@ mod test {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join(METADATA_FILE_NAME), b"someone else's").unwrap();
 
-        assert!(DatabaseDir::new(&path).open(true).is_err());
+        assert!(open(&DatabaseDir::new(&path), true).is_err());
         assert_eq!(
             b"someone else's",
             &std::fs::read(path.join(METADATA_FILE_NAME)).unwrap()[..]
@@ -1021,10 +1653,10 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("db");
         let dir = DatabaseDir::new(&path);
-        create(&dir).close().unwrap();
+        drop(create(&dir));
         std::fs::write(path.join(DATA_FILE_NAME), []).unwrap();
 
-        let (backend, location) = dir.open(true).unwrap();
+        let (data, location) = open(&dir, true).unwrap();
         assert!(!path.join(DATA_FILE_NAME).exists());
         assert!(path.join(DATA_TMP_FILE_NAME).is_file());
 
@@ -1032,7 +1664,7 @@ mod test {
         dir.promote_data(location).unwrap();
         assert!(path.join(DATA_FILE_NAME).is_file());
         assert!(!path.join(DATA_TMP_FILE_NAME).exists());
-        backend.close().unwrap();
+        drop(data);
     }
 
     /// An empty database file is only wreckage if nobody is holding it. One that a process
@@ -1043,7 +1675,7 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("db");
         let dir = DatabaseDir::new(&path);
-        create(&dir).close().unwrap();
+        drop(create(&dir));
         std::fs::write(path.join(DATA_FILE_NAME), []).unwrap();
 
         let held = OpenOptions::new()
@@ -1054,7 +1686,7 @@ mod test {
         held.try_lock().unwrap();
 
         assert!(matches!(
-            dir.open(true),
+            open(&dir, true),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
         assert!(path.join(DATA_FILE_NAME).is_file());
@@ -1062,7 +1694,7 @@ mod test {
         // ... and once it is let go, the empty file is wreckage again
         held.unlock().unwrap();
         drop(held);
-        dir.open(true).unwrap().0.close().unwrap();
+        drop(open(&dir, true).unwrap().0);
     }
 
     #[test]
@@ -1070,14 +1702,15 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("db");
         let dir = DatabaseDir::new(&path);
-        create(&dir).close().unwrap();
+        drop(create(&dir));
 
         let mut contents = [0u8; METADATA_LEN];
         contents[0..11].copy_from_slice(&MAGIC);
         contents[11] = FORMAT_VERSION + 1;
         contents[12] = WRITER_MODE_SINGLE;
         std::fs::write(path.join(METADATA_FILE_NAME), contents).unwrap();
-        assert!(dir.open(false).is_err());
+        assert!(open(&dir, false).is_err());
+        assert!(open(&dir, true).is_err());
     }
 
     #[test]
@@ -1085,13 +1718,14 @@ mod test {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().join("db");
         let dir = DatabaseDir::new(&path);
-        create(&dir).close().unwrap();
+        drop(create(&dir));
 
         let mut contents = [0u8; METADATA_LEN];
         contents[0..11].copy_from_slice(&MAGIC);
         contents[11] = FORMAT_VERSION;
-        contents[12] = WRITER_MODE_SINGLE + 1;
+        contents[12] = WRITER_MODE_MULTI + 1;
         std::fs::write(path.join(METADATA_FILE_NAME), contents).unwrap();
-        assert!(dir.open(false).is_err());
+        assert!(open(&dir, false).is_err());
+        assert!(open(&dir, true).is_err());
     }
 }

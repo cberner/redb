@@ -90,7 +90,7 @@ pub use multimap_table::{
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
 #[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
-pub use multiprocess::{MultiProcessBuilder, MultiProcessDatabase};
+pub use multiprocess::{MultiProcessBuilder, MultiProcessDatabase, WriterMode};
 #[cfg(feature = "experimental-api-5")]
 pub use table::Cursor;
 #[cfg(feature = "experimental_cursor")]
@@ -118,8 +118,16 @@ mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
 mod multimap_table;
-// Needs std::fs and std::path, like the rest of the file-backed API
-#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+// Needs std::fs and std::path. Compiled whenever std is, rather than with the feature, because
+// the coordinator is woven into the transaction tracker -- only the database type it serves is
+// behind the flag
+#[cfg(not(redb_no_std))]
+#[cfg_attr(not(feature = "experimental-multiprocess"), allow(dead_code))]
+mod multiprocess;
+// A directory of lock files needs a file system, so no_std gets a stand-in with the same shape
+// rather than a `cfg` on every path that consults a coordinator
+#[cfg(redb_no_std)]
+#[path = "multiprocess_no_std.rs"]
 mod multiprocess;
 mod sealed;
 mod sync;

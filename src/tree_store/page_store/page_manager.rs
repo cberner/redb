@@ -10,6 +10,8 @@ use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHash
 use crate::tree_store::page_store::header::{
     DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
 };
+#[cfg(not(redb_no_std))]
+use crate::tree_store::page_store::header::{RawCommitSlots, raw_commit_slots};
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
@@ -19,6 +21,8 @@ use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
+#[cfg(not(redb_no_std))]
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -287,6 +291,17 @@ fn ceil_log2(x: usize) -> u8 {
     }
 }
 
+#[cfg(not(redb_no_std))]
+// Flattens the errors that reading a header can produce into the storage error that all of them
+// really are: the other DatabaseError variants describe how a database was opened, not how its
+// bytes parsed
+fn storage_error(error: DatabaseError) -> StorageError {
+    match error {
+        DatabaseError::Storage(storage) => storage,
+        other => StorageError::Corrupted(other.to_string()),
+    }
+}
+
 pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
     hash128_with_seed(data, 0)
 }
@@ -315,6 +330,19 @@ impl InMemoryState {
         self.allocators
             .as_ref()
             .expect("allocators have not been loaded yet")
+    }
+
+    // Reports the absence of allocator state as an error rather than a panic, for the paths a
+    // process that never allocates can reach: a read-only handle on a database another process is
+    // writing has no way to keep allocator state up to date, so it does not load any
+    fn require_allocators(&self) -> Result {
+        if self.allocators.is_none() {
+            return Err(StorageError::Io(io::unsupported(
+                "page allocation statistics are unavailable: this handle does not track the \
+                 database's allocator state",
+            )));
+        }
+        Ok(())
     }
 
     fn allocators_mut(&mut self) -> &mut Allocators {
@@ -499,10 +527,50 @@ impl UnpersistedState {
     }
 }
 
+/// How a [`TransactionalMemory`] may access its file, and what it may assume about other processes
+/// accessing it at the same time.
+///
+/// Only `ReadWrite` is reachable without a file system, since the other two describe how a file was
+/// opened, so the whole enum is kept rather than splitting it by `cfg`.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[cfg_attr(redb_no_std, allow(dead_code))]
+pub(crate) enum AccessMode {
+    /// This process may write to the file, and is the only process with it open for writing
+    ReadWrite,
+    /// This process only reads the file, and no other process has it open for writing, so an
+    /// unclean shutdown must be repaired before the file can be used
+    ReadOnly,
+    /// This process only reads the file, and another process may be writing to it concurrently. An
+    /// unclean shutdown is left for a writer to repair, and the layout recorded in the header is
+    /// not reconciled against the file length, since a writer may be resizing it
+    SharedRead,
+}
+
+impl AccessMode {
+    fn read_only(self) -> bool {
+        !matches!(self, AccessMode::ReadWrite)
+    }
+}
+
+/// Work another part of the crate does inside a commit, at a point no caller can reach from
+/// outside. A multi-process database uses this to write its extended header after the new commit
+/// slot is durable and before the flip that makes it primary.
+#[cfg(not(redb_no_std))]
+pub(crate) trait CommitHook: Send + Sync {
+    /// Called between the phase-1 flush and the header write that flips the primary slot bit.
+    /// `slot` is the index of the commit slot the flip will make primary, and `slot_bytes` is that
+    /// slot exactly as the phase-1 write put it in the file.
+    fn before_primary_flip(&self, slot: usize, slot_bytes: &[u8]) -> Result;
+}
+
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
+    // Runs inside commit(), between the phase-1 flush and the primary flip. Installed after
+    // construction because the installer needs the constructed memory first.
+    #[cfg(not(redb_no_std))]
+    commit_hook: Mutex<Option<Arc<dyn CommitHook>>>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
     open_dirty_pages: Arc<Mutex<PageNumberHashSet>>,
@@ -530,7 +598,7 @@ impl TransactionalMemory {
         page_size: usize,
         requested_region_size: Option<u64>,
         cache_size: usize,
-        read_only: bool,
+        access: AccessMode,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -628,21 +696,30 @@ impl TransactionalMemory {
         let unrepaired =
             UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
-        if needs_recovery && read_only {
-            return Err(DatabaseError::RepairAborted);
-        }
-        let (header, _) = unrepaired.finalize(file_len)?;
-        if needs_recovery {
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
-        }
+        let header = if matches!(access, AccessMode::SharedRead) {
+            // A writer in another process may be holding the file open, in which case it is always
+            // flagged as requiring recovery and its layout may not match the file length at this
+            // instant. Neither matters to a reader: it only follows the committed roots, and any
+            // repair is the next writer's job
+            unrepaired.finalize_transaction_slots()?
+        } else {
+            let needs_recovery = unrepaired.recovery_required(file_len);
+            if needs_recovery && access.read_only() {
+                return Err(DatabaseError::RepairAborted);
+            }
+            let (header, _) = unrepaired.finalize(file_len)?;
+            if needs_recovery {
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
+            assert_eq!(header.layout().len(), storage.raw_file_len()?);
+            header
+        };
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
@@ -653,6 +730,8 @@ impl TransactionalMemory {
             unpersisted: Mutex::new(UnpersistedState::default()),
             storage,
             state: Mutex::new(state),
+            #[cfg(not(redb_no_std))]
+            commit_hook: Mutex::new(None),
             #[cfg(debug_assertions)]
             open_dirty_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             #[cfg(debug_assertions)]
@@ -733,6 +812,12 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
     }
 
+    /// Drops writes that have been buffered but not yet written to the file. Only valid for pages
+    /// no committed root references, i.e. those an aborted transaction allocated.
+    pub(crate) fn discard_buffered_writes(&self) {
+        self.storage.discard_write_buffer();
+    }
+
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
         // The in-memory state is being discarded for the on-disk state, so buffered writes --
         // which can only belong to the discarded state -- are dropped rather than written out;
@@ -743,6 +828,68 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
         self.storage.sync_file()?;
 
+        self.reload_from_file()
+    }
+
+    /// Replaces the in-memory state with what another process has left in the file, in preparation
+    /// for a write transaction. Buffered writes never survive: they can only belong to an aborted
+    /// transaction, whose pages another process may since have reused. Dropping cached pages is
+    /// the caller's decision, since it is the one that can tell whether any of them could have
+    /// been reallocated.
+    ///
+    /// The caller must hold the cross-process write lock, so that no other process can be
+    /// committing, and no write transaction may be in progress in this process.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn reload_for_write(&self) -> Result<(), DatabaseError> {
+        self.storage.discard_write_buffer();
+        // No sync: another process's commits reach this process through the file, which it has
+        // already flushed
+        self.reload_from_file()?;
+        Ok(())
+    }
+
+    /// Picks up commits made by another process, taking only the commit slots from the file. The
+    /// layout is left alone: a writer in another process rewrites it on every resize, so it can
+    /// disagree with the file length at any instant, and a process that is only reading never
+    /// consults it.
+    ///
+    /// Returns the transaction id that is now visible, along with the commit slots exactly as the
+    /// file holds them, which is what the extended header's hash is computed over.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn reload_transaction_slots(&self) -> Result<(TransactionId, RawCommitSlots)> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let raw = raw_commit_slots(&header_bytes);
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(storage_error)?;
+        let header = unrepaired.finalize_transaction_slots()?;
+        let mut state = self.state.lock()?;
+        // Only a process whose own state can be ahead of the file has a pending non-durable
+        // commit, and such a process is the only writer, so it never reloads
+        assert!(!state.read_from_secondary);
+        state.header.adopt_transaction_slots(&header);
+
+        Ok((state.header.primary_slot().transaction_id, raw))
+    }
+
+    /// The last committed transaction id as the file has it, without adopting anything into this
+    /// process's state. For observing another process's progress.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn peek_committed_transaction_id(&self) -> Result<TransactionId> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(storage_error)?;
+        let header = unrepaired.finalize_transaction_slots()?;
+        Ok(header.primary_slot().transaction_id)
+    }
+
+    /// Installs the hook that [`Self::commit`] runs between the phase-1 flush and the primary
+    /// flip. Must be installed before the first commit that needs it.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn set_commit_hook(&self, hook: Arc<dyn CommitHook>) {
+        *self.commit_hook.lock().unwrap() = Some(hook);
+    }
+
+    fn reload_from_file(&self) -> Result<bool, DatabaseError> {
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
@@ -763,6 +910,9 @@ impl TransactionalMemory {
             // load_allocator_state) before any allocation/free path runs.
             state.allocators = None;
         }
+        // Mirrors the allocator state that was just dropped, so it is repopulated with it
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
         self.unpersisted.lock().unwrap().clear();
@@ -771,10 +921,17 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
-        let mut state = self.state.lock().unwrap();
-        assert!(!state.header.recovery_required);
-        state.header.recovery_required = true;
-        self.write_header(&state.header)?;
+        // The state lock is released before the file I/O below, like commit() does: a
+        // multi-process backend takes the cross-process registry lock inside write(), and readers
+        // take that lock and then this one, so holding the state lock across the write would
+        // invert the two
+        let header = {
+            let mut state = self.state.lock().unwrap();
+            assert!(!state.header.recovery_required);
+            state.header.recovery_required = true;
+            state.header.clone()
+        };
+        self.write_header(&header)?;
         self.storage.flush()
     }
 
@@ -892,9 +1049,14 @@ impl TransactionalMemory {
 
     // Durably clears the recovery flag, marking the repair as complete.
     pub(crate) fn clear_recovery_required(&self) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
-        state.header.recovery_required = false;
-        self.write_header(&state.header)?;
+        // State lock released before the I/O, for the same lock-ordering reason as
+        // begin_writable()
+        let header = {
+            let mut state = self.state.lock().unwrap();
+            state.header.recovery_required = false;
+            state.header.clone()
+        };
+        self.write_header(&header)?;
         self.storage.flush()?;
         Ok(())
     }
@@ -1084,21 +1246,49 @@ impl TransactionalMemory {
         let old_transaction_id = header.secondary_slot().transaction_id;
         header.write_secondary_slot(transaction_id, data_root, system_root);
 
-        self.write_header(&header)?;
+        let result: Result = (|| {
+            self.write_header(&header)?;
 
-        // Use 2-phase commit, if checksums are disabled
-        if two_phase {
+            // Use 2-phase commit, if checksums are disabled
+            if two_phase {
+                self.storage.flush()?;
+            }
+
+            // A multi-process database writes its extended header here: after the new slot is
+            // durable, before the flip below makes it primary
+            #[cfg(not(redb_no_std))]
+            {
+                let hook = self.commit_hook.lock().unwrap().clone();
+                if let Some(hook) = hook {
+                    // The hook's ordering guarantee needs the phase-1 flush above, and every
+                    // commit a multi-process database makes is 2-phase for other reasons already
+                    assert!(two_phase);
+                    let bytes = header.to_bytes(true);
+                    let raw = raw_commit_slots(&bytes);
+                    let flipping_to = raw.primary_index ^ 1;
+                    hook.before_primary_flip(flipping_to, raw.slot(flipping_to))?;
+                }
+            }
+
+            // Make our new commit the primary, and record whether it was a 2-phase commit.
+            // These two bits need to be written atomically
+            header.swap_primary_slot();
+            header.two_phase_commit = two_phase;
+
+            // Write the new header to disk
+            self.write_header(&header)?;
             self.storage.flush()?;
+
+            Ok(())
+        })();
+        // A failed commit's pages are already flushed and sitting in this handle's cache, and
+        // once the write lock is released another process may reallocate them with no horizon
+        // moving -- they were never durably allocated, so nothing later invalidates them
+        #[cfg(not(redb_no_std))]
+        if result.is_err() && self.commit_hook.lock().unwrap().is_some() {
+            self.storage.invalidate_cache_all();
         }
-
-        // Make our new commit the primary, and record whether it was a 2-phase commit.
-        // These two bits need to be written atomically
-        header.swap_primary_slot();
-        header.two_phase_commit = two_phase;
-
-        // Write the new header to disk
-        self.write_header(&header)?;
-        self.storage.flush()?;
+        result?;
 
         if shrunk {
             self.storage.resize(header.layout().len())?;
@@ -1646,6 +1836,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_allocated_pages());
@@ -1656,6 +1847,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_free_pages());
@@ -1668,8 +1860,18 @@ impl TransactionalMemory {
         self.page_size.try_into().unwrap()
     }
 
-    pub(crate) fn close(&self) -> Result {
-        let shutdown_result = self.flush_shutdown_header();
+    /// Closes the file.
+    ///
+    /// `assert_clean_shutdown` writes the header to record that this process left the file
+    /// consistent. That is only this process's to say when it is the only one that may write: in a
+    /// multi-process database another process may be part way through a commit, and this write
+    /// would land in the middle of it.
+    pub(crate) fn close(&self, assert_clean_shutdown: bool) -> Result {
+        let shutdown_result = if assert_clean_shutdown {
+            self.flush_shutdown_header()
+        } else {
+            Ok(())
+        };
         // The backend's close() contract guarantees it is called exactly once, so it must be
         // called even if the shutdown writes above failed
         let close_result = self.storage.close();
@@ -1694,6 +1896,7 @@ impl TransactionalMemory {
 
 #[cfg(test)]
 mod test {
+    use crate::tree_store::AccessMode;
     use crate::tree_store::page_store::page_manager::INITIAL_REGIONS;
     use crate::{Database, TableDefinition};
 
@@ -1756,9 +1959,15 @@ mod test {
         use super::TransactionalMemory;
         use crate::tree_store::InMemoryBackend;
 
-        let mem =
-            TransactionalMemory::new(Box::new(InMemoryBackend::new()), true, 4096, None, 0, false)
-                .unwrap();
+        let mem = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            4096,
+            None,
+            0,
+            AccessMode::ReadWrite,
+        )
+        .unwrap();
         mem.reset_allocator_state().unwrap();
 
         std::thread::scope(|s| {
@@ -1798,7 +2007,7 @@ mod test {
             page_size,
             Some(64 * page_size as u64),
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1846,7 +2055,7 @@ mod test {
             page_size,
             Some(64 * page_size as u64),
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1889,7 +2098,7 @@ mod test {
             page_size,
             Some(region_size),
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
