@@ -1,5 +1,7 @@
 use crate::{DatabaseError, Result, StorageBackend};
-use std::fs::File;
+#[cfg(feature = "logging")]
+use log::warn;
+use std::fs::{File, TryLockError};
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Mutex;
@@ -7,6 +9,7 @@ use std::sync::Mutex;
 /// Stores a database as a file on-disk.
 #[derive(Debug)]
 pub struct FileBackend {
+    lock_supported: bool,
     file: Mutex<File>,
 }
 
@@ -16,10 +19,32 @@ impl FileBackend {
         Self::new_internal(file, false)
     }
 
-    pub(crate) fn new_internal(file: File, _: bool) -> Result<Self, DatabaseError> {
-        Ok(Self {
-            file: Mutex::new(file),
-        })
+    pub(crate) fn new_internal(file: File, read_only: bool) -> Result<Self, DatabaseError> {
+        let result = if read_only {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        };
+
+        match result {
+            Ok(()) => Ok(Self {
+                lock_supported: true,
+                file: Mutex::new(file),
+            }),
+            Err(TryLockError::WouldBlock) => Err(DatabaseError::DatabaseAlreadyOpen),
+            Err(TryLockError::Error(err)) if err.kind() == io::ErrorKind::Unsupported => {
+                #[cfg(feature = "logging")]
+                warn!(
+                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
+                );
+
+                Ok(Self {
+                    lock_supported: false,
+                    file: Mutex::new(file),
+                })
+            }
+            Err(TryLockError::Error(err)) => Err(err.into()),
+        }
     }
 }
 
@@ -47,5 +72,13 @@ impl StorageBackend for FileBackend {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(data)
+    }
+
+    fn close(&self) -> Result<(), io::Error> {
+        if self.lock_supported {
+            self.file.lock().unwrap().unlock()?;
+        }
+
+        Ok(())
     }
 }

@@ -60,6 +60,12 @@
   a table. Such failures now poison the transaction: `commit()` returns an error instead of
   committing the half-applied state.
 
+### Minor improvements
+* Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
+  the same file now fails with `DatabaseAlreadyOpen` where the platform supports file locks,
+  and warns via the `logging` feature where it does not, instead of the lock always being
+  silently skipped.
+
 ## 4.2.0 - 2026-08-17
 
 ### New features
