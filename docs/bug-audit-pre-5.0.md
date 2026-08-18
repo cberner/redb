@@ -15,7 +15,8 @@ separator implementations were property-tested over ~3M adversarial pairs. Basel
 Severity tiers: P0 = can corrupt or lose committed data; P1 = correctness bugs without direct
 loss of committed data; P2 = minor bugs (panics, hangs, churn, drift). Within each tier, items
 are ordered by estimated real-world impact. Confidence and reproduction status are given per
-item.
+item. Issues that require deliberately pathological usage to trigger -- `mem::forget` on
+handles, types named to collide with built-ins, unreachable configurations -- are excluded.
 
 ---
 
@@ -134,21 +135,7 @@ easiest way to reach the "not clean" precondition of item 4. Contrast: `commit_i
 `AllocatorStateLatch` handles panic-during-commit correctly; the Drop path lacks the equivalent
 (`invalidate_allocator_state()` is already poison-tolerant and would do).
 
-### 7. Type-identity aliasing between user composites and flat user types (4.2.0 regression)
-`src/types.rs:121-135` (`into_composite` keeps the name string, sets `UserDefined`).
-Confidence: certain -- demonstrated with a live database.
-
-`Vec<FakeU32>` where `FakeU32` declares `TypeName::new("u32")` produces exactly
-`(UserDefined, "Vec<u32>")` -- byte-identical to a flat user type declaring
-`TypeName::new("Vec<u32>")`. A table written as one opens successfully as the other and returns
-framed bytes (or misparses) as values. Pre-4.2 the two were distinguishable (`Internal` vs
-`UserDefined`); the 4.2 composite reclassification moved built-in composites of user types into
-the user namespace untagged. redb-derive already solves this exact problem with an in-name
-`#user` tag; the core composites (`Vec`, `Option`, arrays, tuples) do not. Fix is a format
-change (tag user-defined inner names inside composite name strings, keep `matches_legacy` for
-old spellings) -- 5.0 is the moment.
-
-### 8. `ReadOnlyTable::get()/range()` (and multimap equivalents) return `'static` guards that do not keep the transaction alive
+### 7. `ReadOnlyTable::get()/range()` (and multimap equivalents) return `'static` guards that do not keep the transaction alive
 `src/table.rs:884-915`, `src/multimap_table.rs:1210-1265`. Confidence: certain
 (maintainer-known: the removal is already staged behind `experimental-api-5`).
 
@@ -159,7 +146,7 @@ is memory-safe (the guard reads its old snapshot Arc) but unspecified. The audit
 staged removal is a necessary correctness fix, not an API-taste change -- it should ship in 5.0
 unconditionally, not stay behind the flag.
 
-### 9. `DateTime<FixedOffset>`: `compare()` ignores the stored offset, so byte-different keys are Equal
+### 8. `DateTime<FixedOffset>`: `compare()` ignores the stored offset, so byte-different keys are Equal
 `src/types/chrono_v0_4.rs:229-273`. Confidence: certain -- demonstrated.
 
 `as_bytes` stores the UTC instant plus the offset (bytes 13..17); `compare` deserializes and
@@ -171,7 +158,7 @@ data loss, but round-trip identity does not hold through the database and the re
 nondeterministic from the API's perspective. 5.0 options: tie-break `compare` on the offset
 (sort-order change -> table rewrite) or drop the offset from the encoding.
 
-### 10. Fallback `FileBackend` takes no file lock: no `DatabaseAlreadyOpen` protection on fallback targets
+### 9. Fallback `FileBackend` takes no file lock: no `DatabaseAlreadyOpen` protection on fallback targets
 `src/tree_store/page_store/file_backend/fallback.rs:19-23`. Confidence: certain (guard absent);
 only affects targets that are neither unix, windows, nor wasi.
 
@@ -184,76 +171,51 @@ locking is unsupported).
 
 ## P2: minor bugs (panics, hangs, churn, drift)
 
-### 11. Windows `FileBackend::write` can loop forever on `seek_write` returning `Ok(0)`
+### 10. Windows `FileBackend::write` can loop forever on `seek_write` returning `Ok(0)`
 `src/tree_store/page_store/file_backend/optimized.rs:110-119`. The read loop directly above was
 explicitly fixed for this ("...instead of looping forever") and the WASI sibling returns
 `WriteZero`; the Windows write loop was missed. A zero-length write report wedges the commit
 thread.
 
-### 12. Leaked `pop_first`/`pop_last` guards wedge the page and desync the length header
-`src/tree_store/btree_mutator.rs:219-235` (length written via `finish_deletion` before the
-guard's deferred removal runs at drop), `btree_base.rs:279-297`. `mem::forget` on the returned
-guards leaves the leaf's write-cache slot checked out: every later access panics and commit can
-never complete -- so nothing wrong persists, but it is a process-panic trap, and the
-length-before-removal ordering is a latent corruption hazard for any future change that makes
-commit tolerant of checked-out pages. Same leak-panic applies to other `PageMut`-backed guards
-(`insert_reserve`, `get_mut`).
-
-### 13. `StorageBackend::close()` can race in-flight reads from live read transactions
+### 11. `StorageBackend::close()` can race in-flight reads from live read transactions
 Contract at `src/db.rs:64-71` ("redb will not access the backend after calling this method") vs
 `Drop for Database`, which defers close only for live write transactions. A custom backend that
 frees resources in `close()` can see a use-after-close its author was told cannot happen.
 Built-in backends are unaffected. Fix or re-document in 5.0.
 
-### 14. Multimap: inserting an already-present value into a subtree-backed collection rewrites both trees
+### 12. Multimap: inserting an already-present value into a subtree-backed collection rewrites both trees
 `src/multimap_table.rs:660-676`. The inline arm early-returns on `found`
 (`multimap_table.rs:585-587`); the subtree arm CoWs the subtree and re-inserts into the outer
 tree on a logical no-op. The identical churn on the `remove()` side was already fixed (with a
 regression test); the insert side was missed. Page churn / write amplification only.
 
-### 15. `TypeName::from_bytes` panics on unknown classification bytes and non-UTF-8 names
+### 13. `TypeName::from_bytes` panics on unknown classification bytes and non-UTF-8 names
 `src/types.rs:36-44,102-111`. Concretely: redb 4.1 panics (`unreachable!`) opening a 4.2 file,
 because 4.2 introduced the `Internal3` classification. The next classification addition will do
 it again to 4.2 unless 5.0 makes this a proper `Corrupted`/unsupported-format error.
 
-### 16. redb-derive: `#[derive(Value)]` fails on any struct whose lifetime is named `'a`
+### 14. redb-derive: `#[derive(Value)]` fails on any struct whose lifetime is named `'a`
 `crates/redb-derive/src/lib.rs:132-193`. The generated GAT re-declares `'a` and shadows the
 user's lifetime (E0496). Compile-time only; rename the generated lifetime.
 
-### 17. `get_mut()` on a missing key CoWs the whole root-to-leaf path before discovering the miss
+### 15. `get_mut()` on a missing key CoWs the whole root-to-leaf path before discovering the miss
 `src/tree_store/btree.rs:592-686`. Pure write amplification on a no-op (also hit via
 `entry()`-style probes on vacant keys). Same class as the fixed multimap-remove churn.
 
-### 18. `AccessGuardMut::insert()` (the `get_mut` value-resize path) never splits the leaf
+### 16. `AccessGuardMut::insert()` (the `get_mut` value-resize path) never splits the leaf
 `src/tree_store/btree_base.rs:376-412`. Growing a value via the guard rebuilds the leaf with
 `build()` unconditionally -- no `should_split()` -- so a large value produces one oversized
 higher-order page holding all the leaf's pairs. Valid tree (verified: later inserts split it),
 but pathological page shapes.
 
-### 19. `replace_leaf_children()` can build a branch exceeding the u16 child limit (exotic configs)
-`src/tree_store/btree_mutator.rs:321` -> `RawBranchBuilder`'s `u16::try_from(...).unwrap()`
-(`btree_base.rs:2143`). Needs page sizes around 2.5 MiB or more plus a coalescing
-retain/extract over higher-order multi-pair leaves; panic mid-operation, no on-disk damage.
-Ordinary page sizes provably cannot hit it.
-
-### 20. `mem::forget` on a `Table` handle silently drops that table's writes at commit
-`src/transactions.rs:787-800`. A forgotten handle never stages its root; commit succeeds with
-the transaction-start root. Consistent state, silently missing writes. Cheap 5.0 hardening:
-error at commit when `open_tables` is non-empty.
-
-### 21. Oversized composite members panic inside `as_bytes` before the `ValueTooLarge` check
-`src/complex_types.rs:14`, `src/types.rs:536`, `crates/redb-derive/src/lib.rs:391-394`.
-A tuple/Vec/array/derived member >= 2^32 bytes hits `u32::try_from(...).unwrap()` during
-serialization instead of returning `StorageError::ValueTooLarge`.
-
-### 22. `ExtractIf` yields `Err` forever after latching; a `for` loop that skips errors never terminates
+### 17. `ExtractIf` yields `Err` forever after latching; a `for` loop that skips errors never terminates
 `src/table.rs` extract iterator latch semantics. Consider fusing to `None` after the first
 repeated error. Related (exotic): a non-predicate panic escaping
 `RangeMut::with_live_cursor` (`btree_cursor.rs:2324-2342`) under `catch_unwind` can lose
 already-yielded extract removals without poisoning the transaction -- corruption-induced panics
 only.
 
-### 23. Assorted small items
+### 18. Assorted small items
 - `restore_savepoint` version mismatch is `assert_eq!` (`transactions.rs:1317`) -- panics
   instead of `SavepointError`; will matter the first time a v4 format exists.
 - `rename_table(name, name)` fails with `TableExists` instead of being a no-op.
@@ -273,15 +235,14 @@ only.
 Bug-driven (fixes above that need or deserve the major bump):
 1. Uniform transaction error-atomicity: any failed mutating operation poisons the transaction
    (fixes the class behind items 1-3, and makes the contract documentable).
-2. Ship the staged `experimental-api-5` removals unconditionally (item 8), including the
+2. Ship the staged `experimental-api-5` removals unconditionally (item 7), including the
    `KeyRange` signature change.
-3. TypeName format: tag user-defined inner names in composite name strings (item 7); make
-   classification parsing fallible (item 15); consider dropping `matches_legacy` acceptance of
-   pre-3.0 composite spellings (documented migration), which currently cannot distinguish
-   legacy user composites from built-ins.
+3. TypeName format: make classification parsing fallible (the panic item above -- so the next
+   classification addition degrades gracefully for old readers); consider dropping
+   `matches_legacy` acceptance of pre-3.0 composite spellings (documented migration).
 4. `DateTime<FixedOffset>`: injective ordering (tie-break on offset) or drop the offset from
-   the encoding (item 9).
-5. Commit-slot hygiene: enforce transaction-id monotonicity in `commit()` (item 4); gate the
+   the encoding.
+5. Commit-slot hygiene: enforce transaction-id monotonicity in `commit()`; gate the
    slot version-byte parse on the slot checksum (today a torn slot's garbled version byte fails
    the whole open with `Corrupted`/`UpgradeRequired` even though the primary is intact).
 
@@ -290,25 +251,22 @@ Format/API opportunities surfaced by the audit (not bugs today):
    (or checksum the header region). They are unchecksummed and torn-able; correctness currently
    rests on recompute-from-file-length plus `recovery_required` being set during commits.
 7. Widen branch/leaf entry counts from u16 to u32. Several subsystems exist only to dance
-   around the u16 ceiling (split clamps, in-place gates, the item-19 edge); a u32 count deletes
-   them.
+   around the u16 ceiling (split clamps, in-place gates); a u32 count deletes them.
 8. `Key::separator()` contract: decide whether release builds validate (two extra compares per
    split; a broken user implementation currently mis-routes silently, same trust class as a
    broken `compare`), and consider a `Cow` return so implementations can synthesize separators
    shorter than either input.
-9. Iterator-after-error semantics: fuse all read iterators/cursors (item 5), document the
+9. Iterator-after-error semantics: fuse all read iterators/cursors (item 5 above), document the
    reversed-range behavior (redb returns empty where `BTreeMap::range` panics), and pin down
    `MultimapCursor`'s entry-level gap semantics before the constructors stabilize.
 10. `Durability::None` interplay with clean close: a clean close persists non-durable commits
     (the close-time commit + slot promotion), which is safe but means "None" data can outlive
     the documented expectations; document or gate it.
-11. Smaller items: fail commit on forgotten table handles (item 20); document that leaked
-    `ReadTransaction`/`Savepoint` pins pages until reopen; `SystemTableDefinition` is `pub` but
-    unusable externally; unify `&str`/`String` type identity (byte-identical encodings, distinct
-    names); derived `TypeName`s include no module path, so same-named structs in two crates
-    collide; branch-page format ideas (truncated child checksums for fanout, eliding the
-    zero-width value section in multimap subtree leaves, replacing the in-band `DEFERRED`
-    checksum sentinel).
+11. Smaller items: document that leaked `ReadTransaction`/`Savepoint` pins pages until reopen;
+    `SystemTableDefinition` is `pub` but unusable externally; unify `&str`/`String` type
+    identity (byte-identical encodings, distinct names); branch-page format ideas (truncated
+    child checksums for fanout, eliding the zero-width value section in multimap subtree
+    leaves, replacing the in-band `DEFERRED` checksum sentinel).
 
 ---
 
