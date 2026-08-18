@@ -1928,6 +1928,18 @@ impl WriteTransaction {
     }
 
     fn abort_inner(&mut self) -> Result {
+        // A rollback that fails or panics part way leaves this transaction's pages allocated,
+        // so the leak stays latched until it completes
+        let already_needed_repair = self.mem.needs_repair();
+        self.mem.mark_needs_repair();
+        let result = self.abort_inner_impl();
+        if result.is_ok() && !already_needed_repair {
+            self.mem.clear_needs_repair();
+        }
+        result
+    }
+
+    fn abort_inner_impl(&mut self) -> Result {
         #[cfg(feature = "logging")]
         debug!("Aborting transaction id={:?}", self.transaction_id);
         self.tables
@@ -1979,7 +1991,9 @@ impl WriteTransaction {
                 .delete_table(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
                 .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?;
 
-            if self.quick_repair {
+            // No snapshot of an allocator state that needs repair: the next open must rebuild
+            // it instead of trusting the snapshot
+            if self.quick_repair && !self.mem.needs_repair() {
                 system_tree.create_table_and_flush_table_root(
                     ALLOCATOR_STATE_TABLE_NAME,
                     |system_tree_ref, tree: &mut AllocatorStateTreeMut| {
@@ -2604,6 +2618,11 @@ impl Drop for WriteTransaction {
                 .unwrap()
                 .table_tree
                 .clear_root_updates_and_close();
+        } else if !self.completed {
+            // The abort is skipped while unwinding, leaking this transaction's pages: the
+            // session stays usable, but the leak must not outlive the process
+            assert!(crate::panicking());
+            self.mem.mark_needs_repair();
         }
     }
 }
@@ -2872,8 +2891,6 @@ mod test {
 
     // check_integrity()'s repair commit must reserve its transaction id: recovery orders the
     // commit slots by id, so committing an id twice could roll back a committed transaction.
-    // Gated on unwinding because the leak setup relies on catch_unwind.
-    #[cfg(panic = "unwind")]
     #[test]
     fn repair_commit_reserves_transaction_id() {
         let tmpfile = crate::create_tempfile();
@@ -2885,18 +2902,6 @@ mod test {
         }
         txn.commit().unwrap();
 
-        // A transaction dropped mid-panic skips its abort, leaking pages that survive the clean
-        // close, so check_integrity() below has something to repair
-        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let txn = db.begin_write().unwrap();
-            let mut table = txn.open_table(X).unwrap();
-            table.insert("leak", "leak").unwrap();
-            panic!("simulated panic with a live write transaction");
-        }));
-        assert!(panic_result.is_err());
-        drop(db);
-
-        let db = Database::open(tmpfile.path()).unwrap();
         // Align the tracker's counter with the last committed id. The epilogue is disabled so
         // no pending non-durable commit routes check_integrity() away from the repair commit.
         let mut txn = db.begin_write().unwrap();
@@ -2907,7 +2912,11 @@ mod test {
         txn.disable_post_commit_free();
         txn.commit().unwrap();
 
-        // Not clean: the leaked pages make check_integrity() write a repair commit
+        // Leak one page straight from the allocator, standing in for any bug that loses track
+        // of a page: the allocator state then disagrees with the rebuild, so check_integrity()
+        // has a repair to commit
+        db.get_memory().allocate_helper(1, false).unwrap();
+
         let mut db = db;
         assert!(!db.check_integrity().unwrap());
         let repair_id = db.get_memory().get_last_committed_transaction_id().unwrap();
@@ -2916,6 +2925,91 @@ mod test {
         let txn = db.begin_write().unwrap();
         assert!(txn.transaction_id > repair_id);
         txn.abort().unwrap();
+    }
+
+    // A panic unwinding through a live write transaction skips the rollback, leaking the
+    // transaction's pages. The close must not record a clean shutdown, so that the next open
+    // rebuilds the allocator state and reclaims them. Gated on unwinding for catch_unwind.
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn pages_leaked_by_caught_panic_are_reclaimed_on_reopen() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("baseline", "value").unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        let baseline_pages = txn.stats().unwrap().allocated_pages();
+        txn.abort().unwrap();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = db.begin_write().unwrap();
+            let mut table = txn.open_table(X).unwrap();
+            let big = "x".repeat(1024);
+            // Several hundred pages, so the leak stands out from bookkeeping noise
+            for i in 0..2000u32 {
+                table
+                    .insert(format!("key{i}").as_str(), big.as_str())
+                    .unwrap();
+            }
+            panic!("simulated panic with a live write transaction");
+        }));
+        assert!(panic_result.is_err());
+
+        // The session stays usable after the caught panic. Quick-repair makes this commit
+        // save an allocator snapshot, which must exclude the leak like the close-time one
+        let mut txn = db.begin_write().unwrap();
+        txn.set_quick_repair(true);
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("after-panic", "value").unwrap();
+        }
+        txn.commit().unwrap();
+
+        drop(db);
+        let mut db = Database::open(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let reopened_pages = txn.stats().unwrap().allocated_pages();
+        txn.abort().unwrap();
+        assert!(
+            reopened_pages < baseline_pages + 100,
+            "{reopened_pages} pages allocated after reopen, {baseline_pages} at baseline"
+        );
+        assert!(db.check_integrity().unwrap());
+    }
+
+    // check_integrity() rebuilds the allocator, reclaiming the leak in this process, so the
+    // close may record a clean shutdown again; a read-only open requires one
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn check_integrity_clears_leak_latch() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("baseline", "value").unwrap();
+        }
+        txn.commit().unwrap();
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = db.begin_write().unwrap();
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("leak", "leak").unwrap();
+            panic!("simulated panic with a live write transaction");
+        }));
+        assert!(panic_result.is_err());
+
+        assert!(!db.check_integrity().unwrap());
+        drop(db);
+
+        let db = crate::ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(X).unwrap();
+        assert_eq!(table.get("baseline").unwrap().unwrap().value(), "value");
     }
 
     #[test]
