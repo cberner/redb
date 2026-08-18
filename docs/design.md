@@ -472,6 +472,130 @@ All pages referenced by a savepoint must be contained in the above, because it i
 a) referenced directly by the data, system, or freed tree -- i.e. it's a committed page
 b) it is not referenced, in which case it is in the pending free state and is contained in the freed tree
 
+# Multi-process access (prototype)
+
+`MultiProcessDatabase` extends the epoch based reclamation above across processes. Everything it
+needs from the operating system is ordinary file I/O and the whole-file advisory locks in
+`std::fs::File`; there is no shared memory and no `unsafe`.
+
+The database lives in a directory rather than a single file:
+
+| file | contents |
+|------|----------|
+| `data.redb` | the database, in the ordinary redb file format |
+| `write.lock` | empty; held exclusively by the process that owns the single logical writer |
+| `registry.lock` | the shared state below, protected by the lock on itself |
+| `readers/<n>` | one slot per process: the oldest transaction that process needs |
+
+`registry.lock` holds the writer mode, the number of reader slots that exist, the last transaction
+that has been made durable, the highest free horizon any writer has used, and a counter of how many
+times a horizon has been announced.
+
+## Writer modes
+
+The mode is chosen when the database is created and recorded in the registry, so that every process
+agrees on the protocol:
+
+* **Single writer process.** One process takes `write.lock` when it opens the database and holds it
+  until it closes. Nothing can change the file behind that process's back, so it never reloads
+  anything and its own transactions run at single-process speed. Other processes may open the
+  database read-only.
+* **Multiple writer processes.** `write.lock` is taken at the start of each write transaction and
+  released when it ends, so any process may write, one at a time. A process taking the lock has to
+  pick up what the previous one did, which means loading the allocator state from the file rather
+  than rebuilding it -- so every commit in this mode is forced to be a quick-repair commit. Two
+  further consequences: `Durability::None` is rejected, since a non-durable commit lives only in the
+  committing process's memory, and the post-commit free epilogue is skipped, since it publishes its
+  work the same way.
+
+Commits in *both* modes are forced to be 2-phase. A 1-phase commit writes the new header and the
+pages it references in a single flush, in no particular order, and relies on the header's checksums
+to detect the result if a crash interrupts it. A crash can never observe that intermediate state,
+but a reader in another process can: it may read a header naming pages that are not in the file yet.
+The 2-phase sequence -- write the pages, flush, then publish the new primary slot -- is what gives a
+concurrent reader an order to rely on. This costs an extra `fsync` per commit.
+
+## Pinning transactions
+
+A process publishes the oldest transaction it needs -- the minimum over its live read transactions
+and savepoints, which the in-memory tracker already computes -- into its own slot file, which it
+holds exclusively locked for as long as it has the database open. A writer finds the slots that are
+in use by failing to take a shared lock on them, and takes the minimum of their contents and its own
+tracker as the free horizon. A process that exits, for any reason, therefore stops holding pages
+back with no cleanup and no timeouts: the operating system drops its locks.
+
+Registering a read transaction and publishing it must be atomic with respect to a writer scanning
+the slots, or a reader could read a root, stall, and publish it only after a writer had concluded
+that nothing was pinned and reclaimed the pages that root reaches. This is what the lock on
+`registry.lock` provides: readers take it shared to publish, writers take it exclusively to scan.
+That leaves two cases, both safe:
+
+* the reader publishes before the scan, so the writer sees the transaction and holds its pages back;
+* the reader reads the file after the scan, so it sees a state at least as new as the one the scan
+  produced. What a reader in that position pins is the last *durable* commit, so a writer clamps its
+  free horizon to one past that -- which its own transaction id does not imply, since a commit's
+  non-durable free epilogue and `Durability::None` commits both leave the in-memory transaction id
+  ahead of the file.
+
+In the same process, the state lock in `TransactionTracker` is held across the cross-process
+registration, which extends the same atomicity to the in-memory half. Lock order is always
+tracker state, then registry, then the reader slots; a writer only ever *tries* the slot locks, so
+it can never block on a process that is waiting for the registry.
+
+## Keeping up with other processes
+
+A process's in-memory copy of the database header is stale as soon as another process commits, so
+one has to be read from the file again. A writer publishes the transaction it has committed into
+the registry after the commit is durable, so a process that reads that value can rely on the file
+already holding at least that transaction. Reading the header is skipped when the value has not
+changed.
+
+Only the commit slots are taken from the file by a reader: the layout is rewritten on every resize,
+so it can disagree with the file length at any instant, and a process that only reads never consults
+it. A writer reloads everything -- header, layout and allocator state -- when it takes the write
+lock, unless it was itself the last process to commit.
+
+## Page cache invalidation
+
+A page a process has cached can be reallocated by another process, at which point the cached copy is
+stale. Each process therefore tracks a **cache floor**: a transaction id such that every page in its
+read cache was read from a snapshot at or after it. A page cached from snapshot `S` can only be
+reallocated after being freed by some transaction `F > S` and then reclaimed under a free horizon
+`H > F`, so `H > S + 1` is exactly the condition under which the cache may have gone stale. Writers
+announce their horizon into the registry *before* reclaiming anything, and a process drops its whole
+read cache when it sees one that exceeds its floor.
+
+A process's own reclamation can never invalidate its own cache -- reusing a page writes it through
+the same cache -- but the horizon alone cannot say whose reclamation it was. The registry therefore
+also counts announcements: a writer records the counter when it publishes, and only ever publishes
+while it holds the write lock, so a value it does not recognize can only have come from another
+process. Note that committing does not make a process's cache any newer, because a write transaction
+reads the snapshot it starts from.
+
+The floor is a single value covering the whole cache, so a process that falls behind drops pages
+that are still valid along with the ones that are not. Tracking the snapshot per cache entry would
+be more precise.
+
+## Assumptions
+
+Beyond the ones the rest of redb makes, a multi-process database assumes that a read of the
+super-header cannot observe a partially completed concurrent write of it -- the read/write atomicity
+POSIX requires of regular files. Nothing else is read concurrently with being written: every other
+page is copy-on-write, and the protocol above is what keeps a page from being rewritten while
+another process can still reach it.
+
+## What a crash leaves behind
+
+A process that dies releases its locks, so the write lock and the reader slots need no recovery. A
+writer that died part way through a transaction leaves the file exactly as a single-process crash
+would: the pages it wrote were free as of the last commit, so the next writer reallocates and
+overwrites them. Recovery uses the same quick-repair path as a restart.
+
+The one case that needs a reopen is a writer dying part way through a *commit* in multiple-writer
+mode, which can leave no valid allocator state in the file. The next `begin_write` fails rather than
+repairing in place, because a repair rebuilds state that live read transactions in the process may
+be using; reopening the database repairs it.
+
 # Version changes
 ## v1
 Initial file format

@@ -2249,7 +2249,9 @@ impl<'b> BranchMutator<'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+    use crate::tree_store::{
+        AccessMode, AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+    };
 
     const MAX_PAIRS: usize = u16::MAX as usize;
 
@@ -2264,7 +2266,7 @@ mod tests {
             page_size,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();

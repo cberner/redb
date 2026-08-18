@@ -27,8 +27,9 @@ pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
 pub(crate) use page_store::{
-    AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
-    PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageNumberHashSet, PageResolver,
+    AccessMode, AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
+    PAGE_SIZE, Page, PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageNumberHashSet,
+    PageResolver,
     PageTracker, SerializedSavepoint, ShrinkPolicy, TransactionalMemory,
 };
 pub use page_store::{InMemoryBackend, Savepoint};

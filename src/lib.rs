@@ -88,7 +88,7 @@ pub use error::{
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
 #[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
-pub use multi_process::{MultiProcessBuilder, MultiProcessDatabase};
+pub use multi_process::{MultiProcessBuilder, MultiProcessDatabase, WriterMode};
 #[cfg(feature = "experimental-api-5")]
 pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
