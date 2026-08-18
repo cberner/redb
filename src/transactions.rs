@@ -2833,6 +2833,54 @@ mod test {
         assert!(write_txn.transaction_id > first_txn_id);
     }
 
+    // check_integrity()'s repair commit must reserve its transaction id: recovery orders the
+    // commit slots by id, so committing an id twice could roll back a committed transaction.
+    // Gated on unwinding because the leak setup relies on catch_unwind.
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn repair_commit_reserves_transaction_id() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("k1", "v1").unwrap();
+        }
+        txn.commit().unwrap();
+
+        // A transaction dropped mid-panic skips its abort, leaking pages that survive the clean
+        // close, so check_integrity() below has something to repair
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = db.begin_write().unwrap();
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("leak", "leak").unwrap();
+            panic!("simulated panic with a live write transaction");
+        }));
+        assert!(panic_result.is_err());
+        drop(db);
+
+        let db = Database::open(tmpfile.path()).unwrap();
+        // Align the tracker's counter with the last committed id. The epilogue is disabled so
+        // no pending non-durable commit routes check_integrity() away from the repair commit.
+        let mut txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(X).unwrap();
+            table.insert("k2", "v2").unwrap();
+        }
+        txn.disable_post_commit_free();
+        txn.commit().unwrap();
+
+        // Not clean: the leaked pages make check_integrity() write a repair commit
+        let mut db = db;
+        assert!(!db.check_integrity().unwrap());
+        let repair_id = db.get_memory().get_last_committed_transaction_id().unwrap();
+
+        // The next write transaction must not commit with the repair commit's id
+        let txn = db.begin_write().unwrap();
+        assert!(txn.transaction_id > repair_id);
+        txn.abort().unwrap();
+    }
+
     #[test]
     fn post_commit_epilogue_reserves_transaction_id() {
         let tmpfile = crate::create_tempfile();
