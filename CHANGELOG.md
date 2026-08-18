@@ -59,6 +59,9 @@
   committable after a storage error. Committing it could corrupt the database or silently lose
   a table. Such failures now poison the transaction: `commit()` returns an error instead of
   committing the half-applied state.
+* Fix pages being leaked permanently when a panic unwound through a live write transaction and
+  was caught with `catch_unwind`. The leak survived closing and reopening the database and grew
+  with every such panic; the pages are now reclaimed the next time the database is opened.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

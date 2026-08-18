@@ -693,6 +693,9 @@ impl Database {
                 txn.disable_post_commit_free();
                 txn.commit()
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+                // The rebuild above reclaimed any leaked pages, so the close may record a
+                // clean shutdown again
+                self.mem.clear_needs_repair();
                 return Ok(live_allocator_clean && durable_clean);
             }
             // The live tree is corrupt (or the file size changed), so the reload rolls the commit
@@ -737,6 +740,9 @@ impl Database {
                 .reserve_repair_transaction_id(next_transaction_id);
         }
 
+        // The rebuild reclaimed any leaked pages, so the close may record a clean shutdown
+        // again
+        self.mem.clear_needs_repair();
         self.mem.begin_writable()?;
 
         Ok(was_clean)
@@ -1354,7 +1360,10 @@ fn ensure_allocator_state_table_and_trim(
 // transaction can be started concurrently and the commit in here cannot block on the
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
+    // No saved allocator state when it needs repair: the next open must rebuild it instead
+    // of trusting the saved one
     if !crate::panicking()
+        && !mem.needs_repair()
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
         #[cfg(feature = "logging")]

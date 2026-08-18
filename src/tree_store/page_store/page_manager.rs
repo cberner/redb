@@ -26,6 +26,7 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -511,6 +512,9 @@ pub(crate) struct TransactionalMemory {
     // Set of all allocated pages for debugging assertions
     #[cfg(debug_assertions)]
     allocated_pages: Arc<Mutex<PageNumberHashSet>>,
+    // While set, no allocator state is persisted and shutdowns are not recorded as clean,
+    // forcing the next open to rebuild the state from the committed trees
+    needs_repair: AtomicBool,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -655,6 +659,7 @@ impl TransactionalMemory {
             read_page_ref_counts: Arc::new(Mutex::new(PageNumberHashMap::default())),
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
+            needs_repair: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
@@ -824,6 +829,20 @@ impl TransactionalMemory {
 
     pub(crate) fn allocator_state_loaded(&self) -> bool {
         self.state.lock().unwrap().allocators.is_some()
+    }
+
+    pub(crate) fn mark_needs_repair(&self) {
+        self.needs_repair.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn needs_repair(&self) -> bool {
+        self.needs_repair.load(Ordering::Acquire)
+    }
+
+    // The in-memory allocator state has been rebuilt from the committed trees, so it can be
+    // trusted again
+    pub(crate) fn clear_needs_repair(&self) {
+        self.needs_repair.store(false, Ordering::Release);
     }
 
     // The freed tables name pages that no page walk ever reads, so this is the only place those
@@ -1661,8 +1680,8 @@ impl TransactionalMemory {
         if self.storage.check_io_errors().is_ok() && !crate::panicking() {
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
-            // an allocator state describing what it wrote. Without one there is nothing to assert.
-            if state.allocators.is_some() && self.storage.flush().is_ok() {
+            // an allocator state describing what it wrote, and one not marked for repair.
+            if state.allocators.is_some() && !self.needs_repair() && self.storage.flush().is_ok() {
                 state.header.recovery_required = false;
                 self.write_header(&state.header)?;
                 self.storage.flush()?;
