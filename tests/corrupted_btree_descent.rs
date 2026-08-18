@@ -61,6 +61,19 @@ fn make_self_referential(data: &mut [u8], offset: usize) {
     }
 }
 
+// Makes one child pointer unreadable by corrupting its page-order bits: descending into it
+// reports Corrupted, without latching an I/O failure
+fn corrupt_child_pointer(data: &mut [u8], offset: usize, child: usize) {
+    let page = &mut data[offset..offset + PAGE_SIZE];
+    let num_keys = u16::from_le_bytes([page[2], page[3]]) as usize;
+    assert!(child <= num_keys);
+    // Child pointers follow the per-child checksums, which follow an 8 byte header
+    let children = 8 + 16 * (num_keys + 1);
+    let pointer = children + 8 * child;
+    // The page order lives in the top bits of the 64 bit page number
+    page[pointer + 7] |= 0xF8;
+}
+
 fn opens_cleanly(path: &Path) -> bool {
     let Ok(db) = ReadOnlyDatabase::open(path) else {
         return false;
@@ -141,4 +154,153 @@ fn cyclic_branch_pointer_is_reported_rather_than_overflowing_the_stack() {
         Ok(mut iter) => assert!(matches!(iter.next(), Some(Err(StorageError::Corrupted(_))))),
         Err(err) => panic!("expected Corrupted, got {err:?}"),
     }
+}
+
+// Resuming iteration after an error must keep reporting the error, not skip the unreadable
+// subtree and yield the rest of the table as if nothing were missing
+#[test]
+fn iteration_does_not_resume_past_corruption() {
+    let tmpfile = create_tempfile();
+    {
+        let db = redb::Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(T).unwrap();
+            // Enough entries that the table's tree has branch pages
+            for i in 0..5_000u64 {
+                table.insert(&i, &i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let pristine = std::fs::read(tmpfile.path()).unwrap();
+    let candidates = branch_page_offsets(&pristine);
+    assert!(
+        !candidates.is_empty(),
+        "no branch page was found to corrupt"
+    );
+
+    // Corrupt the second child of one branch at a time; candidates may be stale or unreachable
+    // pages, so use the first that makes the iteration fail part way through
+    for &offset in &candidates {
+        let mut data = pristine.clone();
+        corrupt_child_pointer(&mut data, offset, 1);
+        std::fs::write(tmpfile.path(), &data).unwrap();
+        if !opens_cleanly(tmpfile.path()) {
+            continue;
+        }
+
+        let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(T).unwrap();
+
+        let mut iter = table.iter().unwrap();
+        let mut yielded = 0u64;
+        let mut saw_error = false;
+        for entry in &mut iter {
+            match entry {
+                Ok(_) => yielded += 1,
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        if !saw_error {
+            // This branch page was not reachable by the iteration; try another
+            assert_eq!(yielded, 5_000);
+            continue;
+        }
+
+        assert!(yielded > 0 && yielded < 5_000, "yielded {yielded}");
+        // Yielding entries again would mean the unreadable subtree was skipped, and a bare end
+        // would claim the table is complete
+        for _ in 0..10 {
+            match iter.next() {
+                Some(Err(_)) => {}
+                Some(Ok(entry)) => panic!(
+                    "iterator resumed past the corruption at key {}",
+                    entry.0.value()
+                ),
+                None => panic!("iterator ended as if complete after {yielded} of 5000 entries"),
+            }
+        }
+        return;
+    }
+    panic!("no corruptible branch page was reachable by iteration");
+}
+
+// An error on one iteration end must latch the whole range: the other end runs on an
+// independent cursor and would otherwise keep yielding entries
+#[test]
+fn iteration_from_both_ends_latches_after_error() {
+    let tmpfile = create_tempfile();
+    {
+        let db = redb::Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(T).unwrap();
+            for i in 0..5_000u64 {
+                table.insert(&i, &i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    let pristine = std::fs::read(tmpfile.path()).unwrap();
+    let candidates = branch_page_offsets(&pristine);
+    assert!(
+        !candidates.is_empty(),
+        "no branch page was found to corrupt"
+    );
+
+    // Iterate backward into the corruption, then continue forward: the front cursor is
+    // untouched by the back cursor's error, so only the range-level latch stops it.
+    for &offset in &candidates {
+        let mut data = pristine.clone();
+        corrupt_child_pointer(&mut data, offset, 1);
+        std::fs::write(tmpfile.path(), &data).unwrap();
+        if !opens_cleanly(tmpfile.path()) {
+            continue;
+        }
+
+        let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(T).unwrap();
+
+        let mut iter = table.iter().unwrap();
+        let mut yielded = 0u64;
+        let mut saw_error = false;
+        while let Some(entry) = iter.next_back() {
+            match entry {
+                Ok(_) => yielded += 1,
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        if !saw_error {
+            // This branch page was not reachable by the iteration; try another
+            assert_eq!(yielded, 5_000);
+            continue;
+        }
+
+        assert!(yielded > 0 && yielded < 5_000, "yielded {yielded}");
+        // Both ends must report the error from here on
+        for _ in 0..3 {
+            match iter.next() {
+                Some(Err(_)) => {}
+                Some(Ok(entry)) => panic!(
+                    "front end continued after the back end's error, at key {}",
+                    entry.0.value()
+                ),
+                None => panic!("iterator ended as if complete after {yielded} of 5000 entries"),
+            }
+            assert!(matches!(iter.next_back(), Some(Err(_))));
+        }
+        return;
+    }
+    panic!("no corruptible branch page was reachable by iteration");
 }

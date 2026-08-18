@@ -479,6 +479,9 @@ pub(super) struct Cursor<K: Key + 'static, V: Value + 'static> {
     leaf: Option<Leaf>,
     manager: PageResolver,
     hint: PageHint,
+    // A failed step leaves the position half-advanced, and continuing from it would silently
+    // skip the unreadable subtree, so the first error latches the cursor; seek_to() clears it
+    errored: bool,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
 }
@@ -491,44 +494,69 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
             leaf: None,
             manager,
             hint,
+            errored: false,
             _key_type: PhantomData,
             _value_type: PhantomData,
         }
     }
 
-    pub(super) fn seek_to(&mut self, position: Position<'_>) -> Result {
-        self.path.clear();
-        let root_page = self.manager.get_page(self.root, self.hint)?;
-        let Self {
-            manager,
-            hint,
-            path,
-            leaf,
-            ..
-        } = self;
-        let mut get_page = |page| manager.get_page(page, *hint);
-        *leaf = Some(descend_to_position::<K, V, _>(
-            root_page,
-            position,
-            path,
-            &mut get_page,
-        )?);
+    fn latch_errors<T>(&mut self, result: Result<T>) -> Result<T> {
+        if result.is_err() {
+            self.errored = true;
+        }
+        result
+    }
+
+    fn check_not_errored(&self) -> Result {
+        if self.errored {
+            return Err(StorageError::PreviousIo);
+        }
         Ok(())
     }
 
+    pub(super) fn seek_to(&mut self, position: Position<'_>) -> Result {
+        // A seek rebuilds the position from the root, so a previous error does not taint it
+        self.errored = false;
+        self.path.clear();
+        let result = (|| {
+            let root_page = self.manager.get_page(self.root, self.hint)?;
+            let Self {
+                manager,
+                hint,
+                path,
+                leaf,
+                ..
+            } = self;
+            let mut get_page = |page| manager.get_page(page, *hint);
+            *leaf = Some(descend_to_position::<K, V, _>(
+                root_page,
+                position,
+                path,
+                &mut get_page,
+            )?);
+            Ok(())
+        })();
+        self.latch_errors(result)
+    }
+
     fn ensure_has_entry(&mut self, direction: Direction) -> Result<bool> {
-        let Self {
-            manager,
-            hint,
-            path,
-            leaf,
-            ..
-        } = self;
-        let mut get_page = |page| manager.get_page(page, *hint);
-        prepare_leaf::<K, V, _>(leaf, path, direction, &mut get_page)
+        self.check_not_errored()?;
+        let result = {
+            let Self {
+                manager,
+                hint,
+                path,
+                leaf,
+                ..
+            } = self;
+            let mut get_page = |page| manager.get_page(page, *hint);
+            prepare_leaf::<K, V, _>(leaf, path, direction, &mut get_page)
+        };
+        self.latch_errors(result)
     }
 
     pub(super) fn normalize_forward_gap(&mut self) -> Result {
+        self.check_not_errored()?;
         if self
             .leaf
             .as_ref()
@@ -537,18 +565,18 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
             return Ok(());
         }
 
-        let Self {
-            manager,
-            hint,
-            path,
-            leaf,
-            ..
-        } = self;
-        let mut get_page = |page| manager.get_page(page, *hint);
-        if let Some(next_leaf) =
-            move_to_adjacent_leaf::<K, V, _>(path, Direction::Next, &mut get_page)?
-        {
-            *leaf = Some(next_leaf);
+        let result = {
+            let Self {
+                manager,
+                hint,
+                path,
+                ..
+            } = self;
+            let mut get_page = |page| manager.get_page(page, *hint);
+            move_to_adjacent_leaf::<K, V, _>(path, Direction::Next, &mut get_page)
+        };
+        if let Some(next_leaf) = self.latch_errors(result)? {
+            self.leaf = Some(next_leaf);
         }
         Ok(())
     }
