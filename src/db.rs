@@ -1,5 +1,8 @@
 use crate::io;
 use crate::multi_process::ProcessCoordinator;
+// Only the paths that open a file can be pointed at one, and those need std
+#[cfg(not(redb_no_std))]
+use crate::multi_process::reject_multi_process_data_file;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -1678,6 +1681,7 @@ impl Builder {
     /// * otherwise this function will return an error
     #[cfg(not(redb_no_std))]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        reject_multi_process_data_file(path.as_ref())?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -1698,6 +1702,7 @@ impl Builder {
     /// Opens an existing redb database.
     #[cfg(not(redb_no_std))]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
+        reject_multi_process_data_file(path.as_ref())?;
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         Database::new(
@@ -1720,6 +1725,7 @@ impl Builder {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<ReadOnlyDatabase, DatabaseError> {
+        reject_multi_process_data_file(path.as_ref())?;
         let file = OpenOptions::new().read(true).open(path)?;
 
         ReadOnlyDatabase::new(

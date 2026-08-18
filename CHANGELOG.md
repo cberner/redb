@@ -86,6 +86,11 @@
   allocator state. Non-durable commits, compaction and integrity checks are not supported in all
   configurations -- see the type's documentation. The directory layout may change incompatibly
   while the feature is experimental.
+* `Database::open()`, `Database::create()` and `ReadOnlyDatabase::open()` now refuse a `data.redb`
+  that belongs to a `MultiProcessDatabase` directory. That file carries no lock of its own -- every
+  process using the database has it open at once -- so nothing else stopped an ordinary `Database`
+  from writing to it underneath processes using it properly; the `metadata` marker beside it is
+  what turns them away.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
