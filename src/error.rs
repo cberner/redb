@@ -484,7 +484,8 @@ impl core::error::Error for TransactionError {}
 pub enum CommitError {
     /// Error from underlying storage
     Storage(StorageError),
-    /// The transaction was poisoned by a panic and can no longer be committed
+    /// The transaction was poisoned and can no longer be committed: an operation panicked, or
+    /// failed part way through modifying the transaction
     TransactionPoisoned,
 }
 
@@ -517,7 +518,10 @@ impl Display for CommitError {
         match self {
             CommitError::Storage(storage) => storage.fmt(f),
             CommitError::TransactionPoisoned => {
-                write!(f, "Transaction was poisoned by a panic")
+                write!(
+                    f,
+                    "Transaction was poisoned by a panic or a failed operation"
+                )
             }
         }
     }
@@ -548,7 +552,8 @@ pub enum Error {
     EphemeralSavepointExists,
     /// A transaction is still in-progress
     TransactionInProgress,
-    /// The transaction was poisoned by a panic and can no longer be committed
+    /// The transaction was poisoned and can no longer be committed: an operation panicked, or
+    /// failed part way through modifying the transaction
     TransactionPoisoned,
     /// The Database is corrupted
     Corrupted(String),
@@ -710,7 +715,10 @@ impl Display for Error {
                 )
             }
             Error::TransactionPoisoned => {
-                write!(f, "Transaction was poisoned by a panic")
+                write!(
+                    f,
+                    "Transaction was poisoned by a panic or a failed operation"
+                )
             }
             Error::InvalidSavepoint => {
                 write!(f, "Savepoint is invalid or cannot be created.")

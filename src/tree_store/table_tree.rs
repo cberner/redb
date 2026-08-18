@@ -575,12 +575,15 @@ impl TableTreeMut {
             if self.get_table_untyped(new_name, table_type)?.is_some() {
                 return Err(TableError::TableExists(new_name.to_string()));
             }
+            assert!(self.tree.remove(&name)?.is_some());
+            // A failure here leaves the table under neither name; the caller poisons the
+            // transaction so the half-renamed catalog can never be committed.
+            assert!(self.tree.insert(&new_name, &definition)?.is_none());
+            // Re-keyed only after both catalog updates succeed
             if let Some(update) = self.pending_table_updates.remove(name) {
                 self.pending_table_updates
                     .insert(new_name.to_string(), update);
             }
-            assert!(self.tree.remove(&name)?.is_some());
-            assert!(self.tree.insert(&new_name, &definition)?.is_none());
         } else {
             return Err(TableError::TableDoesNotExist(name.to_string()));
         }
@@ -601,6 +604,12 @@ impl TableTreeMut {
                 pages.push(path.page_number());
                 Ok(())
             })?;
+
+            // Free only after the fallible catalog removal: a still-reachable table's pages
+            // must never sit in the freed queue of a committable transaction
+            let found = self.tree.remove(&name)?.is_some();
+            self.pending_table_updates.remove(name);
+
             let mut freed_pages = self.freed_pages.lock().unwrap();
             for page in pages {
                 if !self
@@ -612,9 +621,6 @@ impl TableTreeMut {
             }
             drop(freed_pages);
 
-            self.pending_table_updates.remove(name);
-
-            let found = self.tree.remove(&name)?.is_some();
             return Ok(found);
         }
 

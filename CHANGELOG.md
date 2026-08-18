@@ -55,6 +55,10 @@
   that yielded `Err(Corrupted)` could yield the rest of the table on later calls, skipping the
   unreadable entries with no further error. Iterators and read-only cursors now keep returning
   an error after the first one; re-seeking a cursor resets it.
+* Fix `restore_savepoint()`, `rename_table()`, and `delete_table()` leaving the transaction
+  committable after a storage error. Committing it could corrupt the database or silently lose
+  a table. Such failures now poison the transaction: `commit()` returns an error instead of
+  committing the half-applied state.
 
 ## 4.2.0 - 2026-08-17
 
