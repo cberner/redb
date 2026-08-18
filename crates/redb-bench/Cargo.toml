@@ -11,7 +11,7 @@ authors.workspace = true
 
 # Common test/bench dependencies
 [dev-dependencies]
-redb = { path = "../..", features = ["experimental_cursor"] }
+redb = { path = "../..", features = ["experimental_cursor", "experimental-multiprocess"] }
 rand = "0.10.1"
 tempfile = "3.5.0"
 walkdir = "2.5.0"
@@ -63,4 +63,8 @@ harness = false
 
 [[bench]]
 name = "syscall_benchmark"
+harness = false
+
+[[bench]]
+name = "multi_process_benchmark"
 harness = false

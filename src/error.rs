@@ -404,12 +404,17 @@ impl core::error::Error for CompactionError {}
 pub enum SetDurabilityError {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// The database is open for writing by more than one process, where a non-durable commit
+    /// cannot be supported: it would be visible only to the process that made it, and discarded
+    /// as soon as another process took the write lock
+    NonDurableCommitUnsupported,
 }
 
 impl From<SetDurabilityError> for Error {
     fn from(err: SetDurabilityError) -> Error {
         match err {
             SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+            SetDurabilityError::NonDurableCommitUnsupported => Error::NonDurableCommitUnsupported,
         }
     }
 }
@@ -421,6 +426,12 @@ impl Display for SetDurabilityError {
                 write!(
                     f,
                     "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
+            }
+            SetDurabilityError::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when several processes may write to the database"
                 )
             }
         }
@@ -546,6 +557,8 @@ pub enum Error {
     RepairAborted,
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// Non-durable commits are not supported when several processes may write to the database
+    NonDurableCommitUnsupported,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -689,6 +702,12 @@ impl Display for Error {
             }
             Error::RepairAborted => {
                 write!(f, "Database repair aborted.")
+            }
+            Error::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when several processes may write to the database"
+                )
             }
             Error::PersistentSavepointModified => {
                 write!(

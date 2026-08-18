@@ -2455,7 +2455,9 @@ fn park_bound<K: Key + 'static, V: Value + 'static>(
 mod tests {
     use super::*;
     use crate::tree_store::btree_base::{DEFERRED, LeafBuilder};
-    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+    use crate::tree_store::{
+        AccessMode, AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+    };
 
     fn test_page_allocator() -> PageAllocator {
         let mem = TransactionalMemory::new(
@@ -2464,7 +2466,7 @@ mod tests {
             PAGE_SIZE,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
