@@ -1,6 +1,6 @@
 #[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
 use crate::multi_process::ProcessCoordinator;
-use crate::sync::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;

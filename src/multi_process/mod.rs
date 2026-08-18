@@ -1,35 +1,5 @@
 //! A multi-process safe interface to a redb database.
 //!
-<<<<<<< HEAD
-//! **This is the first step of an incomplete feature.** [`MultiProcessDatabase`] currently allows
-//! only one process to have the database open at all -- it establishes the directory layout and
-//! the lock file that later releases relax, so that other processes can read while one writes. Use
-//! [`Database`] until then; this type has no advantage over it yet.
-
-mod locks;
-
-use crate::db::RepairSession;
-use crate::sealed::Sealed;
-use crate::tree_store::PAGE_SIZE;
-use crate::{
-    CacheStats, Database, DatabaseError, ReadTransaction, ReadableDatabase, Result,
-    TransactionError, WriteTransaction,
-};
-use locks::DatabaseDir;
-use std::path::Path;
-
-/// A redb database stored in a directory, alongside the lock files that coordinate the processes
-/// using it.
-///
-/// Use [`Self::begin_read`] to get a [`ReadTransaction`], and [`Self::begin_write`] to get a
-/// [`WriteTransaction`]. Both behave exactly as they do for a [`Database`].
-///
-/// The directory must be on a filesystem that supports file locking, and belongs to redb -- do not
-/// put anything else in it. A second process that opens the same directory fails with
-/// [`DatabaseError::DatabaseAlreadyOpen`], as it would for a [`Database`] on a single file. What
-/// the directory adds so far is a lock file that carries that exclusion, which is what a later
-/// release needs in order to let other processes read while one writes.
-=======
 //! [`MultiProcessDatabase`] stores its database in a directory, alongside the lock files that
 //! coordinate the processes using it. One write transaction may be in progress at a time across
 //! every process, and any number of processes may read concurrently with it and with each other.
@@ -97,8 +67,6 @@ use std::sync::Arc;
 /// * [`Durability::None`](crate::Durability) is rejected in
 ///   [`WriterMode::MultiWriterProcess`], since a non-durable commit is only visible to the process
 ///   that made it.
-/// * Persistent savepoints are only supported in [`WriterMode::SingleWriterProcess`]. Ephemeral
-///   savepoints work in both modes.
 /// * Compaction and [`Database::check_integrity`] are not available.
 /// * Every commit is 2-phase, which costs an extra `fsync`: a reader in another process would
 ///   otherwise be able to see a header naming pages that are not in the file yet.
@@ -106,7 +74,6 @@ use std::sync::Arc;
 ///   [`WriterMode::MultiWriterProcess`], the database must be reopened to repair it; the next
 ///   [`Self::begin_write`] fails rather than repairing in place, since a repair rebuilds state
 ///   that live read transactions may be using.
->>>>>>> b508cef (Add a multi-process safe database interface)
 ///
 /// # Examples
 ///
@@ -126,35 +93,25 @@ use std::sync::Arc;
 /// }
 /// write_txn.commit()?;
 ///
-<<<<<<< HEAD
-/// let read_txn = db.begin_read()?;
-=======
 /// // Any number of other processes may open the same directory and read it
 /// let read_only = MultiProcessDatabase::open_read_only(&path)?;
 /// let read_txn = read_only.begin_read()?;
->>>>>>> b508cef (Add a multi-process safe database interface)
 /// assert_eq!(0, read_txn.open_table(TABLE)?.get_owned(0)?.unwrap().value());
 /// # Ok(())
 /// # }
 /// ```
 pub struct MultiProcessDatabase {
     inner: Database,
-<<<<<<< HEAD
-=======
     coordinator: Arc<ProcessCoordinator>,
->>>>>>> b508cef (Add a multi-process safe database interface)
 }
 
 impl MultiProcessDatabase {
     /// Opens the directory at `path` as a multi-process database, creating it if it does not
     /// exist.
-<<<<<<< HEAD
-=======
     ///
     /// A database created this way uses [`WriterMode::MultiWriterProcess`]. Use
     /// [`MultiProcessBuilder::set_writer_mode`] to create one that only a single process may write
     /// to, which is faster for that process.
->>>>>>> b508cef (Add a multi-process safe database interface)
     pub fn create(path: impl AsRef<Path>) -> Result<MultiProcessDatabase, DatabaseError> {
         Self::builder().create(path)
     }
@@ -164,8 +121,6 @@ impl MultiProcessDatabase {
         Self::builder().open(path)
     }
 
-<<<<<<< HEAD
-=======
     /// Opens an existing multi-process database for reading only.
     ///
     /// Any number of processes may do this, concurrently with each other and with a writer.
@@ -173,22 +128,11 @@ impl MultiProcessDatabase {
         Self::builder().open_read_only(path)
     }
 
->>>>>>> b508cef (Add a multi-process safe database interface)
     /// Convenience method for [`MultiProcessBuilder::new`]
     pub fn builder() -> MultiProcessBuilder {
         MultiProcessBuilder::new()
     }
 
-<<<<<<< HEAD
-    /// Begins a write transaction
-    ///
-    /// Returns a [`WriteTransaction`] which may be used to read/write to the database. Only a
-    /// single write may be in progress at a time. If a write is in progress, this function blocks
-    /// until it completes.
-    pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
-        self.inner.begin_write()
-    }
-=======
     /// The mode this database was created with, which governs which processes may write to it
     pub fn writer_mode(&self) -> WriterMode {
         self.coordinator.mode()
@@ -210,7 +154,6 @@ impl MultiProcessDatabase {
     pub fn last_durable_commit(&self) -> Result<u64> {
         Ok(self.coordinator.last_committed()?.raw_id())
     }
->>>>>>> b508cef (Add a multi-process safe database interface)
 }
 
 impl Sealed for MultiProcessDatabase {}
@@ -227,25 +170,18 @@ impl ReadableDatabase for MultiProcessDatabase {
 
 impl std::fmt::Debug for MultiProcessDatabase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-<<<<<<< HEAD
-        f.debug_struct("MultiProcessDatabase").finish()
-=======
         f.debug_struct("MultiProcessDatabase")
             .field("mode", &self.coordinator.mode())
             .finish_non_exhaustive()
->>>>>>> b508cef (Add a multi-process safe database interface)
     }
 }
 
 /// Configuration builder of a [`MultiProcessDatabase`].
 pub struct MultiProcessBuilder {
     cache_size: usize,
-<<<<<<< HEAD
-=======
     mode: Option<WriterMode>,
     // Only configurable in test and fuzzing builds, exactly as for `crate::Builder`
     region_size: Option<u64>,
->>>>>>> b508cef (Add a multi-process safe database interface)
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -255,19 +191,13 @@ impl MultiProcessBuilder {
     /// ## Defaults
     ///
     /// - `cache_size_bytes`: 1GiB
-<<<<<<< HEAD
-=======
     /// - `writer_mode`: [`WriterMode::MultiWriterProcess`]
->>>>>>> b508cef (Add a multi-process safe database interface)
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             cache_size: 1024 * 1024 * 1024,
-<<<<<<< HEAD
-=======
             mode: None,
             region_size: None,
->>>>>>> b508cef (Add a multi-process safe database interface)
             repair_callback: Box::new(|_| {}),
         }
     }
@@ -278,8 +208,6 @@ impl MultiProcessBuilder {
         self
     }
 
-<<<<<<< HEAD
-=======
     /// Set which processes may write to the database.
     ///
     /// The mode is fixed when the database is created. Setting it before opening an existing
@@ -289,7 +217,6 @@ impl MultiProcessBuilder {
         self
     }
 
->>>>>>> b508cef (Add a multi-process safe database interface)
     /// Set a callback which will be invoked periodically in the event that the database file needs
     /// to be repaired. See [`crate::Builder::set_repair_callback`].
     pub fn set_repair_callback(
@@ -300,11 +227,6 @@ impl MultiProcessBuilder {
         self
     }
 
-<<<<<<< HEAD
-    /// Opens the directory at `path` as a multi-process database, creating it if it does not exist
-    pub fn create(&self, path: impl AsRef<Path>) -> Result<MultiProcessDatabase, DatabaseError> {
-        self.open_inner(path.as_ref(), true)
-=======
     #[cfg(any(test, fuzzing))]
     pub fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
@@ -315,43 +237,16 @@ impl MultiProcessBuilder {
     /// Opens the directory at `path` as a multi-process database, creating it if it does not exist
     pub fn create(&self, path: impl AsRef<Path>) -> Result<MultiProcessDatabase, DatabaseError> {
         let dir = DatabaseDir::new(path);
-        let mode = dir.create(self.mode.unwrap_or(WriterMode::MultiWriterProcess))?;
+        dir.prepare(true)?;
+        let mode = dir.init_registry(self.mode.unwrap_or(WriterMode::MultiWriterProcess))?;
         self.check_mode(mode)?;
         self.open_inner(&dir, mode, true)
->>>>>>> b508cef (Add a multi-process safe database interface)
     }
 
     /// Opens an existing multi-process database
     pub fn open(&self, path: impl AsRef<Path>) -> Result<MultiProcessDatabase, DatabaseError> {
-<<<<<<< HEAD
-        self.open_inner(path.as_ref(), false)
-    }
-
-    fn open_inner(&self, path: &Path, create: bool) -> Result<MultiProcessDatabase, DatabaseError> {
         let dir = DatabaseDir::new(path);
-        let (backend, location) = dir.open(create)?;
-        // `create` alone decides whether an empty database file may be initialized, exactly as it
-        // does for a Database: an existing one is recognized by its contents rather than by the
-        // directory's marker, so a create() that died before initializing the file can be redone
-        let inner = Database::new(
-            backend,
-            create,
-            PAGE_SIZE,
-            None,
-            self.cache_size,
-            &self.repair_callback,
-        )?;
-        if create {
-            // Both last, and in this order, so that a create() pointed somewhere that turns out
-            // not to hold a database fails without having left either a database file or a marker
-            // behind
-            dir.promote_data(location)?;
-            dir.write_metadata_if_missing()?;
-        }
-
-        Ok(MultiProcessDatabase { inner })
-=======
-        let dir = DatabaseDir::new(path);
+        dir.prepare(false)?;
         let mode = dir.mode()?;
         self.check_mode(mode)?;
         self.open_inner(&dir, mode, false)
@@ -363,6 +258,7 @@ impl MultiProcessBuilder {
         path: impl AsRef<Path>,
     ) -> Result<ReadOnlyDatabase, DatabaseError> {
         let dir = DatabaseDir::new(path);
+        dir.prepare(false)?;
         let mode = dir.mode()?;
         self.check_mode(mode)?;
 
@@ -423,12 +319,10 @@ impl MultiProcessBuilder {
             WriterMode::MultiWriterProcess => write_lock.acquire()?,
         }
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(allow_create)
-            .truncate(false)
-            .open(dir.data_file())?;
+        // A database being created is initialized under a temporary name and renamed into place
+        // once `Database` has accepted it, so that a crash part way through initialization leaves
+        // an unfinished attempt of ours rather than a `data.redb` that must be refused forever
+        let (file, location) = dir.open_data(allow_create)?;
         // No file lock: `write.lock` and the reader slots do that job, and every process needs the
         // file open at once
         let backend = FileBackend::new_internal(file, FileLockKind::None)?;
@@ -456,6 +350,14 @@ impl MultiProcessBuilder {
                 )?))
             },
         )?;
+
+        if allow_create {
+            // Both after `Database` has accepted the file, so that a create() pointed somewhere
+            // that turns out not to hold a database fails without having left either a database
+            // file or a marker behind
+            dir.promote_data(location)?;
+            dir.write_metadata_if_missing()?;
+        }
 
         let coordinator = inner
             .transaction_tracker()
@@ -653,6 +555,5 @@ mod test {
                 .len()
                 .unwrap()
         );
->>>>>>> b508cef (Add a multi-process safe database interface)
     }
 }

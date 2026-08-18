@@ -319,8 +319,7 @@ impl InMemoryState {
     // writing has no way to keep allocator state up to date, so it does not load any
     fn require_allocators(&self) -> Result {
         if self.allocators.is_none() {
-            return Err(StorageError::Io(io::Error::new(
-                ErrorKind::Unsupported,
+            return Err(StorageError::Io(io::unsupported(
                 "page allocation statistics are unavailable: this handle does not track the \
                  database's allocator state",
             )));

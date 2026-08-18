@@ -24,6 +24,17 @@ pub(crate) fn invalid_data(message: &str) -> Error {
     }
 }
 
+pub(crate) fn unsupported(message: &str) -> Error {
+    #[cfg(not(redb_no_std))]
+    {
+        Error::new(std::io::ErrorKind::Unsupported, message)
+    }
+    #[cfg(redb_no_std)]
+    {
+        Error::other(message)
+    }
+}
+
 pub(crate) fn invalid_input(message: &str) -> Error {
     #[cfg(not(redb_no_std))]
     {

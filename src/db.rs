@@ -6,7 +6,7 @@ use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     AccessMode, AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint,
-    PageNumber, PageResolver, ReadOnlyBackend, ShrinkPolicy, TableTree, TableType,
+    PageNumber, PageResolver, ShrinkPolicy, TableTree, TableType,
     TransactionalMemory,
 };
 use crate::types::{Key, Value};
