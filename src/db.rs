@@ -731,6 +731,10 @@ impl Database {
                 true,
                 ShrinkPolicy::Never,
             )?;
+            // Reserve the id, or the next write transaction would commit with the same one,
+            // which crash recovery could then resolve to the wrong slot
+            self.transaction_tracker
+                .reserve_repair_transaction_id(next_transaction_id);
         }
 
         self.mem.begin_writable()?;

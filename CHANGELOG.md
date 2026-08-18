@@ -49,6 +49,8 @@
   nodes store the result instead of a whole key, so more children fit in each node and lookups
   touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
   implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
+* Fix a crash shortly after a commit being able to silently roll that commit back during
+  recovery, if `check_integrity()` had previously repaired the database.
 
 ## 4.2.0 - 2026-08-17
 

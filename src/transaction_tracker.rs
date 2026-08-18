@@ -244,6 +244,14 @@ impl TransactionTracker {
         state.next_transaction_id = id;
     }
 
+    // Reserves a repair commit's id so it is never issued again: crash recovery orders the
+    // commit slots by transaction id, so an id must never be committed twice
+    pub(crate) fn reserve_repair_transaction_id(&self, id: TransactionId) {
+        let mut state = self.state.lock().unwrap();
+        assert!(state.live_write_transaction.is_none());
+        state.next_transaction_id = state.next_transaction_id.max(id);
+    }
+
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
         let mut state = self.state.lock().unwrap();
         assert!(state.valid_savepoints.is_empty());

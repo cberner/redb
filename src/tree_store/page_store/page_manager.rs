@@ -1055,6 +1055,13 @@ impl TransactionalMemory {
         let mut header = state.header.clone();
         drop(state);
 
+        // Crash recovery orders the slots by transaction id, so every commit must be newer than
+        // the primary it supersedes; the secondary is overwritten below
+        assert!(
+            transaction_id > header.primary_slot().transaction_id,
+            "commit transaction id not newer than the primary slot's"
+        );
+
         let old_transaction_id = header.secondary_slot().transaction_id;
         header.write_secondary_slot(transaction_id, data_root, system_root);
 
