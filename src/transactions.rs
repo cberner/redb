@@ -953,6 +953,7 @@ impl WriteTransaction {
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
+        let defer_post_commit_free = transaction_tracker.defers_post_commit_free();
 
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
@@ -974,7 +975,13 @@ impl WriteTransaction {
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
-            post_commit_free: PostCommitFree::Enabled,
+            // The epilogue publishes its work as a non-durable commit, which no other process can
+            // see. Leaving it out costs nothing but deferring those frees to the next transaction
+            post_commit_free: if defer_post_commit_free {
+                PostCommitFree::Disabled
+            } else {
+                PostCommitFree::Enabled
+            },
             restored_transaction: None,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
@@ -1465,6 +1472,11 @@ impl WriteTransaction {
         if persistent_modified && !matches!(durability, Durability::Immediate) {
             return Err(SetDurabilityError::PersistentSavepointModified);
         }
+        if matches!(durability, Durability::None)
+            && !self.transaction_tracker.allows_non_durable_commit()
+        {
+            return Err(SetDurabilityError::NonDurableCommitUnsupported);
+        }
 
         self.durability = match durability {
             Durability::None => InternalDurability::None,
@@ -1700,6 +1712,15 @@ impl WriteTransaction {
     }
 
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
+        // The next process to take the write lock loads the allocator state this writes, rather
+        // than rebuilding it, so it is not optional
+        if self.transaction_tracker.requires_quick_repair() {
+            self.quick_repair = true;
+        }
+        // Ordering that a reader in another process depends on: see requires_two_phase_commit()
+        if self.transaction_tracker.requires_two_phase_commit() {
+            self.two_phase_commit = true;
+        }
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -1962,6 +1983,12 @@ impl WriteTransaction {
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
+        if self.transaction_tracker.write_lock_is_shared() {
+            // The buffered writes belong to pages this transaction allocated, which are about to
+            // become free for another process to allocate. Flushing them later would overwrite
+            // whatever that process put there
+            self.mem.discard_buffered_writes();
+        }
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -1978,10 +2005,16 @@ impl WriteTransaction {
             self.store_data_freed_pages_for(transaction_id, pages)?;
         }
 
-        let free_until_transaction = self
+        let mut free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(self.transaction_id, |x| x.next());
+        if let Some(limit) = self
+            .transaction_tracker
+            .cross_process_free_limit(&self.mem)?
+        {
+            free_until_transaction = free_until_transaction.min(limit);
+        }
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
@@ -2048,6 +2081,10 @@ impl WriteTransaction {
         )?;
         // All of this transaction's allocations are durable; discard the per-txn tracker.
         let _ = page_allocator.take_allocated_since_commit();
+        // Tell other processes that the file is now at this transaction. Published after the
+        // commit is on disk, so that a process which reads it can rely on finding at least this
+        self.transaction_tracker
+            .publish_durable_commit(self.transaction_id)?;
 
         // Mark any pending non-durable commits as fully committed.
         self.transaction_tracker.clear_pending_non_durable_commits();
@@ -2082,8 +2119,17 @@ impl WriteTransaction {
         let epilogue_transaction = self.transaction_id.next();
         let mut free_until = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(epilogue_transaction, |x| x.next());
+        // Clamp the free horizon to what a read transaction another process is about to register
+        // may still need. Without this the epilogue's own transaction id, which is one past the
+        // commit that is in the file, would let a page that snapshot reaches be reclaimed
+        if let Some(limit) = self
+            .transaction_tracker
+            .cross_process_free_limit(&self.mem)?
+        {
+            free_until = free_until.min(limit);
+        }
         // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
         // is also a live read, so absent concurrency `oldest_live_read_transaction()` never
         // exceeds it and this is a no-op. But an ephemeral `Savepoint::drop` racing this commit
@@ -2094,6 +2140,10 @@ impl WriteTransaction {
         if savepoint_horizon != u64::MAX {
             free_until = free_until.min(TransactionId::new(savepoint_horizon).next());
         }
+
+        // As in process_freed_pages(): announced before anything is reclaimed
+        self.transaction_tracker
+            .publish_reclaim_horizon(free_until)?;
 
         let mut freed_any = false;
         let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
@@ -2292,6 +2342,13 @@ impl WriteTransaction {
     fn process_freed_pages(&mut self, free_until: TransactionId) -> Result {
         // We assume below that PageNumber is length 8
         assert_eq!(PageNumber::serialized_size(), 8);
+
+        // Announced before the first page is reclaimed, so that a process which checks it
+        // afterwards knows its cached pages may have been reused out from under it. Published
+        // unconditionally rather than only when something is actually freed, since a page becomes
+        // reusable the moment it is dropped into the allocator below
+        self.transaction_tracker
+            .publish_reclaim_horizon(free_until)?;
 
         let page_allocator = self.page_allocator();
         let mut free_page = |page| {

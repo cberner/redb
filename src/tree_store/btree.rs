@@ -1430,7 +1430,7 @@ mod tests {
     fn test_cycle_detection_in_btree() {
         use crate::tree_store::btree_base::RawBranchBuilder;
         use crate::tree_store::{
-            AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+            AccessMode, AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
         };
 
         let mem = TransactionalMemory::new(
@@ -1439,7 +1439,7 @@ mod tests {
             PAGE_SIZE,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();

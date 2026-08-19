@@ -298,6 +298,15 @@ impl UnrepairedDatabaseHeader {
         Ok(recalculated)
     }
 
+    // Select a primary slot, without reconciling the layout against the file length. Used by a
+    // process which only reads the file while another process may be writing to it: the layout is
+    // rewritten on every resize, so it can disagree with the file length at any moment, but such a
+    // process never allocates and so never consults it.
+    pub(super) fn finalize_transaction_slots(mut self) -> Result<DatabaseHeader> {
+        self.select_primary_slot()?;
+        Ok(self.inner)
+    }
+
     fn select_primary_slot(&mut self) -> Result<bool> {
         // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
         // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
@@ -395,6 +404,16 @@ impl DatabaseHeader {
             self.trailing_partial_region_pages = 0;
         }
         self.full_regions = layout.num_full_regions();
+    }
+
+    // Adopt another header's commit slots, leaving the layout alone. Used to pick up commits made
+    // by another process, whose header describes a file this process must not assume anything about
+    // beyond the trees those slots root.
+    #[cfg(not(redb_no_std))]
+    pub(super) fn adopt_transaction_slots(&mut self, other: &DatabaseHeader) {
+        self.primary_slot = other.primary_slot;
+        self.two_phase_commit = other.two_phase_commit;
+        self.transaction_slots.clone_from(&other.transaction_slots);
     }
 
     pub(super) fn primary_slot(&self) -> &TransactionHeader {

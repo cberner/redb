@@ -1831,7 +1831,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 #[cfg(all(test, feature = "experimental_cursor"))]
 mod tests {
     use super::*;
-    use crate::tree_store::{AllocationPolicy, InMemoryBackend, TransactionalMemory};
+    use crate::tree_store::{AccessMode, AllocationPolicy, InMemoryBackend, TransactionalMemory};
 
     const MAX_KEYS: usize = u16::MAX as usize;
 
@@ -1846,7 +1846,7 @@ mod tests {
             page_size,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
