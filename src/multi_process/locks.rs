@@ -6,6 +6,7 @@
 
 use crate::{DatabaseError, Result, StorageError};
 use alloc::vec::Vec;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
@@ -122,6 +123,39 @@ fn require_regular_file(path: &Path) -> Result<()> {
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(StorageError::Io(err)),
     }
+}
+
+/// Refuses a path naming the database file inside a multi-process database directory.
+///
+/// A multi-process database keeps its data in an ordinary redb file with *no* lock on it: every
+/// process using the database has it open at once, and the lock files beside it are what keep them
+/// out of each other's way. So nothing about the file itself stops [`crate::Database`] from opening
+/// it and writing to it underneath processes that are using it properly. The marker beside it is
+/// what says to keep away.
+///
+/// Costs one `stat` of a name that is almost never there, and only for a file called `data.redb`.
+pub(crate) fn reject_multi_process_data_file(path: &Path) -> Result<(), DatabaseError> {
+    if path.file_name() != Some(OsStr::new(DATA_FILE_NAME)) || !marker_present(&parent_of(path)) {
+        return Ok(());
+    }
+    Err(StorageError::Io(io::Error::new(
+        ErrorKind::InvalidInput,
+        "this file belongs to a multi-process database; open the directory holding it rather than \
+         the file itself",
+    ))
+    .into())
+}
+
+/// Whether a directory carries a complete multi-process marker. Anything that is not one -- absent,
+/// unreadable, the wrong size, a symlink, someone else's file under that name -- answers no, which
+/// is what the caller needs: only a marker this database wrote vouches for the directory.
+fn marker_present(root: &Path) -> bool {
+    let path = root.join(METADATA_FILE_NAME);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && metadata.len() == METADATA_LEN as u64 => {}
+        _ => return false,
+    }
+    std::fs::read(&path).is_ok_and(|contents| contents.starts_with(&MAGIC))
 }
 
 /// Which name [`DatabaseDir::open_data`] put the database file under.
