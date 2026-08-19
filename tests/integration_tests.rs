@@ -774,6 +774,37 @@ fn page_reuse() {
 }
 
 #[test]
+fn multiple_persistent_savepoints_in_one_transaction() {
+    // Savepoint bookkeeping is not table activity: creating or deleting a persistent savepoint
+    // must leave the transaction eligible for further savepoints
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let id1 = txn.persistent_savepoint().unwrap();
+    let id2 = txn.persistent_savepoint().unwrap();
+    assert!(txn.delete_persistent_savepoint(id1).unwrap());
+    let id3 = txn.persistent_savepoint().unwrap();
+    assert_ne!(id2, id3);
+    txn.commit().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    let savepoint = txn.get_persistent_savepoint(id2).unwrap();
+    txn.restore_savepoint(&savepoint).unwrap();
+    txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
 fn page_reuse_after_persistent_savepoint_delete() {
     test_page_reuse_after_persistent_savepoint_delete(false);
     test_page_reuse_after_persistent_savepoint_delete(true);

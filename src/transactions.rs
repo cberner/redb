@@ -551,7 +551,6 @@ impl SystemNamespace {
 
     fn open_system_table<'s, K: Key + 'static, V: Value + 'static>(
         &'s mut self,
-        transaction: &WriteTransaction,
         definition: SystemTableDefinition<K, V>,
     ) -> Result<SystemTable<'s, K, V>> {
         let (root, _) = self
@@ -562,7 +561,8 @@ impl SystemNamespace {
             })?;
         self.table_tree
             .clear_pending_table_update(definition.name());
-        transaction.dirty.store(true, Ordering::Release);
+        // Not marked dirty: savepoints capture only the data root, system trees roll forward
+        // through restores, and system allocations are untracked (see SystemNamespace::new)
 
         let page_allocator = self.table_tree.page_allocator().clone();
         Ok(SystemTable::new(
@@ -1074,9 +1074,7 @@ impl WriteTransaction {
         {
             println!("Pending free (in data freed table)");
             let mut system_tables = self.system_tables.lock().unwrap();
-            let data_freed = system_tables
-                .open_system_table(self, DATA_FREED_TABLE)
-                .unwrap();
+            let data_freed = system_tables.open_system_table(DATA_FREED_TABLE).unwrap();
             for entry in data_freed.range::<TransactionIdWithPagination>(..).unwrap() {
                 let (_, entry) = entry.unwrap();
                 let value = entry.value();
@@ -1090,9 +1088,7 @@ impl WriteTransaction {
         {
             println!("Pending free (in system freed table)");
             let mut system_tables = self.system_tables.lock().unwrap();
-            let system_freed = system_tables
-                .open_system_table(self, SYSTEM_FREED_TABLE)
-                .unwrap();
+            let system_freed = system_tables.open_system_table(SYSTEM_FREED_TABLE).unwrap();
             for entry in system_freed
                 .range::<TransactionIdWithPagination>(..)
                 .unwrap()
@@ -1142,9 +1138,10 @@ impl WriteTransaction {
     /// Note that while a savepoint exists, pages that become unused after it was created are not freed.
     /// Therefore, the lifetime of a savepoint should be minimized.
     ///
-    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened),
-    /// or `[SavepointError::ImmediateDurabilityRequired]` if the transaction's durability is less than
-    /// `[Durability::Immediate]`
+    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (a data
+    /// table has been opened, renamed, or deleted, or a savepoint has been restored), or
+    /// `[SavepointError::ImmediateDurabilityRequired]` if the transaction's durability is less
+    /// than `[Durability::Immediate]`
     pub fn persistent_savepoint(&self) -> Result<u64, SavepointError> {
         if self.durability != InternalDurability::Immediate {
             return Err(SavepointError::ImmediateDurabilityRequired);
@@ -1154,11 +1151,18 @@ impl WriteTransaction {
 
         let mut system_tables = self.system_tables.lock().unwrap();
 
-        let mut next_table = system_tables.open_system_table(self, NEXT_SAVEPOINT_TABLE)?;
-        next_table.insert((), savepoint.get_id().next())?;
+        let mut next_table = system_tables.open_system_table(NEXT_SAVEPOINT_TABLE)?;
+        // Concurrent calls persist their counters in any order, so the stored value only
+        // ratchets up; a lower one could hand an existing savepoint's id out after reopening.
+        // The system_tables lock is held across the read and the write, making them atomic
+        let mut next = savepoint.get_id().next();
+        if let Some(stored) = next_table.get(())? {
+            next = next.max(stored.value());
+        }
+        next_table.insert((), next)?;
         drop(next_table);
 
-        let mut savepoint_table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
+        let mut savepoint_table = system_tables.open_system_table(SAVEPOINT_TABLE)?;
         savepoint_table.insert(
             savepoint.get_id(),
             SerializedSavepoint::from_savepoint(&savepoint),
@@ -1223,7 +1227,7 @@ impl WriteTransaction {
         {
             return Ok(false);
         }
-        let mut table = system_tables.open_system_table(self, SAVEPOINT_TABLE)?;
+        let mut table = system_tables.open_system_table(SAVEPOINT_TABLE)?;
         // Parse before removing, so that a corrupted record errors out without staging any change
         let savepoint = if let Some(serialized) = table.get(SavepointId(id))? {
             serialized
@@ -1267,7 +1271,8 @@ impl WriteTransaction {
     ///
     /// This savepoint will be freed as soon as the returned `[Savepoint]` is dropped.
     ///
-    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (any tables have been opened)
+    /// Returns `[SavepointError::InvalidSavepoint`], if the transaction is "dirty" (a data
+    /// table has been opened, renamed, or deleted, or a savepoint has been restored)
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
         // Serialize the dirty check and savepoint registration against
         // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
@@ -1377,7 +1382,7 @@ impl WriteTransaction {
                 pagination_id: 0,
             };
             let mut system_tables = self.system_tables.lock().unwrap();
-            let mut data_freed = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+            let mut data_freed = system_tables.open_system_table(DATA_FREED_TABLE)?;
             let mut iter = data_freed.extract_from_if(lower.., |_, _| true)?;
             for entry in &mut iter {
                 entry?;
@@ -1400,7 +1405,7 @@ impl WriteTransaction {
             let mut data_freed_pages = tables.freed_pages.lock().unwrap();
             data_freed_pages.clear();
             let mut system_tables = self.system_tables.lock().unwrap();
-            let data_allocated = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+            let data_allocated = system_tables.open_system_table(DATA_ALLOCATED_TABLE)?;
             let lower = TransactionIdWithPagination {
                 transaction_id: txn_id,
                 pagination_id: 0,
@@ -1793,7 +1798,7 @@ impl WriteTransaction {
         mut freed_pages: Vec<PageNumber>,
     ) -> Result {
         let mut system_tables = self.system_tables.lock().unwrap();
-        let mut freed_table = system_tables.open_system_table(self, DATA_FREED_TABLE)?;
+        let mut freed_table = system_tables.open_system_table(DATA_FREED_TABLE)?;
         let mut pagination_counter = 0;
         #[cfg(debug_assertions)]
         let page_allocator = self.page_allocator();
@@ -1857,7 +1862,7 @@ impl WriteTransaction {
 
         let unpersisted = self.mem.take_unpersisted_allocations();
         let mut system_tables = self.system_tables.lock().unwrap();
-        let mut allocated_table = system_tables.open_system_table(self, DATA_ALLOCATED_TABLE)?;
+        let mut allocated_table = system_tables.open_system_table(DATA_ALLOCATED_TABLE)?;
         for (txn_id, pages) in unpersisted {
             Self::write_allocated_pages_entry(
                 &mut allocated_table,
@@ -2094,7 +2099,7 @@ impl WriteTransaction {
         let (system_root, stored_system_freed_pages, extracted_data_transactions) = {
             let mut system_tables = self.system_tables.lock().unwrap();
             let system_freed_pages = system_tables.system_freed_pages();
-            let extracted_data_transactions = self.extract_freed_pages(
+            let extracted_data_transactions = Self::extract_freed_pages(
                 &mut system_tables,
                 DATA_FREED_TABLE,
                 free_until,
@@ -2300,13 +2305,13 @@ impl WriteTransaction {
 
         let extracted_transactions = {
             let mut system_tables = self.system_tables.lock().unwrap();
-            let mut extracted_transactions = self.extract_freed_pages(
+            let mut extracted_transactions = Self::extract_freed_pages(
                 &mut system_tables,
                 DATA_FREED_TABLE,
                 free_until,
                 &mut free_page,
             )?;
-            extracted_transactions.extend(self.extract_freed_pages(
+            extracted_transactions.extend(Self::extract_freed_pages(
                 &mut system_tables,
                 SYSTEM_FREED_TABLE,
                 free_until,
@@ -2321,7 +2326,6 @@ impl WriteTransaction {
     }
 
     fn extract_freed_pages(
-        &self,
         system_tables: &mut SystemNamespace,
         definition: SystemTableDefinition<TransactionIdWithPagination, PageList>,
         free_until: TransactionId,
@@ -2331,7 +2335,7 @@ impl WriteTransaction {
             return Ok(vec![]);
         }
 
-        let mut freed = system_tables.open_system_table(self, definition)?;
+        let mut freed = system_tables.open_system_table(definition)?;
         let key = TransactionIdWithPagination {
             transaction_id: free_until.raw_id(),
             pagination_id: 0,
@@ -2372,7 +2376,7 @@ impl WriteTransaction {
             transaction_id: oldest_unprocessed,
             pagination_id: 0,
         };
-        let mut data_freed = system_tables.open_system_table(self, definition)?;
+        let mut data_freed = system_tables.open_system_table(definition)?;
 
         let mut candidate_transactions = vec![];
         for entry in data_freed.range(first_key..last_key)? {
