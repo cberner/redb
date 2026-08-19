@@ -4,6 +4,7 @@ use crate::tree_store::page_store::{
 use crate::tree_store::{PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{Result, StorageError};
+use alloc::borrow::Cow;
 use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::sync::Arc;
@@ -31,20 +32,20 @@ pub(super) const DEFERRED: Checksum = 999;
 // whose least key is `right`. Branch keys only route lookups -- they are compared, never
 // deserialized -- so a `Key` implementation may shorten them, which packs more children into each
 // branch page.
-pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
     debug_assert!(K::compare(left, right).is_lt());
     // Branch keys of a fixed width type are stored at that stride, so a shorter separator would
     // corrupt the page, and a same width one would save nothing. Never ask for one.
     if K::fixed_width().is_some() {
-        return left;
+        return Cow::Borrowed(left);
     }
     let separator = K::separator(left, right);
     debug_assert!(
-        K::compare(left, separator).is_le(),
+        K::compare(left, &separator).is_le(),
         "separator sorts below the left child's greatest key"
     );
     debug_assert!(
-        K::compare(separator, right).is_lt(),
+        K::compare(&separator, right).is_lt(),
         "separator does not sort below the right child's least key"
     );
     separator
@@ -899,7 +900,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
     // Returns the two halves, and the separator to store between them in their parent
     pub(super) fn build_split<'txn, K: Key>(
         self,
-    ) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
+    ) -> Result<(PageMut<'txn>, Cow<'a, [u8]>, PageMut<'txn>)> {
         let total_size = self.total_key_bytes + self.total_value_bytes;
         let mut division = 0;
         let mut first_split_key_bytes = 0;
@@ -1948,7 +1949,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
 
 pub(super) struct BranchBuilder<'a, 'b> {
     children: Vec<(PageNumber, Checksum)>,
-    keys: Vec<&'a [u8]>,
+    keys: Vec<Cow<'a, [u8]>>,
     total_key_bytes: usize,
     fixed_key_size: Option<usize>,
     page_allocator: &'b PageAllocator,
@@ -1980,9 +1981,10 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         self.children.push((child, checksum));
     }
 
-    pub(super) fn push_key(&mut self, key: &'a [u8]) {
-        self.keys.push(key);
+    pub(super) fn push_key(&mut self, key: impl Into<Cow<'a, [u8]>>) {
+        let key = key.into();
         self.total_key_bytes += key.len();
+        self.keys.push(key);
     }
 
     pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, '_, T>) {
@@ -2009,7 +2011,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
     }
 
     pub(super) fn into_parts(self) -> (Vec<(PageNumber, Checksum)>, Vec<Vec<u8>>) {
-        let owned_keys = self.keys.into_iter().map(<[u8]>::to_vec).collect();
+        let owned_keys = self.keys.into_iter().map(Cow::into_owned).collect();
         (self.children, owned_keys)
     }
 
@@ -2045,12 +2047,12 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         (size > self.page_allocator.get_page_size() || too_many_keys) && self.keys.len() >= 3
     }
 
-    pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, &'a [u8], PageMut<'txn>)> {
+    pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, Cow<'a, [u8]>, PageMut<'txn>)> {
         assert_eq!(self.children.len(), self.keys.len() + 1);
         assert!(self.keys.len() >= 3);
         let division = self.keys.len() / 2;
         let first_split_key_len: usize = self.keys.iter().take(division).map(|k| k.len()).sum();
-        let division_key = self.keys[division];
+        let division_key = self.keys[division].clone();
         let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
 
         let size =
@@ -2389,7 +2391,7 @@ mod tests {
         assert!(builder.should_split());
 
         let (_, separator, _) = builder.build_split::<&[u8]>().unwrap();
-        assert_eq!(separator, b"abc1");
+        assert_eq!(separator.as_ref(), b"abc1");
     }
 
     // Branch keys of a fixed width type are stored at that stride, so a `Key` implementation that
@@ -2432,14 +2434,17 @@ mod tests {
                 data1.cmp(data2)
             }
 
-            fn separator<'a>(_left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
-                &right[..1]
+            fn separator<'a>(_left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+                Cow::Borrowed(&right[..1])
             }
         }
 
         let left = [1u8; 8];
         let right = [2u8; 8];
-        assert_eq!(branch_separator::<BadSeparator>(&left, &right), left);
+        assert_eq!(
+            branch_separator::<BadSeparator>(&left, &right).as_ref(),
+            left
+        );
     }
 
     // Splitting divides by total bytes, which can be arbitrarily lopsided when one pair

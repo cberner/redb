@@ -1,3 +1,4 @@
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -228,10 +229,13 @@ pub trait Key: Value {
     /// valid encoding of `Self`. The shorter it is, the more children fit in each internal node,
     /// which makes the tree shallower and cheaper to search.
     ///
+    /// Returning [`Cow::Owned`] allows separators synthesized from the inputs, rather than
+    /// borrowed from them.
+    ///
     /// The default implementation returns `left`, which is always valid.
-    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         debug_assert!(Self::compare(left, right).is_lt());
-        left
+        Cow::Borrowed(left)
     }
 }
 
@@ -427,7 +431,7 @@ impl Key for &[u8] {
         data1.cmp(data2)
     }
 
-    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         debug_assert!(left < right);
         // Truncating `right` just past the first byte where it exceeds `left` leaves something
         // greater than `left`, and less than `right` as long as bytes were dropped. When that is
@@ -436,9 +440,9 @@ impl Key for &[u8] {
         // `right`.
         let separator_len = left.iter().zip(right).take_while(|(x, y)| x == y).count() + 1;
         if separator_len < left.len() && separator_len < right.len() {
-            &right[..separator_len]
+            Cow::Borrowed(&right[..separator_len])
         } else {
-            left
+            Cow::Borrowed(left)
         }
     }
 }
@@ -629,15 +633,15 @@ impl Key for &str {
         str1.cmp(str2)
     }
 
-    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         debug_assert!(left < right);
         // `str` orders as its bytes, but `compare()` deserializes, so the cut must keep it valid
         let common_bytes = left.iter().zip(right).take_while(|(x, y)| x == y).count();
         let separator_len = round_up_to_char_boundary(right, common_bytes + 1);
         if separator_len < left.len() && separator_len < right.len() {
-            &right[..separator_len]
+            Cow::Borrowed(&right[..separator_len])
         } else {
-            left
+            Cow::Borrowed(left)
         }
     }
 }
@@ -683,7 +687,7 @@ impl Key for String {
     }
 
     // Encoded the same way as `&str`, so it separates the same way
-    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         <&str as Key>::separator(left, right)
     }
 }
@@ -832,8 +836,8 @@ mod tests {
         for &(left, right, expected) in cases {
             let separator = <&[u8] as Key>::separator(left, right);
             assert_eq!(separator, expected);
-            assert!(<&[u8] as Key>::compare(left, separator).is_le());
-            assert!(<&[u8] as Key>::compare(separator, right).is_lt());
+            assert!(<&[u8] as Key>::compare(left, &separator).is_le());
+            assert!(<&[u8] as Key>::compare(&separator, right).is_lt());
         }
     }
 
@@ -895,9 +899,9 @@ mod tests {
             let separator = <&str as Key>::separator(left.as_bytes(), right.as_bytes());
             assert_eq!(separator, expected.as_bytes());
             // A separator is passed back through `compare()`, which deserializes it
-            assert!(core::str::from_utf8(separator).is_ok());
-            assert!(<&str as Key>::compare(left.as_bytes(), separator).is_le());
-            assert!(<&str as Key>::compare(separator, right.as_bytes()).is_lt());
+            assert!(core::str::from_utf8(&separator).is_ok());
+            assert!(<&str as Key>::compare(left.as_bytes(), &separator).is_le());
+            assert!(<&str as Key>::compare(&separator, right.as_bytes()).is_lt());
             assert_eq!(
                 <String as Key>::separator(left.as_bytes(), right.as_bytes()),
                 separator
@@ -909,7 +913,7 @@ mod tests {
     fn default_separator_returns_full_key() {
         let left = 1u64.to_le_bytes();
         let right = 2u64.to_le_bytes();
-        assert_eq!(<u64 as Key>::separator(&left, &right), left);
+        assert_eq!(<u64 as Key>::separator(&left, &right).as_ref(), left);
     }
 
     // A user-defined type whose name deliberately collides with the built-in `u32`, and whose
