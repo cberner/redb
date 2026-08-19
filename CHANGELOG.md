@@ -63,6 +63,8 @@
 * Fix pages being leaked permanently when a panic unwound through a live write transaction and
   was caught with `catch_unwind`. The leak survived closing and reopening the database and grew
   with every such panic; the pages are now reclaimed the next time the database is opened.
+* Fix a Windows-only hang: a write to the database file that reported writing zero bytes made
+  the commit retry it forever. It now fails with a `WriteZero` I/O error.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
