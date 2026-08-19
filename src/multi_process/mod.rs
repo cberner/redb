@@ -148,10 +148,11 @@ impl MultiProcessBuilder {
     }
 
     fn open_inner(&self, path: &Path, create: bool) -> Result<MultiProcessDatabase, DatabaseError> {
-        let backend = DatabaseDir::new(path).open(create)?;
+        let dir = DatabaseDir::new(path);
+        let backend = dir.open(create)?;
         // `create` alone decides whether an empty database file may be initialized, exactly as it
-        // does for a Database, so a create() that made the directory but died before initializing
-        // the database file can be redone
+        // does for a Database: an existing one is recognized by its contents rather than by the
+        // directory's marker, so a create() that died before initializing the file can be redone
         let inner = Database::new(
             backend,
             create,
@@ -160,6 +161,11 @@ impl MultiProcessBuilder {
             self.cache_size,
             &self.repair_callback,
         )?;
+        if create {
+            // Last, so that a create() pointed at a directory which turns out not to hold a
+            // database fails without having marked it as one of these on the way out
+            dir.write_metadata_if_missing()?;
+        }
 
         Ok(MultiProcessDatabase { inner })
     }
