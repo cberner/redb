@@ -67,6 +67,9 @@
   with every such panic; the pages are now reclaimed the next time the database is opened.
 * Fix a Windows-only hang: a write to the database file that reported writing zero bytes made
   the commit retry it forever. It now fails with a `WriteZero` I/O error.
+* Fix `rename_table()` and `rename_multimap_table()` returning `TableExists` when the new name
+  is the same as the current one. Renaming a table to its own name now succeeds and leaves the
+  table unchanged.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
