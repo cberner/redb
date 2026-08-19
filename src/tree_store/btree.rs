@@ -11,7 +11,7 @@ use crate::tree_store::btree_cursor::BtreeCursorMut;
 use crate::tree_store::btree_cursor::{CursorMut, Position};
 use crate::tree_store::btree_iters::{bounds_are_empty, encode_bounds};
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageImpl, PageMut};
+use crate::tree_store::page_store::{Page, PageImpl};
 use crate::tree_store::{
     AccessGuardMutInPlace, AllPageNumbersBtreeIter, BtreeCursorRange, BtreeExtractIf,
     PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageResolver, PageTracker,
@@ -593,96 +593,109 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         &mut self,
         key: &K::SelfType<'_>,
     ) -> Result<Option<AccessGuardMut<'_, V>>> {
-        if let Some(ref mut root) = self.root {
-            let key_bytes = K::as_bytes(key);
-            let query = key_bytes.as_ref();
-            let page_mut = if self.page_allocator.uncommitted(root.root) {
-                self.page_allocator.get_page_mut(root.root)?
+        let Some(root) = self.root.as_ref() else {
+            return Ok(None);
+        };
+        let root_page = root.root;
+        let key_bytes = K::as_bytes(key);
+        let query = key_bytes.as_ref();
+
+        // Search pass: a single read-only descent, recording the route. A missing key must not
+        // modify the tree, so pages are copied only after the leaf proves the key exists
+        let mut route = Vec::new();
+        let mut page = self.page_allocator.get_page(root_page, PageHint::None)?;
+        let entry_index = loop {
+            match page.memory()[0] {
+                LEAF => {
+                    let accessor =
+                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                    match accessor.find_key::<K>(query) {
+                        Some(entry_index) => break entry_index,
+                        None => return Ok(None),
+                    }
+                }
+                BRANCH => {
+                    let (child_index, child_page) = {
+                        let accessor = BranchAccessor::new(&page, K::fixed_width());
+                        accessor.child_for_key::<K>(query)
+                    };
+                    route.push(child_index);
+                    page = self.page_allocator.get_page(child_page, PageHint::None)?;
+                }
+                _ => unreachable!(),
+            }
+        };
+        drop(page);
+
+        // The key exists: copy-on-write along the recorded route, with no further comparisons
+        let root = self.root.as_mut().unwrap();
+        let mut page_mut = if self.page_allocator.uncommitted(root_page) {
+            self.page_allocator.get_page_mut(root_page)?
+        } else {
+            let mut freed_pages = self.freed_pages.lock().unwrap();
+            let required: usize = root_page
+                .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
+                .try_into()
+                .unwrap();
+            let mut new_page = self
+                .page_allocator
+                .allocate(required, &self.allocated_pages)?;
+            let old_page = self.page_allocator.get_page(root_page, PageHint::None)?;
+            new_page.memory_mut().copy_from_slice(old_page.memory());
+            drop(old_page);
+            freed_pages.push(root_page);
+
+            root.root = new_page.get_page_number();
+            root.checksum = DEFERRED;
+            new_page
+        };
+
+        let mut parent = None;
+        for child_index in route {
+            let child_page = {
+                let accessor = BranchAccessor::new(&page_mut, K::fixed_width());
+                accessor.child_page(child_index).unwrap()
+            };
+            let child_page_mut = if self.page_allocator.uncommitted(child_page) {
+                self.page_allocator.get_page_mut(child_page)?
             } else {
                 let mut freed_pages = self.freed_pages.lock().unwrap();
-                let required: usize = root
-                    .root
+                let required: usize = child_page
                     .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
                     .try_into()
                     .unwrap();
                 let mut new_page = self
                     .page_allocator
                     .allocate(required, &self.allocated_pages)?;
-                let old_page = self.page_allocator.get_page(root.root, PageHint::None)?;
-                new_page.memory_mut().copy_from_slice(old_page.memory());
-                drop(old_page);
-                freed_pages.push(root.root);
+                let old_child_page = self.page_allocator.get_page(child_page, PageHint::None)?;
+                new_page
+                    .memory_mut()
+                    .copy_from_slice(old_child_page.memory());
+                drop(old_child_page);
+                freed_pages.push(child_page);
 
-                root.root = new_page.get_page_number();
-                root.checksum = DEFERRED;
+                let mut mutator = BranchMutator::new(page_mut.memory_mut());
+                mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
                 new_page
             };
-            self.get_mut_helper(None, page_mut, query)
-        } else {
-            Ok(None)
+            parent = Some((page_mut, child_index));
+            page_mut = child_page_mut;
         }
-    }
 
-    fn get_mut_helper<'txn>(
-        &'txn mut self,
-        parent: Option<(PageMut<'txn>, usize)>,
-        mut page: PageMut<'txn>,
-        query: &[u8],
-    ) -> Result<Option<AccessGuardMut<'txn, V>>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
-                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                if let Some(entry_index) = accessor.find_key::<K>(query) {
-                    let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuardMut::new(
-                        page,
-                        start,
-                        end - start,
-                        entry_index,
-                        parent,
-                        self.page_allocator.clone(),
-                        self.allocated_pages.clone(),
-                        self.root.as_mut().unwrap(),
-                        K::fixed_width(),
-                    );
-                    Ok(Some(guard))
-                } else {
-                    Ok(None)
-                }
-            }
-            BRANCH => {
-                let (child_index, child_page) = {
-                    let accessor = BranchAccessor::new(&page, K::fixed_width());
-                    accessor.child_for_key::<K>(query)
-                };
-                let child_page_mut = if self.page_allocator.uncommitted(child_page) {
-                    self.page_allocator.get_page_mut(child_page)?
-                } else {
-                    let mut freed_pages = self.freed_pages.lock().unwrap();
-                    let required: usize = child_page
-                        .page_size_bytes(self.page_allocator.get_page_size().try_into().unwrap())
-                        .try_into()
-                        .unwrap();
-                    let mut new_page = self
-                        .page_allocator
-                        .allocate(required, &self.allocated_pages)?;
-                    let old_child_page =
-                        self.page_allocator.get_page(child_page, PageHint::None)?;
-                    new_page
-                        .memory_mut()
-                        .copy_from_slice(old_child_page.memory());
-                    drop(old_child_page);
-                    freed_pages.push(child_page);
-
-                    let mut mutator = BranchMutator::new(page.memory_mut());
-                    mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
-                    new_page
-                };
-                self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
-            }
-            _ => unreachable!(),
-        }
+        let accessor = LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
+        let (start, end) = accessor.value_range(entry_index).unwrap();
+        let guard = AccessGuardMut::new(
+            page_mut,
+            start,
+            end - start,
+            entry_index,
+            parent,
+            self.page_allocator.clone(),
+            self.allocated_pages.clone(),
+            self.root.as_mut().unwrap(),
+            K::fixed_width(),
+        );
+        Ok(Some(guard))
     }
 
     pub(crate) fn first(

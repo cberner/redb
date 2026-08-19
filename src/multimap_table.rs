@@ -666,7 +666,14 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         self.allocated_pages.clone(),
                     );
                     drop(guard);
+                    if subtree.get(value.borrow())?.is_some() {
+                        // The value is already present, so both trees would be unchanged.
+                        // Return early to avoid needlessly copy-on-writing them on a logical
+                        // no-op, like remove() does.
+                        return Ok(true);
+                    }
                     let existed = subtree.insert(value.borrow(), &())?.is_some();
+                    debug_assert!(!existed);
                     let subtree_data =
                         DynamicCollection::<V>::make_subtree_data(subtree.get_root().unwrap());
                     self.tree

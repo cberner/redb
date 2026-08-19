@@ -1687,6 +1687,92 @@ fn insert_reserve() {
 }
 
 #[test]
+fn get_mut_missing_key_does_not_churn() {
+    // get_mut() on a missing key is a logical no-op and must not rewrite any pages
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        // Enough entries for the tree to have branch pages.
+        for i in 0..5000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Finalize the cleanup of the freed pages from the setup so the baseline is at steady state.
+    db.begin_write().unwrap().commit().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert!(table.get_mut(&123_456u64).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+    assert_eq!(
+        baseline, after,
+        "get_mut() on a missing key must not allocate or free pages"
+    );
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 5000);
+}
+
+#[test]
+fn get_mut_deep_tree() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        // Enough entries for the tree to have branch pages.
+        for i in 0..5000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        // The first access copies the committed pages on its path; the later ones traverse a
+        // mix of the already-copied pages and committed ones
+        table.get_mut(&100u64).unwrap().unwrap().insert(&1).unwrap();
+        table.get_mut(&100u64).unwrap().unwrap().insert(&2).unwrap();
+        table
+            .get_mut(&4000u64)
+            .unwrap()
+            .unwrap()
+            .insert(&3)
+            .unwrap();
+        assert!(table.get_mut(&123_456u64).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(&100u64).unwrap().unwrap().value(), 2);
+    assert_eq!(table.get(&4000u64).unwrap().unwrap().value(), 3);
+    assert_eq!(table.get(&99u64).unwrap().unwrap().value(), 99);
+    assert_eq!(table.len().unwrap(), 5000);
+    drop(table);
+    drop(read_txn);
+    assert!(db.check_integrity().unwrap());
+}
+
+#[test]
 fn get_mut() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

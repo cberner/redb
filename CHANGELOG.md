@@ -63,6 +63,10 @@
 * Fix pages being leaked permanently when a panic unwound through a live write transaction and
   was caught with `catch_unwind`. The leak survived closing and reopening the database and grew
   with every such panic; the pages are now reclaimed the next time the database is opened.
+* Fix needless page rewrites on two logical no-ops: `MultimapTable::insert()` of a value that
+  the key already contains rewrote both of the trees involved, and `Table::get_mut()` of a key
+  that does not exist rewrote the whole path to where the key would have been. Both now leave
+  the database untouched.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

@@ -660,6 +660,53 @@ fn multimap_remove_nonexistent_value_from_subtree_does_not_churn() {
     assert_eq!(table.get(&0u64).unwrap().len(), 1000);
 }
 
+#[test]
+fn multimap_insert_existing_value_into_subtree_does_not_churn() {
+    // Inserting a value that is already present under a subtree-backed key is a logical no-op
+    // and must not rewrite either tree, like removing an absent one
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        // Enough values for key 0 to be promoted from inline storage to a subtree.
+        for v in 0..1000u64 {
+            table.insert(&0u64, &v).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Finalize the cleanup of the freed pages from the setup so the baseline is at steady state.
+    db.begin_write().unwrap().commit().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let baseline = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_multimap_table(U64_TABLE).unwrap();
+        assert!(table.insert(&0u64, &500u64).unwrap());
+        assert_eq!(table.len().unwrap(), 1000);
+    }
+    write_txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    let after = txn.stats().unwrap().allocated_pages();
+    txn.commit().unwrap();
+    assert_eq!(
+        baseline, after,
+        "inserting an already-present value under a subtree-backed key must not allocate or free pages"
+    );
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_multimap_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 1000);
+    assert_eq!(table.get(&0u64).unwrap().len(), 1000);
+}
+
 fn overwrite_multimap_10_times(db: &Database) {
     for _ in 0..10 {
         let write_txn = db.begin_write().unwrap();
