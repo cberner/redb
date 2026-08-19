@@ -2107,6 +2107,42 @@ fn delete_table() {
 }
 
 #[test]
+fn rename_table_to_same_name() {
+    let table_def: TableDefinition<&str, &str> = TableDefinition::new("x");
+    let missing_def: TableDefinition<&str, &str> = TableDefinition::new("missing");
+    let multitable_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("multi");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert("hi", "hi").unwrap();
+        let mut multitable = write_txn.open_multimap_table(multitable_def).unwrap();
+        multitable.insert("a", "b").unwrap();
+    }
+    // Renaming a table to its current name is a no-op
+    write_txn.rename_table(table_def, table_def).unwrap();
+    write_txn
+        .rename_multimap_table(multitable_def, multitable_def)
+        .unwrap();
+    // A table that does not exist still errors
+    assert!(matches!(
+        write_txn
+            .rename_table(missing_def, missing_def)
+            .unwrap_err(),
+        TableError::TableDoesNotExist(_)
+    ));
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get("hi").unwrap().unwrap().value(), "hi");
+    let multitable = read_txn.open_multimap_table(multitable_def).unwrap();
+    assert_eq!(multitable.len().unwrap(), 1);
+}
+
+#[test]
 fn rename_table() {
     let table_def: TableDefinition<&str, &str> = TableDefinition::new("x");
     let table_def2: TableDefinition<&str, &str> = TableDefinition::new("x2");

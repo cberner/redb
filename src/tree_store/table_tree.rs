@@ -572,6 +572,9 @@ impl TableTreeMut {
             None
         };
         if let Some(definition) = stored_definition {
+            if name == new_name {
+                return Ok(());
+            }
             if self.get_table_untyped(new_name, table_type)?.is_some() {
                 return Err(TableError::TableExists(new_name.to_string()));
             }
