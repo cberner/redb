@@ -793,12 +793,6 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
     }
 
-    /// Drops writes that have been buffered but not yet written to the file. Only valid for pages
-    /// no committed root references, i.e. those an aborted transaction allocated.
-    pub(crate) fn discard_buffered_writes(&self) {
-        self.storage.discard_write_buffer();
-    }
-
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
         // The in-memory state is being discarded for the on-disk state, so buffered writes --
         // which can only belong to the discarded state -- are dropped rather than written out;

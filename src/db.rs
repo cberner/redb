@@ -17,6 +17,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
@@ -1436,13 +1437,58 @@ fn begin_write_with_allocation_policy(
         )
         .into());
     }
-    WriteTransaction::new(
+    let transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
         mem.clone(),
         allocation_policy,
-    )
-    .map_err(|e| e.into())
+    )?;
+
+    if transaction_tracker.write_lock_is_shared() {
+        // Another process may have created or deleted a persistent savepoint since this one last
+        // held the write lock. Adopted before anything in this transaction can free a page, since
+        // that is what the savepoints hold back
+        adopt_persistent_savepoints(transaction_tracker, &transaction).map_err(|e| match e {
+            SavepointError::Storage(storage) => TransactionError::Storage(storage),
+            // Neither is reachable from reading the savepoints out of the database
+            SavepointError::InvalidSavepoint | SavepointError::ImmediateDurabilityRequired => {
+                unreachable!()
+            }
+        })?;
+    }
+
+    Ok(transaction)
+}
+
+// Reads the persistent savepoints out of the database and registers them with the tracker, in
+// place of whatever this process previously knew about.
+fn adopt_persistent_savepoints(
+    transaction_tracker: &Arc<TransactionTracker>,
+    transaction: &WriteTransaction,
+) -> Result<(), SavepointError> {
+    let next_savepoint = transaction.next_persistent_savepoint_id()?;
+    let mut savepoints = Vec::new();
+    for id in transaction.list_persistent_savepoints()? {
+        let savepoint = transaction.get_persistent_savepoint(id)?;
+        savepoints.push((savepoint.get_id(), savepoint.get_transaction_id()));
+    }
+    transaction_tracker.adopt_persistent_savepoints(next_savepoint, &savepoints)?;
+
+    Ok(())
+}
+
+// Whether closing has to write an allocator state table for the next open to load. A database
+// whose every commit is a quick-repair commit already has a current one, and writing another would
+// mean taking the cross-process write lock while dropping the database -- which can block on
+// another process for as long as its transaction runs.
+fn needs_allocator_state_table(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+) -> bool {
+    if !transaction_tracker.requires_quick_repair() {
+        return true;
+    }
+    !matches!(Database::allocator_state_table(mem), Ok(Some(_)))
 }
 
 fn ensure_allocator_state_table_and_trim(
@@ -1473,26 +1519,26 @@ fn ensure_allocator_state_table_and_trim(
 // transaction can be started concurrently and the commit in here cannot block on the
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
-    // Neither write below is this process's to make when another process may take over the write
-    // lock: the allocator state table needs a write transaction, which would wait on whatever that
-    // process is doing, and the shutdown header would land in the middle of it. Nothing is lost --
-    // every commit in that mode is already a quick-repair commit, so the allocator state in the
-    // file is current, and a multi-process database is read expecting the header's recovery flag to
-    // be set, since a writer in another process is entitled to be holding it open
-    let owns_the_file = !transaction_tracker.write_lock_is_shared();
-
     // No saved allocator state when it needs repair: the next open must rebuild it instead
     // of trusting the saved one
-    if owns_the_file
-        && !crate::panicking()
+    if !crate::panicking()
         && !mem.needs_repair()
+        && needs_allocator_state_table(transaction_tracker, mem)
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
         #[cfg(feature = "logging")]
         warn!("Failed to write allocator state table. Repair may be required at restart.");
     }
 
-    if mem.close(owns_the_file).is_err() {
+    // Asserting a clean shutdown is only this process's to do when no other process may write. The
+    // header it writes covers the commit slots, so doing it while another process holds the write
+    // lock would put this process's view of the database over what that one has just committed. A
+    // multi-process database is read expecting the flag to be set in any case, since a writer in
+    // another process is entitled to be holding the file open
+    if mem
+        .close(!transaction_tracker.write_lock_is_shared())
+        .is_err()
+    {
         #[cfg(feature = "logging")]
         warn!("Failed to flush database file. Repair may be required at restart.");
     }
