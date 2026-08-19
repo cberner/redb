@@ -47,6 +47,13 @@ struct ComplexStruct<'inner, 'inner2> {
 #[derive(Value, Debug, PartialEq)]
 struct UnitStruct;
 
+// The derived implementation must not shadow the struct's own lifetimes, whatever their names
+#[derive(Key, Value, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct LifetimeNames<'a, 'b> {
+    reference: &'a str,
+    reference2: &'b str,
+}
+
 fn test_key_helper<K: Key + 'static>(key: &<K as Value>::SelfType<'_>) {
     let file = create_tempfile();
     let db = Database::create(file.path()).unwrap();
@@ -681,4 +688,15 @@ fn test_complex_struct() {
     let expected_name = "ComplexStruct {tuple_field: (u8,u16,u32), array_field: [(u8,Option<u16>);2], reference: &str, reference2: &str}";
     test_key_helper::<ComplexStruct>(&original);
     test_value_helper::<ComplexStruct>(original, expected_name);
+}
+
+#[test]
+fn lifetime_names() {
+    let original = LifetimeNames {
+        reference: "hello",
+        reference2: "world",
+    };
+    let expected_name = "LifetimeNames {reference: &str, reference2: &str}";
+    test_key_helper::<LifetimeNames>(&original);
+    test_value_helper::<LifetimeNames>(original, expected_name);
 }
