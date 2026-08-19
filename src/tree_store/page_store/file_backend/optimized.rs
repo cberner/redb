@@ -112,6 +112,14 @@ impl StorageBackend for FileBackend {
         let mut data_offset = 0;
         while data_offset < data.len() {
             let written = self.file.seek_write(&data[data_offset..], offset)?;
+            // seek_write can report zero bytes written; treat that as an error so the write
+            // fails instead of looping forever, like the read loop above.
+            if written == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
             offset += written as u64;
             data_offset += written;
         }
