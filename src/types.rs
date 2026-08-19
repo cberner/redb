@@ -232,6 +232,9 @@ pub trait Key: Value {
     /// Returning [`Cow::Owned`] allows separators synthesized from the inputs, rather than
     /// borrowed from them.
     ///
+    /// Branch keys of a fixed width type are stored at that width, so redb never asks such a
+    /// type for a separator: implementing this is only worthwhile for a variable width one.
+    ///
     /// The default implementation returns `left`, which is always valid.
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         debug_assert!(Self::compare(left, right).is_lt());
@@ -390,6 +393,29 @@ impl<T: Key> Key for Option<T> {
                 T::compare(&data1[1..], &data2[1..])
             }
         }
+    }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        // A fixed width `T` makes `Option<T>` fixed width too, and its encodings are compared at
+        // that width, so nothing shorter than `left` may be returned
+        if T::fixed_width().is_some() {
+            return Cow::Borrowed(left);
+        }
+        // `None` sorts below every `Some` and encodes as the tag alone, so nothing is shorter
+        if left[0] == 0 {
+            return Cow::Borrowed(left);
+        }
+        // Both are `Some`, so a separator between the payloads, behind the same tag, separates
+        // the two. Which input the payload came from is not visible here, so the result is
+        // assembled rather than borrowed.
+        let payload = T::separator(&left[1..], &right[1..]);
+        if payload.len() + 1 >= left.len() {
+            return Cow::Borrowed(left);
+        }
+        let mut separator = Vec::with_capacity(payload.len() + 1);
+        separator.push(1);
+        separator.extend_from_slice(&payload);
+        Cow::Owned(separator)
     }
 }
 
@@ -581,6 +607,52 @@ impl<const N: usize, T: Key> Key for [T; N] {
             }
         }
         Ordering::Equal
+    }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        // A fixed width element type makes the array fixed width too, and its encodings are
+        // compared at that width, so nothing shorter than `left` may be returned
+        if T::fixed_width().is_some() {
+            return Cow::Borrowed(left);
+        }
+        // Only the element the two first differ in can be shortened: the elements before it are
+        // needed for the result to sort below `right`, and those after it for the result to stay
+        // at or above `left`, in case that element ends up unchanged.
+        let header = size_of::<u32>() * N;
+        let mut start1 = header;
+        let mut start2 = header;
+        for i in 0..N {
+            let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
+            let end1 = u32::from_le_bytes(left[range.clone()].try_into().unwrap()) as usize;
+            let end2 = u32::from_le_bytes(right[range].try_into().unwrap()) as usize;
+            let element = &left[start1..end1];
+            if T::compare(element, &right[start2..end2]).is_eq() {
+                start1 = end1;
+                start2 = end2;
+                continue;
+            }
+            let separator = T::separator(element, &right[start2..end2]);
+            if separator.len() >= element.len() {
+                return Cow::Borrowed(left);
+            }
+            let removed = u32::try_from(element.len() - separator.len()).unwrap();
+            let mut result = Vec::with_capacity(left.len() - removed as usize);
+            // Every end offset from the shortened element on moves down by what it dropped
+            for j in 0..N {
+                let range = size_of::<u32>() * j..size_of::<u32>() * (j + 1);
+                let mut end = u32::from_le_bytes(left[range].try_into().unwrap());
+                if j >= i {
+                    end -= removed;
+                }
+                result.extend_from_slice(&end.to_le_bytes());
+            }
+            result.extend_from_slice(&left[header..start1]);
+            result.extend_from_slice(&separator);
+            result.extend_from_slice(&left[end1..]);
+            return Cow::Owned(result);
+        }
+        // Every element compared equal, so `left` does not sort below `right`
+        Cow::Borrowed(left)
     }
 }
 
@@ -906,6 +978,66 @@ mod tests {
                 <String as Key>::separator(left.as_bytes(), right.as_bytes()),
                 separator
             );
+        }
+    }
+
+    #[test]
+    fn option_separator() {
+        // (left, right, the shortest separator)
+        let cases: &[(Option<&str>, Option<&str>, &[u8])] = &[
+            // The payloads separate as `&str` does, behind the `Some` tag
+            (Some("abc0suffix"), Some("abc1suffix"), b"\x01abc1"),
+            // `None` encodes as the tag alone, so nothing is shorter
+            (None, Some("abc"), b"\x00"),
+            // Nothing shorter than `left` sorts above it
+            (Some("abc"), Some("abd-suffix"), b"\x01abc"),
+        ];
+
+        for &(left, right, expected) in cases {
+            let left = <Option<&str> as Value>::as_bytes(&left);
+            let right = <Option<&str> as Value>::as_bytes(&right);
+            let separator = <Option<&str> as Key>::separator(&left, &right);
+            assert_eq!(separator, expected);
+            assert!(<Option<&str> as Key>::compare(&left, &separator).is_le());
+            assert!(<Option<&str> as Key>::compare(&separator, &right).is_lt());
+        }
+    }
+
+    // `Option<T>` of a fixed width `T` is itself fixed width, so it must not shorten
+    #[test]
+    fn fixed_width_option_separator_returns_full_key() {
+        let left = <Option<u64> as Value>::as_bytes(&Some(1));
+        let right = <Option<u64> as Value>::as_bytes(&Some(2));
+        assert_eq!(<Option<u64> as Key>::separator(&left, &right), left);
+    }
+
+    #[test]
+    fn array_separator() {
+        // (left, right, the shortest separator)
+        let cases: &[([&str; 2], [&str; 2], [&str; 2])] = &[
+            // The elements after the shortened one are `left`'s, not `right`'s
+            (
+                ["abc0suffix", "left"],
+                ["abc1suffix", "right"],
+                ["abc1", "left"],
+            ),
+            // Shortening the last element leaves the rest untouched
+            (
+                ["same", "abc0suffix"],
+                ["same", "abc1suffix"],
+                ["same", "abc1"],
+            ),
+            // Nothing shorter than `left` sorts above it
+            (["abc", "x"], ["abd-suffix", "y"], ["abc", "x"]),
+        ];
+
+        for &(left, right, expected) in cases {
+            let left = <[&str; 2] as Value>::as_bytes(&left);
+            let right = <[&str; 2] as Value>::as_bytes(&right);
+            let separator = <[&str; 2] as Key>::separator(&left, &right);
+            assert_eq!(separator, <[&str; 2] as Value>::as_bytes(&expected));
+            assert!(<[&str; 2] as Key>::compare(&left, &separator).is_le());
+            assert!(<[&str; 2] as Key>::compare(&separator, &right).is_lt());
         }
     }
 

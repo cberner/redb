@@ -5,9 +5,9 @@ use redb::CommitError;
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
-    TableError, TableHandle, TypeName, Value, WriteTransaction,
+    AccessGuard, Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange,
+    ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError,
+    TableDefinition, TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -3390,6 +3390,135 @@ fn str_keys_with_multibyte_characters() {
         assert_eq!(iter.next().unwrap().unwrap().0.value(), key.as_str());
     }
     assert!(iter.next().is_none());
+}
+
+// Composite keys build their separators out of their elements', so they must route and iterate
+// correctly with the elements' cuts embedded in a larger encoding
+#[test]
+fn composite_keys_with_shortened_separators() {
+    const TUPLE: TableDefinition<(u64, &str), u64> = TableDefinition::new("tuple");
+    const OPTION: TableDefinition<Option<&str>, u64> = TableDefinition::new("option");
+    const ARRAY: TableDefinition<[&str; 2], u64> = TableDefinition::new("array");
+    const NUM_KEYS: u64 = 2_000;
+    // A long shared suffix, so a separator that cuts at the first difference saves most of the key
+    let key = |i: u64| format!("{i:08}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut option_table = write_txn.open_table(OPTION).unwrap();
+        let mut array_table = write_txn.open_table(ARRAY).unwrap();
+        for i in 0..NUM_KEYS {
+            tuple_table.insert(&(0, key(i).as_str()), &i).unwrap();
+            option_table.insert(&Some(key(i).as_str()), &i).unwrap();
+            array_table.insert(&[key(i).as_str(), "tail"], &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let option_table = read_txn.open_table(OPTION).unwrap();
+    let array_table = read_txn.open_table(ARRAY).unwrap();
+    assert!(tuple_table.stats().unwrap().tree_height() > 1);
+    assert!(option_table.stats().unwrap().tree_height() > 1);
+    assert!(array_table.stats().unwrap().tree_height() > 1);
+    for i in 0..NUM_KEYS {
+        let key = key(i);
+        let key = key.as_str();
+        assert_eq!(tuple_table.get(&(0, key)).unwrap().unwrap().value(), i);
+        assert_eq!(option_table.get(&Some(key)).unwrap().unwrap().value(), i);
+        assert_eq!(array_table.get(&[key, "tail"]).unwrap().unwrap().value(), i);
+    }
+    // The keys are zero padded, so insertion order is also the sorted order
+    let mut iter = tuple_table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        assert_eq!(
+            iter.next().unwrap().unwrap().0.value(),
+            (0, key(i).as_str())
+        );
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, which reshuffles separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut option_table = write_txn.open_table(OPTION).unwrap();
+        let mut array_table = write_txn.open_table(ARRAY).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 == 0 {
+                continue;
+            }
+            let key = key(i);
+            let key = key.as_str();
+            assert_eq!(tuple_table.remove(&(0, key)).unwrap().unwrap().value(), i);
+            assert_eq!(option_table.remove(&Some(key)).unwrap().unwrap().value(), i);
+            assert_eq!(
+                array_table.remove(&[key, "tail"]).unwrap().unwrap().value(),
+                i
+            );
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let option_table = read_txn.open_table(OPTION).unwrap();
+    let array_table = read_txn.open_table(ARRAY).unwrap();
+    for i in 0..NUM_KEYS {
+        let key = key(i);
+        let key = key.as_str();
+        let expected = (i % 4 == 0).then_some(i);
+        let read = |guard: Option<_>| guard.map(|guard: AccessGuard<u64>| guard.value());
+        assert_eq!(read(tuple_table.get(&(0, key)).unwrap()), expected);
+        assert_eq!(read(option_table.get(&Some(key)).unwrap()), expected);
+        assert_eq!(read(array_table.get(&[key, "tail"]).unwrap()), expected);
+    }
+}
+
+// A separator may only shorten the element that the two keys first differ in, and only when that
+// element is variable width. When it is, branch nodes hold many more children.
+#[test]
+fn tuple_separators_shrink_branch_nodes() {
+    const SHORTENED: TableDefinition<(u64, &str), u64> = TableDefinition::new("shortened");
+    const WHOLE: TableDefinition<(u64, &str), u64> = TableDefinition::new("whole");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut shortened = write_txn.open_table(SHORTENED).unwrap();
+        let mut whole = write_txn.open_table(WHOLE).unwrap();
+        for i in 0..NUM_KEYS {
+            // These differ in the variable width element, which a separator may cut short
+            shortened
+                .insert(&(0, format!("{i:08}{suffix}").as_str()), &i)
+                .unwrap();
+            // ...and these in the fixed width one, which pins the separator to a whole key. The
+            // encodings are the same size either way, so the two trees are otherwise identical.
+            whole
+                .insert(&(i, format!("{:08}{suffix}", 0).as_str()), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let shortened = read_txn.open_table(SHORTENED).unwrap().stats().unwrap();
+    let whole = read_txn.open_table(WHOLE).unwrap().stats().unwrap();
+    assert_eq!(shortened.leaf_pages(), whole.leaf_pages());
+    assert!(
+        shortened.branch_pages() * 2 < whole.branch_pages(),
+        "{} branch pages, against {} without shortening",
+        shortened.branch_pages(),
+        whole.branch_pages()
+    );
 }
 
 // Branch keys are separators, which need not be valid encodings: nothing may deserialize them
