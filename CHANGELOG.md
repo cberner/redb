@@ -70,6 +70,10 @@
 * Fix `rename_table()` and `rename_multimap_table()` returning `TableExists` when the new name
   is the same as the current one. Renaming a table to its own name now succeeds and leaves the
   table unchanged.
+* Fix `persistent_savepoint()` and `delete_persistent_savepoint()` making the transaction
+  ineligible for further savepoints, so a second savepoint in the same transaction failed with
+  `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
+  savepoint, makes a transaction savepoint-ineligible now.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
