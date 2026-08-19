@@ -74,6 +74,9 @@
   ineligible for further savepoints, so a second savepoint in the same transaction failed with
   `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
   savepoint, makes a transaction savepoint-ineligible now.
+* Fix the database failing to open after a crash that tore a commit slot's version byte. The
+  open reported `Corrupted`, or a misleading `UpgradeRequired`, even though the other commit
+  slot was intact; a torn version byte is now repaired like any other torn slot write.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

@@ -176,6 +176,15 @@ impl UnrepairedDatabaseHeader {
         let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
             &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
         )?;
+        // With at least one verified slot the database is v3, and a slot that failed
+        // verification is a torn write for the repair logic to handle -- whatever its version
+        // byte says. Pre-v3 files have no v3-checksummed slot at all, so when neither slot
+        // verifies, the version bytes are the only signal distinguishing an older file format
+        // from a corrupted database.
+        if slot0_corrupted && slot1_corrupted {
+            TransactionHeader::check_version(slot0.version)?;
+            TransactionHeader::check_version(slot1.version)?;
+        }
         let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
             (slot0_corrupted, slot1_corrupted)
         } else {
@@ -413,6 +422,8 @@ impl DatabaseHeader {
         system_root: Option<BtreeHeader>,
     ) {
         let slot = &mut self.transaction_slots[self.primary_slot ^ 1];
+        // The slot may have held a torn write whose version byte never verified
+        slot.version = FILE_FORMAT_VERSION3;
         slot.transaction_id = transaction_id;
         slot.user_root = user_root;
         slot.system_root = system_root;
@@ -478,27 +489,34 @@ impl TransactionHeader {
         }
     }
 
-    // Returned bool indicates whether the checksum was corrupted
-    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
-        let version = data[VERSION_OFFSET];
+    fn check_version(version: u8) -> Result<(), DatabaseError> {
         match version {
             FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
-                return Err(DatabaseError::UpgradeRequired(version));
+                Err(DatabaseError::UpgradeRequired(version))
             }
-            FILE_FORMAT_VERSION3 => {}
-            _ => {
-                return Err(StorageError::Corrupted(format!(
-                    "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
-                ))
-                .into());
-            }
+            FILE_FORMAT_VERSION3 => Ok(()),
+            _ => Err(StorageError::Corrupted(format!(
+                "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
+            ))
+            .into()),
         }
+    }
+
+    // Returned bool indicates whether the checksum was corrupted
+    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
         let checksum = Checksum::from_le_bytes(
             data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
                 .try_into()
                 .unwrap(),
         );
         let corrupted = checksum != xxh3_checksum(&data[..SLOT_CHECKSUM_OFFSET]);
+        let version = data[VERSION_OFFSET];
+        // The version byte is covered by the slot checksum, so in a slot that failed
+        // verification it can hold anything a torn write left behind. Version errors for such
+        // slots are raised by the caller, which can see whether the other slot verified.
+        if !corrupted {
+            Self::check_version(version)?;
+        }
 
         let user_root = if data[USER_ROOT_NON_NULL_OFFSET] != 0 {
             Some(BtreeHeader::from_le_bytes(
@@ -893,6 +911,79 @@ mod test {
             &header[secondary_offset..secondary_offset + super::TRANSACTION_SIZE],
             &torn_secondary,
             "recovery laundered the torn secondary slot into a valid one"
+        );
+    }
+
+    // A torn write can leave anything in a commit slot, including in its version byte. A slot
+    // that fails checksum verification must be handled as a torn slot by the repair logic, not
+    // fail the open outright -- nor report a missing upgrade, when the garbage matches an old
+    // format version.
+    #[test]
+    fn torn_slot_version_byte_is_repaired() {
+        for garbage in [super::FILE_FORMAT_VERSION1, 0xF3] {
+            let tmpfile = crate::create_tempfile();
+            create_database_with_one_table(tmpfile.path());
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let mut header = [0u8; DB_HEADER_SIZE];
+            file.read_exact(&mut header).unwrap();
+            let secondary_offset =
+                if primary_slot_offset(header[GOD_BYTE_OFFSET]) == TRANSACTION_0_OFFSET {
+                    TRANSACTION_1_OFFSET
+                } else {
+                    TRANSACTION_0_OFFSET
+                };
+            // Tear the secondary slot's version byte and mark the file as a crashed 1-phase
+            // commit, so that a full repair runs
+            header[secondary_offset + super::VERSION_OFFSET] = garbage;
+            header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+            header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&header).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            let db = Database::open(tmpfile.path()).unwrap();
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(X).unwrap();
+            assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
+        }
+    }
+
+    // Pre-v3 files have no v3-checksummed commit slot, so the version bytes are the only
+    // evidence of their format. They must be reported as UpgradeRequired, not as corruption.
+    #[test]
+    fn old_file_format_reports_upgrade_required() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        // Give both slots an old version byte; their checksums no longer verify, just like a
+        // genuine pre-v3 file's slots, which are laid out differently
+        header[TRANSACTION_0_OFFSET + super::VERSION_OFFSET] = super::FILE_FORMAT_VERSION1;
+        header[TRANSACTION_1_OFFSET + super::VERSION_OFFSET] = super::FILE_FORMAT_VERSION1;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DatabaseError::UpgradeRequired(super::FILE_FORMAT_VERSION1)
+            ),
+            "expected UpgradeRequired, got {err:?}"
         );
     }
 
