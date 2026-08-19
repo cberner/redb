@@ -131,27 +131,31 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
 
     Ok(quote! {
         impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
-            type SelfType<'a> = #self_type
+            type SelfType<'__redb_a> = #self_type
             where
-                Self: 'a;
-            type AsBytes<'a> = ::std::vec::Vec<::std::primitive::u8>
+                Self: '__redb_a;
+            type AsBytes<'__redb_a> = ::std::vec::Vec<::std::primitive::u8>
             where
-                Self: 'a;
+                Self: '__redb_a;
 
             fn fixed_width() -> ::std::option::Option<::std::primitive::usize> {
                 #fixed_width_impl
             }
 
-            fn from_bytes<'a>(data: &'a [::std::primitive::u8]) -> Self::SelfType<'a>
+            fn from_bytes<'__redb_a>(
+                data: &'__redb_a [::std::primitive::u8],
+            ) -> Self::SelfType<'__redb_a>
             where
-                Self: 'a,
+                Self: '__redb_a,
             {
                 #from_bytes_impl
             }
 
-            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            fn as_bytes<'__redb_a, '__redb_b: '__redb_a>(
+                value: &'__redb_a Self::SelfType<'__redb_b>,
+            ) -> Self::AsBytes<'__redb_a>
             where
-                Self: 'b,
+                Self: '__redb_b,
             {
                 #as_bytes_impl
             }
@@ -173,7 +177,7 @@ fn generate_self_type(
         let mut params = vec![];
         for param in &generics.params {
             match param {
-                GenericParam::Lifetime(_) => params.push(quote! { 'a }),
+                GenericParam::Lifetime(_) => params.push(quote! { '__redb_a }),
                 GenericParam::Type(type_param) => {
                     return Err(syn::Error::new_spanned(
                         type_param,

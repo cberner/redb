@@ -31,6 +31,8 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 
 ### redb-derive (unreleased)
+* Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
+  named `'a` or `'b`; the generated implementations no longer shadow the struct's lifetimes.
 * Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
   `as_bytes`, or `type_name` on field types, instead of the `Value` trait methods. The
   generated code now uses fully qualified paths, and no longer requires the `Value` and `Key`
