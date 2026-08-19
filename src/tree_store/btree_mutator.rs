@@ -14,6 +14,7 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, Result};
+use alloc::borrow::Cow;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -461,13 +462,13 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let last_key = entries[range.end - 1].0;
             let separator = match plan.get(index + 1).or(balance_tail.as_ref()) {
                 Some(next) => branch_separator::<K>(last_key, entries[next.start].0),
-                None => last_key,
+                None => Cow::Borrowed(last_key),
             };
-            leaves.push((page.get_page_number(), separator.to_vec()));
+            leaves.push((page.get_page_number(), separator.into_owned()));
         }
         if let Some(range) = balance_tail {
             let (page1, split_key, page2) = fill(&range).build_split::<K>()?;
-            leaves.push((page1.get_page_number(), split_key.to_vec()));
+            leaves.push((page1.get_page_number(), split_key.into_owned()));
             leaves.push((page2.get_page_number(), entries[range.end - 1].0.to_vec()));
         }
         Ok(leaves)
@@ -776,7 +777,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
                     return if position == 0 {
                         let split_key =
-                            branch_separator::<K>(key, accessor.entry(0).unwrap().key()).to_vec();
+                            branch_separator::<K>(key, accessor.entry(0).unwrap().key())
+                                .into_owned();
                         Ok(InsertionResult {
                             new_root: new_page_number,
                             root_checksum: DEFERRED,
@@ -790,7 +792,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         })
                     } else {
                         let split_key =
-                            branch_separator::<K>(accessor.last_entry().key(), key).to_vec();
+                            branch_separator::<K>(accessor.last_entry().key(), key).into_owned();
                         Ok(InsertionResult {
                             new_root: page.get_page_number(),
                             root_checksum: page_checksum,
@@ -898,7 +900,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     )
                 {
                     let split_key =
-                        branch_separator::<K>(accessor.last_entry().key(), key).to_vec();
+                        branch_separator::<K>(accessor.last_entry().key(), key).into_owned();
                     let mut builder = LeafBuilder::new(
                         self.page_allocator,
                         self.allocated,

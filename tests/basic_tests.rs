@@ -9,6 +9,7 @@ use redb::{
     ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
     TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
+use std::borrow::Cow;
 use std::cmp::Ordering;
 #[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
@@ -3397,7 +3398,7 @@ fn branch_separators_are_not_deserialized() {
             data1.cmp(data2)
         }
 
-        fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> &'a [u8] {
+        fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
             // Every pair of keys differs within the first two bytes, so a separator is always
             // shorter than the 8 byte encoding, and so always invalid to deserialize
             let separator = <&[u8] as Key>::separator(left, right);
