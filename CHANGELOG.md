@@ -52,6 +52,7 @@
   nodes store the result instead of a whole key, so more children fit in each node and lookups
   touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
   implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
+  `Option` keys shorten their payload, when the wrapped type is variable width.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator

@@ -3392,6 +3392,103 @@ fn str_keys_with_multibyte_characters() {
     assert!(iter.next().is_none());
 }
 
+// An `Option` separator is the payload's, behind the `Some` tag, so it must route and iterate
+// correctly with that cut embedded in the larger encoding
+#[test]
+fn option_keys_with_shortened_separators() {
+    const TABLE: TableDefinition<Option<&str>, u64> = TableDefinition::new("option");
+    const NUM_KEYS: u64 = 2_000;
+    // A long shared suffix, so a separator that cuts at the first difference saves most of the key
+    let key = |i: u64| format!("{i:08}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            table.insert(&Some(key(i).as_str()), &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 1);
+    // The keys are zero padded, so insertion order is also the sorted order
+    let mut iter = table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        let key = key(i);
+        let key = key.as_str();
+        assert_eq!(table.get(&Some(key)).unwrap().unwrap().value(), i);
+        let (actual_key, actual_value) = iter.next().unwrap().unwrap();
+        assert_eq!(actual_key.value(), Some(key));
+        assert_eq!(actual_value.value(), i);
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let removed = table.remove(&Some(key(i).as_str())).unwrap();
+                assert_eq!(removed.unwrap().value(), i);
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..NUM_KEYS {
+        let value = table
+            .get(&Some(key(i).as_str()))
+            .unwrap()
+            .map(|guard| guard.value());
+        assert_eq!(value, (i % 4 == 0).then_some(i));
+    }
+}
+
+// Keys that differ early separate into a few bytes, while keys of the same size that differ only
+// at the very end have no shorter separator than the whole key, and so pack far fewer children
+#[test]
+fn option_separators_shrink_branch_nodes() {
+    const EARLY: TableDefinition<Option<&str>, u64> = TableDefinition::new("early");
+    const LATE: TableDefinition<Option<&str>, u64> = TableDefinition::new("late");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut early = write_txn.open_table(EARLY).unwrap();
+        let mut late = write_txn.open_table(LATE).unwrap();
+        for i in 0..NUM_KEYS {
+            early
+                .insert(&Some(format!("{i:08}{suffix}").as_str()), &i)
+                .unwrap();
+            late.insert(&Some(format!("{suffix}{i:08}").as_str()), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let early = read_txn.open_table(EARLY).unwrap().stats().unwrap();
+    let late = read_txn.open_table(LATE).unwrap().stats().unwrap();
+    assert_eq!(early.leaf_pages(), late.leaf_pages());
+    assert!(
+        early.branch_pages() * 2 < late.branch_pages(),
+        "{} branch pages, against {} without shortening",
+        early.branch_pages(),
+        late.branch_pages()
+    );
+}
+
 // Branch keys are separators, which need not be valid encodings: nothing may deserialize them
 #[test]
 fn branch_separators_are_not_deserialized() {
