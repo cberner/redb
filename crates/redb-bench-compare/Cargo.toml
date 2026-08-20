@@ -1,0 +1,44 @@
+[package]
+name = "redb-bench-compare"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# Benchmarks comparing redb against other storage engines. These engines are dev-dependencies of
+# this crate alone, so building redb-bench's benchmarks never compiles them.
+[dev-dependencies]
+redb-bench = { path = "../redb-bench" }
+redb = { path = "../..", features = ["experimental_cursor"] }
+rand = "0.10.1"
+tempfile = "3.5.0"
+heed = { version = "0.22", default-features = false }
+rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "bindgen-runtime"] }
+fjall = "=3.1.6"
+rusqlite = { version = "0.38.0", features = ["bundled"] }
+ctrlc = "3.2.3"
+env_logger = "0.11"
+libc = "0.2.99"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+io-uring = "0.7.4"
+
+[[bench]]
+name = "lmdb_benchmark"
+harness = false
+
+[[bench]]
+name = "large_values_benchmark"
+harness = false
+
+[[bench]]
+name = "int_benchmark"
+harness = false
+
+[[bench]]
+name = "syscall_benchmark"
+harness = false

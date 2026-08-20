@@ -2,9 +2,7 @@
 use tempfile::NamedTempFile;
 
 #[cfg(target_os = "linux")]
-mod benchmark_dir;
-#[cfg(target_os = "linux")]
-use benchmark_dir::benchmark_dir;
+use redb_bench::benchmark_dir;
 
 #[cfg(target_os = "linux")]
 mod unix {

@@ -1,12 +1,10 @@
-#![allow(dead_code)]
-
 use tempfile::{NamedTempFile, TempDir};
 
-mod benchmark_dir;
-use benchmark_dir::benchmark_dir;
+use redb_bench::benchmark_dir;
 
 mod common;
 use common::*;
+use redb_bench::*;
 
 use rand::Rng;
 use std::time::Instant;

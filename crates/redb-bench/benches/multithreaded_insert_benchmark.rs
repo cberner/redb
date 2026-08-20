@@ -1,8 +1,7 @@
 use std::{fs, process, thread};
 use tempfile::NamedTempFile;
 
-mod benchmark_dir;
-use benchmark_dir::benchmark_dir;
+use redb_bench::benchmark_dir;
 
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};

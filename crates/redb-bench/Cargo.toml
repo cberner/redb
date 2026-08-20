@@ -9,25 +9,22 @@ homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 
-# Common test/bench dependencies
-[dev-dependencies]
+# The shared harness is a library, so these have to be regular dependencies. Engines other than redb
+# live in redb-bench-compare, which keeps their native build dependencies out of this crate.
+[dependencies]
 redb = { path = "../..", features = ["experimental_cursor"] }
-rand = "0.10.1"
-tempfile = "3.5.0"
 walkdir = "2.5.0"
 byte-unit = "5.1.6"
 fastrand = "2.0.0"
+comfy-table = "7.0.1"
+
+# Common test/bench dependencies
+[dev-dependencies]
+rand = "0.10.1"
+tempfile = "3.5.0"
 libc = "0.2.99"
 ctrlc = "3.2.3"
-heed = { version = "0.22", default-features = false }
-rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "bindgen-runtime"] }
-fjall = "=3.1.6"
-rusqlite = { version = "0.38.0", features = ["bundled"] }
-comfy-table = "7.0.1"
 env_logger = "0.11"
-
-[target.'cfg(target_os = "linux")'.dev-dependencies]
-io-uring = "0.7.4"
 
 [[bench]]
 name = "atomics_benchmark"
@@ -46,21 +43,6 @@ name = "savepoint_benchmark"
 harness = false
 
 [[bench]]
-name = "lmdb_benchmark"
-harness = false
-
-[[bench]]
 name = "redb_benchmark"
 harness = false
 
-[[bench]]
-name = "large_values_benchmark"
-harness = false
-
-[[bench]]
-name = "int_benchmark"
-harness = false
-
-[[bench]]
-name = "syscall_benchmark"
-harness = false
