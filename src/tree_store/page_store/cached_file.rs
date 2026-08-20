@@ -328,6 +328,10 @@ impl PagedCachedFile {
         &self.write_buffer[stripe]
     }
 
+    pub(super) fn max_cache_size(&self) -> usize {
+        self.max_cache_size
+    }
+
     #[allow(clippy::unused_self)]
     pub(crate) fn cache_stats(&self) -> CacheStats {
         #[cfg(not(feature = "cache_metrics"))]
