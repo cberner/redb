@@ -569,15 +569,6 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
             T::db_type_name(),
             duration.as_millis()
         );
-        {
-            let connection = db.connect();
-            let mut txn = connection.write_transaction();
-            let mut inserter = txn.get_inserter();
-            let (key, value) = random_pair(&mut rng);
-            inserter.insert(&key, &value).unwrap();
-            drop(inserter);
-            txn.commit().unwrap();
-        }
         let compacted_size = database_size(path);
         results.push((
             "compacted size".to_string(),
