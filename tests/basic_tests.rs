@@ -5,11 +5,10 @@ use redb::CommitError;
 use redb::DatabaseError;
 use redb::backends::InMemoryBackend;
 use redb::{
-    Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
-    TableError, TableHandle, TypeName, Value, WriteTransaction,
+    AccessGuard, Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange,
+    ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError,
+    TableDefinition, TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
-use std::borrow::Cow;
 use std::cmp::Ordering;
 #[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
@@ -3489,76 +3488,175 @@ fn option_separators_shrink_branch_nodes() {
     );
 }
 
-// Branch keys are separators, which need not be valid encodings: nothing may deserialize them
+// A composite separator shortens one element and discards those after it, so it must route and
+// iterate correctly with a tail that no longer holds any of the original key
 #[test]
-fn branch_separators_are_not_deserialized() {
-    #[derive(Debug)]
-    struct SeparatorKey;
+fn composite_keys_with_discarded_elements() {
+    const TUPLE: TableDefinition<(&str, &str), u64> = TableDefinition::new("tuple");
+    const ARRAY: TableDefinition<[&str; 2], u64> = TableDefinition::new("array");
+    const OPTION: TableDefinition<(&str, Option<&str>), u64> = TableDefinition::new("option");
+    const NUM_KEYS: u64 = 2_000;
+    // The first element decides the order, and runs past the digits that distinguish adjacent
+    // keys so that its separator can truncate and land strictly above the left key's. The second
+    // is long enough to dominate the key.
+    let head = |i: u64| format!("{i:08}{}", "-head".repeat(8));
+    let tail = |i: u64| format!("{i:04}{}", "-suffix".repeat(16));
 
-    impl Value for SeparatorKey {
-        type SelfType<'a> = u64;
-        type AsBytes<'a> = [u8; 8];
-
-        fn fixed_width() -> Option<usize> {
-            None
-        }
-
-        fn from_bytes<'a>(data: &'a [u8]) -> u64
-        where
-            Self: 'a,
-        {
-            assert_eq!(data.len(), 8, "separator passed to from_bytes()");
-            (u64::from(data[0]) << 8) | u64::from(data[1])
-        }
-
-        fn as_bytes<'a, 'b: 'a>(value: &'a u64) -> [u8; 8]
-        where
-            Self: 'b,
-        {
-            let mut result = [0; 8];
-            result[0] = u8::try_from(value >> 8).unwrap();
-            result[1] = *value as u8;
-            result
-        }
-
-        fn type_name() -> TypeName {
-            TypeName::new("test::SeparatorKey")
-        }
-    }
-
-    impl Key for SeparatorKey {
-        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-            data1.cmp(data2)
-        }
-
-        fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
-            // Every pair of keys differs within the first two bytes, so a separator is always
-            // shorter than the 8 byte encoding, and so always invalid to deserialize
-            let separator = <&[u8] as Key>::separator(left, right);
-            assert!(separator.len() < left.len());
-            separator
-        }
-    }
-
-    const NUM_KEYS: u64 = 1_024;
-    let definition: TableDefinition<SeparatorKey, u64> = TableDefinition::new("separators");
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
-        let mut table = write_txn.open_table(definition).unwrap();
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut array_table = write_txn.open_table(ARRAY).unwrap();
+        let mut option_table = write_txn.open_table(OPTION).unwrap();
         for i in 0..NUM_KEYS {
-            table.insert(&i, &i).unwrap();
+            let (head, tail) = (head(i), tail(i));
+            tuple_table
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            array_table
+                .insert(&[head.as_str(), tail.as_str()], &i)
+                .unwrap();
+            option_table
+                .insert(&(head.as_str(), Some(tail.as_str())), &i)
+                .unwrap();
         }
     }
     write_txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let table = read_txn.open_table(definition).unwrap();
-    assert!(table.stats().unwrap().tree_height() > 1);
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let array_table = read_txn.open_table(ARRAY).unwrap();
+    let option_table = read_txn.open_table(OPTION).unwrap();
+    assert!(tuple_table.stats().unwrap().tree_height() > 1);
+    assert!(array_table.stats().unwrap().tree_height() > 1);
+    assert!(option_table.stats().unwrap().tree_height() > 1);
+    // The heads are zero padded, so insertion order is also the sorted order
+    let mut iter = tuple_table.iter().unwrap();
     for i in 0..NUM_KEYS {
-        assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        let (head, tail) = (head(i), tail(i));
+        let (head, tail) = (head.as_str(), tail.as_str());
+        assert_eq!(tuple_table.get(&(head, tail)).unwrap().unwrap().value(), i);
+        assert_eq!(array_table.get(&[head, tail]).unwrap().unwrap().value(), i);
+        assert_eq!(
+            option_table
+                .get(&(head, Some(tail)))
+                .unwrap()
+                .unwrap()
+                .value(),
+            i
+        );
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), (head, tail));
     }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut array_table = write_txn.open_table(ARRAY).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let (head, tail) = (head(i), tail(i));
+                let (head, tail) = (head.as_str(), tail.as_str());
+                assert_eq!(
+                    tuple_table.remove(&(head, tail)).unwrap().unwrap().value(),
+                    i
+                );
+                assert_eq!(
+                    array_table.remove(&[head, tail]).unwrap().unwrap().value(),
+                    i
+                );
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let array_table = read_txn.open_table(ARRAY).unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let (head, tail) = (head.as_str(), tail.as_str());
+        let expected = (i % 4 == 0).then_some(i);
+        let read = |guard: Option<_>| guard.map(|guard: AccessGuard<u64>| guard.value());
+        assert_eq!(read(tuple_table.get(&(head, tail)).unwrap()), expected);
+        assert_eq!(read(array_table.get(&[head, tail]).unwrap()), expected);
+    }
+}
+
+// The same keys, differing only in whether the trailing element has a smallest encoding to be
+// discarded to. `&str` does; `[&str; 1]` does not, so its bytes have to be carried into the
+// branch node instead.
+#[test]
+fn discarding_elements_shrinks_branch_nodes() {
+    const DISCARDED: TableDefinition<(&str, &str), u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<(&str, [&str; 1]), u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let head = format!("{i:08}{}", "-head".repeat(8));
+            let tail = format!("{i:04}{suffix}");
+            discarded
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            carried
+                .insert(&(head.as_str(), [tail.as_str()]), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
+// A separator is stored in a branch node and compared against keys, so it has to be an encoding
+// of the key type. Deserializing and re-serializing one reproduces it, as it would any encoding.
+#[test]
+fn separators_are_encodings() {
+    fn check<K: Key>(left: &K::SelfType<'_>, right: &K::SelfType<'_>) {
+        let left = K::as_bytes(left);
+        let right = K::as_bytes(right);
+        let separator = K::separator(left.as_ref(), right.as_ref());
+        let value = K::from_bytes(&separator);
+        assert_eq!(
+            K::as_bytes(&value).as_ref(),
+            separator.as_ref(),
+            "separator is not an encoding: {separator:?}"
+        );
+    }
+
+    check::<&str>(&"abc0suffix", &"abc1suffix");
+    // A cut inside a multi-byte character would leave the separator invalid UTF-8
+    check::<&str>(&"aaaaaa", &"a\u{1d11e}zz");
+    check::<&[u8]>(&b"abc0suffix".as_slice(), &b"abc1suffix".as_slice());
+    check::<String>(&String::from("abc0suffix"), &String::from("abc1suffix"));
+    check::<Option<&str>>(&Some("abc0suffix"), &Some("abc1suffix"));
+    check::<Option<&str>>(&None, &Some("abc"));
+    // Composites assemble their separators, so their headers have to come out consistent
+    check::<(&str, &str)>(&("abc0suffix", "tail"), &("abc1suffix", "other"));
+    check::<(&str, u64)>(&("abc0suffix", 1), &("abc1suffix", 2));
+    check::<(u64, &str)>(&(7, "abc0suffix"), &(7, "abc1suffix"));
+    check::<(&str, Option<&str>)>(&("abc0suffix", Some("tail")), &("abc1suffix", Some("x")));
+    check::<[&str; 2]>(&["abc0suffix", "tail"], &["abc1suffix", "other"]);
+    check::<[&str; 3]>(&["abc0suffix", "a", "b"], &["abc1suffix", "c", "d"]);
+    check::<[Option<&str>; 2]>(&[Some("aaaa"), Some("zzzz")], &[Some("bbbb"), Some("yyyy")]);
 }
 
 #[test]

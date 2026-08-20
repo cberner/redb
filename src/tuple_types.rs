@@ -1,5 +1,6 @@
 use crate::complex_types::{decode_varint_len, encode_varint_len};
 use crate::types::{Key, TypeName, Value};
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -62,6 +63,121 @@ fn not_equal<T: Key>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
         Ordering::Equal => None,
         Ordering::Greater => Some(Ordering::Greater),
     }
+}
+
+// One element of a tuple, so that `tuple_separator()` can walk elements whose types it cannot name
+#[derive(Clone, Copy)]
+struct TupleElement {
+    fixed_width: Option<usize>,
+    min_encoded_key: Option<&'static [u8]>,
+    compare: fn(&[u8], &[u8]) -> Ordering,
+    separator: for<'a> fn(&'a [u8], &'a [u8]) -> Cow<'a, [u8]>,
+}
+
+impl TupleElement {
+    fn of<T: Key>() -> Self {
+        Self {
+            fixed_width: T::fixed_width(),
+            min_encoded_key: T::MIN_ENCODED_KEY,
+            compare: T::compare,
+            separator: T::separator,
+        }
+    }
+
+    // A separator for this element, and whether it sorts strictly above `left`, or `None` when a
+    // fixed width element leaves nothing to shorten: its encodings are compared at that width.
+    fn shorten<'a>(&self, left: &'a [u8], right: &'a [u8]) -> Option<(Cow<'a, [u8]>, bool)> {
+        if self.fixed_width.is_some() {
+            return None;
+        }
+        let separator = (self.separator)(left, right);
+        let strict = (self.compare)(left, &separator).is_lt();
+        Some((separator, strict))
+    }
+
+    // What to store for an element the separator no longer has to distinguish: the smallest
+    // encoding where the type has one, and `left`'s bytes otherwise. A fixed width element is
+    // compared at its width, so it can only be kept.
+    fn discard<'a>(&self, left: &'a [u8]) -> &'a [u8] {
+        if self.fixed_width.is_some() {
+            return left;
+        }
+        self.min_encoded_key.unwrap_or(left)
+    }
+}
+
+// The separator between two encodings of a variable width tuple. `leading` describes every element
+// but the last, whose length is implicit and which `last` describes.
+//
+// The elements before the one the two first differ in are needed for the result to sort below
+// `right`. Once the shortened element sorts strictly above `left`'s, both comparisons resolve
+// there and never read what follows, so the rest can be replaced by their smallest encodings.
+fn tuple_separator<'a, const N: usize>(
+    leading: [TupleElement; N],
+    last: TupleElement,
+    left: &'a [u8],
+    right: &'a [u8],
+) -> Cow<'a, [u8]> {
+    let fixed_width: [Option<usize>; N] = core::array::from_fn(|i| leading[i].fixed_width);
+    let (header, lens) = parse_lens::<N>(fixed_width, left);
+    let (right_header, right_lens) = parse_lens::<N>(fixed_width, right);
+    let mut offset = header;
+    let mut right_offset = right_header;
+    for (index, element) in leading.iter().enumerate() {
+        let bytes = &left[offset..(offset + lens[index])];
+        let right_bytes = &right[right_offset..(right_offset + right_lens[index])];
+        if (element.compare)(bytes, right_bytes).is_eq() {
+            offset += lens[index];
+            right_offset += right_lens[index];
+            continue;
+        }
+        let Some((separator, strict)) = element.shorten(bytes, right_bytes) else {
+            return Cow::Borrowed(left);
+        };
+
+        let mut elements: Vec<&[u8]> = Vec::with_capacity(N + 1);
+        let mut cursor = header;
+        for (i, element) in leading.iter().enumerate() {
+            let bytes = &left[cursor..(cursor + lens[i])];
+            cursor += lens[i];
+            elements.push(match i.cmp(&index) {
+                Ordering::Equal => &separator,
+                Ordering::Greater if strict => element.discard(bytes),
+                Ordering::Less | Ordering::Greater => bytes,
+            });
+        }
+        let tail = &left[cursor..];
+        elements.push(if strict { last.discard(tail) } else { tail });
+
+        // Every length varint is rebuilt, since a shortened element's may shrink as well
+        let mut result = Vec::with_capacity(left.len());
+        for (i, element) in leading.iter().enumerate() {
+            if element.fixed_width.is_none() {
+                encode_varint_len(elements[i].len(), &mut result);
+            }
+        }
+        for element in &elements {
+            result.extend_from_slice(element);
+        }
+        // A separator longer than the whole key is no use, however it was assembled
+        return if result.len() < left.len() {
+            Cow::Owned(result)
+        } else {
+            Cow::Borrowed(left)
+        };
+    }
+    // Every leading element compared equal, so only the last one can differ. It stores no length
+    // and has nothing after it, so the rest of the encoding is kept as it is.
+    let Some((separator, _)) = last.shorten(&left[offset..], &right[right_offset..]) else {
+        return Cow::Borrowed(left);
+    };
+    if separator.len() >= left.len() - offset {
+        return Cow::Borrowed(left);
+    }
+    let mut result = Vec::with_capacity(offset + separator.len());
+    result.extend_from_slice(&left[..offset]);
+    result.extend_from_slice(&separator);
+    Cow::Owned(result)
 }
 
 macro_rules! fixed_width_impl {
@@ -275,6 +391,20 @@ macro_rules! tuple_impl {
                     compare_variable_impl!(data1, data2 $(,$t,$i)+ | $t_last, $i_last)
                 }
             }
+
+            fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+                // A fixed width tuple's encodings are compared at that width, so nothing shorter
+                // than `left` may be returned
+                if Self::fixed_width().is_some() {
+                    return Cow::Borrowed(left);
+                }
+                tuple_separator::<$i_last>(
+                    [$(TupleElement::of::<$t>(),)+],
+                    TupleElement::of::<$t_last>(),
+                    left,
+                    right,
+                )
+            }
         }
     };
 }
@@ -318,6 +448,13 @@ impl<T: Key> Key for (T,) {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         T::compare(data1, data2)
     }
+
+    // Encoded and compared exactly as `T`, so it separates the same way
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        T::separator(left, right)
+    }
+
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = T::MIN_ENCODED_KEY;
 }
 
 tuple_impl! {
@@ -432,7 +569,8 @@ tuple_impl! {
 
 #[cfg(test)]
 mod test {
-    use crate::types::Value;
+    use crate::types::{Key, Value};
+    use alloc::format;
 
     #[test]
     fn width() {
@@ -452,5 +590,101 @@ mod test {
             <(&str, u8)>::as_bytes(&("hello", 1)).len(),
             "hello".len() + size_of::<u8>() + size_of::<u8>()
         );
+    }
+
+    // `expected` is the tuple the separator between `left` and `right` must encode to
+    fn check_separator<K: Key>(
+        left: &K::SelfType<'_>,
+        right: &K::SelfType<'_>,
+        expected: &K::SelfType<'_>,
+    ) {
+        let left = K::as_bytes(left);
+        let right = K::as_bytes(right);
+        let separator = K::separator(left.as_ref(), right.as_ref());
+        assert_eq!(separator.as_ref(), K::as_bytes(expected).as_ref());
+        assert!(K::compare(left.as_ref(), &separator).is_le());
+        assert!(K::compare(&separator, right.as_ref()).is_lt());
+    }
+
+    #[test]
+    fn single_element_tuple_separator() {
+        // Encoded exactly as the element, so it separates the same way
+        check_separator::<(&str,)>(&("abc0suffix",), &("abc1suffix",), &("abc1",));
+    }
+
+    #[test]
+    fn last_element_separator() {
+        // The last element stores no length, so shortening it leaves the rest of the encoding
+        // untouched
+        check_separator::<(u64, &str)>(&(7, "abc0suffix"), &(7, "abc1suffix"), &(7, "abc1"));
+    }
+
+    #[test]
+    fn leading_element_separator() {
+        // A shortened leading element's length varint is rewritten, and the elements after it
+        // are `left`'s, not `right`'s
+        check_separator::<(&str, u64)>(&("abc0suffix", 1), &("abc1suffix", 2), &("abc1", 1));
+        // ...including when the shortened element is neither the first nor the last
+        check_separator::<(u8, &str, u64)>(
+            &(9, "abc0suffix", 1),
+            &(9, "abc1suffix", 2),
+            &(9, "abc1", 1),
+        );
+        // A varint that shrinks from three bytes to one is rewritten, not just overwritten
+        let long = "x".repeat(300);
+        check_separator::<(&str, u64)>(
+            &(&format!("0{long}"), 1),
+            &(&format!("1{long}"), 2),
+            &("1", 1),
+        );
+    }
+
+    #[test]
+    fn fixed_width_element_separator_returns_full_key() {
+        // A fixed width element cannot shrink, and the elements after it cannot be dropped
+        check_separator::<(u64, &str)>(&(1, "suffix"), &(2, "suffix"), &(1, "suffix"));
+        // Neither can a wholly fixed width tuple
+        check_separator::<(u64, u8)>(&(1, 1), &(2, 2), &(1, 1));
+    }
+
+    #[test]
+    fn elements_after_the_shortened_one_are_discarded() {
+        // The shortened element sorts strictly above `left`'s, so both comparisons resolve there
+        // and the elements after it collapse to their smallest encodings
+        check_separator::<(&str, &str)>(
+            &("abc0suffix", "a long tail"),
+            &("abc1suffix", "another"),
+            &("abc1", ""),
+        );
+        // A variable width element with no smallest encoding of its own is kept as it is
+        check_separator::<(&str, [&str; 2])>(
+            &("abc0suffix", ["kept", "here"]),
+            &("abc1suffix", ["other", "values"]),
+            &("abc1", ["kept", "here"]),
+        );
+        // ...as is a fixed width one, which is compared at its width
+        check_separator::<(&str, u64, &str)>(
+            &("abc0suffix", 7, "a long tail"),
+            &("abc1suffix", 9, "another"),
+            &("abc1", 7, ""),
+        );
+        // `Option` discards down to its tag byte, which is what `None` encodes to
+        check_separator::<(&str, Option<&str>)>(
+            &("abc0suffix", Some("a long tail")),
+            &("abc1suffix", Some("another")),
+            &("abc1", None),
+        );
+    }
+
+    #[test]
+    fn nothing_is_discarded_without_a_strictly_greater_element() {
+        // Nothing sorts between these first elements, so the separator equals `left`'s element and
+        // the comparison against `left` runs on into the tail, which therefore has to stay
+        check_separator::<(&str, &str)>(&("abc", "tail"), &("abc-suffix", "x"), &("abc", "tail"));
+    }
+
+    #[test]
+    fn separator_returns_full_key_when_nothing_is_shorter() {
+        check_separator::<(&str, u64)>(&("abc", 1), &("abd-suffix", 2), &("abc", 1));
     }
 }

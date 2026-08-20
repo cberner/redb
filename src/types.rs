@@ -221,13 +221,12 @@ pub trait Key: Value {
     /// Returns a separator between `left` and `right`.
     ///
     /// `left` and `right` are encoded values for which [`compare()`](Self::compare) returns
-    /// [`Ordering::Less`]. The result must be greater than or equal to `left`, and less than
-    /// `right`, under [`compare()`](Self::compare).
+    /// [`Ordering::Less`]. The result must be an encoding of `Self` that is greater than or equal
+    /// to `left`, and less than `right`, under [`compare()`](Self::compare).
     ///
-    /// The result is only used to route lookups through the btree's internal nodes: it is passed
-    /// to [`compare()`](Self::compare), and never to [`Value::from_bytes()`], so it need not be a
-    /// valid encoding of `Self`. The shorter it is, the more children fit in each internal node,
-    /// which makes the tree shallower and cheaper to search.
+    /// The result is stored in the btree's internal nodes to route lookups. The shorter it is,
+    /// the more children fit in each internal node, which makes the tree shallower and cheaper to
+    /// search. It should never be longer than `left`, which is always available to fall back to.
     ///
     /// Returning [`Cow::Owned`] allows separators synthesized from the inputs, rather than
     /// borrowed from them.
@@ -237,6 +236,16 @@ pub trait Key: Value {
         debug_assert!(Self::compare(left, right).is_lt());
         Cow::Borrowed(left)
     }
+
+    /// The encoding of the smallest value of `Self`, or `None` when it has no smallest value.
+    ///
+    /// A composite key's separator uses this in place of the elements it no longer has to
+    /// distinguish, rather than copying them from `left`. Leaving it `None` costs only separator
+    /// length.
+    ///
+    /// Only consulted for variable width types. A fixed width type's encodings are all the same
+    /// length, so there is never anything shorter to substitute.
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = None;
 }
 
 impl Value for () {
@@ -414,6 +423,10 @@ impl<T: Key> Key for Option<T> {
         separator.extend_from_slice(&payload);
         Cow::Owned(separator)
     }
+
+    // `None` sorts below every `Some`, and encodes as the tag alone when `T` is variable width.
+    // A fixed width `T` makes `Option<T>` fixed width too, so this is never consulted for one.
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = Some(&[0]);
 }
 
 impl Value for &[u8] {
@@ -468,6 +481,9 @@ impl Key for &[u8] {
             Cow::Borrowed(left)
         }
     }
+
+    // Encodings order as their bytes, so the empty one sorts below them all
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = Some(&[]);
 }
 
 impl<const N: usize> Value for &[u8; N] {
@@ -605,6 +621,65 @@ impl<const N: usize, T: Key> Key for [T; N] {
         }
         Ordering::Equal
     }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        // A fixed width element type makes the array fixed width too, and its encodings are
+        // compared at that width, so nothing shorter than `left` may be returned
+        if T::fixed_width().is_some() {
+            return Cow::Borrowed(left);
+        }
+        // Only the element the two first differ in can be shortened: the elements before it are
+        // needed for the result to sort below `right`. The elements after it can be replaced by
+        // the smallest encoding, but only once the shortened element sorts strictly above
+        // `left`'s, so that both comparisons resolve there and never read what follows.
+        let header = size_of::<u32>() * N;
+        let left_ends: [usize; N] = core::array::from_fn(|i| array_end_offset(left, i));
+        let right_ends: [usize; N] = core::array::from_fn(|i| array_end_offset(right, i));
+        let element = |data: &'a [u8], ends: &[usize; N], i: usize| -> &'a [u8] {
+            &data[if i == 0 { header } else { ends[i - 1] }..ends[i]]
+        };
+
+        for i in 0..N {
+            let left_element = element(left, &left_ends, i);
+            let right_element = element(right, &right_ends, i);
+            if T::compare(left_element, right_element).is_eq() {
+                continue;
+            }
+            let separator = T::separator(left_element, right_element);
+            // The tail may only be replaced once this element sorts strictly above `left`'s
+            let tail = T::MIN_ENCODED_KEY.filter(|_| T::compare(left_element, &separator).is_lt());
+            let mut elements: Vec<&[u8]> = Vec::with_capacity(N);
+            elements.extend((0..i).map(|j| element(left, &left_ends, j)));
+            elements.push(&separator);
+            elements
+                .extend(((i + 1)..N).map(|j| tail.unwrap_or_else(|| element(left, &left_ends, j))));
+
+            let total: usize = elements.iter().map(|x| x.len()).sum();
+            let mut result = Vec::with_capacity(header + total);
+            let mut end = header;
+            for element in &elements {
+                end += element.len();
+                result.extend_from_slice(&u32::try_from(end).unwrap().to_le_bytes());
+            }
+            for element in &elements {
+                result.extend_from_slice(element);
+            }
+            // A separator longer than the whole key is no use, however it was assembled
+            return if result.len() < left.len() {
+                Cow::Owned(result)
+            } else {
+                Cow::Borrowed(left)
+            };
+        }
+        // Every element compared equal, so `left` does not sort below `right`
+        Cow::Borrowed(left)
+    }
+}
+
+// The end offset an array encoding stores for its `index`th element
+fn array_end_offset(data: &[u8], index: usize) -> usize {
+    let range = size_of::<u32>() * index..size_of::<u32>() * (index + 1);
+    u32::from_le_bytes(data[range].try_into().unwrap()) as usize
 }
 
 impl Value for &str {
@@ -667,6 +742,9 @@ impl Key for &str {
             Cow::Borrowed(left)
         }
     }
+
+    // The empty string is valid UTF-8, and sorts below every other one
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = Some(&[]);
 }
 
 impl Value for String {
@@ -713,6 +791,8 @@ impl Key for String {
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         <&str as Key>::separator(left, right)
     }
+
+    const MIN_ENCODED_KEY: Option<&'static [u8]> = <&str as Key>::MIN_ENCODED_KEY;
 }
 
 impl Value for char {
@@ -960,6 +1040,98 @@ mod tests {
         let left = <Option<u64> as Value>::as_bytes(&Some(1));
         let right = <Option<u64> as Value>::as_bytes(&Some(2));
         assert_eq!(<Option<u64> as Key>::separator(&left, &right), left);
+    }
+
+    #[test]
+    fn array_separator() {
+        // (left, right, the shortest separator)
+        let cases: &[([&str; 2], [&str; 2], [&str; 2])] = &[
+            // The shortened element sorts strictly above `left`'s, so the tail is discarded
+            (
+                ["abc0suffix", "left"],
+                ["abc1suffix", "right"],
+                ["abc1", ""],
+            ),
+            // Shortening the last element leaves the elements before it alone
+            (
+                ["same", "abc0suffix"],
+                ["same", "abc1suffix"],
+                ["same", "abc1"],
+            ),
+            // Nothing sorts between these first elements, so the tail has to stay: a separator
+            // equal to `left`'s element does not resolve the comparison against `left`
+            (["abc", "tail"], ["abc-suffix", "x"], ["abc", "tail"]),
+        ];
+
+        for &(left, right, expected) in cases {
+            let left = <[&str; 2] as Value>::as_bytes(&left);
+            let right = <[&str; 2] as Value>::as_bytes(&right);
+            let separator = <[&str; 2] as Key>::separator(&left, &right);
+            assert_eq!(separator, <[&str; 2] as Value>::as_bytes(&expected));
+            assert!(<[&str; 2] as Key>::compare(&left, &separator).is_le());
+            assert!(<[&str; 2] as Key>::compare(&separator, &right).is_lt());
+            assert!(separator.len() <= left.len());
+        }
+    }
+
+    // An array of a fixed width element type is itself fixed width, so it must not shorten
+    #[test]
+    fn fixed_width_array_separator_returns_full_key() {
+        let left = <[u64; 2] as Value>::as_bytes(&[1, 1]);
+        let right = <[u64; 2] as Value>::as_bytes(&[2, 2]);
+        assert_eq!(<[u64; 2] as Key>::separator(&left, &right), left);
+    }
+
+    // A discarded element is replaced by its own smallest encoding, not by nothing. A lookup key
+    // that matches the separator up to the discarded element is compared against it, and `Option`
+    // reads a tag byte, so an empty element would leave `compare()` indexing past the end.
+    #[test]
+    fn discarded_elements_stay_readable_by_compare() {
+        type Key2 = [Option<&'static str>; 2];
+        let left = <Key2 as Value>::as_bytes(&[Some("aaaa"), Some("zzzz")]);
+        let right = <Key2 as Value>::as_bytes(&[Some("bbbb"), Some("yyyy")]);
+        let separator = <Key2 as Key>::separator(&left, &right);
+        assert_eq!(
+            separator,
+            // The `Some("b")` the first element shortened to, then `None` in place of the second
+            <Key2 as Value>::as_bytes(&[Some("b"), None])
+        );
+        assert!(<Key2 as Key>::compare(&left, &separator).is_le());
+        assert!(<Key2 as Key>::compare(&separator, &right).is_lt());
+
+        // The comparison a lookup makes once its first element matches the separator's
+        let probe = <Key2 as Value>::as_bytes(&[Some("b"), Some("x")]);
+        assert!(<Key2 as Key>::compare(&probe, &separator).is_gt());
+    }
+
+    fn assert_least<K: Key>(value: &K::SelfType<'_>) {
+        let encoded = K::as_bytes(value);
+        let min = K::MIN_ENCODED_KEY.unwrap();
+        assert!(K::compare(min, encoded.as_ref()).is_le());
+        assert!(K::compare(min, min).is_eq());
+    }
+
+    #[test]
+    fn min_encoded_keys() {
+        // Types whose encodings order as their bytes bottom out at the empty one
+        assert_eq!(<&[u8] as Key>::MIN_ENCODED_KEY, Some(b"".as_slice()));
+        assert_eq!(<&str as Key>::MIN_ENCODED_KEY, Some(b"".as_slice()));
+        assert_eq!(<String as Key>::MIN_ENCODED_KEY, Some(b"".as_slice()));
+        // `Option` needs its tag, which is also what `None` encodes to
+        assert_eq!(<Option<&str> as Key>::MIN_ENCODED_KEY, Some([0].as_slice()));
+        // Composing one for these would mean concatenating their elements' at compile time
+        assert_eq!(<[&str; 2] as Key>::MIN_ENCODED_KEY, None);
+        assert_eq!(<(&str, &str) as Key>::MIN_ENCODED_KEY, None);
+        // A type that does not implement it keeps the default
+        assert_eq!(<u64 as Key>::MIN_ENCODED_KEY, None);
+
+        // Every one of them must be something `compare()` accepts, and sort at or below the
+        // encoding of any value
+        assert_least::<&[u8]>(&b"anything".as_slice());
+        assert_least::<&str>(&"anything");
+        assert_least::<String>(&String::from("anything"));
+        assert_least::<Option<&str>>(&Some("anything"));
+        assert_least::<Option<&str>>(&None);
     }
 
     #[test]

@@ -53,6 +53,14 @@
   touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
   implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
   `Option` keys shorten their payload, when the wrapped type is variable width.
+* Add `Key::MIN_ENCODED_KEY`, the smallest byte string `compare()` accepts for a type, and use it
+  to shorten separators for tuple and array keys. Both shorten the element that the two keys
+  first differ in, and, when that leaves it sorting strictly above the left key's, replace every
+  element after it with its smallest encoding, since nothing beyond that point can affect the
+  comparison. A tuple of two long strings that differ in the first element stores a few bytes in
+  each branch node instead of the whole key. The default is `None`, meaning the type has no such
+  byte string, which leaves existing `Key` implementations unchanged and only costs separator
+  length; `&[u8]`, `&str` and `String` supply the empty byte string, and `Option` its tag byte.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator
