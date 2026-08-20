@@ -391,6 +391,29 @@ impl<T: Key> Key for Option<T> {
             }
         }
     }
+
+    fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        // A fixed width `T` makes `Option<T>` fixed width too, and its encodings are compared at
+        // that width, so nothing shorter than `left` may be returned
+        if T::fixed_width().is_some() {
+            return Cow::Borrowed(left);
+        }
+        // `None` sorts below every `Some` and encodes as the tag alone, so nothing is shorter
+        if left[0] == 0 {
+            return Cow::Borrowed(left);
+        }
+        // Both are `Some`, so a separator between the payloads, behind the same tag, separates
+        // the two. Which input the payload came from is not visible here, so the result is
+        // assembled rather than borrowed.
+        let payload = T::separator(&left[1..], &right[1..]);
+        if payload.len() + 1 >= left.len() {
+            return Cow::Borrowed(left);
+        }
+        let mut separator = Vec::with_capacity(payload.len() + 1);
+        separator.push(1);
+        separator.extend_from_slice(&payload);
+        Cow::Owned(separator)
+    }
 }
 
 impl Value for &[u8] {
@@ -907,6 +930,36 @@ mod tests {
                 separator
             );
         }
+    }
+
+    #[test]
+    fn option_separator() {
+        // (left, right, the shortest separator)
+        let cases: &[(Option<&str>, Option<&str>, &[u8])] = &[
+            // The payloads separate as `&str` does, behind the `Some` tag
+            (Some("abc0suffix"), Some("abc1suffix"), b"\x01abc1"),
+            // `None` encodes as the tag alone, so nothing is shorter
+            (None, Some("abc"), b"\x00"),
+            // Nothing shorter than `left` sorts above it
+            (Some("abc"), Some("abd-suffix"), b"\x01abc"),
+        ];
+
+        for &(left, right, expected) in cases {
+            let left = <Option<&str> as Value>::as_bytes(&left);
+            let right = <Option<&str> as Value>::as_bytes(&right);
+            let separator = <Option<&str> as Key>::separator(&left, &right);
+            assert_eq!(separator, expected);
+            assert!(<Option<&str> as Key>::compare(&left, &separator).is_le());
+            assert!(<Option<&str> as Key>::compare(&separator, &right).is_lt());
+        }
+    }
+
+    // `Option<T>` of a fixed width `T` is itself fixed width, so it must not shorten
+    #[test]
+    fn fixed_width_option_separator_returns_full_key() {
+        let left = <Option<u64> as Value>::as_bytes(&Some(1));
+        let right = <Option<u64> as Value>::as_bytes(&Some(2));
+        assert_eq!(<Option<u64> as Key>::separator(&left, &right), left);
     }
 
     #[test]
