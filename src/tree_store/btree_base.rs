@@ -29,9 +29,9 @@ pub(super) type Checksum = u128;
 pub(super) const DEFERRED: Checksum = 999;
 
 // The key to store in a branch node between a child whose greatest key is `left` and the next,
-// whose least key is `right`. Branch keys only route lookups -- they are compared, never
-// deserialized -- so a `Key` implementation may shorten them, which packs more children into each
-// branch page.
+// whose least key is `right`. Branch keys only route lookups, so a `Key` implementation may
+// shorten them to any encoding that still sorts between the two, which packs more children into
+// each branch page.
 pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
     debug_assert!(K::compare(left, right).is_lt());
     // Branch keys of a fixed width type are stored at that stride, so a shorter separator would
@@ -1833,7 +1833,7 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
         );
         for i in 0..(self.count_children() - 1) {
             if let Some(child) = self.child_page(i + 1) {
-                // Branch keys are separators, which need not be valid encodings of the key type
+                // Branch keys are separators, which are shortened encodings of the key type
                 let key = self.key(i).unwrap();
                 eprint!(" key_{i}={key:?}");
                 eprint!(" child_{}={child:?}", i + 1);

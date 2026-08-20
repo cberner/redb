@@ -221,13 +221,12 @@ pub trait Key: Value {
     /// Returns a separator between `left` and `right`.
     ///
     /// `left` and `right` are encoded values for which [`compare()`](Self::compare) returns
-    /// [`Ordering::Less`]. The result must be greater than or equal to `left`, and less than
-    /// `right`, under [`compare()`](Self::compare).
+    /// [`Ordering::Less`]. The result must be an encoding of `Self` that is greater than or equal
+    /// to `left`, and less than `right`, under [`compare()`](Self::compare).
     ///
-    /// The result is only used to route lookups through the btree's internal nodes: it is passed
-    /// to [`compare()`](Self::compare), and never to [`Value::from_bytes()`], so it need not be a
-    /// valid encoding of `Self`. The shorter it is, the more children fit in each internal node,
-    /// which makes the tree shallower and cheaper to search.
+    /// The result is stored in the btree's internal nodes to route lookups. The shorter it is,
+    /// the more children fit in each internal node, which makes the tree shallower and cheaper to
+    /// search. It should never be longer than `left`, which is always available to fall back to.
     ///
     /// Returning [`Cow::Owned`] allows separators synthesized from the inputs, rather than
     /// borrowed from them.
