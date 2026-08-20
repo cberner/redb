@@ -62,6 +62,16 @@ different bench name to compare against other engines, e.g.
 `just bench lmdb_benchmark`. `just bench_containerized` runs benchmarks inside
 a memory-limited Docker container (see `Dockerfile.bench`).
 
+The benchmarks are split across two crates. `redb-bench` holds the shared harness
+(`src/lib.rs`: the `BenchDatabase` trait family, the workloads, and the redb
+adapter) plus the benchmarks that only exercise redb. `redb-bench-compare` holds
+the benchmarks that compare against other engines, and is the only crate that
+depends on lmdb, RocksDB, fjall, or SQLite. Cargo builds every dev-dependency of
+a package whenever any of its bench targets is built, so keeping those engines
+out of `redb-bench` is what stops `cargo bench --bench redb_benchmark` from
+compiling RocksDB's vendored C++ sources. Add new engine comparisons to
+`redb-bench-compare`, not `redb-bench`.
+
 ## Design / architecture
 
 The design doc lives at `docs/design.md` — read it before making non-trivial

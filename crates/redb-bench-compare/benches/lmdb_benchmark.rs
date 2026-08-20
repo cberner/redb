@@ -1,11 +1,11 @@
 use std::{fs, process};
 use tempfile::{NamedTempFile, TempDir};
 
-mod benchmark_dir;
-use benchmark_dir::benchmark_dir;
+use redb_bench::benchmark_dir;
 
 mod common;
 use common::*;
+use redb_bench::*;
 
 fn main() {
     let _ = env_logger::try_init();
