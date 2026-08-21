@@ -236,6 +236,14 @@ pub trait Key: Value {
         debug_assert!(Self::compare(left, right).is_lt());
         Cow::Borrowed(left)
     }
+
+    /// The encoding of the smallest value of `Self`, or `None` when it has no smallest value.
+    ///
+    /// Providing this is optional. It lets container types holding `Self` shorten their
+    /// separators.
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        None
+    }
 }
 
 impl Value for () {
@@ -413,6 +421,15 @@ impl<T: Key> Key for Option<T> {
         separator.extend_from_slice(&payload);
         Cow::Owned(separator)
     }
+
+    // `None` sorts below every `Some`
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        Some(match T::fixed_width() {
+            // A fixed width `T` pads the tag out to the width of a `Some`
+            Some(width) => Cow::Owned(vec![0; width + 1]),
+            None => Cow::Borrowed(&[0]),
+        })
+    }
 }
 
 impl Value for &[u8] {
@@ -466,6 +483,11 @@ impl Key for &[u8] {
         } else {
             Cow::Borrowed(left)
         }
+    }
+
+    // Encodings order as their bytes, so the empty one sorts below them all
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        Some(Cow::Borrowed(&[]))
     }
 }
 
@@ -666,6 +688,11 @@ impl Key for &str {
             Cow::Borrowed(left)
         }
     }
+
+    // The empty string is valid UTF-8, and sorts below every other one
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        Some(Cow::Borrowed(&[]))
+    }
 }
 
 impl Value for String {
@@ -711,6 +738,10 @@ impl Key for String {
     // Encoded the same way as `&str`, so it separates the same way
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
         <&str as Key>::separator(left, right)
+    }
+
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        <&str as Key>::min_encoded_key()
     }
 }
 
@@ -959,6 +990,63 @@ mod tests {
         let left = <Option<u64> as Value>::as_bytes(&Some(1));
         let right = <Option<u64> as Value>::as_bytes(&Some(2));
         assert_eq!(<Option<u64> as Key>::separator(&left, &right), left);
+    }
+
+    fn assert_least<K: Key>(value: &K::SelfType<'_>) {
+        let encoded = K::as_bytes(value);
+        let min = K::min_encoded_key().unwrap();
+        assert!(K::compare(&min, encoded.as_ref()).is_le());
+        assert!(K::compare(&min, &min).is_eq());
+        // It is an encoding like any other, so a fixed width type's is that wide
+        if let Some(width) = K::fixed_width() {
+            assert_eq!(min.len(), width);
+        }
+    }
+
+    #[test]
+    fn min_encoded_keys() {
+        // Types whose encodings order as their bytes bottom out at the empty one
+        assert_eq!(
+            <&[u8] as Key>::min_encoded_key().as_deref(),
+            Some(b"".as_slice())
+        );
+        assert_eq!(
+            <&str as Key>::min_encoded_key().as_deref(),
+            Some(b"".as_slice())
+        );
+        assert_eq!(
+            <String as Key>::min_encoded_key().as_deref(),
+            Some(b"".as_slice())
+        );
+        // `Option` needs its tag, which is also what `None` encodes to
+        assert_eq!(
+            <Option<&str> as Key>::min_encoded_key().as_deref(),
+            Some([0].as_slice())
+        );
+        // A fixed width `T` pads that tag out to the width of a `Some`
+        assert_eq!(
+            <Option<u64> as Key>::min_encoded_key().as_deref(),
+            Some([0; 9].as_slice())
+        );
+        // A one element tuple is encoded exactly as its element
+        assert_eq!(
+            <(&str,) as Key>::min_encoded_key().as_deref(),
+            Some(b"".as_slice())
+        );
+        // Types that do not implement it keep the default
+        assert_eq!(<u64 as Key>::min_encoded_key(), None);
+        assert_eq!(<[&str; 2] as Key>::min_encoded_key(), None);
+        assert_eq!(<(&str, &str) as Key>::min_encoded_key(), None);
+
+        // Every one of them must be something `compare()` accepts, and sort at or below the
+        // encoding of any value
+        assert_least::<&[u8]>(&b"anything".as_slice());
+        assert_least::<&str>(&"anything");
+        assert_least::<String>(&String::from("anything"));
+        assert_least::<Option<&str>>(&Some("anything"));
+        assert_least::<Option<&str>>(&None);
+        assert_least::<Option<u64>>(&Some(1));
+        assert_least::<Option<u64>>(&None);
     }
 
     #[test]

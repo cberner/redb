@@ -53,6 +53,8 @@
   touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
   implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
   `Option` keys shorten their payload, when the wrapped type is variable width.
+* Add `Key::min_encoded_key()`, the encoding of a key type's smallest value. Implementing it is
+  optional, and lets container types holding that key store shorter separators.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator
