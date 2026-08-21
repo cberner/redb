@@ -3594,6 +3594,163 @@ fn array_separators_shrink_branch_nodes() {
     );
 }
 
+// A tuple separator shortens one element, discards those after it, and rewrites the length
+// varints that head the encoding, so it must route and iterate correctly with that new header
+#[test]
+fn tuple_keys_with_shortened_separators() {
+    const TUPLE: TableDefinition<(&str, &str), u64> = TableDefinition::new("tuple");
+    const OPTION: TableDefinition<(&str, Option<&str>), u64> = TableDefinition::new("option");
+    const NUM_KEYS: u64 = 2_000;
+    // The first element decides the order, and runs past the digits that distinguish adjacent
+    // keys so that its separator can truncate and land strictly above the left key's. The second
+    // is long enough to dominate the key.
+    let head = |i: u64| format!("{i:08}{}", "-head".repeat(8));
+    let tail = |i: u64| format!("{i:04}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut option_table = write_txn.open_table(OPTION).unwrap();
+        for i in 0..NUM_KEYS {
+            let (head, tail) = (head(i), tail(i));
+            tuple_table
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            option_table
+                .insert(&(head.as_str(), Some(tail.as_str())), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let option_table = read_txn.open_table(OPTION).unwrap();
+    assert!(tuple_table.stats().unwrap().tree_height() > 1);
+    assert!(option_table.stats().unwrap().tree_height() > 1);
+    // The heads are zero padded, so insertion order is also the sorted order
+    let mut iter = tuple_table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let (head, tail) = (head.as_str(), tail.as_str());
+        assert_eq!(tuple_table.get(&(head, tail)).unwrap().unwrap().value(), i);
+        assert_eq!(
+            option_table
+                .get(&(head, Some(tail)))
+                .unwrap()
+                .unwrap()
+                .value(),
+            i
+        );
+        let (actual_key, actual_value) = iter.next().unwrap().unwrap();
+        assert_eq!(actual_key.value(), (head, tail));
+        assert_eq!(actual_value.value(), i);
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let (head, tail) = (head(i), tail(i));
+                let removed = tuple_table.remove(&(head.as_str(), tail.as_str())).unwrap();
+                assert_eq!(removed.unwrap().value(), i);
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let value = tuple_table
+            .get(&(head.as_str(), tail.as_str()))
+            .unwrap()
+            .map(|guard| guard.value());
+        assert_eq!(value, (i % 4 == 0).then_some(i));
+    }
+}
+
+// The same keys, differing only in whether the trailing element has a smallest encoding to be
+// discarded to. `&str` does; `[&str; 1]` does not, so its bytes have to be carried into the
+// branch node instead.
+#[test]
+fn tuple_separators_shrink_branch_nodes() {
+    const DISCARDED: TableDefinition<(&str, &str), u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<(&str, [&str; 1]), u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let head = format!("{i:08}{}", "-head".repeat(8));
+            let tail = format!("{i:04}{suffix}");
+            discarded
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            carried
+                .insert(&(head.as_str(), [tail.as_str()]), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
+// Keys that differ in a fixed width leading element, which cannot shrink. Taking `right`'s element
+// whole still lets the tail collapse, which is where nearly the whole key is.
+#[test]
+fn fixed_width_leading_element_separators_shrink_branch_nodes() {
+    const DISCARDED: TableDefinition<(u64, &str), u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<(u64, [&str; 1]), u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let tail = format!("{i:04}{suffix}");
+            discarded.insert(&(i, tail.as_str()), &i).unwrap();
+            carried.insert(&(i, [tail.as_str()]), &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
 // A separator is stored in a branch node and compared against keys, so it has to be an encoding
 // of the key type. Deserializing and re-serializing one reproduces it, as it would any encoding.
 #[test]
