@@ -1,5 +1,6 @@
 use crate::complex_types::{decode_varint_len, encode_varint_len};
 use crate::types::{Key, TypeName, Value};
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -317,6 +318,11 @@ impl<T: Value> Value for (T,) {
 impl<T: Key> Key for (T,) {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
         T::compare(data1, data2)
+    }
+
+    // Encoded exactly as `T`, so its smallest value encodes the same way
+    fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        T::min_encoded_key()
     }
 }
 
