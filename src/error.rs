@@ -398,7 +398,7 @@ impl Display for CompactionError {
 
 impl core::error::Error for CompactionError {}
 
-/// Errors related to transactions
+/// Errors related to setting a transaction's durability
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SetDurabilityError {
