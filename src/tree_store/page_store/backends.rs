@@ -6,6 +6,7 @@ use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::fmt::{Debug, Formatter};
 
 #[cfg(not(redb_no_std))]
 #[derive(Debug)]
@@ -48,8 +49,20 @@ impl StorageBackend for ReadOnlyBackend {
 }
 
 /// Acts as temporal in-memory database storage.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct InMemoryBackend(RwLock<Vec<u8>>);
+
+// Hand-written: the derived impl would print every byte of the database, and opening a database
+// formats its backend into the debug log when the "logging" feature is enabled. The length stays
+// meaningful when a writer panicked, so a poisoned lock is read through rather than branched on
+impl Debug for InMemoryBackend {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        let guard = self.0.read().unwrap_or_else(|error| error.into_inner());
+        f.debug_struct("InMemoryBackend")
+            .field("len", &guard.len())
+            .finish()
+    }
+}
 
 impl InMemoryBackend {
     fn out_of_range() -> io::Error {
@@ -110,5 +123,35 @@ impl StorageBackend for InMemoryBackend {
         } else {
             Err(Self::out_of_range())
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::InMemoryBackend;
+    use crate::StorageBackend;
+
+    #[test]
+    fn debug_reports_length_not_contents() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        assert_eq!(format!("{backend:?}"), "InMemoryBackend { len: 1024 }");
+    }
+
+    // A writer that panics poisons the lock; the length is still reported. Poisoning requires
+    // unwinding past the guard, so the test does too.
+    #[test]
+    #[cfg(panic = "unwind")]
+    fn debug_reads_through_a_poisoned_lock() {
+        let backend = std::sync::Arc::new(InMemoryBackend::new());
+        backend.set_len(512).unwrap();
+        let poisoner = backend.clone();
+        let result = std::thread::spawn(move || {
+            let _guard = poisoner.0.write();
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(result.is_err());
+        assert_eq!(format!("{backend:?}"), "InMemoryBackend { len: 512 }");
     }
 }
