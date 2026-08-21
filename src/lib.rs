@@ -107,12 +107,11 @@ pub mod backends;
 mod complex_types;
 mod db;
 mod error;
-// Public only where it is needed: without std a backend author has to be able to name these types
-// to implement `StorageBackend`. With std they are re-exports of `std::io`, which the caller
-// already has, so the module stays private and redb adds no public surface.
-#[cfg(redb_no_std)]
+// Public under the redb 5 API preview, so a backend author can name the error type in both
+// modes; with std it is a re-export of `std::io`
+#[cfg(feature = "experimental-api-5")]
 pub mod io;
-#[cfg(not(redb_no_std))]
+#[cfg(not(feature = "experimental-api-5"))]
 mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;

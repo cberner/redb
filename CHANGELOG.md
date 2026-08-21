@@ -6,8 +6,8 @@
   target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend
   and everything that opens a database from a path or a `File` are unavailable in that mode, as is
   `ReadOnlyDatabase`; storage is supplied through `Builder::create_with_backend()`, and
-  `StorageBackend` reports failures as `redb::io::Error`, a module redb makes public only in that
-  mode; with std it stays private and the type is `std::io::Error`, as before. The `cache_metrics`,
+  `StorageBackend` reports failures as `redb::io::Error`; the `io` module is public whenever
+  `experimental-api-5` is enabled, and with std it re-exports `std::io::Error`. The `cache_metrics`,
   `chrono_v0_4` and `uuid` features are unavailable there: the first needs 64-bit atomics, and the
   other two link against the standard library. Leaving `experimental-api-5` off keeps the std build
   regardless of the `std` feature, as before.
