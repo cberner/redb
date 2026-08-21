@@ -55,6 +55,8 @@
   `Option` keys shorten their payload, when the wrapped type is variable width.
 * Add `Key::min_encoded_key()`, the encoding of a key type's smallest value. Implementing it is
   optional, and lets container types holding that key store shorter separators.
+* Shorten separators for array keys, when the element type is variable width. Tables with such
+  keys use slightly less space, and lookups are faster.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator
