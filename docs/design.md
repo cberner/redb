@@ -475,6 +475,165 @@ All pages referenced by a savepoint must be contained in the above, because it i
 a) referenced directly by the data, system, or freed tree -- i.e. it's a committed page
 b) it is not referenced, in which case it is in the pending free state and is contained in the freed tree
 
+# Multi-process access
+
+Several processes may use one database at once, extending the epoch based reclamation above across
+process boundaries. The protocol needs only ordinary file I/O and whole-file advisory locks.
+
+The database is a directory rather than a single file: every process has `data.redb` open at once,
+so the exclusive lock a single-file database takes is impossible, and a shared one would deny
+writes to the holder on Windows. Coordination lives in the files beside the data:
+
+| file | contents |
+|------|----------|
+| `data.redb` | the database, in the single-file format described above |
+| `write.lock` | empty; held by the process that owns the single logical writer |
+| `metadata` | magic number and format version, which identifies the directory |
+| `registry.lock` | the shared state below, protected by the lock on itself |
+| `txn/<id>` | empty; one file per transaction some process is still reading |
+
+`data.redb` carries no lock of its own, so opening a file of that name with a marker beside it is
+refused. Opening fails outright where the platform has no file locks, rather than warning and
+continuing.
+
+`data.redb` and `metadata` are each written under a temporary name and renamed into place,
+`metadata` last, so a directory is recognized only once it holds a finished database and a call
+that fails leaves no marker behind.
+
+## metadata (12 bytes)
+
+* 8 bytes: magic number
+* 4 bytes: format version
+
+`magic number` must be set to the ASCII letters `redbMPro`.
+
+`format version` is 1. Any other value is refused rather than guessed at.
+
+## registry.lock (32 bytes)
+
+* 4 bytes: writer mode
+* 4 bytes: padding
+* 8 bytes: last committed transaction id
+* 8 bytes: free horizon
+* 8 bytes: horizon sequence number
+
+All fields are little endian, protected by the lock on this file: shared to read, exclusive to
+write.
+
+`writer mode` is 1 for a single writer process and 2 for multiple writer processes, fixed when the
+database is created.
+
+`last committed transaction id` is the newest transaction a writer has made durable, published after
+the commit is on disk.
+
+`free horizon` is the highest one any writer has used, published *before* anything is reclaimed
+under it.
+
+`horizon sequence number` counts announcements of a free horizon, whether or not they raised it.
+
+## Writer modes
+
+* **Single writer process.** One process holds `write.lock` for as long as it has the database open.
+  Nothing changes the file behind it, so it never reloads anything and its transactions run at
+  single-process speed. Other processes may open the database read-only.
+* **Multiple writer processes.** `write.lock` is taken per write transaction, so any process may
+  write, one at a time. Each writer loads the allocator state from the file rather than rebuilding
+  it, which forces every commit to be a quick-repair commit. Non-durable commits are rejected.
+
+Both modes skip the post-commit free epilogue. It publishes its work as a non-durable commit, which
+no other process can see, and its horizon is clamped to what a reader about to register can still
+reach -- which is what the next commit frees anyway.
+
+Commits are forced to 2-phase, at an extra `fsync` each. A crash can never observe the intermediate
+state of a 1-phase commit, but a reader in another process can, and may read a header naming pages
+that are not in the file yet.
+
+## Pinning transactions
+
+A process pins the oldest transaction it needs -- the minimum over its live read transactions and
+savepoints -- by creating `txn/<id>` and taking a **shared** lock on it. The name carries all of the
+data; these files are never read. Every process that needs the same transaction holds the same file.
+
+A writer lists `txn/` and walks it from the lowest id up, trying each file **exclusively**:
+
+* succeeding means nobody needs that transaction. The writer unlinks it while still holding the
+  lock, so a reader cannot open it in between and be left holding an unlinked inode;
+* failing means a process is reading that transaction. It is the lowest such id, so it is the
+  horizon, and the scan stops there.
+
+The free horizon is the minimum of that id and the oldest transaction the writer's own process
+needs. Moving a pin forward takes the new lock before dropping the old one, so a scan in between
+sees the older id rather than nothing. A process that exits needs no cleanup: the operating system
+drops its locks, and the next writer unlinks the name it left. Nothing accumulates, since the
+files are named after transactions rather than processes.
+
+Registering a read transaction and pinning it must be atomic against a writer's scan, or a reader
+could read a root, stall, and pin it only after a writer had concluded that nothing was pinned and
+reclaimed what that root reaches. `registry.lock` provides that: readers take it shared to pin,
+writers exclusively to scan. Both orderings are then safe:
+
+* the reader pins before the scan, so the writer holds its pages back;
+* the reader reads the file after the scan, so it sees a state at least as new as the scan produced.
+  Such a reader pins the last *durable* commit, so a writer clamps its free horizon to one past that
+  -- which its own transaction id does not imply, since the non-durable free epilogue and non-durable
+  commits both leave the in-memory id ahead of the file.
+
+The process's own transaction state is held across the cross-process registration, extending the
+same atomicity inward. Lock order is process state, then registry, then `txn/`; a writer only ever
+*tries* the last, so it cannot block on a process waiting for the registry.
+
+## Savepoints
+
+An ephemeral savepoint pins a transaction exactly as a read transaction does.
+
+A persistent savepoint lives in the database rather than in any one process, so a process that
+opened earlier has never heard of one created since. A writer reads the persistent savepoints out
+of the database at the start of every transaction and adopts them, replacing what it knew, before
+anything in that transaction can free a page. It picks up the savepoint id counter at the same
+time -- forwards only, since this process may have given higher ids to live ephemeral savepoints.
+
+## Keeping up with other processes
+
+A process's in-memory header is stale as soon as another process commits. `last committed
+transaction id` is published only once the commit is durable, so a process that reads it can rely
+on the file holding at least that transaction, and re-reads the header only when the value has
+changed.
+
+A process that only reads takes the commit slots and nothing else: the region layout is rewritten
+on every resize, so it can disagree with the file length at any instant. A writer reloads header,
+layout and allocator state when it takes the write lock, unless it was itself the last to commit.
+
+## Page cache invalidation
+
+A cached page can be reallocated by another process. Each process therefore tracks a **cache
+floor**: a transaction id such that every page in its read cache came from a snapshot at or after
+it. A page cached from snapshot `S` can only be reallocated after being freed by some `F > S` and
+then reclaimed under a horizon `H > F`, so `H > S + 1` is exactly the condition under which the
+cache may be stale. A horizon reaches the registry before anything is reclaimed under it, so a
+process that drops its whole read cache on seeing one above its floor can never read a page
+reallocated behind it.
+
+A process's own reclamation cannot invalidate its own cache -- reusing a page writes through it --
+but the horizon alone cannot say whose reclamation it was. Hence the sequence number: a writer
+records it when it publishes, and only publishes while holding the write lock, so a value it does
+not recognize came from another process. Committing does not make a cache newer, since a write
+transaction reads the snapshot it starts from.
+
+The floor covers the whole cache, so a process that falls behind drops valid pages along with stale
+ones. Tracking the snapshot per cache entry would be more precise.
+
+## What a crash leaves behind
+
+A dead process releases its locks, so neither the write lock nor the pinned transactions need
+recovery: an unlocked file in `txn/` is one nobody needs. A writer that died partway through a
+transaction leaves the file as a single-process crash would, and recovery uses the same quick-repair
+path as a restart.
+
+A writer dying partway through a *commit* with multiple writer processes can leave no valid
+allocator state in the file. The next write transaction fails rather than repairing in place,
+since a repair rebuilds state that live read transactions in the process may be using; reopening
+repairs it.
+
 # Version changes
 ## v1
 Initial file format
@@ -499,3 +658,9 @@ Therefore, we make only a few assumptions about the guarantees provided by the u
    a range of bytes in a file, no bytes outside of that range will change,
    even if the write occurs just before a crash or power failure. sqlite makes this same
    assumption, by default, in all modern versions.
+
+Multi-process access assumes one thing more: that a read of the super-header cannot observe a
+partially completed concurrent write of it -- the read/write atomicity POSIX requires of regular
+files. Nothing else is ever read while it is being written, since every other page is
+copy-on-write, and the protocol keeps a page from being rewritten while another process can still
+reach it.
