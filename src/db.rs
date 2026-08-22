@@ -5,6 +5,7 @@ use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
     PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    release_thread_local_page_cache,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -341,6 +342,10 @@ impl TransactionGuard {
             }
         }
     }
+
+    pub(crate) fn is_read(&self) -> bool {
+        matches!(self, Self::Read { .. })
+    }
 }
 
 impl Drop for TransactionGuard {
@@ -349,7 +354,12 @@ impl Drop for TransactionGuard {
             Self::Read {
                 tracker,
                 transaction_id,
-            } => tracker.deallocate_read_transaction(*transaction_id),
+            } => {
+                // Clear the thread local cache, so that it doesn't leak cache space if this
+                // thread doesn't run another transaction
+                release_thread_local_page_cache();
+                tracker.deallocate_read_transaction(*transaction_id);
+            }
             Self::Write {
                 tracker,
                 transaction_id,

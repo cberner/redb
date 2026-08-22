@@ -28,6 +28,28 @@ use core::marker::PhantomData;
 use core::mem;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+// Assigns every TransactionalMemory, and every in-place reload of one, an id that no other
+// instance in this process has held, which is what lets a thread local page cache tell whose
+// pages it is holding. The id must be unique process wide, not just within one database:
+// thread local caches outlive the databases that filled them, and every database a thread
+// reads shares one cache, so an id unique only within a database would let one database's
+// pages match another's tag. Ids are never reused -- incrementing a u64 once per instance and
+// per reload cannot wrap in practice -- so a tag from a dropped database matches nothing.
+//
+// A mutex rather than an atomic, because 64 bit atomics are unavailable on some of the targets
+// redb supports, and this is taken only when a database is opened or reloaded.
+static NEXT_CACHE_INSTANCE_ID: Mutex<u64> = Mutex::new(1);
+
+fn next_cache_instance_id() -> u64 {
+    let mut next = NEXT_CACHE_INSTANCE_ID.lock().unwrap();
+    let id = *next;
+    *next += 1;
+    id
+}
+
+// Enough for the top levels of a large btree. 512KiB with 4KiB pages
+const MAX_THREAD_LOCAL_CACHE_PAGES: usize = 128;
+
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
 const NO_HEADER: u32 = 0;
@@ -102,6 +124,14 @@ impl PageResolver {
 
     pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {
         self.mem.get_page(page_number, hint)
+    }
+
+    pub(crate) fn cache_instance_id(&self) -> u64 {
+        self.mem.cache_instance_id
+    }
+
+    pub(crate) fn thread_local_cache_pages(&self) -> usize {
+        self.mem.thread_local_cache_pages()
     }
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
@@ -500,6 +530,10 @@ impl UnpersistedState {
 }
 
 pub(crate) struct TransactionalMemory {
+    // Identifies this instance's pages in the thread local cache. A transaction id alone is
+    // not enough, because a reload can rewind it and later commits then reuse ids that named
+    // different data
+    cache_instance_id: u64,
     unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
     state: Mutex<InMemoryState>,
@@ -650,6 +684,7 @@ impl TransactionalMemory {
         assert!(page_size >= DB_HEADER_SIZE);
 
         Ok(Self {
+            cache_instance_id: next_cache_instance_id(),
             unpersisted: Mutex::new(UnpersistedState::default()),
             storage,
             state: Mutex::new(state),
@@ -741,6 +776,9 @@ impl TransactionalMemory {
         // leave cached pages that disagree with the file.
         self.storage.discard_write_buffer();
         self.storage.invalidate_cache_all();
+        // Invalidate the thread local caches too, since the state being loaded can give a
+        // transaction id already read under this instance different contents
+        self.cache_instance_id = next_cache_instance_id();
         self.storage.sync_file()?;
 
         let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
@@ -1666,6 +1704,14 @@ impl TransactionalMemory {
 
     pub(crate) fn get_page_size(&self) -> usize {
         self.page_size.try_into().unwrap()
+    }
+
+    // Pages each thread may cache. Bounded by the configured cache size, so that a small one
+    // shrinks it and set_cache_size(0) disables it, but this is a per thread bound: threads
+    // reading concurrently can hold this many pages each, beyond the configured size
+    fn thread_local_cache_pages(&self) -> usize {
+        let budget = self.storage.max_cache_size() / (self.page_size as usize);
+        budget.min(MAX_THREAD_LOCAL_CACHE_PAGES)
     }
 
     pub(crate) fn close(&self) -> Result {

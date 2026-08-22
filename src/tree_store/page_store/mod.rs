@@ -12,6 +12,7 @@ mod lru_cache;
 mod page_manager;
 mod region;
 mod savepoint;
+mod thread_local_page_cache;
 #[allow(clippy::pedantic, dead_code)]
 mod xxh3;
 
@@ -27,6 +28,10 @@ pub(crate) use page_manager::{
 };
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
+pub(crate) use thread_local_page_cache::release_thread_local_page_cache;
+pub(super) use thread_local_page_cache::{
+    CacheTag, ThreadLocalPageCache, with_thread_local_page_cache,
+};
 
 pub(super) use base::{PageImpl, PageMut};
 pub(super) use xxh3::hash128_with_seed;

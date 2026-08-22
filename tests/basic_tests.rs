@@ -4103,3 +4103,184 @@ fn multi_table_commit_writes_are_deterministic() {
         "identical operation sequences must produce identical backend write sequences"
     );
 }
+
+#[test]
+// The read transaction's page cache holds pages of the snapshot for the duration of the
+// transaction. Verify that a long-lived reader keeps seeing its own snapshot while later
+// write transactions rewrite the whole tree, and that the pages pinned by the cache are
+// released when the transaction ends.
+fn read_snapshot_stable_while_writes_proceed() {
+    const TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("snapshot");
+    // Enough entries for a tree with several branch pages, so lookups populate the
+    // read transaction's page cache
+    const ELEMENTS: u32 = 20_000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(i, [0u8; 50].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    // Only branch pages below the root are cached, so a tree of height <= 2 would leave the
+    // cache empty and make this test vacuous
+    assert!(table.stats().unwrap().tree_height() > 2);
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [0u8; 50]);
+    }
+
+    // Rewrite every entry to copy-on-write the whole tree and free the reader's pages
+    for round in 1..=2u8 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                table.insert(i, [round; 50].as_slice()).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    // The reader still sees its snapshot, including through its cached pages
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [0u8; 50]);
+    }
+
+    drop(table);
+    read_txn.close().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [2u8; 50]);
+    }
+}
+
+#[test]
+// The thread-local page cache is keyed by snapshot generation: short read transactions on
+// one thread, interleaved with writes, must never see an earlier generation's cached pages.
+fn alternating_reads_and_writes_invalidate_thread_cache() {
+    const TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("alternating");
+    const ELEMENTS: u32 = 20_000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(i, [0u8; 50].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Only branch pages below the root are cached, so a tree of height <= 2 would leave the
+    // cache empty and make this test vacuous
+    let read_txn = db.begin_read().unwrap();
+    assert!(
+        read_txn
+            .open_table(TABLE)
+            .unwrap()
+            .stats()
+            .unwrap()
+            .tree_height()
+            > 2
+    );
+    drop(read_txn);
+
+    for round in 1..=3u8 {
+        {
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                assert_eq!(table.get(i).unwrap().unwrap().value(), [round - 1; 50]);
+            }
+        }
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                table.insert(i, [round; 50].as_slice()).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(TABLE).unwrap();
+        for i in 0..ELEMENTS {
+            assert_eq!(table.get(i).unwrap().unwrap().value(), [round; 50]);
+        }
+    }
+}
+
+#[test]
+// set_cache_size() bounds the thread-local page cache too, so a database configured with a
+// tiny cache does not gain memory back through each reading thread.
+fn small_cache_size_bounds_thread_local_cache() {
+    const TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("small_cache");
+    const ELEMENTS: u32 = 20_000;
+
+    let tmpfile = create_tempfile();
+    let db = Database::builder()
+        .set_cache_size(0)
+        .create(tmpfile.path())
+        .unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(i, [7u8; 50].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // Reads are still correct with the cache disabled by the configured budget
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 2);
+    for i in 0..ELEMENTS {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), [7u8; 50]);
+    }
+}
+
+#[test]
+// Two databases open in one process share the thread's page cache, and their page numbers
+// overlap, so reads interleaved between them must not serve each other's pages.
+fn two_databases_do_not_share_cached_pages() {
+    const TABLE: TableDefinition<u32, &[u8]> = TableDefinition::new("two_dbs");
+    const ELEMENTS: u32 = 20_000;
+
+    let build = |value: u8| {
+        let tmpfile = create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for i in 0..ELEMENTS {
+                table.insert(i, [value; 50].as_slice()).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+        (tmpfile, db)
+    };
+    let (_file_a, db_a) = build(1);
+    let (_file_b, db_b) = build(2);
+
+    let txn_a = db_a.begin_read().unwrap();
+    let table_a = txn_a.open_table(TABLE).unwrap();
+    let txn_b = db_b.begin_read().unwrap();
+    let table_b = txn_b.open_table(TABLE).unwrap();
+    assert!(table_a.stats().unwrap().tree_height() > 2);
+
+    for i in 0..ELEMENTS {
+        assert_eq!(table_a.get(i).unwrap().unwrap().value(), [1u8; 50]);
+        assert_eq!(table_b.get(i).unwrap().unwrap().value(), [2u8; 50]);
+    }
+}
