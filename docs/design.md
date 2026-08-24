@@ -475,6 +475,169 @@ All pages referenced by a savepoint must be contained in the above, because it i
 a) referenced directly by the data, system, or freed tree -- i.e. it's a committed page
 b) it is not referenced, in which case it is in the pending free state and is contained in the freed tree
 
+# Directory-structured databases
+
+Ordinary redb database files support concurrent processes that open the database in read-only mode.
+
+Directory-structured databases extend the database format to support concurrent read and write
+access to the database from multiple processes.
+
+The protocol needs only ordinary file I/O and whole-file open-file-description-based advisory locks.
+
+The database is a directory rather than a single file. Processes coordinate via a set of files
+beside the data file:
+
+| file              | contents                                                       |
+|-------------------|----------------------------------------------------------------|
+| `data.redb`       | the database, in the single-file format described above        |
+| `metadata`        | magic number and configuration                                 |
+| `extended-header` | extended header fields, logically part of the database header  |
+| `write.lock`      | empty; held by the process that owns the single logical writer |
+| `registry.lock`   | empty; guards access to various shared state                   |
+| `txn/<id>`        | empty; one file per transaction some process is still reading  |
+
+## data.redb
+
+Readers must always read the latest transaction id from this file and never cache it.
+
+Unlike the ordinary file database, this file is not locked.
+
+## metadata
+
+* 11 bytes: magic number
+* 1 byte: format version
+* 1 byte: writer mode
+
+`magic number` must be set to the ASCII letters 'redbMP' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A.
+This sequence is inspired by the PNG magic number.
+
+`format version` must be set to 1.
+
+`writer mode` is 1 for a single writer process and 2 for multiple writer processes.
+
+All processes hold a shared lock on this file. This is for future format upgrades, so that a process
+can take an exclusive lock to perform a format upgrade.
+
+### Writer modes
+
+* **Single writer process.** One process holds `write.lock` for as long as it has the database open.
+  Its transactions run at single-process speed. Other processes may open the database read-only.
+* **Multiple writer processes.** `write.lock` is taken per write transaction, so any process may
+  write, one at a time. Each writer loads the allocator state from the file rather than rebuilding
+  it, which forces every commit to be a quick-repair commit.
+
+## extended-header
+
+This file is logically an extension of the header of `data.redb`, specifically the commit slots.
+The active slot is determined by the primary slot bit in the header of `data.redb`.
+
+* 8 bytes: slot 0: transaction collection horizon
+* 16 bytes: slot 0: XXH3 hash of the transaction collection horizon and the commit slot in `data.redb`
+* 8 bytes: slot 1: transaction collection horizon
+* 16 bytes: slot 1: XXH3 hash of the transaction collection horizon and the commit slot in `data.redb`
+
+`transaction collection horizon` is the newest transaction which has been garbage collected. Pages
+freed by this transaction, or an earlier one, may have been reused.
+
+Readers must always verify the hash, and fall back to the "Crashes" section if it does not match.
+
+Access to this file is guarded by locking `registry.lock`. No locks are taken directly on this file.
+
+Write transactions must write this file before toggling the primary slot bit. Fsync'ing the file
+is not required, because there is a safe fallback path described in the "Crashes" section.
+
+## write.lock
+
+An empty file. The active writer holds an exclusive lock on this file.
+
+## registry.lock
+
+An empty lock file.
+
+Locking this file guards cross-process access to `extended-header`, the `txn/` directory, and the
+header of `data.redb`. It must be held while reading (shared) or writing (exclusive), but does not
+need to be held during fsync().
+
+## Locking protocol
+
+The lock files are used to coordinate the following things, which are otherwise handled by in-process
+locks:
+1) write exclusivity: only a single process may write at one time.
+2) cache invalidation: all processes must invalidate cached pages which are freed.
+3) active transaction set: the writer must know the full set of active transactions, so it can
+   garbage collect pages which are no longer reachable.
+
+### Write exclusivity
+
+The writer takes an exclusive lock on `write.lock` before it starts writing. This lock is held
+until the writer is done writing.
+
+### Cache invalidation
+
+Each process' page cache must track the oldest transaction id that the process has active when pages
+are inserted into the cache, so that these pages can be invalidated during a cross-process garbage
+collection event.
+
+`registry.lock` is used to coordinate cache invalidation and transaction initiation.
+
+After acquiring a shared lock on `registry.lock`, processes read the `transaction collection horizon`
+id from `extended-header`. If that id is newer than the oldest transaction id that was active when
+a page was cached, the process must invalidate those pages. For simplicity, redb invalidates all
+cached pages, except in single writer mode where the writer never needs to handle external cache
+invalidation events.
+
+Before flipping the primary bit during commit, a writer must update `extended-header` with the
+collection horizon transaction id from processing the freed table.
+
+### Active transaction set
+
+The set of active transactions is determined by the contents of the `txn/` directory.
+
+To begin a read transaction, the reader acquires a shared lock on `registry.lock`, reads the latest
+transaction id from `data.redb`, and then while still holding the lock on `registry.lock`, acquires
+a shared lock on `txn/<id>` with that id. When the transaction ends, the lock on `txn/<id>` is released,
+but the file is not deleted.
+Write transactions similarly take a shared lock on the transaction they are reading in `txn/<id>`.
+
+To determine the oldest active transaction, a writer acquires an exclusive lock on `registry.lock`
+and scans `txn/` from lowest to highest, stopping at the first file it cannot open exclusively.
+It then takes the minimum of this id and the lowest one referenced by a persistent savepoint.
+It may safely unlink any file that it can exclusively lock.
+
+## Savepoints
+
+An ephemeral savepoint pins a transaction exactly as a read transaction does.
+
+A persistent savepoint lives in the database rather than in any one process. At the beginning of a
+write transaction, the writer reads the persistent savepoints out of the database to determine
+the highest savepoint id stored -- advancing its counter if needed -- and to discover the oldest
+transaction that must be kept for the persistent savepoints.
+
+## Crashes
+
+The OS automatically releases file locks when a process crashes.
+The `data.redb` database file relies on the normal repair process to recover from crashes. This is
+safe to perform concurrently while other processes are reading, since the repair process rebuilds
+the allocator state and never modifies a reachable page.
+If the `extended-header` file is corrupted, processes reading it must assume the collection horizon
+is greater than or equal to the lowest active (i.e. locked) transaction id in `txn/`. If there are no
+active transaction ids, it is always safe to assume that the collection horizon is equal to the
+latest transaction id in the `data.redb` header, minus one. The horizon is only used
+to trigger cache invalidation, and if no transactions are in progress then the next one will be
+greater than or equal to the current latest id.
+
+## Unsupported features
+
+Some features are not supported by directory-structured databases.
+
+* Non-durable commits are not supported since they exist only in the local process's memory.
+* 2-phase commits are always used to ensure that committed pages are flushed before the transaction
+  becomes visible to another process. Disabling 2-phase commit is not supported.
+* Read-only processes do not detect database corruption on open. Since 2-phase commit is always used,
+  the committed root is always valid, so the check is skipped. Further, it cannot be performed because
+  a process may be concurrently modifying the database.
+* Ephemeral savepoints are not supported in multi-writer mode.
+
 # Version changes
 ## v1
 Initial file format
