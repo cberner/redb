@@ -916,6 +916,67 @@ le_impl!(i128);
 le_value!(f32);
 le_value!(f64);
 
+// `NonZero*` is encoded exactly like the primitive it wraps, so it sorts
+// identically and costs the same width. `usize`/`isize` are excluded here for the
+// same reason they are excluded above: their width is platform dependent, which
+// would make a database non-portable.
+macro_rules! nonzero_impl {
+    ($t:ty, $prim:ty, $name:literal) => {
+        impl Value for $t {
+            type SelfType<'a> = $t;
+            type AsBytes<'a>
+                = [u8; core::mem::size_of::<$prim>()]
+            where
+                Self: 'a;
+
+            fn fixed_width() -> Option<usize> {
+                Some(core::mem::size_of::<$prim>())
+            }
+
+            fn from_bytes<'a>(data: &'a [u8]) -> $t
+            where
+                Self: 'a,
+            {
+                // `as_bytes()` cannot produce a zero encoding, and implementations may
+                // assume `data` came from it, so a zero here is unreachable in the same
+                // way an out-of-range scalar is for `char`.
+                <$t>::new(<$prim>::from_le_bytes(data.try_into().unwrap())).unwrap()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(
+                value: &'a Self::SelfType<'b>,
+            ) -> [u8; core::mem::size_of::<$prim>()]
+            where
+                Self: 'a,
+                Self: 'b,
+            {
+                value.get().to_le_bytes()
+            }
+
+            fn type_name() -> TypeName {
+                TypeName::internal($name)
+            }
+        }
+
+        impl Key for $t {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+            }
+        }
+    };
+}
+
+nonzero_impl!(core::num::NonZeroU8, u8, "NonZeroU8");
+nonzero_impl!(core::num::NonZeroU16, u16, "NonZeroU16");
+nonzero_impl!(core::num::NonZeroU32, u32, "NonZeroU32");
+nonzero_impl!(core::num::NonZeroU64, u64, "NonZeroU64");
+nonzero_impl!(core::num::NonZeroU128, u128, "NonZeroU128");
+nonzero_impl!(core::num::NonZeroI8, i8, "NonZeroI8");
+nonzero_impl!(core::num::NonZeroI16, i16, "NonZeroI16");
+nonzero_impl!(core::num::NonZeroI32, i32, "NonZeroI32");
+nonzero_impl!(core::num::NonZeroI64, i64, "NonZeroI64");
+nonzero_impl!(core::num::NonZeroI128, i128, "NonZeroI128");
+
 #[cfg(test)]
 mod tests {
     use super::*;
