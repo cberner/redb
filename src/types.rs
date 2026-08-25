@@ -182,6 +182,23 @@ pub trait Value: Debug {
 
     /// Globally unique identifier for this type
     fn type_name() -> TypeName;
+
+    /// An encoding of `Self`'s width that `as_bytes()` can never produce, if one exists.
+    ///
+    /// Container types may use it to represent an absent value in place of a discriminant.
+    /// `Option<Self>` uses it to encode `None`, which makes `Option<Self>` the same width as
+    /// `Self` rather than one byte wider.
+    ///
+    /// Implementations that return `Some` must ensure the returned bytes are `fixed_width()`
+    /// long, that `fixed_width()` is not `None`, and that no value of `Self` encodes to them.
+    /// Returning a pattern that `as_bytes()` can produce will make values indistinguishable
+    /// from absence.
+    ///
+    /// The default implementation returns `None`, which leaves the discriminant encoding in
+    /// place.
+    fn niche() -> Option<Cow<'static, [u8]>> {
+        None
+    }
 }
 
 /// Implementing this trait indicates that the type can be mutated in-place as a &mut [u8].
@@ -346,13 +363,24 @@ impl<T: Value> Value for Option<T> {
         Self: 'a;
 
     fn fixed_width() -> Option<usize> {
-        T::fixed_width().map(|x| x + 1)
+        match T::niche() {
+            // The niche encodes `None`, so no discriminant is needed
+            Some(_) => T::fixed_width(),
+            None => T::fixed_width().map(|x| x + 1),
+        }
     }
 
     fn from_bytes<'a>(data: &'a [u8]) -> Option<T::SelfType<'a>>
     where
         Self: 'a,
     {
+        if let Some(niche) = T::niche() {
+            return if data == niche.as_ref() {
+                None
+            } else {
+                Some(T::from_bytes(data))
+            };
+        }
         match data[0] {
             0 => None,
             1 => Some(T::from_bytes(&data[1..])),
@@ -364,6 +392,12 @@ impl<T: Value> Value for Option<T> {
     where
         Self: 'b,
     {
+        if let Some(niche) = T::niche() {
+            return match value {
+                Some(x) => T::as_bytes(x).as_ref().to_vec(),
+                None => niche.into_owned(),
+            };
+        }
         let mut result = vec![0];
         if let Some(x) = value {
             result[0] = 1;
@@ -384,6 +418,16 @@ impl<T: Value> Value for Option<T> {
 impl<T: Key> Key for Option<T> {
     #[allow(clippy::collapsible_else_if)]
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        if let Some(niche) = T::niche() {
+            let niche = niche.as_ref();
+            // `None` sorts below every `Some`, as it does with a discriminant
+            return match (data1 == niche, data2 == niche) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => T::compare(data1, data2),
+            };
+        }
         if data1[0] == 0 {
             if data2[0] == 0 {
                 Ordering::Equal
@@ -400,6 +444,10 @@ impl<T: Key> Key for Option<T> {
     }
 
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+        // A niche implies a fixed width `T`, so the same reasoning as below applies
+        if T::niche().is_some() {
+            return Cow::Borrowed(left);
+        }
         // A fixed width `T` makes `Option<T>` fixed width too, and its encodings are compared at
         // that width, so nothing shorter than `left` may be returned
         if T::fixed_width().is_some() {
@@ -424,6 +472,9 @@ impl<T: Key> Key for Option<T> {
 
     // `None` sorts below every `Some`
     fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        if let Some(niche) = T::niche() {
+            return Some(niche);
+        }
         Some(match T::fixed_width() {
             // A fixed width `T` pads the tag out to the width of a `Some`
             Some(width) => Cow::Owned(vec![0; width + 1]),
@@ -955,6 +1006,13 @@ macro_rules! nonzero_impl {
 
             fn type_name() -> TypeName {
                 TypeName::internal($name)
+            }
+
+            // Zero is the one encoding of the underlying primitive that this type
+            // cannot hold, which is exactly what makes it a niche.
+            fn niche() -> Option<Cow<'static, [u8]>> {
+                const { assert!(core::mem::size_of::<$prim>() <= 16) };
+                Some(Cow::Borrowed(&[0u8; 16][..core::mem::size_of::<$prim>()]))
             }
         }
 
