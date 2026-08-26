@@ -40,15 +40,6 @@ fn lock_unsupported(err: io::Error) -> DatabaseError {
     StorageError::Io(err).into()
 }
 
-fn open_or_create(path: &Path) -> Result<File, io::Error> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-}
-
 /// Flushes a directory itself, so that an entry a rename just created is durable. Best-effort
 /// about a directory this process cannot open: flushing needs read permission, and nothing else
 /// here does.
@@ -115,12 +106,43 @@ fn sync_ancestors(root: &Path, preexisting: Option<&Path>) -> Result<(), Databas
     }
 }
 
+/// What sits under a name, without following a symlink -- `None` only for a provable absence.
+/// Any error other than `NotFound` is reported rather than read as absence, which the accepting
+/// paths would then trust.
+fn symlink_metadata_if_any(path: &Path) -> Result<Option<std::fs::Metadata>, StorageError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(StorageError::Io(err)),
+    }
+}
+
+/// Whether a name is taken, by anything at all -- including a symlink that resolves to nothing,
+/// which `Path::exists` reports as absent because it follows the link.
+fn occupied(path: &Path) -> Result<bool, DatabaseError> {
+    Ok(symlink_metadata_if_any(path)?.is_some())
+}
+
+/// Marks a lock file a `create()` made and then could not stand behind. It cannot be unlinked --
+/// nothing ever unlinks one -- but left empty it would vouch, on the next `create()`, for the very
+/// files that were just refused; written to and flushed, it fails the empty-lock-file rule
+/// instead, and the directory stays refused.
+fn mark_lock_abandoned(lock: &File) {
+    let _ = (&*lock).write_all(b"abandoned by a rejected create\n");
+    let _ = lock.sync_all();
+}
+
 /// The paths that make up a multi-process database directory.
 pub(super) struct DatabaseDir {
     root: PathBuf,
 }
 
 impl DatabaseDir {
+    /// Every name `create()` writes after taking the write lock. `metadata` is not among them: the
+    /// check that uses this runs only where there is no marker.
+    const WRITTEN_UNDER_THE_LOCK: &'static [&'static str] =
+        &[DATA_FILE_NAME, METADATA_TMP_FILE_NAME];
+
     pub(super) fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
@@ -143,35 +165,68 @@ impl DatabaseDir {
         self.root.join(METADATA_TMP_FILE_NAME)
     }
 
-    /// Takes the write lock, which excludes every other process from the database. Taken before
-    /// anything in the directory is read or written, so the holder has the directory to itself.
+    /// Takes the write lock, which excludes every other process from the database, and reports
+    /// whether this call created the file. Taken before anything in the directory is read or
+    /// written, so the holder has the directory to itself.
     ///
     /// Only `create()` makes the file, and nothing ever unlinks one: another process may be
     /// waiting on the lock on that same file, and unlinking would let a third process lock a
-    /// fresh `write.lock` while the second holds the old inode.
-    fn acquire_write_lock(&self, create: bool) -> Result<File, DatabaseError> {
+    /// fresh `write.lock` while the second holds the old inode. Creation is decided by the open
+    /// itself rather than by a look beforehand, since a snapshot can go stale while another
+    /// `create()` runs to completion, and what the fresh-lock rule may refuse turns on who
+    /// really made the file.
+    fn acquire_write_lock(&self, create: bool) -> Result<(File, bool), DatabaseError> {
         let path = self.write_lock_file();
-        let file = if create {
-            open_or_create(&path)
-        } else {
-            OpenOptions::new().read(true).write(true).open(&path)
-        }
-        .map_err(|err| {
-            if err.kind() == ErrorKind::NotFound {
-                StorageError::Io(io::Error::new(
-                    ErrorKind::NotFound,
-                    "not a multi-process database directory",
-                ))
-            } else {
-                StorageError::Io(err)
+        let open_existing = || {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|err| {
+                    if err.kind() == ErrorKind::NotFound {
+                        StorageError::Io(io::Error::new(
+                            ErrorKind::NotFound,
+                            "not a multi-process database directory",
+                        ))
+                    } else {
+                        StorageError::Io(err)
+                    }
+                })
+        };
+        let (file, created) = if create {
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => (file, true),
+                Err(err) if err.kind() == ErrorKind::AlreadyExists => (open_existing()?, false),
+                Err(err) => return Err(StorageError::Io(err).into()),
             }
-        })?;
+        } else {
+            (open_existing()?, false)
+        };
 
         match file.try_lock() {
-            Ok(()) => Ok(file),
-            Err(TryLockError::WouldBlock) => Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(TryLockError::Error(err)) => Err(lock_unsupported(err)),
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(DatabaseError::DatabaseAlreadyOpen),
+            Err(TryLockError::Error(err)) => return Err(lock_unsupported(err)),
         }
+        if !created {
+            // Re-read through the held lock: the preflight's snapshot can go stale, and a lock
+            // file that gained contents -- an abandonment mark included -- or stopped being a
+            // regular file vouches for nothing
+            let metadata = file.metadata().map_err(StorageError::Io)?;
+            if !metadata.is_file() || metadata.len() > 0 {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "write.lock is not a multi-process database's lock file",
+                ))
+                .into());
+            }
+        }
+        Ok((file, created))
     }
 
     /// Opens the directory, creating it if `create` is set, and returns a backend for the database
@@ -180,7 +235,18 @@ impl DatabaseDir {
     /// A directory being created is not marked as one of these yet -- the caller does that with
     /// [`Self::write_metadata_if_missing`], once the database file has turned out to be usable.
     pub(super) fn open(&self, create: bool) -> Result<Box<dyn StorageBackend>, DatabaseError> {
+        let mut marked_at_preflight = false;
         if create {
+            // Both checks run before the directory is touched, so a rejected create() leaves no
+            // trace. A marker arrives by rename and so is either absent or complete, which is what
+            // makes refusing without the lock sound; `read_metadata` below repeats the check under
+            // the lock, which is the authoritative pass
+            marked_at_preflight = occupied(&self.metadata_file())?;
+            if marked_at_preflight {
+                self.read_metadata(create)?;
+            } else {
+                self.reject_unmarked_database()?;
+            }
             // The deepest ancestor that already exists bounds what create_dir_all makes; every
             // entry from the database directory up to there needs its own flush below
             let preexisting = deepest_existing_ancestor(&self.root);
@@ -199,21 +265,64 @@ impl DatabaseDir {
             .into());
         }
 
-        let write_lock = self.acquire_write_lock(create)?;
+        let (write_lock, lock_created) = self.acquire_write_lock(create)?;
+        let mut fresh_claim = false;
+        if create {
+            // The lock file's entry must be durable before anything else is written under these
+            // names: its *absence* beside them is what says a directory is not this database's,
+            // and a crash could otherwise keep `data.redb` while losing `write.lock`
+            sync_dir(&self.root)?;
+            // A marker seen before the lock file was made marks a create() to finish -- a crash
+            // can lose the lock's entry while the marker survives -- and the fresh-lock rule has
+            // nothing to refuse. One that first appears after cannot be another create()'s, since
+            // finishing one needs the lock this call holds, so the rejecting pass below refuses
+            // it like every other name that arrives while the directory is being claimed
+            fresh_claim = lock_created && !marked_at_preflight;
+            if fresh_claim && let Err(err) = self.reject_files_beside_a_fresh_lock() {
+                mark_lock_abandoned(&write_lock);
+                return Err(err);
+            }
+        }
         self.read_metadata(create)?;
 
-        let data = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(create)
-            .truncate(false)
-            .open(self.data_file())
-            .map_err(StorageError::Io)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).truncate(false);
+        if fresh_claim {
+            // The pass above required this name to be absent, and a file appearing since arrived
+            // the same way -- something reaching past the directory API -- so creating exclusively
+            // turns the appearance into the same refusal instead of an adoption
+            options.create_new(true);
+        } else {
+            options.create(create);
+        }
+        let data = match options.open(self.data_file()) {
+            Ok(data) => data,
+            Err(err) if fresh_claim && err.kind() == ErrorKind::AlreadyExists => {
+                mark_lock_abandoned(&write_lock);
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "the database file appeared while the directory was being claimed",
+                ))
+                .into());
+            }
+            Err(err) => return Err(StorageError::Io(err).into()),
+        };
         // The ordinary exclusive lock, the same one a Database takes: a process that reaches past
         // the directory and opens this file directly is not looking at the write lock, so the file
         // needs a lock of its own. Exclusive rather than shared, because nothing coordinates a
         // reader that attaches this way with the pages this process frees
-        let data = FileBackend::new(data)?;
+        let data = match FileBackend::new(data) {
+            Ok(data) => data,
+            Err(err) => {
+                // On a fresh claim the file was created exclusively just above, so failing to
+                // lock it means something took it in between -- and the lock file left empty
+                // would vouch, on the next create(), for whatever that something makes of it
+                if fresh_claim {
+                    mark_lock_abandoned(&write_lock);
+                }
+                return Err(err);
+            }
+        };
 
         Ok(Box::new(DirectoryBackend { data, write_lock }))
     }
@@ -245,7 +354,7 @@ impl DatabaseDir {
     /// validated by [`Self::read_metadata`] on the way in, so it is byte-for-byte what would be
     /// written.
     pub(super) fn write_metadata_if_missing(&self) -> Result<(), DatabaseError> {
-        if self.metadata_file().exists() {
+        if occupied(&self.metadata_file())? {
             // Validated here rather than assumed: the write lock keeps redb out, but the claim
             // that an existing marker is byte-for-byte what would be written has to survive
             // whatever else was pointed at the directory
@@ -257,6 +366,71 @@ impl DatabaseDir {
         }
 
         self.write_metadata()
+    }
+
+    /// Refuses a directory holding files under these names that this type did not put there.
+    ///
+    /// An unmarked directory is accepted only as an interrupted create, and `write.lock` is the
+    /// first thing `create()` makes, so every other name implies a lock file beside it. One
+    /// without means something else filled the directory in -- most likely a plain
+    /// [`crate::Database`] under `data.redb`, which `create()` would otherwise adopt.
+    fn reject_unmarked_database(&self) -> Result<(), DatabaseError> {
+        if occupied(&self.write_lock_file())? {
+            // The lock file vouches for the other names only while it could be redb's own:
+            // created empty and never written to, so one with contents was put there by something
+            // else. The marker's temporary is bounded the same way -- written fresh, always a
+            // regular file, holding at most the marker's length -- so anything else under that
+            // name cannot be an interrupted create's, and finishing the create would delete it,
+            // or write the marker through whatever a planted link points at
+            let lock = symlink_metadata_if_any(&self.write_lock_file())?;
+            let tmp = symlink_metadata_if_any(&self.metadata_tmp_file())?;
+            if lock.is_some_and(|metadata| !metadata.is_file() || metadata.len() > 0)
+                || tmp.is_some_and(|metadata| {
+                    !metadata.is_file() || metadata.len() > METADATA_LEN as u64
+                })
+            {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "refusing to take over a directory that already holds files under the names a \
+                     multi-process database uses",
+                ))
+                .into());
+            }
+            return Ok(());
+        }
+
+        for name in Self::WRITTEN_UNDER_THE_LOCK {
+            if occupied(&self.root.join(name))? {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "refusing to take over a directory that already holds files under the names a \
+                     multi-process database uses",
+                ))
+                .into());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// The accepting pass for a directory whose lock file this call has just created. A
+    /// pre-existing `write.lock` vouches for redb's other names; a fresh one vouches for nothing,
+    /// so anything already under them arrived while the directory was being claimed -- another
+    /// process reaching past the directory API -- and adopting it would hand this handle a file
+    /// something else is using.
+    fn reject_files_beside_a_fresh_lock(&self) -> Result<(), DatabaseError> {
+        let claimed = Self::WRITTEN_UNDER_THE_LOCK.iter().copied();
+        for name in claimed.chain([METADATA_FILE_NAME]) {
+            if occupied(&self.root.join(name))? {
+                return Err(StorageError::Io(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "another process put files into the directory while it was being claimed",
+                ))
+                .into());
+            }
+        }
+
+        Ok(())
     }
 
     /// Takes the shared lock on `metadata` that every process holds for as long as it has the
@@ -279,7 +453,7 @@ impl DatabaseDir {
                 // Opening follows symlinks, so NotFound covers a dangling one as well as a truly
                 // absent marker. The name being taken at all -- by anything -- means the
                 // directory is not redb's to mark
-                if std::fs::symlink_metadata(self.metadata_file()).is_ok() {
+                if occupied(&self.metadata_file())? {
                     return Err(StorageError::Io(io::Error::new(
                         ErrorKind::InvalidData,
                         "not a multi-process database directory",
@@ -456,6 +630,8 @@ mod test {
             b"someone else's",
             &std::fs::read(path.join(METADATA_FILE_NAME)).unwrap()[..]
         );
+        // ... and refused before anything of redb's was put in it
+        assert!(!path.join(WRITE_LOCK_FILE_NAME).exists());
     }
 
     #[test]

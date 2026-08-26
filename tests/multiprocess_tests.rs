@@ -100,6 +100,66 @@ fn an_interrupted_create_can_be_redone() {
     drop(MultiProcessDatabase::create(&path).unwrap());
 }
 
+/// A directory holding a plain [`Database`] under `data.redb` is someone else's data, not an
+/// interrupted create: without the marker, the missing `write.lock` beside the file is what tells
+/// the two apart, and create() refuses rather than adopting the file.
+#[test]
+fn create_does_not_adopt_a_plain_database() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    std::fs::create_dir(&path).unwrap();
+    drop(Database::create(path.join("data.redb")).unwrap());
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+
+    // The refusal left no trace, and the file is still an ordinary database
+    assert!(!path.join("write.lock").exists());
+    assert!(!path.join("metadata").exists());
+    drop(Database::open(path.join("data.redb")).unwrap());
+}
+
+/// The same refusal covers every name create() writes: a directory already using one of them
+/// belongs to something else, and is left exactly as it was found.
+#[test]
+fn create_does_not_clobber_files_in_a_directory_it_did_not_make() {
+    let contents: &[u8] = b"not redb's, and bigger than its marker";
+    let dir = tempdir();
+    let path = db_path(&dir);
+    std::fs::create_dir(&path).unwrap();
+    std::fs::write(path.join("metadata.tmp"), contents).unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+
+    assert!(!path.join("write.lock").exists());
+    assert_eq!(contents, &std::fs::read(path.join("metadata.tmp")).unwrap());
+
+    // Even beside a lock file, a temporary bigger than the marker cannot be an interrupted create
+    // of redb's, and finishing one would delete it
+    std::fs::write(path.join("write.lock"), []).unwrap();
+    assert!(MultiProcessDatabase::create(&path).is_err());
+    assert_eq!(contents, &std::fs::read(path.join("metadata.tmp")).unwrap());
+}
+
+/// An empty lock file is the only kind redb ever writes, so one with contents was put there by
+/// something else, and does not make the directory an interrupted create.
+#[test]
+fn create_does_not_trust_a_nonempty_lock_file() {
+    let dir = tempdir();
+    let path = db_path(&dir);
+    std::fs::create_dir(&path).unwrap();
+    drop(Database::create(path.join("data.redb")).unwrap());
+    std::fs::write(path.join("write.lock"), b"pid 1234").unwrap();
+
+    assert!(MultiProcessDatabase::create(&path).is_err());
+
+    assert!(!path.join("metadata").exists());
+    assert_eq!(
+        b"pid 1234",
+        &std::fs::read(path.join("write.lock")).unwrap()[..]
+    );
+    drop(Database::open(path.join("data.redb")).unwrap());
+}
+
 /// The write lock is invisible to a process that reaches past the directory and opens the database
 /// file itself, so that file carries the ordinary exclusive lock as well. Readers are turned away
 /// along with writers: nothing coordinates a reader that attaches this way with the pages the
