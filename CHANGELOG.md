@@ -1,6 +1,11 @@
 # redb - Changelog
 
 ## 5.0.0 - 2026-XX-XX
+* On Linux and macOS, opening a database now takes byte-range locks on the database file --
+  exclusive for a writable `Database`, shared for a `ReadOnlyDatabase` -- alongside the
+  whole-file lock on Linux, and in place of it on macOS, where the two kinds of lock conflict
+  with each other. These are the ranges the multi-process locking protocol will coordinate
+  through, so another process's byte-range locks on a database file now conflict with opening it.
 * Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
   `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
   target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend

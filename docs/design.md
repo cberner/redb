@@ -490,15 +490,17 @@ The following concurrency modes are supported, and their locking protocol is des
 ## Read-only
 
 In this mode, multiple processes may open the database. Each takes a shared lock on the entire database file.
-On platforms that support both whole-file and range locks, both must be held, since some platforms
-such as Linux namespace them separately.
+On platforms that namespace whole-file and range locks separately, such as Linux, both must be
+held. On platforms where the two share one lock table and conflict with each other, such as macOS,
+only the range lock is taken.
 
 ## Single process
 
 In this mode, only a single process may open the database. The process takes an exclusive lock on
 the entire database file.
-On platforms that support both whole-file and range locks, both must be held, since some platforms
-such as Linux namespace them separately.
+On platforms that namespace whole-file and range locks separately, such as Linux, both must be
+held. On platforms where the two share one lock table and conflict with each other, such as macOS,
+only the range lock is taken.
 
 ## Multi-process with a single writer process
 
