@@ -8,7 +8,8 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet, Shrink};
 use crate::tree_store::page_store::header::{
-    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
+    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TRANSACTION_SIZE, TransactionHeader,
+    UnrepairedDatabaseHeader,
 };
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -80,6 +81,29 @@ pub(crate) enum AllocationPolicy {
     /// expensive, but keeps trailing pages free so `try_shrink()` can
     /// reclaim recently-grown space.
     Lowest,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum AccessMode {
+    ReadWrite,
+    ReadOnly,
+    // Another process may be writing. These handles follow only committed roots and never use an
+    // allocator, so they neither repair the file nor trust its transient layout fields.
+    SharedRead,
+}
+
+impl AccessMode {
+    fn read_only(self) -> bool {
+        !matches!(self, Self::ReadWrite)
+    }
+}
+
+/// The commit slot a shared reader observed directly in the data file.
+#[cfg(not(redb_no_std))]
+pub(crate) struct CommitSnapshot {
+    pub(crate) transaction_id: TransactionId,
+    pub(crate) slot_index: usize,
+    pub(crate) slot_bytes: [u8; TRANSACTION_SIZE],
 }
 
 /// Read-only view over `TransactionalMemory` exposing only the methods that
@@ -317,6 +341,15 @@ impl InMemoryState {
             .expect("allocators have not been loaded yet")
     }
 
+    fn require_allocators(&self) -> Result {
+        if self.allocators.is_none() {
+            return Err(StorageError::Io(io::invalid_input(
+                "allocator statistics are unavailable on a shared read-only database",
+            )));
+        }
+        Ok(())
+    }
+
     fn allocators_mut(&mut self) -> &mut Allocators {
         self.allocators
             .as_mut()
@@ -532,6 +565,45 @@ impl TransactionalMemory {
         cache_size: usize,
         read_only: bool,
     ) -> Result<Self, DatabaseError> {
+        let access = if read_only {
+            AccessMode::ReadOnly
+        } else {
+            AccessMode::ReadWrite
+        };
+        Self::new_inner(
+            file,
+            allow_initialize,
+            page_size,
+            requested_region_size,
+            cache_size,
+            access,
+        )
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn new_shared_read(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        cache_size: usize,
+    ) -> Result<Self, DatabaseError> {
+        Self::new_inner(
+            file,
+            false,
+            page_size,
+            None,
+            cache_size,
+            AccessMode::SharedRead,
+        )
+    }
+
+    fn new_inner(
+        file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
+        page_size: usize,
+        requested_region_size: Option<u64>,
+        cache_size: usize,
+        access: AccessMode,
+    ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
@@ -628,21 +700,28 @@ impl TransactionalMemory {
         let unrepaired =
             UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
-        if needs_recovery && read_only {
-            return Err(DatabaseError::RepairAborted);
-        }
-        let (header, _) = unrepaired.finalize(file_len)?;
-        if needs_recovery {
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
-        }
+        let header = if matches!(access, AccessMode::SharedRead) {
+            unrepaired.finalize_transaction_slots()?
+        } else {
+            let needs_recovery = unrepaired.recovery_required(file_len);
+            if needs_recovery && access.read_only() {
+                return Err(DatabaseError::RepairAborted);
+            }
+            let (header, _) = unrepaired.finalize(file_len)?;
+            if needs_recovery {
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
+            header
+        };
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
+        if !matches!(access, AccessMode::SharedRead) {
+            assert_eq!(layout.len(), storage.raw_file_len()?);
+        }
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
@@ -731,6 +810,77 @@ impl TransactionalMemory {
 
     pub(crate) fn clear_read_cache(&self) {
         self.storage.invalidate_cache_all();
+    }
+
+    /// Drops writes which do not belong to a committed multiprocess transaction.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn discard_write_buffer(&self) {
+        self.storage.discard_write_buffer();
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn current_commit_snapshot(&self) -> CommitSnapshot {
+        let state = self.state.lock().unwrap();
+        debug_assert!(!state.read_from_secondary);
+        let slot_index = state.header.primary_slot_index();
+        CommitSnapshot {
+            transaction_id: state.header.primary_slot().transaction_id,
+            slot_index,
+            slot_bytes: state.header.transaction_slot_bytes(slot_index),
+        }
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn commit_slot_bytes(&self) -> [[u8; TRANSACTION_SIZE]; 2] {
+        let state = self.state.lock().unwrap();
+        [
+            state.header.transaction_slot_bytes(0),
+            state.header.transaction_slot_bytes(1),
+        ]
+    }
+
+    /// Reads the latest committed slot directly from the data file, without trusting the copy this
+    /// process cached when it opened the database.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn reload_transaction_slots(&self) -> Result<CommitSnapshot> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(|error| match error {
+                DatabaseError::Storage(storage) => storage,
+                other => StorageError::Corrupted(other.to_string()),
+            })?;
+        let header = unrepaired.finalize_transaction_slots()?;
+        let slot_index = header.primary_slot_index();
+        let snapshot = CommitSnapshot {
+            transaction_id: header.primary_slot().transaction_id,
+            slot_index,
+            slot_bytes: header.transaction_slot_bytes(slot_index),
+        };
+
+        let mut state = self.state.lock()?;
+        debug_assert!(!state.read_from_secondary);
+        state.header.adopt_transaction_slots(&header);
+        Ok(snapshot)
+    }
+
+    /// Reloads the complete file state after another process has owned the writer lock.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn reload_for_write(&self) -> Result<(), DatabaseError> {
+        self.storage.discard_write_buffer();
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
+        let (header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+
+        {
+            let mut state = self.state.lock().unwrap();
+            state.header = header;
+            state.read_from_secondary = false;
+            state.allocators = None;
+        }
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
+        self.unpersisted.lock().unwrap().clear();
+        Ok(())
     }
 
     pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
@@ -829,6 +979,13 @@ impl TransactionalMemory {
 
     pub(crate) fn allocator_state_loaded(&self) -> bool {
         self.state.lock().unwrap().allocators.is_some()
+    }
+
+    /// Keeps the database marked as open for writing after loading another process's allocator
+    /// snapshot. The on-disk flag is already set for the lifetime of a multiple-writer database.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn retain_recovery_required(&self) {
+        self.state.lock().unwrap().header.recovery_required = true;
     }
 
     pub(crate) fn mark_needs_repair(&self) {
@@ -1057,6 +1214,28 @@ impl TransactionalMemory {
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
     ) -> Result {
+        self.commit_with(
+            data_root,
+            system_root,
+            transaction_id,
+            two_phase,
+            shrink_policy,
+            |_, _| Ok(()),
+        )
+    }
+
+    /// Commits and invokes `before_primary_swap` after the new slot is flushed but before it is
+    /// made active. Directory-structured databases use this point to write their matching
+    /// extended-header slot while holding the registry lock.
+    pub(crate) fn commit_with(
+        &self,
+        data_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+        transaction_id: TransactionId,
+        two_phase: bool,
+        shrink_policy: ShrinkPolicy,
+        before_primary_swap: impl FnOnce(usize, &[u8; TRANSACTION_SIZE]) -> Result,
+    ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
         // to future read transactions
@@ -1090,6 +1269,10 @@ impl TransactionalMemory {
         if two_phase {
             self.storage.flush()?;
         }
+
+        let new_primary_slot = header.primary_slot_index() ^ 1;
+        let new_slot_bytes = header.transaction_slot_bytes(new_primary_slot);
+        before_primary_swap(new_primary_slot, &new_slot_bytes)?;
 
         // Make our new commit the primary, and record whether it was a 2-phase commit.
         // These two bits need to be written atomically
@@ -1646,6 +1829,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_allocated_pages());
@@ -1656,6 +1840,7 @@ impl TransactionalMemory {
 
     pub(crate) fn count_free_pages(&self) -> Result<u64> {
         let state = self.state.lock().unwrap();
+        state.require_allocators()?;
         let mut count = 0u64;
         for i in 0..state.header.layout().num_regions() {
             count += u64::from(state.get_region(i).count_free_pages());
@@ -1674,6 +1859,14 @@ impl TransactionalMemory {
         // called even if the shutdown writes above failed
         let close_result = self.storage.close();
         shutdown_result.and(close_result)
+    }
+
+    /// Closes a multiple-writer handle without flushing buffered writes or rewriting its stale
+    /// copy of the shared header. Every committed transaction already flushed its own changes.
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn close_multiprocess_writer(&self) -> Result {
+        self.storage.discard_write_buffer();
+        self.storage.close()
     }
 
     fn flush_shutdown_header(&self) -> Result {

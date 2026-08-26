@@ -953,6 +953,7 @@ impl WriteTransaction {
     ) -> Result<Self> {
         let transaction_id = guard.id();
         let guard = Arc::new(guard);
+        let defer_post_commit_free = transaction_tracker.defers_post_commit_free();
 
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
@@ -974,7 +975,11 @@ impl WriteTransaction {
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
             quick_repair: false,
-            post_commit_free: PostCommitFree::Enabled,
+            post_commit_free: if defer_post_commit_free {
+                PostCommitFree::Disabled
+            } else {
+                PostCommitFree::Enabled
+            },
             restored_transaction: None,
             shrink_policy: ShrinkPolicy::Default,
             savepoint_state: Mutex::new(SavepointTransactionState::default()),
@@ -1148,7 +1153,7 @@ impl WriteTransaction {
             return Err(SavepointError::ImmediateDurabilityRequired);
         }
 
-        let mut savepoint = self.ephemeral_savepoint()?;
+        let mut savepoint = self.create_ephemeral_savepoint()?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
 
@@ -1273,8 +1278,17 @@ impl WriteTransaction {
     /// This savepoint will be freed as soon as the returned [`Savepoint`] is dropped.
     ///
     /// Returns [`SavepointError::InvalidSavepoint`] if the transaction is "dirty" (a data
-    /// table has been opened, renamed, or deleted, or a savepoint has been restored)
+    /// table has been opened, renamed, or deleted, or a savepoint has been restored), or
+    /// [`SavepointError::EphemeralSavepointUnsupported`] for a multiple-writer multiprocess
+    /// database.
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
+        if !self.transaction_tracker.allows_ephemeral_savepoint() {
+            return Err(SavepointError::EphemeralSavepointUnsupported);
+        }
+        self.create_ephemeral_savepoint()
+    }
+
+    fn create_ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
         // Serialize the dirty check and savepoint registration against
         // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
         // a concurrent first table-open (legal since `WriteTransaction: Sync`) can read the
@@ -1456,7 +1470,8 @@ impl WriteTransaction {
     /// Defaults to [`Durability::Immediate`]
     ///
     /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
-    /// be reduced below [`Durability::Immediate`]
+    /// be reduced below [`Durability::Immediate`]. Multiprocess databases also require
+    /// [`Durability::Immediate`] for every transaction.
     pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
         let persistent_modified = self
             .savepoint_state
@@ -1465,6 +1480,11 @@ impl WriteTransaction {
             .has_created_or_deleted();
         if persistent_modified && !matches!(durability, Durability::Immediate) {
             return Err(SetDurabilityError::PersistentSavepointModified);
+        }
+        if !matches!(durability, Durability::Immediate)
+            && !self.transaction_tracker.allows_non_durable_commit()
+        {
+            return Err(SetDurabilityError::MultiprocessDurabilityRequired);
         }
 
         self.durability = match durability {
@@ -1476,6 +1496,8 @@ impl WriteTransaction {
     }
 
     /// Enable or disable 2-phase commit (defaults to disabled)
+    ///
+    /// Multiprocess databases always use 2-phase commit, regardless of this setting.
     ///
     /// By default, data is written using the following 1-phase commit algorithm:
     ///
@@ -1701,6 +1723,12 @@ impl WriteTransaction {
     }
 
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
+        if self.transaction_tracker.requires_quick_repair() {
+            self.quick_repair = true;
+        }
+        if self.transaction_tracker.requires_two_phase_commit() {
+            self.two_phase_commit = true;
+        }
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -1981,7 +2009,7 @@ impl WriteTransaction {
 
         let free_until_transaction = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
@@ -2040,6 +2068,29 @@ impl WriteTransaction {
         };
 
         let page_allocator = self.page_allocator();
+        #[cfg(not(redb_no_std))]
+        if let Some(commit_guard) = self.transaction_tracker.prepare_commit(
+            &self.mem,
+            TransactionId::new(free_until_transaction.raw_id().saturating_sub(1)),
+        )? {
+            self.mem.commit_with(
+                user_root,
+                system_root,
+                self.transaction_id,
+                self.two_phase_commit,
+                self.shrink_policy,
+                |slot_index, slot_bytes| commit_guard.publish(slot_index, slot_bytes),
+            )?;
+        } else {
+            self.mem.commit(
+                user_root,
+                system_root,
+                self.transaction_id,
+                self.two_phase_commit,
+                self.shrink_policy,
+            )?;
+        }
+        #[cfg(redb_no_std)]
         self.mem.commit(
             user_root,
             system_root,
@@ -2083,7 +2134,7 @@ impl WriteTransaction {
         let epilogue_transaction = self.transaction_id.next();
         let mut free_until = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_live_read_transaction()?
             .map_or(epilogue_transaction, |x| x.next());
         // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
         // is also a live read, so absent concurrency `oldest_live_read_transaction()` never
@@ -2628,6 +2679,14 @@ impl Drop for WriteTransaction {
             // session stays usable, but the leak must not outlive the process
             assert!(crate::panicking());
             self.mem.mark_needs_repair();
+        }
+
+        // A multiple-writer handle may relinquish write.lock as soon as the transaction guard is
+        // dropped. Do not let buffered pages from an abort or failed commit survive that handoff:
+        // another process may immediately reuse their offsets.
+        #[cfg(not(redb_no_std))]
+        if self.transaction_tracker.is_multiprocess() {
+            self.mem.discard_write_buffer();
         }
     }
 }

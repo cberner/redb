@@ -1,4 +1,6 @@
 use crate::io;
+#[cfg(not(redb_no_std))]
+use crate::multiprocess::ProcessCoordinator;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -19,6 +21,8 @@ use alloc::string::ToString;
 use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
+#[cfg(not(redb_no_std))]
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 #[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
@@ -498,6 +502,27 @@ impl ReadOnlyDatabase {
         };
 
         Ok(db)
+    }
+
+    pub(crate) fn new_multiprocess(
+        file: Box<dyn StorageBackend>,
+        page_size: usize,
+        cache_size: usize,
+        coordinator: Arc<ProcessCoordinator>,
+    ) -> Result<Self, DatabaseError> {
+        let mem = Arc::new(TransactionalMemory::new_shared_read(
+            Box::new(ReadOnlyBackend::new(file)),
+            page_size,
+            cache_size,
+        )?);
+        let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
+        Ok(Self {
+            mem,
+            transaction_tracker: Arc::new(TransactionTracker::new_multiprocess(
+                next_transaction_id,
+                coordinator,
+            )),
+        })
     }
 }
 
@@ -980,9 +1005,7 @@ impl Database {
     }
 
     #[cfg(debug_assertions)]
-    fn mark_allocated_page_for_debug(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
-    ) -> Result {
+    pub(crate) fn mark_allocated_page_for_debug(mem: &Arc<TransactionalMemory>) -> Result {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
@@ -1181,7 +1204,7 @@ impl Database {
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
-            Self::mark_allocated_page_for_debug(&mut mem)?;
+            Self::mark_allocated_page_for_debug(&mem)?;
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -1220,7 +1243,8 @@ impl Database {
                 Ok(savepoint) => savepoint,
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint
-                    | SavepointError::ImmediateDurabilityRequired => unreachable!(),
+                    | SavepointError::ImmediateDurabilityRequired
+                    | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
                     SavepointError::Storage(storage) => {
                         return Err(storage.into());
                     }
@@ -1234,7 +1258,34 @@ impl Database {
         Ok(db)
     }
 
-    fn get_allocator_state_table(
+    #[cfg(not(redb_no_std))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_multiprocess(
+        file: Box<dyn StorageBackend>,
+        allow_initialize: bool,
+        page_size: usize,
+        region_size: Option<u64>,
+        cache_size: usize,
+        repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+        coordinator: Arc<ProcessCoordinator>,
+    ) -> Result<Self, DatabaseError> {
+        let mut database = Self::new(
+            file,
+            allow_initialize,
+            page_size,
+            region_size,
+            cache_size,
+            repair_callback,
+        )?;
+        let next_transaction_id = database.mem.get_last_committed_transaction_id()?.next();
+        database.transaction_tracker = Arc::new(TransactionTracker::new_multiprocess(
+            next_transaction_id,
+            coordinator,
+        ));
+        Ok(database)
+    }
+
+    pub(crate) fn get_allocator_state_table(
         mem: &Arc<TransactionalMemory>,
     ) -> Result<Option<AllocatorStateTree>> {
         // The allocator state table is only valid if the primary was written using 2-phase commit
@@ -1309,7 +1360,7 @@ fn begin_write_with_allocation_policy(
     // Fail early if there has been an I/O error -- nothing can be committed in that case
     mem.check_io_errors()?;
     let guard = TransactionGuard::new_write(
-        transaction_tracker.start_write_transaction(),
+        transaction_tracker.start_write_transaction_for(mem)?,
         transaction_tracker.clone(),
     );
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
@@ -1323,13 +1374,41 @@ fn begin_write_with_allocation_policy(
         )
         .into());
     }
-    WriteTransaction::new(
+    let transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
         mem.clone(),
         allocation_policy,
-    )
-    .map_err(|e| e.into())
+    )?;
+
+    #[cfg(not(redb_no_std))]
+    if transaction_tracker.is_multiprocess() {
+        adopt_persistent_savepoints(transaction_tracker, &transaction).map_err(
+            |error| match error {
+                SavepointError::Storage(storage) => TransactionError::Storage(storage),
+                SavepointError::InvalidSavepoint
+                | SavepointError::ImmediateDurabilityRequired
+                | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
+            },
+        )?;
+    }
+
+    Ok(transaction)
+}
+
+#[cfg(not(redb_no_std))]
+fn adopt_persistent_savepoints(
+    transaction_tracker: &Arc<TransactionTracker>,
+    transaction: &WriteTransaction,
+) -> Result<(), SavepointError> {
+    let next_savepoint = transaction.next_persistent_savepoint_id()?;
+    let mut savepoints = Vec::new();
+    for id in transaction.list_persistent_savepoints()? {
+        let savepoint = transaction.get_persistent_savepoint(id)?;
+        savepoints.push((savepoint.get_id(), savepoint.get_transaction_id()));
+    }
+    transaction_tracker.adopt_persistent_savepoints(next_savepoint, &savepoints)?;
+    Ok(())
 }
 
 fn ensure_allocator_state_table_and_trim(
@@ -1353,6 +1432,14 @@ fn ensure_allocator_state_table_and_trim(
     Ok(())
 }
 
+fn needs_allocator_state_table(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+) -> bool {
+    !transaction_tracker.requires_quick_repair()
+        || !matches!(Database::get_allocator_state_table(mem), Ok(Some(_)))
+}
+
 // Closes the database: persists the allocator state table, so that the next open does not
 // require a repair, and closes the storage backend. Runs exactly once, when the database
 // closes: from Database::drop, or from the end of the write transaction that was live at
@@ -1364,13 +1451,14 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // of trusting the saved one
     if !crate::panicking()
         && !mem.needs_repair()
+        && needs_allocator_state_table(transaction_tracker, mem)
         && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
     {
         #[cfg(feature = "logging")]
         warn!("Failed to write allocator state table. Repair may be required at restart.");
     }
 
-    if mem.close().is_err() {
+    if transaction_tracker.close(mem).is_err() {
         #[cfg(feature = "logging")]
         warn!("Failed to flush database file. Repair may be required at restart.");
     }

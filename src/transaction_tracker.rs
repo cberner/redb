@@ -1,4 +1,6 @@
-use crate::sync::{Condvar, Mutex};
+#[cfg(not(redb_no_std))]
+use crate::multiprocess::{CommitGuard, PreparedWrite, ProcessCoordinator, TransactionPin};
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;
@@ -93,6 +95,13 @@ struct State {
     pending_non_durable_commits: BTreeMap<TransactionId, TransactionId>,
     // Non-durable commits which have NOT been processed in the freed table
     unprocessed_freed_non_durable_commits: BTreeSet<TransactionId>,
+    // Set while a thread has reserved the local write slot and is waiting for the cross-process
+    // writer lock.
+    write_transaction_starting: bool,
+    #[cfg(not(redb_no_std))]
+    process_read_pins: BTreeMap<TransactionId, TransactionPin>,
+    #[cfg(not(redb_no_std))]
+    write_snapshot_pin: Option<TransactionPin>,
     // Set when the Database was dropped while a write transaction was live. That transaction
     // keeps the database open, and end_write_transaction() hands the close back to it when
     // it ends
@@ -102,6 +111,8 @@ struct State {
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
+    #[cfg(not(redb_no_std))]
+    process: Option<Arc<ProcessCoordinator>>,
 }
 
 impl TransactionTracker {
@@ -116,17 +127,39 @@ impl TransactionTracker {
                 persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: BTreeMap::default(),
                 unprocessed_freed_non_durable_commits: BTreeSet::default(),
+                write_transaction_starting: false,
+                #[cfg(not(redb_no_std))]
+                process_read_pins: BTreeMap::default(),
+                #[cfg(not(redb_no_std))]
+                write_snapshot_pin: None,
                 deferred_close: None,
             }),
             live_write_transaction_available: Condvar::new(),
+            #[cfg(not(redb_no_std))]
+            process: None,
         }
     }
 
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn new_multiprocess(
+        next_transaction_id: TransactionId,
+        process: Arc<ProcessCoordinator>,
+    ) -> Self {
+        let mut tracker = Self::new(next_transaction_id);
+        tracker.process = Some(process);
+        tracker
+    }
+
+    fn reserve_write_slot(&self) -> MutexGuard<'_, State> {
         let mut state = self.state.lock().unwrap();
-        while state.live_write_transaction.is_some() {
+        while state.live_write_transaction.is_some() || state.write_transaction_starting {
             state = self.live_write_transaction_available.wait(state).unwrap();
         }
+        state
+    }
+
+    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+        let mut state = self.reserve_write_slot();
         assert!(state.live_write_transaction.is_none());
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
@@ -134,6 +167,43 @@ impl TransactionTracker {
         state.live_write_transaction = Some(transaction_id);
 
         transaction_id
+    }
+
+    pub(crate) fn start_write_transaction_for(
+        &self,
+        mem: &Arc<TransactionalMemory>,
+    ) -> Result<TransactionId> {
+        #[cfg(not(redb_no_std))]
+        if let Some(process) = &self.process {
+            return self.start_write_transaction_prepared(|| process.begin_write(mem));
+        }
+        Ok(self.start_write_transaction())
+    }
+
+    #[cfg(not(redb_no_std))]
+    fn start_write_transaction_prepared(
+        &self,
+        prepare: impl FnOnce() -> Result<PreparedWrite>,
+    ) -> Result<TransactionId> {
+        self.reserve_write_slot().write_transaction_starting = true;
+        let prepared = prepare();
+
+        let mut state = self.state.lock()?;
+        state.write_transaction_starting = false;
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.live_write_transaction_available.notify_one();
+                return Err(error);
+            }
+        };
+        state.next_transaction_id = prepared.last_committed;
+        let transaction_id = state.next_transaction_id.increment();
+        state.live_write_transaction = Some(transaction_id);
+        state.write_snapshot_pin = prepared.pin;
+        #[cfg(feature = "logging")]
+        debug!("Beginning write transaction id={transaction_id:?}");
+        Ok(transaction_id)
     }
 
     // Returns the deferred close, if the Database was dropped while this transaction was live.
@@ -145,8 +215,71 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.live_write_transaction.unwrap(), id);
         state.live_write_transaction = None;
+        #[cfg(not(redb_no_std))]
+        {
+            state.write_snapshot_pin = None;
+            if let Some(process) = &self.process {
+                process.end_write();
+            }
+        }
         self.live_write_transaction_available.notify_one();
         state.deferred_close.take()
+    }
+
+    pub(crate) fn requires_quick_repair(&self) -> bool {
+        #[cfg(not(redb_no_std))]
+        {
+            self.process
+                .as_ref()
+                .is_some_and(|process| process.multiple_writers())
+        }
+        #[cfg(redb_no_std)]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn is_multiprocess(&self) -> bool {
+        #[cfg(not(redb_no_std))]
+        {
+            self.process.is_some()
+        }
+        #[cfg(redb_no_std)]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn requires_two_phase_commit(&self) -> bool {
+        #[cfg(not(redb_no_std))]
+        {
+            self.process.is_some()
+        }
+        #[cfg(redb_no_std)]
+        {
+            false
+        }
+    }
+
+    pub(crate) fn defers_post_commit_free(&self) -> bool {
+        self.requires_two_phase_commit()
+    }
+
+    pub(crate) fn allows_non_durable_commit(&self) -> bool {
+        !self.requires_two_phase_commit()
+    }
+
+    pub(crate) fn allows_ephemeral_savepoint(&self) -> bool {
+        #[cfg(not(redb_no_std))]
+        {
+            self.process
+                .as_ref()
+                .is_none_or(|process| !process.multiple_writers())
+        }
+        #[cfg(redb_no_std)]
+        {
+            true
+        }
     }
 
     // Defers the database close to the end of the live write transaction, if one exists.
@@ -284,7 +417,22 @@ impl TransactionTracker {
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
         let mut state = self.state.lock()?;
+        #[cfg(not(redb_no_std))]
+        let (id, pin) = if let Some(process) = &self.process {
+            let local_oldest = state.live_read_transactions.keys().next().copied();
+            process.begin_read(mem, state.live_write_transaction.is_some(), local_oldest)?
+        } else {
+            (mem.get_last_committed_transaction_id()?, None)
+        };
+        #[cfg(redb_no_std)]
         let id = mem.get_last_committed_transaction_id()?;
+
+        #[cfg(not(redb_no_std))]
+        if !state.live_read_transactions.contains_key(&id)
+            && let Some(pin) = pin
+        {
+            state.process_read_pins.insert(id, pin);
+        }
         state
             .live_read_transactions
             .entry(id)
@@ -300,7 +448,57 @@ impl TransactionTracker {
         *ref_count -= 1;
         if *ref_count == 0 {
             state.live_read_transactions.remove(&id);
+            #[cfg(not(redb_no_std))]
+            state.process_read_pins.remove(&id);
         }
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn adopt_persistent_savepoints(
+        &self,
+        next_savepoint: Option<SavepointId>,
+        savepoints: &[(SavepointId, TransactionId)],
+    ) -> Result<()> {
+        let mut state = self.state.lock()?;
+        let previous: Vec<_> = state
+            .persistent_savepoints
+            .iter()
+            .filter_map(|id| {
+                state
+                    .valid_savepoints
+                    .get(id)
+                    .map(|transaction| (*id, *transaction))
+            })
+            .collect();
+        for (id, transaction) in previous {
+            state.persistent_savepoints.remove(&id);
+            state.valid_savepoints.remove(&id);
+            let count = state.live_read_transactions.get_mut(&transaction).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                state.live_read_transactions.remove(&transaction);
+                state.process_read_pins.remove(&transaction);
+            }
+        }
+
+        if let Some(next_savepoint) = next_savepoint {
+            state.next_savepoint_id = state.next_savepoint_id.max(next_savepoint);
+        }
+        for (id, transaction) in savepoints {
+            state
+                .live_read_transactions
+                .entry(*transaction)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            state.valid_savepoints.insert(*id, *transaction);
+            state.persistent_savepoints.insert(*id);
+        }
+        if let Some(oldest) = savepoints.iter().map(|(_, transaction)| *transaction).min()
+            && let Some(process) = &self.process
+        {
+            process.track_cache_floor(oldest)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
@@ -408,14 +606,41 @@ impl TransactionTracker {
             .map(|(id, txn_id)| (*id, *txn_id))
     }
 
-    pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
-        self.state
-            .lock()
-            .unwrap()
-            .live_read_transactions
-            .keys()
-            .next()
-            .copied()
+    pub(crate) fn oldest_live_read_transaction(&self) -> Result<Option<TransactionId>> {
+        let state = self.state.lock()?;
+        let local = state.live_read_transactions.keys().next().copied();
+        #[cfg(not(redb_no_std))]
+        if let Some(process) = &self.process {
+            let local = state
+                .write_snapshot_pin
+                .as_ref()
+                .map_or(local, |write_pin| {
+                    let write = write_pin.transaction();
+                    Some(local.map_or(write, |read| read.min(write)))
+                });
+            return process.oldest_active_transaction(local);
+        }
+        Ok(local)
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn prepare_commit(
+        &self,
+        mem: &TransactionalMemory,
+        collection_horizon: TransactionId,
+    ) -> Result<Option<CommitGuard>> {
+        self.process
+            .as_ref()
+            .map(|process| process.prepare_commit(mem, collection_horizon))
+            .transpose()
+    }
+
+    pub(crate) fn close(&self, mem: &TransactionalMemory) -> Result<()> {
+        #[cfg(not(redb_no_std))]
+        if let Some(process) = &self.process {
+            return process.close(mem);
+        }
+        mem.close()
     }
 
     // Returns the transaction id of the oldest non-durable transaction which has not been processed

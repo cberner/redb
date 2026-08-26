@@ -51,6 +51,17 @@ impl FileBackend {
             Err(TryLockError::Error(err)) => Err(err.into()),
         }
     }
+
+    /// Creates a backend without locking the data file.
+    ///
+    /// Directory-structured databases coordinate through their adjacent lock files, so every
+    /// process must be able to keep the data file open at the same time.
+    pub(crate) fn new_unlocked(file: File) -> Self {
+        Self {
+            file,
+            lock_supported: false,
+        }
+    }
 }
 
 impl StorageBackend for FileBackend {

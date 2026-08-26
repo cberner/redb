@@ -116,6 +116,8 @@ mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
 mod multimap_table;
+#[cfg(not(redb_no_std))]
+pub mod multiprocess;
 mod sealed;
 mod sync;
 mod table;

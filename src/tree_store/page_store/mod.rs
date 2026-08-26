@@ -21,6 +21,8 @@ pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTracker};
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
+#[cfg(not(redb_no_std))]
+pub(crate) use page_manager::CommitSnapshot;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, xxh3_checksum,

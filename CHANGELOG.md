@@ -1,6 +1,9 @@
 # redb - Changelog
 
 ## 5.0.0 - 2026-XX-XX
+* Add the `multiprocess` module for directory-structured databases that support concurrent readers
+  and either one long-lived writer process or writer handoff between multiple processes. Its
+  transactions use the existing table types, making single-file redb code straightforward to port.
 * Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
   `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
   target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend

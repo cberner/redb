@@ -300,6 +300,8 @@ pub enum SavepointError {
     /// creating or deleting a persistent savepoint, or restoring an older savepoint while
     /// newer persistent savepoints exist that would need to be deleted.
     ImmediateDurabilityRequired,
+    /// Ephemeral savepoints are not supported when writer ownership may move between processes.
+    EphemeralSavepointUnsupported,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -309,6 +311,7 @@ impl From<SavepointError> for Error {
         match err {
             SavepointError::InvalidSavepoint => Error::InvalidSavepoint,
             SavepointError::ImmediateDurabilityRequired => Error::ImmediateDurabilityRequired,
+            SavepointError::EphemeralSavepointUnsupported => Error::EphemeralSavepointUnsupported,
             SavepointError::Storage(storage) => storage.into(),
         }
     }
@@ -330,6 +333,12 @@ impl Display for SavepointError {
                 write!(
                     f,
                     "Operation requires Durability::Immediate for the current transaction."
+                )
+            }
+            SavepointError::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported in multiple-writer mode"
                 )
             }
             SavepointError::Storage(storage) => storage.fmt(f),
@@ -404,12 +413,17 @@ impl core::error::Error for CompactionError {}
 pub enum SetDurabilityError {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// Directory-structured databases require immediately durable commits.
+    MultiprocessDurabilityRequired,
 }
 
 impl From<SetDurabilityError> for Error {
     fn from(err: SetDurabilityError) -> Error {
         match err {
             SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+            SetDurabilityError::MultiprocessDurabilityRequired => {
+                Error::MultiprocessDurabilityRequired
+            }
         }
     }
 }
@@ -422,6 +436,9 @@ impl Display for SetDurabilityError {
                     f,
                     "Persistent savepoint modified. Cannot reduce transaction durability"
                 )
+            }
+            SetDurabilityError::MultiprocessDurabilityRequired => {
+                write!(f, "Multiprocess databases require immediate durability")
             }
         }
     }
@@ -542,10 +559,14 @@ pub enum Error {
     InvalidSavepoint,
     /// A savepoint operation requires [`crate::Durability::Immediate`] for the transaction.
     ImmediateDurabilityRequired,
+    /// Ephemeral savepoints are not supported in multiple-writer mode.
+    EphemeralSavepointUnsupported,
     /// [`crate::RepairSession::abort`] was called.
     RepairAborted,
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// Multiprocess databases require immediately durable commits.
+    MultiprocessDurabilityRequired,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -696,6 +717,9 @@ impl Display for Error {
                     "Persistent savepoint modified. Cannot reduce transaction durability"
                 )
             }
+            Error::MultiprocessDurabilityRequired => {
+                write!(f, "Multiprocess databases require immediate durability")
+            }
             Error::PersistentSavepointExists => {
                 write!(
                     f,
@@ -727,6 +751,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Operation requires Durability::Immediate for the current transaction."
+                )
+            }
+            Error::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported in multiple-writer mode"
                 )
             }
             Error::ReadTransactionStillInUse(_) => {

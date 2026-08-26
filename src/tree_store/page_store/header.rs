@@ -52,7 +52,7 @@ const NUM_FULL_REGIONS_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<
 const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
 // Formerly the region tracker page
 const _UNUSED3_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
-const TRANSACTION_SIZE: usize = 128;
+pub(super) const TRANSACTION_SIZE: usize = 128;
 const TRANSACTION_0_OFFSET: usize = 64;
 const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
 pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
@@ -257,6 +257,14 @@ impl UnrepairedDatabaseHeader {
         Ok((self.inner, kept_primary && !layout_stale))
     }
 
+    // Selects the committed transaction without reconciling the layout against the current file
+    // length. A shared reader may observe the file while a writer is growing it and never uses the
+    // layout for allocation, so only the commit slots are meaningful to it.
+    pub(super) fn finalize_transaction_slots(mut self) -> Result<DatabaseHeader> {
+        self.select_primary_slot()?;
+        Ok(self.inner)
+    }
+
     // Rebuild the database layout from the actual file length, trusting only the immutable region
     // geometry. Rejects any length no valid layout can produce: too short to hold a region, more
     // regions than the 20-bit region index can address, or a length that doesn't fall on a region
@@ -395,6 +403,22 @@ impl DatabaseHeader {
             self.trailing_partial_region_pages = 0;
         }
         self.full_regions = layout.num_full_regions();
+    }
+
+    // Replaces only the commit slots. A shared reader deliberately keeps the immutable region
+    // geometry it opened with while another process may be changing the recorded file layout.
+    pub(super) fn adopt_transaction_slots(&mut self, other: &DatabaseHeader) {
+        self.primary_slot = other.primary_slot;
+        self.two_phase_commit = other.two_phase_commit;
+        self.transaction_slots.clone_from(&other.transaction_slots);
+    }
+
+    pub(super) fn primary_slot_index(&self) -> usize {
+        self.primary_slot
+    }
+
+    pub(super) fn transaction_slot_bytes(&self, index: usize) -> [u8; TRANSACTION_SIZE] {
+        self.transaction_slots[index].to_bytes()
     }
 
     pub(super) fn primary_slot(&self) -> &TransactionHeader {
