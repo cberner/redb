@@ -9,7 +9,7 @@ mod locks;
 use crate::db::RepairSession;
 use crate::tree_store::PAGE_SIZE;
 use crate::{Database, DatabaseError, Result};
-use locks::DatabaseDir;
+use locks::{DataLocation, DatabaseDir};
 use std::fs::File;
 use std::path::Path;
 
@@ -100,7 +100,15 @@ impl MultiProcessBuilder {
 
     fn open_inner(&self, path: &Path, create: bool) -> Result<MultiProcessDatabase, DatabaseError> {
         let dir = DatabaseDir::new(path);
-        let backend = dir.open(create)?;
+        let (backend, location) = dir.open(create)?;
+        // A guard rather than a check on the error path: the repair callback runs inside the
+        // initialization and is the caller's code, so the span can be left by a panic the caller
+        // catches as well as by an error, and the temporary has to be cleaned up either way
+        let mut cleanup = DiscardFailedData {
+            dir: &dir,
+            location,
+            armed: true,
+        };
         // `create` alone decides whether an empty database file may be initialized: an existing
         // database is recognized by its contents rather than by the marker, so a create() that
         // died before initializing the file can be redone
@@ -113,15 +121,36 @@ impl MultiProcessBuilder {
             &self.repair_callback,
         )?;
         if create {
-            // Last, so that a create() pointed at a directory which turns out not to hold a
-            // database fails without having marked it as one of these
+            // Both last, and in this order, so that a create() pointed somewhere that turns out
+            // not to hold a database fails without having left either a database file or a marker
+            // behind
+            dir.promote_data(location)?;
             dir.write_metadata_if_missing()?;
         }
+        cleanup.armed = false;
         let metadata_lock = dir.lock_metadata_shared()?;
 
         Ok(MultiProcessDatabase {
             _inner: inner,
             _metadata_lock: metadata_lock,
         })
+    }
+}
+
+/// Discards the temporary a `create()` made, unless initialization completed and disarmed it.
+/// A drop guard rather than error-path cleanup, because the span it covers runs the repair
+/// callback -- the caller's code -- and can be left by a panic the caller catches, which no
+/// error path would see.
+struct DiscardFailedData<'a> {
+    dir: &'a DatabaseDir,
+    location: DataLocation,
+    armed: bool,
+}
+
+impl Drop for DiscardFailedData<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.dir.discard_failed_data(self.location);
+        }
     }
 }

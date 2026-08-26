@@ -85,8 +85,8 @@
   database in a directory -- the database file beside a `metadata` marker carrying a magic number,
   format version, and writer mode, and the lock files that coordinate the processes using it. Only
   `create()` and `open()` are provided, and only one process may have the database open at a time.
-  `create()` refuses an unmarked directory that already holds files under redb's names, such as a
-  plain `Database` stored as `data.redb`, rather than adopting them.
+  `create()` refuses an unmarked directory that already holds other files, such as a plain
+  `Database` stored as `data.redb`, rather than adopting or overwriting them.
 
 ### Minor improvements
 * Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of

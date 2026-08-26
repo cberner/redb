@@ -20,6 +20,8 @@ pub use backends::InMemoryBackend;
 pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTracker};
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
+#[cfg(all(feature = "experimental-multiprocess", not(redb_no_std)))]
+pub(crate) use header::MAGICNUMBER;
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
