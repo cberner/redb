@@ -1229,7 +1229,7 @@ impl Database {
                 },
             };
             db.transaction_tracker
-                .register_persistent_savepoint(&savepoint);
+                .register_persistent_savepoint(&savepoint)?;
         }
         txn.abort()?;
 

@@ -22,10 +22,14 @@ pub(crate) use btree_cursor_range::BtreeCursorRange;
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, encode_bounds};
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
+#[cfg(all(redb_multiprocess, test))]
+pub(crate) use page_store::DB_HEADER_SIZE;
 #[cfg(not(redb_no_std))]
 pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
+#[cfg(redb_multiprocess)]
+pub(crate) use page_store::range_lock;
 pub(crate) use page_store::{
     AllocationPolicy, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PAGE_SIZE, Page,
     PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageNumberHashSet, PageResolver,

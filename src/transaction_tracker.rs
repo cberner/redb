@@ -102,6 +102,10 @@ struct State {
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
+    // Present when the database is shared between processes: the coordinator that publishes
+    // this process's transaction pins and reads the other processes' state
+    #[cfg(redb_multiprocess)]
+    multiprocess: Option<crate::multiprocess::Coordinator>,
 }
 
 impl TransactionTracker {
@@ -119,6 +123,8 @@ impl TransactionTracker {
                 deferred_close: None,
             }),
             live_write_transaction_available: Condvar::new(),
+            #[cfg(redb_multiprocess)]
+            multiprocess: None,
         }
     }
 
@@ -259,8 +265,17 @@ impl TransactionTracker {
         state.next_savepoint_id = next_savepoint;
     }
 
-    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {
+    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) -> Result {
         let mut state = self.state.lock().unwrap();
+        // Pinned exactly as a read of the same transaction would be, so that every local
+        // holder carries a pin and the one release path serves them all alike. Pinning the
+        // savepoint's old id is sound because the savepoint's presence in the database
+        // already keeps its transaction from being collected
+        #[cfg(redb_multiprocess)]
+        if let Some(coordinator) = &self.multiprocess {
+            let id = savepoint.get_transaction_id();
+            coordinator.pin_transaction(|| Ok(id))?;
+        }
         state
             .live_read_transactions
             .entry(savepoint.get_transaction_id())
@@ -270,6 +285,7 @@ impl TransactionTracker {
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
         state.persistent_savepoints.insert(savepoint.get_id());
+        Ok(())
     }
 
     // Marks an already-registered savepoint as persistent
@@ -284,6 +300,18 @@ impl TransactionTracker {
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
         let mut state = self.state.lock()?;
+        // Pinned before the local registration, so a pin that cannot be taken leaves no
+        // local record behind; both sit under the state lock, so the pin exists whenever
+        // the local count says it must. The coordinator runs the read inside its hold of
+        // the header lock, so the id pinned is the one still published: no other process
+        // can collect between the read and the pin
+        #[cfg(redb_multiprocess)]
+        let id = if let Some(coordinator) = &self.multiprocess {
+            coordinator.pin_transaction(|| mem.get_last_committed_transaction_id())?
+        } else {
+            mem.get_last_committed_transaction_id()?
+        };
+        #[cfg(not(redb_multiprocess))]
         let id = mem.get_last_committed_transaction_id()?;
         state
             .live_read_transactions
@@ -301,6 +329,52 @@ impl TransactionTracker {
         if *ref_count == 0 {
             state.live_read_transactions.remove(&id);
         }
+        // A pin that cannot be released stays held until the process exits, which holds
+        // pages back but corrupts nothing; ending a read transaction is infallible
+        #[cfg(redb_multiprocess)]
+        if let Some(coordinator) = &self.multiprocess {
+            let _ = coordinator.unpin_transaction(id);
+        }
+    }
+
+    /// The oldest transaction another process still pins, whose snapshot must stay
+    /// readable: pages freed after it may not be reclaimed. `None` for a database no other
+    /// process shares. This handle's own transactions are not included: the tracker itself
+    /// knows them.
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn cross_process_free_floor(
+        &self,
+        mem: &TransactionalMemory,
+    ) -> Result<Option<TransactionId>> {
+        if let Some(coordinator) = &self.multiprocess {
+            return coordinator.oldest_foreign_pin(
+                mem.collection_horizon(),
+                mem.get_last_committed_transaction_id()?,
+            );
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(redb_multiprocess))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn cross_process_free_floor(
+        &self,
+        _mem: &TransactionalMemory,
+    ) -> Result<Option<TransactionId>> {
+        Ok(None)
+    }
+
+    /// Whether a cross-process coordinator is installed, making other processes' pins part
+    /// of every reclamation decision.
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn multiprocess_coordinated(&self) -> bool {
+        self.multiprocess.is_some()
+    }
+
+    #[cfg(not(redb_multiprocess))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn multiprocess_coordinated(&self) -> bool {
+        false
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {

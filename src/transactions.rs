@@ -1979,10 +1979,19 @@ impl WriteTransaction {
             self.store_data_freed_pages_for(transaction_id, pages)?;
         }
 
-        let free_until_transaction = self
+        let mut free_until_transaction = self
             .transaction_tracker
             .oldest_live_read_transaction()
             .map_or(self.transaction_id, |x| x.next());
+        // Another process's oldest pin bounds reclamation exactly as a local reader does:
+        // pages freed by the pinned transaction itself are already dead in that snapshot,
+        // so the boundary is the transaction after it, as for a local reader above
+        if let Some(floor) = self
+            .transaction_tracker
+            .cross_process_free_floor(&self.mem)?
+        {
+            free_until_transaction = free_until_transaction.min(floor.next());
+        }
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
@@ -2069,7 +2078,13 @@ impl WriteTransaction {
 
         self.apply_savepoint_state_on_commit();
 
-        if self.post_commit_free == PostCommitFree::Enabled {
+        // The post-commit pass bounds itself by local readers alone, and it runs after
+        // publication, where a new foreign pin can land below any floor the pre-commit
+        // scan produced -- no scan can vouch for it. With a coordinator installed these
+        // entries wait for the next durable commit's bounded pass instead
+        if self.post_commit_free == PostCommitFree::Enabled
+            && !self.transaction_tracker.multiprocess_coordinated()
+        {
             self.process_data_freed_pages_after_commit(
                 user_root,
                 &page_allocator,

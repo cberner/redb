@@ -2,6 +2,9 @@ use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::{File, TryLockError};
 use std::io;
 
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+use super::range_lock;
+
 #[cfg(feature = "logging")]
 use log::warn;
 
@@ -10,104 +13,6 @@ use std::os::unix::fs::FileExt;
 
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
-
-// The multi-process locking protocol (see docs/design.md) coordinates processes through
-// byte-range locks on the database file, at offsets far past any possible end of file. On
-// Unix those are a separate namespace from the whole-file flock() that std's file locks
-// take, so the two kinds of lock cannot see each other; a single-process or read-only
-// handle must hold the entire byte range as well, so that it and a multi-process handle
-// refuse each other. Windows needs nothing extra: std's whole-file lock is itself a range
-// lock over every byte.
-//
-// Open file description locks, never POSIX record locks: a record lock belongs to the
-// process, and is released when any descriptor for the file is closed anywhere in it --
-// which a library embedded in an arbitrary program cannot rule out.
-#[cfg(any(target_os = "linux", target_vendor = "apple"))]
-mod range_lock {
-    use std::fs::File;
-    use std::io;
-    use std::os::unix::io::AsRawFd;
-
-    // The lock-type constants are c_int on Linux and already c_short on the Apple platforms
-    #[cfg(target_os = "linux")]
-    fn lock_type(kind: libc::c_int) -> libc::c_short {
-        kind.try_into().unwrap()
-    }
-
-    #[cfg(target_vendor = "apple")]
-    fn lock_type(kind: libc::c_short) -> libc::c_short {
-        kind
-    }
-
-    fn flock_struct(kind: libc::c_short, start: u64, len: u64) -> libc::flock {
-        // Zeroed rather than written field by field: the layout of struct flock differs
-        // between Linux and the Apple platforms, and libc carries the right one for each
-        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-        lock.l_type = kind;
-        lock.l_whence = libc::SEEK_SET.try_into().unwrap();
-        lock.l_start = libc::off_t::try_from(start).unwrap();
-        lock.l_len = libc::off_t::try_from(len).unwrap();
-        lock
-    }
-
-    /// `Ok(true)`: acquired. `Ok(false)`: a conflicting lock is held elsewhere.
-    fn try_lock(file: &File, start: u64, len: u64, exclusive: bool) -> io::Result<bool> {
-        let kind = lock_type(if exclusive {
-            libc::F_WRLCK
-        } else {
-            libc::F_RDLCK
-        });
-        let mut lock = flock_struct(kind, start, len);
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &raw mut lock) };
-        if rc == 0 {
-            return Ok(true);
-        }
-        let err = io::Error::last_os_error();
-        match err.raw_os_error() {
-            Some(libc::EAGAIN | libc::EACCES) => Ok(false),
-            _ => Err(err),
-        }
-    }
-
-    fn unlock(file: &File, start: u64, len: u64) -> io::Result<()> {
-        let mut lock = flock_struct(lock_type(libc::F_UNLCK), start, len);
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &raw mut lock) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
-    }
-
-    /// Locks every offset the file can address. A length of zero means "to the largest
-    /// possible offset", and is the only way to say it: an explicit length cannot reach the
-    /// last addressable byte, because the offsets fcntl takes are signed.
-    pub(super) fn try_lock_all(file: &File, exclusive: bool) -> io::Result<bool> {
-        try_lock(file, 0, 0, exclusive)
-    }
-
-    pub(super) fn unlock_all(file: &File) -> io::Result<()> {
-        unlock(file, 0, 0)
-    }
-
-    /// The filesystem does not support range locks (fcntl on a kernel or filesystem
-    /// without them reports `EINVAL` or a not-supported error)
-    pub(super) fn unsupported(err: &io::Error) -> bool {
-        matches!(err.raw_os_error(), Some(code) if code == libc::EINVAL
-            || code == libc::ENOTSUP
-            || code == libc::EOPNOTSUPP)
-    }
-
-    #[cfg(test)]
-    pub(super) fn try_lock_byte(file: &File, offset: u64, exclusive: bool) -> io::Result<bool> {
-        try_lock(file, offset, 1, exclusive)
-    }
-
-    #[cfg(test)]
-    pub(super) fn unlock_byte(file: &File, offset: u64) -> io::Result<()> {
-        unlock(file, offset, 1)
-    }
-}
 
 /// Stores a database as a file on-disk.
 #[derive(Debug)]
@@ -145,7 +50,16 @@ impl FileBackend {
         // locks ignore each other there -- so they are held in addition. A conflict means
         // a multi-process handle has the database open
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        let range_lock_supported = match range_lock::try_lock_all(&file, !read_only) {
+        let range_lock_supported = match range_lock::try_lock(
+            &file,
+            0,
+            range_lock::WHOLE_FILE_LEN,
+            if read_only {
+                range_lock::LockKind::Shared
+            } else {
+                range_lock::LockKind::Exclusive
+            },
+        ) {
             Ok(true) => true,
             Ok(false) => return Err(DatabaseError::DatabaseAlreadyOpen),
             Err(err) if range_lock::unsupported(&err) => {
@@ -276,7 +190,7 @@ impl StorageBackend for FileBackend {
     fn close(&self) -> Result<(), io::Error> {
         #[cfg(any(target_os = "linux", target_vendor = "apple"))]
         if self.range_lock_supported {
-            range_lock::unlock_all(&self.file)?;
+            range_lock::unlock(&self.file, 0, range_lock::WHOLE_FILE_LEN)?;
         }
         if self.lock_supported {
             self.file.unlock()?;
@@ -359,7 +273,8 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod range_lock_tests {
-    use super::{FileBackend, range_lock};
+    use super::super::range_lock;
+    use super::FileBackend;
     use crate::StorageBackend;
     use std::fs::{File, OpenOptions};
     use std::path::Path;
@@ -381,7 +296,12 @@ mod range_lock_tests {
     /// A shared probe answers "could a reader-side lock land here", an exclusive probe
     /// "could a writer-side lock land here". The probe's own lock is released right away.
     fn byte_is_free(file: &File, offset: u64, exclusive: bool) -> bool {
-        let acquired = range_lock::try_lock_byte(file, offset, exclusive).unwrap();
+        let kind = if exclusive {
+            range_lock::LockKind::Exclusive
+        } else {
+            range_lock::LockKind::Shared
+        };
+        let acquired = range_lock::try_lock_byte(file, offset, kind).unwrap();
         if acquired {
             range_lock::unlock_byte(file, offset).unwrap();
         }
@@ -423,7 +343,7 @@ mod range_lock_tests {
     fn a_held_protocol_byte_reads_as_already_open() {
         let tmpfile = crate::create_tempfile();
         let holder = reopen(tmpfile.path());
-        assert!(range_lock::try_lock_byte(&holder, BASE, true).unwrap());
+        assert!(range_lock::try_lock_byte(&holder, BASE, range_lock::LockKind::Exclusive).unwrap());
 
         // Both kinds of handle are refused while any part of the range is held, which is
         // what stands in for a multi-process handle having the database open

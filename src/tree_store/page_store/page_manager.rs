@@ -1281,8 +1281,8 @@ impl TransactionalMemory {
     }
 
     // The collection horizon the latest durable commit published. Nothing outside the
-    // multi-process protocol needs it, and that protocol reads it from the file
-    #[cfg(test)]
+    // multi-process protocol and its tests needs it
+    #[cfg(any(test, redb_multiprocess))]
     pub(crate) fn collection_horizon(&self) -> TransactionId {
         self.state
             .lock()
