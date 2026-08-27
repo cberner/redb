@@ -32,10 +32,15 @@
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
-  takes a `ConcurrencyMode` configuring how processes may share the database.
-  When `SingleWriterProcess` or `MultiWriterProcess` is configured, commits are always 2-phase,
-  `Durability::None` is refused, and the database may be opened read-only while another process has
-  it open for writing; each new read transaction then sees that process's durable commits.
+  takes a `ConcurrencyMode` configuring how processes may share the database, on Linux, macOS and
+  Windows: the default single-process mode, where a writer excludes every other process; one
+  writing process with any number of read-only processes (`ConcurrencyMode::SingleWriterProcess`);
+  or several writing processes (`ConcurrencyMode::MultiWriterProcess`). Opening a database for
+  writing in a shared mode requires every process that has it open in another mode to have closed
+  it. In the shared modes a database may be opened read-only while another process has it open for
+  writing; each new read transaction sees that process's commits. Commits in those modes are always
+  durable and 2-phase, whatever `WriteTransaction::set_two_phase_commit()` asked for; multi-writer
+  additionally makes every commit a quick-repair commit and does not support ephemeral savepoints.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

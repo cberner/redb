@@ -476,7 +476,7 @@ impl PagedCachedFile {
         }
     }
 
-    fn flush_write_buffer(&self) -> Result {
+    pub(super) fn flush_write_buffer(&self) -> Result {
         for stripe in &self.write_buffer {
             let mut write_buffer = stripe.lock().unwrap();
 

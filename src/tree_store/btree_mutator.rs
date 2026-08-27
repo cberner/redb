@@ -1831,6 +1831,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 #[cfg(all(test, feature = "experimental_cursor"))]
 mod tests {
     use super::*;
+    use crate::tree_store::AccessMode;
     use crate::tree_store::{
         AllocationPolicy, InMemoryBackend, LocklessBackend, TransactionalMemory,
     };
@@ -1848,7 +1849,7 @@ mod tests {
             page_size,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
             crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
