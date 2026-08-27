@@ -73,6 +73,9 @@ const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
 const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
 const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
 const TRANSACTION_ID_OFFSET: usize = _UNUSED2_OFFSET + BtreeHeader::serialized_size();
+// The last 8 bytes of what was padding before the collection horizon was recorded, kept
+// directly ahead of the transaction id per the layout in docs/design.md
+const COLLECTION_HORIZON_OFFSET: usize = TRANSACTION_ID_OFFSET - size_of::<u64>();
 const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
@@ -405,17 +408,23 @@ impl DatabaseHeader {
         &self.transaction_slots[self.primary_slot ^ 1]
     }
 
-    // Overwrite the secondary slot with a newly committed transaction.
+    // Overwrite the secondary slot with a newly committed transaction. `collection_horizon`
+    // is the newest transaction this commit processed freed pages through, or `None` for a
+    // commit that processed none; the stored horizon never moves backwards either way, since
+    // reuse that an earlier commit made visible cannot be taken back
     pub(super) fn write_secondary_slot(
         &mut self,
         transaction_id: TransactionId,
         user_root: Option<BtreeHeader>,
         system_root: Option<BtreeHeader>,
+        collection_horizon: Option<TransactionId>,
     ) {
+        let floor = self.transaction_slots[self.primary_slot].collection_horizon;
         let slot = &mut self.transaction_slots[self.primary_slot ^ 1];
         slot.transaction_id = transaction_id;
         slot.user_root = user_root;
         slot.system_root = system_root;
+        slot.collection_horizon = floor.max(collection_horizon.unwrap_or(floor));
         slot.corrupt_bytes = None;
     }
 
@@ -461,6 +470,12 @@ pub(super) struct TransactionHeader {
     pub(super) user_root: Option<BtreeHeader>,
     pub(super) system_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
+    // The newest transaction whose freed pages have been processed for reuse. A page can only
+    // change after it is freed and reused, so this is the watermark a page cache is valid
+    // against: entries cached at or before it may be stale. It only ever advances. Nothing in a
+    // single process consults it -- the in-memory tracker knows more -- but the multi-process
+    // protocol reads it from the file, so every commit keeps it current
+    pub(super) collection_horizon: TransactionId,
     // When present, the original on-disk bytes of a slot whose checksum did not verify. They are
     // written back verbatim, so a slot that failed verification keeps its invalid checksum instead
     // of being re-serialized as if it were valid. `None` once the slot holds a new commit.
@@ -474,6 +489,7 @@ impl TransactionHeader {
             user_root: None,
             system_root: None,
             transaction_id,
+            collection_horizon: TransactionId::new(0),
             corrupt_bytes: None,
         }
     }
@@ -519,12 +535,15 @@ impl TransactionHeader {
             None
         };
         let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
+        // Zero in files from before the field existed: nothing recorded, the safe floor
+        let collection_horizon = TransactionId::new(get_u64(&data[COLLECTION_HORIZON_OFFSET..]));
 
         let result = Self {
             version,
             user_root,
             system_root,
             transaction_id,
+            collection_horizon,
             corrupt_bytes: if corrupted {
                 Some(data[..TRANSACTION_SIZE].try_into().unwrap())
             } else {
@@ -553,6 +572,8 @@ impl TransactionHeader {
             result[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
                 .copy_from_slice(&header.to_le_bytes());
         }
+        result[COLLECTION_HORIZON_OFFSET..(COLLECTION_HORIZON_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.collection_horizon.raw_id().to_le_bytes());
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
             .copy_from_slice(&self.transaction_id.raw_id().to_le_bytes());
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
@@ -565,10 +586,12 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    use super::{COLLECTION_HORIZON_OFFSET, TRANSACTION_SIZE, TransactionHeader};
     #[cfg(feature = "experimental-api-5")]
     use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
+    use crate::transaction_tracker::TransactionId;
     use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
         DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
@@ -1512,5 +1535,30 @@ mod test {
             || *x == 0x0B
             || (0x0E <= *x && *x <= 0x1F)
             || (0x7F <= *x && *x <= 0x9F)));
+    }
+
+    #[test]
+    fn collection_horizon_roundtrips_and_is_checksummed() {
+        let mut slot = TransactionHeader::new(TransactionId::new(7));
+        slot.collection_horizon = TransactionId::new(5);
+        let bytes = slot.to_bytes();
+
+        let (parsed, corrupted) = TransactionHeader::from_bytes(&bytes).unwrap();
+        assert!(!corrupted);
+        assert_eq!(parsed.collection_horizon, TransactionId::new(5));
+        assert_eq!(parsed.transaction_id, TransactionId::new(7));
+
+        // The horizon sits inside the checksummed region: a torn write of it must invalidate
+        // the slot rather than parse as a different horizon
+        let mut torn = bytes;
+        torn[COLLECTION_HORIZON_OFFSET] ^= 0xFF;
+        let (_, corrupted) = TransactionHeader::from_bytes(&torn).unwrap();
+        assert!(corrupted);
+
+        // Files from before the field existed hold zeros there
+        let empty = TransactionHeader::new(TransactionId::new(1)).to_bytes();
+        let (parsed, _) = TransactionHeader::from_bytes(&empty).unwrap();
+        assert_eq!(parsed.collection_horizon, TransactionId::new(0));
+        assert_eq!(empty.len(), TRANSACTION_SIZE);
     }
 }

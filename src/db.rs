@@ -733,6 +733,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                None,
             )?;
             // Reserve the id, or the next write transaction would commit with the same one,
             // which crash recovery could then resolve to the wrong slot
@@ -1198,6 +1199,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                None,
             )?;
         }
 
@@ -1598,6 +1600,43 @@ mod test {
     use core::sync::atomic::{AtomicU64, Ordering};
     use std::fs::File;
     use std::io::{ErrorKind, Read, Seek, SeekFrom};
+
+    #[test]
+    fn collection_horizon_advances_and_persists() {
+        let tmpfile = crate::create_tempfile();
+        let table: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+        let db = Database::create(tmpfile.path()).unwrap();
+        let value = [0u8; 512];
+        for _ in 0..5 {
+            let txn = db.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(table).unwrap();
+                for key in 0..64u64 {
+                    t.insert(&key, value.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+        // Overwriting commits free and reprocess pages, so the published horizon has moved
+        let horizon = db.mem.collection_horizon();
+        assert!(horizon.raw_id() > 0);
+        drop(db);
+
+        // The horizon rides in the commit slots, so a reopen reads it back, and every commit
+        // only ever advances it -- the close itself included, which commits the allocator
+        // state and moves the watermark with it
+        let db = Database::open(tmpfile.path()).unwrap();
+        assert!(db.mem.collection_horizon() >= horizon);
+        let horizon = db.mem.collection_horizon();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(table).unwrap();
+            t.insert(&0, value.as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+        assert!(db.mem.collection_horizon() >= horizon);
+    }
 
     #[derive(Debug)]
     struct FailingBackend {

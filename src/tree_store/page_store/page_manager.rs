@@ -1056,6 +1056,7 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
+        collection_horizon: Option<TransactionId>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1082,7 +1083,7 @@ impl TransactionalMemory {
         );
 
         let old_transaction_id = header.secondary_slot().transaction_id;
-        header.write_secondary_slot(transaction_id, data_root, system_root);
+        header.write_secondary_slot(transaction_id, data_root, system_root, collection_horizon);
 
         self.write_header(&header)?;
 
@@ -1141,7 +1142,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state
             .header
-            .write_secondary_slot(transaction_id, data_root, system_root);
+            .write_secondary_slot(transaction_id, data_root, system_root, None);
         state.read_from_secondary = true;
 
         Ok(())
@@ -1277,6 +1278,18 @@ impl TransactionalMemory {
 
     pub(crate) fn get_durable_system_root(&self) -> Option<BtreeHeader> {
         self.state.lock().unwrap().header.primary_slot().system_root
+    }
+
+    // The collection horizon the latest durable commit published. Nothing outside the
+    // multi-process protocol needs it, and that protocol reads it from the file
+    #[cfg(test)]
+    pub(crate) fn collection_horizon(&self) -> TransactionId {
+        self.state
+            .lock()
+            .unwrap()
+            .header
+            .primary_slot()
+            .collection_horizon
     }
 
     pub(crate) fn free(&self, page: PageNumber, allocated: &PageTracker) {

@@ -2040,12 +2040,18 @@ impl WriteTransaction {
         };
 
         let page_allocator = self.page_allocator();
+        // Freed pages were processed through free_until_transaction above, so pages freed
+        // strictly before it may now be reused: that boundary, inclusive, is the collection
+        // horizon this commit publishes
         self.mem.commit(
             user_root,
             system_root,
             self.transaction_id,
             self.two_phase_commit,
             self.shrink_policy,
+            Some(TransactionId::new(
+                free_until_transaction.raw_id().saturating_sub(1),
+            )),
         )?;
         // All of this transaction's allocations are durable; discard the per-txn tracker.
         let _ = page_allocator.take_allocated_since_commit();
