@@ -1056,6 +1056,7 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
+        collection_horizon: Option<TransactionId>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1082,7 +1083,7 @@ impl TransactionalMemory {
         );
 
         let old_transaction_id = header.secondary_slot().transaction_id;
-        header.write_secondary_slot(transaction_id, data_root, system_root);
+        header.write_secondary_slot(transaction_id, data_root, system_root, collection_horizon);
 
         self.write_header(&header)?;
 
@@ -1141,7 +1142,7 @@ impl TransactionalMemory {
         let mut state = self.state.lock().unwrap();
         state
             .header
-            .write_secondary_slot(transaction_id, data_root, system_root);
+            .write_secondary_slot(transaction_id, data_root, system_root, None);
         state.read_from_secondary = true;
 
         Ok(())

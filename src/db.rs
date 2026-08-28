@@ -733,6 +733,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                None,
             )?;
             // Reserve the id, or the next write transaction would commit with the same one,
             // which crash recovery could then resolve to the wrong slot
@@ -1198,6 +1199,7 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                None,
             )?;
         }
 

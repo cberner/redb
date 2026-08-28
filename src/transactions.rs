@@ -2040,12 +2040,16 @@ impl WriteTransaction {
         };
 
         let page_allocator = self.page_allocator();
+        // process_freed_pages ran through free_until_transaction, so reuse reaches the id below it
         self.mem.commit(
             user_root,
             system_root,
             self.transaction_id,
             self.two_phase_commit,
             self.shrink_policy,
+            Some(TransactionId::new(
+                free_until_transaction.raw_id().saturating_sub(1),
+            )),
         )?;
         // All of this transaction's allocations are durable; discard the per-txn tracker.
         let _ = page_allocator.take_allocated_since_commit();

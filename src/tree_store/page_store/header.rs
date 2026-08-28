@@ -73,6 +73,7 @@ const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
 const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
 const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
 const TRANSACTION_ID_OFFSET: usize = _UNUSED2_OFFSET + BtreeHeader::serialized_size();
+const COLLECTION_HORIZON_OFFSET: usize = TRANSACTION_ID_OFFSET - size_of::<u64>();
 const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
@@ -405,17 +406,20 @@ impl DatabaseHeader {
         &self.transaction_slots[self.primary_slot ^ 1]
     }
 
-    // Overwrite the secondary slot with a newly committed transaction.
+    // Reuse an earlier commit made visible cannot be taken back, so the horizon only advances
     pub(super) fn write_secondary_slot(
         &mut self,
         transaction_id: TransactionId,
         user_root: Option<BtreeHeader>,
         system_root: Option<BtreeHeader>,
+        collection_horizon: Option<TransactionId>,
     ) {
+        let floor = self.transaction_slots[self.primary_slot].collection_horizon;
         let slot = &mut self.transaction_slots[self.primary_slot ^ 1];
         slot.transaction_id = transaction_id;
         slot.user_root = user_root;
         slot.system_root = system_root;
+        slot.collection_horizon = floor.max(collection_horizon.unwrap_or(floor));
         slot.corrupt_bytes = None;
     }
 
@@ -461,6 +465,9 @@ pub(super) struct TransactionHeader {
     pub(super) user_root: Option<BtreeHeader>,
     pub(super) system_root: Option<BtreeHeader>,
     pub(super) transaction_id: TransactionId,
+    // The newest transaction whose freed pages a commit's reclamation has processed for reuse.
+    // Bounds that alone: the pages a commit frees from the system tree once it is done escape it
+    pub(super) collection_horizon: TransactionId,
     // When present, the original on-disk bytes of a slot whose checksum did not verify. They are
     // written back verbatim, so a slot that failed verification keeps its invalid checksum instead
     // of being re-serialized as if it were valid. `None` once the slot holds a new commit.
@@ -474,6 +481,7 @@ impl TransactionHeader {
             user_root: None,
             system_root: None,
             transaction_id,
+            collection_horizon: TransactionId::new(0),
             corrupt_bytes: None,
         }
     }
@@ -519,12 +527,14 @@ impl TransactionHeader {
             None
         };
         let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
+        let collection_horizon = TransactionId::new(get_u64(&data[COLLECTION_HORIZON_OFFSET..]));
 
         let result = Self {
             version,
             user_root,
             system_root,
             transaction_id,
+            collection_horizon,
             corrupt_bytes: if corrupted {
                 Some(data[..TRANSACTION_SIZE].try_into().unwrap())
             } else {
@@ -553,6 +563,8 @@ impl TransactionHeader {
             result[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
                 .copy_from_slice(&header.to_le_bytes());
         }
+        result[COLLECTION_HORIZON_OFFSET..(COLLECTION_HORIZON_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.collection_horizon.raw_id().to_le_bytes());
         result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
             .copy_from_slice(&self.transaction_id.raw_id().to_le_bytes());
         let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
@@ -565,16 +577,18 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    use super::{COLLECTION_HORIZON_OFFSET, TRANSACTION_SIZE, TransactionHeader};
     #[cfg(feature = "experimental-api-5")]
     use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
+    use crate::transaction_tracker::TransactionId;
     use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
         DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
         PRIMARY_BIT, RECOVERY_REQUIRED, REGION_HEADER_PAGES_OFFSET, REGION_MAX_DATA_PAGES_OFFSET,
         TRAILING_REGION_DATA_PAGES_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
-        TWO_PHASE_COMMIT, get_u32,
+        TWO_PHASE_COMMIT, get_u32, get_u64,
     };
     use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
@@ -585,6 +599,75 @@ mod test {
     use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    fn primary_slot_horizon(path: &std::path::Path) -> u64 {
+        let mut header = [0; DB_HEADER_SIZE];
+        std::fs::File::open(path)
+            .unwrap()
+            .read_exact(&mut header)
+            .unwrap();
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        get_u64(&header[slot + COLLECTION_HORIZON_OFFSET..])
+    }
+
+    // Read after the close, since on Windows the database's own locks are mandatory
+    fn horizon_after(commits: usize, hold_a_reader: bool) -> u64 {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let reader = hold_a_reader.then(|| db.begin_read().unwrap());
+        for i in 0..commits {
+            let write_txn = db.begin_write().unwrap();
+            {
+                let mut table = write_txn.open_table(X).unwrap();
+                table.insert("hello", i.to_string().as_str()).unwrap();
+            }
+            write_txn.commit().unwrap();
+        }
+        drop(reader);
+        drop(db);
+        primary_slot_horizon(tmpfile.path())
+    }
+
+    #[test]
+    fn every_commit_publishes_the_collection_horizon() {
+        let after_five = horizon_after(5, false);
+        let after_nine = horizon_after(9, false);
+        assert!(after_five > 0);
+        assert!(after_nine > after_five);
+
+        // Held back at the reader rather than following the commits
+        assert!(horizon_after(9, true) < after_nine);
+    }
+
+    /// The horizon goes in bytes releases without it leave zero, inside the checksummed region
+    #[test]
+    fn the_collection_horizon_round_trips_and_is_checksummed() {
+        let mut slot = TransactionHeader::new(TransactionId::new(7));
+        slot.collection_horizon = TransactionId::new(5);
+        let bytes = slot.to_bytes();
+
+        let (parsed, corrupted) = TransactionHeader::from_bytes(&bytes).unwrap();
+        assert!(!corrupted);
+        assert_eq!(parsed.collection_horizon, TransactionId::new(5));
+        assert_eq!(parsed.transaction_id, TransactionId::new(7));
+
+        // A torn write must invalidate the slot rather than parse as a different horizon
+        let mut torn = bytes;
+        torn[COLLECTION_HORIZON_OFFSET] ^= 0xFF;
+        let (_, corrupted) = TransactionHeader::from_bytes(&torn).unwrap();
+        assert!(corrupted);
+
+        // What an older release writes: zeroed but for the fields it knows
+        let mut older = [0; TRANSACTION_SIZE];
+        older[..COLLECTION_HORIZON_OFFSET].copy_from_slice(&bytes[..COLLECTION_HORIZON_OFFSET]);
+        older[COLLECTION_HORIZON_OFFSET + size_of::<u64>()..]
+            .copy_from_slice(&bytes[COLLECTION_HORIZON_OFFSET + size_of::<u64>()..]);
+        let checksum = super::xxh3_checksum(&older[..super::SLOT_CHECKSUM_OFFSET]);
+        older[super::SLOT_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+        let (parsed, corrupted) = TransactionHeader::from_bytes(&older).unwrap();
+        assert!(!corrupted);
+        assert_eq!(parsed.collection_horizon, TransactionId::new(0));
+    }
 
     fn primary_slot_offset(god_byte: u8) -> usize {
         if god_byte & PRIMARY_BIT == 0 {
