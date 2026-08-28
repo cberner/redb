@@ -65,6 +65,10 @@ impl InternalStorageBackend for LocklessBackend {
     fn unlock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
         Err(unsupported())
     }
+
+    fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
+        Err(unsupported())
+    }
 }
 
 #[cfg_attr(redb_no_std, allow(dead_code))]
@@ -101,6 +105,10 @@ impl InternalStorageBackend for ReadOnlyBackend {
 
     fn unlock_range(&self, range: Range<u64>) -> Result<(), Error> {
         self.inner.unlock_range(range)
+    }
+
+    fn query_lock_range(&self, range: Range<u64>) -> Result<bool, Error> {
+        self.inner.query_lock_range(range)
     }
 }
 
@@ -223,6 +231,7 @@ mod test {
             backend.try_lock_range(FULL_RANGE).err(),
             backend.try_lock_shared_range(FULL_RANGE).err(),
             backend.unlock_range(FULL_RANGE).err(),
+            backend.query_lock_range(FULL_RANGE).err(),
         ] {
             let err = result.expect("the locks are unsupported");
             assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);

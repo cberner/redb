@@ -13,6 +13,7 @@ use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 // Allocates an `Arc<[u8]>` in one step. `Arc::<[u8]>::from(vec![0; len])` would
 // allocate the Vec and then allocate a new Arc and memcpy into it.
 fn zero_filled_arc(len: usize) -> Arc<[u8]> {
@@ -156,6 +157,10 @@ impl CheckedBackend {
 
     fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
         self.file.try_lock_shared_range(range)
+    }
+
+    fn query_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.query_lock_range(range)
     }
 
     fn check_failure(&self) -> Result<()> {
@@ -346,6 +351,11 @@ impl PagedCachedFile {
 
     pub(crate) fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
         self.file.try_lock_shared_range(range)
+    }
+
+    /// Whether an exclusive lock over the range would conflict with one held elsewhere.
+    pub(crate) fn query_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.query_lock_range(range)
     }
 
     fn write_buffer_stripe(&self, offset: u64) -> &Arc<Mutex<LRUWriteCache>> {

@@ -31,6 +31,8 @@
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
+* Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
+  takes a `ConcurrencyMode` configuring how processes may share the database.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
