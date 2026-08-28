@@ -76,12 +76,31 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 #[cfg_attr(redb_no_std, allow(dead_code))]
 pub(crate) const FULL_RANGE: Range<u64> = 0..u64::MAX;
 
-#[cfg(any(windows, unix, target_os = "wasi"))]
+#[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 const LOCK_BASE: u64 = 1 << 62;
 /// An offset that is not used in the multi-process locking protocol. Used to detect whether
-/// `flock()` and range locks share the same namespace.
-#[cfg(any(windows, unix, target_os = "wasi"))]
+/// `flock()` and range locks share the same namespace, which only matters while a whole-file
+/// lock is taken alongside the ranges.
+#[cfg(not(feature = "experimental-api-5"))]
+#[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 pub(crate) const NAMESPACE_PROBE_BYTE: u64 = LOCK_BASE - 2;
+/// Held exclusively by the writing process in single-writer mode.
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
+/// Whether the database is open for a single writer (held exclusively by it) or for many (held
+/// shared by each writing process while the database is open).
+#[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
+pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
+/// Held shared by every read-only multi-process handle while the database is open, so that a
+/// single-process open conflicts with a live reader no matter what the reader is doing.
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const IMMUTABLE_READER_BYTE: u64 = LOCK_BASE + 3;
+
+pub(crate) fn byte_range(offset: u64) -> Range<u64> {
+    offset..offset + 1
+}
 
 /// A range reaching [`u64::MAX`] covers the entire storage.
 #[cfg_attr(redb_no_std, allow(dead_code))]
@@ -98,6 +117,9 @@ pub(crate) trait InternalStorageBackend: StorageBackend {
     fn try_lock_shared_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
 
     fn unlock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
+
+    /// Whether an exclusive lock over the range would conflict with one held elsewhere.
+    fn query_lock_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
 }
 
 pub trait TableHandle: Sealed {
@@ -493,6 +515,7 @@ impl ReadOnlyDatabase {
         page_size: usize,
         region_size: Option<u64>,
         cache_size: usize,
+        concurrency_mode: ConcurrencyMode,
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
@@ -505,6 +528,7 @@ impl ReadOnlyDatabase {
             region_size,
             cache_size,
             true,
+            concurrency_mode,
         )?;
         let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1188,6 +1212,7 @@ impl Database {
         page_size: usize,
         region_size: Option<u64>,
         cache_size: usize,
+        concurrency_mode: ConcurrencyMode,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<Self, DatabaseError> {
         #[cfg(feature = "logging")]
@@ -1201,6 +1226,7 @@ impl Database {
             region_size,
             cache_size,
             false,
+            concurrency_mode,
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
@@ -1452,11 +1478,36 @@ impl RepairSession {
     }
 }
 
+/// The sharing mode between processes accessing the database
+///
+/// Every process opening one database concurrently must use a compatible mode: one
+/// `SingleWriterProcess` writer or any number of `MultiWriterProcess` writers, plus read-only
+/// handles in either case. The multi-process modes need byte-range file locks, so they are
+/// supported on Linux, the Apple platforms and Windows; elsewhere, opening a database in one of
+/// them fails.
+#[cfg_attr(
+    not(feature = "experimental-multiprocess"),
+    allow(dead_code, unreachable_pub, clippy::enum_variant_names)
+)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub enum ConcurrencyMode {
+    /// The database is not shared: one process may open it for writing, or several read-only.
+    /// Enforced by locking the whole file. The default.
+    #[default]
+    SingleProcess,
+    /// One process writes; any number of processes may, concurrently, open the database read-only.
+    SingleWriterProcess,
+    /// Any number of processes may, concurrently open the database for reading and writing.
+    /// Only one write transaction may be open at a time.
+    MultiWriterProcess,
+}
+
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
     region_size: Option<u64>,
     cache_size: usize,
+    concurrency_mode: ConcurrencyMode,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -1474,6 +1525,7 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
+            concurrency_mode: ConcurrencyMode::SingleProcess,
             cache_size: 1024 * 1024 * 1024,
             repair_callback: Box::new(|_| {}),
         }
@@ -1514,6 +1566,13 @@ impl Builder {
         self
     }
 
+    /// Set how processes may share this database. Defaults to [`ConcurrencyMode::SingleProcess`].
+    #[cfg(feature = "experimental-multiprocess")]
+    pub fn set_concurrency_mode(&mut self, mode: ConcurrencyMode) -> &mut Self {
+        self.concurrency_mode = mode;
+        self
+    }
+
     #[cfg(any(test, fuzzing))]
     pub fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
@@ -1540,6 +1599,7 @@ impl Builder {
             self.page_size,
             self.region_size,
             self.cache_size,
+            self.concurrency_mode,
             &self.repair_callback,
         )
     }
@@ -1555,6 +1615,7 @@ impl Builder {
             self.page_size,
             None,
             self.cache_size,
+            self.concurrency_mode,
             &self.repair_callback,
         )
     }
@@ -1576,6 +1637,7 @@ impl Builder {
             self.page_size,
             None,
             self.cache_size,
+            self.concurrency_mode,
         )
     }
 
@@ -1590,6 +1652,7 @@ impl Builder {
             self.page_size,
             self.region_size,
             self.cache_size,
+            self.concurrency_mode,
             &self.repair_callback,
         )
     }
@@ -1605,6 +1668,7 @@ impl Builder {
             self.page_size,
             self.region_size,
             self.cache_size,
+            self.concurrency_mode,
             &self.repair_callback,
         )
     }

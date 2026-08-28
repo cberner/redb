@@ -1440,6 +1440,7 @@ mod tests {
             None,
             0,
             false,
+            crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();

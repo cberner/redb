@@ -1,4 +1,8 @@
-use crate::db::{FULL_RANGE, InternalStorageBackend, NAMESPACE_PROBE_BYTE};
+#[cfg(not(feature = "experimental-api-5"))]
+use crate::db::NAMESPACE_PROBE_BYTE;
+#[cfg(not(feature = "experimental-api-5"))]
+use crate::db::byte_range;
+use crate::db::{FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE};
 use crate::{DatabaseError, Result, StorageBackend};
 use std::collections::HashSet;
 use std::fs::{File, TryLockError};
@@ -18,9 +22,26 @@ use std::os::windows::fs::FileExt;
 
 use super::range_lock::RangeLock;
 
-/// Every offset the multi-process locking protocol uses
-const PROTOCOL_RANGES: [Range<u64>; 2] =
-    [0..NAMESPACE_PROBE_BYTE, NAMESPACE_PROBE_BYTE + 1..u64::MAX];
+#[cfg(feature = "experimental-api-5")]
+fn protocol_ranges(shared: bool) -> &'static [Range<u64>] {
+    static EXCLUSIVE: [Range<u64>; 1] = [FULL_RANGE];
+    static SHARED: [Range<u64>; 2] = [0..SHARED_WRITER_BYTE, SHARED_WRITER_BYTE + 1..u64::MAX];
+
+    if shared { &SHARED } else { &EXCLUSIVE }
+}
+
+#[cfg(not(feature = "experimental-api-5"))]
+fn protocol_ranges(shared: bool) -> &'static [Range<u64>] {
+    static EXCLUSIVE: [Range<u64>; 2] =
+        [0..NAMESPACE_PROBE_BYTE, NAMESPACE_PROBE_BYTE + 1..u64::MAX];
+    static SHARED: [Range<u64>; 3] = [
+        0..NAMESPACE_PROBE_BYTE,
+        NAMESPACE_PROBE_BYTE + 1..SHARED_WRITER_BYTE,
+        SHARED_WRITER_BYTE + 1..u64::MAX,
+    ];
+
+    if shared { &SHARED } else { &EXCLUSIVE }
+}
 
 fn report_failed_release(result: io::Result<()>) {
     #[cfg(feature = "logging")]
@@ -82,7 +103,7 @@ impl FileBackend {
         if File::CONFLICTS_WITH_STD_FILE_LOCK.is_none()
             && self
                 .file
-                .query_lock(NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1)
+                .query_lock(byte_range(NAMESPACE_PROBE_BYTE))
                 .unwrap_or(false)
         {
             // Prefer range locks, so release the whole-file lock which maps to the range lock
@@ -106,7 +127,7 @@ impl FileBackend {
 
     /// The ranges alone, which is what a namespace shared with the whole-file lock calls for
     fn lock_protocol_ranges(&self, shared: bool) -> io::Result<bool> {
-        for (taken, range) in PROTOCOL_RANGES.into_iter().enumerate() {
+        for (taken, range) in protocol_ranges(shared).iter().enumerate() {
             let acquired = if shared {
                 self.file.try_lock_shared_range(range.clone())
             } else {
@@ -114,8 +135,8 @@ impl FileBackend {
             };
             // Another handle has the database open, holding either kind of lock
             if !matches!(acquired, Ok(true)) {
-                for range in PROTOCOL_RANGES.into_iter().take(taken) {
-                    report_failed_release(self.unlock_range(range));
+                for range in protocol_ranges(shared).iter().take(taken) {
+                    report_failed_release(self.unlock_range(range.clone()));
                 }
                 return acquired;
             }
@@ -188,6 +209,10 @@ impl InternalStorageBackend for FileBackend {
         }
         self.locked_ranges.lock().unwrap().remove(&range);
         self.file.unlock_range(range)
+    }
+
+    fn query_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
+        self.file.query_lock(range)
     }
 }
 
@@ -342,7 +367,9 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod range_lock_tests {
-    use super::{FULL_RANGE, FileBackend, InternalStorageBackend, NAMESPACE_PROBE_BYTE, RangeLock};
+    #[cfg(not(feature = "experimental-api-5"))]
+    use super::NAMESPACE_PROBE_BYTE;
+    use super::{FULL_RANGE, FileBackend, InternalStorageBackend, RangeLock};
     #[cfg(not(all(feature = "experimental-api-5", target_os = "linux")))]
     use std::fs::TryLockError;
     use std::fs::{File, OpenOptions};
@@ -515,12 +542,12 @@ mod range_lock_tests {
         drop(kept_by_the_caller);
     }
 
-    /// The question the namespace answer is asked with. An implementation blind to the locks
-    /// another handle holds would report every filesystem as keeping the two kinds apart.
+    /// The question the protocol's probes are asked with. An implementation blind to the locks
+    /// another handle holds would answer every one of them free.
     #[test]
     fn a_query_reports_the_locks_another_handle_holds() {
         let tmpfile = crate::create_tempfile();
-        let byte = NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1;
+        let byte = BASE + 4..BASE + 5;
         let asking = reopen(tmpfile.path());
         assert!(!asking.query_lock(byte.clone()).unwrap());
 
@@ -569,6 +596,7 @@ mod range_lock_tests {
         for offset in PROTOCOL_OFFSETS {
             assert!(!byte_is_free(&observer, offset, false), "offset {offset}");
         }
+        #[cfg(not(feature = "experimental-api-5"))]
         assert!(byte_is_free(&observer, NAMESPACE_PROBE_BYTE, true));
         // Here the whole-file lock is a namespace of its own, so taking it proves it is unheld
         observer.try_lock().unwrap();
@@ -582,6 +610,7 @@ mod range_lock_tests {
 
     /// The byte the namespace probe asks at is left free by every open, whichever lock it holds:
     /// where the whole-file lock would cover it, the ranges are held in its place
+    #[cfg(not(feature = "experimental-api-5"))]
     #[test]
     fn the_probe_byte_is_free_while_a_backend_is_open() {
         let tmpfile = crate::create_tempfile();
@@ -656,10 +685,7 @@ mod range_lock_tests {
 
         // Mapped together, this test has nothing to say
         let asking = reopen(tmpfile.path());
-        if asking
-            .query_lock(NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1)
-            .unwrap()
-        {
+        if !byte_is_free(&asking, 0, true) {
             return;
         }
 

@@ -71,6 +71,10 @@ impl InternalStorageBackend for FileBackend {
 
         Ok(())
     }
+
+    fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
+        Err(unsupported())
+    }
 }
 
 fn unsupported() -> io::Error {

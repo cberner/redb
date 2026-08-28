@@ -59,6 +59,10 @@ experimental_cursor = ["experimental-api-5"]
 # Unstable additions and changes to the public API, planned for redb 5. May change incompatibly, or
 # be removed, in any release
 experimental-api-5 = []
+# Unstable support for sharing a database between processes. Requires "std", and a platform with
+# byte-range file locks.
+# May change incompatibly, or be removed, in any release
+experimental-multiprocess = ["std", "experimental-api-5"]
 
 [profile.bench]
 debug = true

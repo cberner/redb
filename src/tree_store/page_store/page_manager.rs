@@ -1,5 +1,9 @@
 use crate::CacheStats;
-use crate::db::{FULL_RANGE, InternalStorageBackend};
+use crate::db::{
+    ConcurrencyMode, FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE, byte_range,
+};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::db::{IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, WRITER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -526,6 +530,23 @@ pub(crate) struct TransactionalMemory {
 }
 
 impl TransactionalMemory {
+    /// The locks a handle holds for as long as the database is open, taken before anything is
+    /// read from the storage.
+    fn lock_for_open(
+        storage: &PagedCachedFile,
+        read_only: bool,
+        concurrency_mode: ConcurrencyMode,
+    ) -> Result<(), DatabaseError> {
+        match concurrency_mode {
+            ConcurrencyMode::SingleProcess => Self::lock_whole_storage(storage, read_only),
+            #[cfg(feature = "experimental-multiprocess")]
+            mode => Self::lock_mode_bytes(storage, read_only, mode),
+            // The shared modes are only reachable through the feature-gated setter
+            #[cfg(not(feature = "experimental-multiprocess"))]
+            _ => unreachable!(),
+        }
+    }
+
     fn lock_whole_storage(storage: &PagedCachedFile, read_only: bool) -> Result<(), DatabaseError> {
         // A caller-supplied backend has no locks, which is not a platform limitation
         if !storage.locks_expected() {
@@ -539,17 +560,67 @@ impl TransactionalMemory {
         };
 
         match result {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(DatabaseError::DatabaseAlreadyOpen),
+            Ok(true) => {}
+            Ok(false) => return Err(DatabaseError::DatabaseAlreadyOpen),
             Err(err) if io::is_unsupported(&err) => {
                 #[cfg(feature = "logging")]
                 warn!(
                     "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
                 );
 
-                Ok(())
+                return Ok(());
             }
-            Err(err) => Err(err.into()),
+            Err(err) => return Err(err.into()),
+        }
+
+        // A multi-writer cohort holds nothing a read-only open's shared locks conflict with, so
+        // the open probes for one, which its own ranges leave uncovered for the purpose
+        if read_only {
+            match Self::locked_for_multi_process_writing(storage) {
+                Ok(true) => return Err(DatabaseError::DatabaseAlreadyOpen),
+                Ok(false) => {}
+                // Without byte-range locks there is no multi-process handle to find
+                Err(ref err) if io::is_unsupported(err) => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Whether a multi-writer cohort has the database open. Not gated on the feature that forms
+    /// one: the cohort is another process, which may have been built with it when this was not.
+    fn locked_for_multi_process_writing(storage: &PagedCachedFile) -> Result<bool, io::Error> {
+        storage.query_lock_range(byte_range(SHARED_WRITER_BYTE))
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_mode_bytes(
+        storage: &PagedCachedFile,
+        read_only: bool,
+        concurrency_mode: ConcurrencyMode,
+    ) -> Result<(), DatabaseError> {
+        let acquired = if read_only {
+            storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
+        } else {
+            match concurrency_mode {
+                ConcurrencyMode::SingleProcess => unreachable!(),
+                ConcurrencyMode::SingleWriterProcess => {
+                    storage.try_lock_range(byte_range(SHARED_WRITER_BYTE))?
+                        && storage.try_lock_range(byte_range(WRITER_BYTE))?
+                }
+                ConcurrencyMode::MultiWriterProcess => {
+                    storage.try_lock_shared_range(byte_range(SHARED_WRITER_BYTE))?
+                        // Ensure we didn't race with an Immutable open of the database
+                        && !storage.query_lock_range(byte_range(IMMUTABLE_READER_BYTE))?
+                }
+            }
+        };
+
+        if acquired {
+            Ok(())
+        } else {
+            Err(DatabaseError::DatabaseAlreadyOpen)
         }
     }
 
@@ -561,6 +632,7 @@ impl TransactionalMemory {
         requested_region_size: Option<u64>,
         cache_size: usize,
         read_only: bool,
+        concurrency_mode: ConcurrencyMode,
     ) -> Result<Self, DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
@@ -572,7 +644,8 @@ impl TransactionalMemory {
         assert!(region_size.is_power_of_two());
 
         let storage = PagedCachedFile::new(file, page_size as u64, cache_size);
-        Self::lock_whole_storage(&storage, read_only)?;
+        // Dropping the storage releases whatever this took, so an open that fails below does too
+        Self::lock_for_open(&storage, read_only, concurrency_mode)?;
 
         let initial_storage_len = storage.raw_file_len()?;
 
@@ -1794,6 +1867,7 @@ mod test {
             None,
             0,
             false,
+            crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1836,6 +1910,7 @@ mod test {
             Some(64 * page_size as u64),
             0,
             false,
+            crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1884,6 +1959,7 @@ mod test {
             Some(64 * page_size as u64),
             0,
             false,
+            crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1927,6 +2003,7 @@ mod test {
             Some(region_size),
             0,
             false,
+            crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -1973,10 +2050,162 @@ mod test {
     }
 }
 
+/// The locking protocol an open runs before it reads anything, against real files. Only the
+/// platforms with byte-range locks can run it.
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
+mod lock_protocol_test {
+    use super::TransactionalMemory;
+    use crate::DatabaseError;
+    use crate::db::ConcurrencyMode;
+    use crate::tree_store::page_store::cached_file::PagedCachedFile;
+    use crate::tree_store::page_store::file_backend::FileBackend;
+    use crate::tree_store::page_store::file_backend::range_lock::RangeLock;
+    use std::fs::{File, OpenOptions};
+    use std::path::Path;
+
+    fn reopen(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    }
+
+    /// The locks an open takes. A failure drops the storage, which is what releases whatever it
+    /// had taken.
+    fn open_file(
+        file: File,
+        read_only: bool,
+        concurrency_mode: ConcurrencyMode,
+    ) -> Result<PagedCachedFile, DatabaseError> {
+        let storage = PagedCachedFile::new(Box::new(FileBackend::new(file)?), 4096, 0);
+        TransactionalMemory::lock_for_open(&storage, read_only, concurrency_mode)?;
+
+        Ok(storage)
+    }
+
+    fn open(
+        path: &Path,
+        read_only: bool,
+        concurrency_mode: ConcurrencyMode,
+    ) -> Result<PagedCachedFile, DatabaseError> {
+        open_file(reopen(path), read_only, concurrency_mode)
+    }
+
+    fn single_process(path: &Path, read_only: bool) -> Result<PagedCachedFile, DatabaseError> {
+        open(path, read_only, ConcurrencyMode::SingleProcess)
+    }
+
+    fn refused(result: Result<PagedCachedFile, DatabaseError>) -> bool {
+        matches!(result, Err(DatabaseError::DatabaseAlreadyOpen))
+    }
+
+    /// The cohort is another process, which may have been built with the multi-process feature
+    /// when this one was not, so the probe is not gated on being able to form one
+    #[test]
+    fn a_read_only_open_refuses_a_cohort_this_build_cannot_form() {
+        use crate::db::{SHARED_WRITER_BYTE, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let cohort = reopen(tmpfile.path());
+        assert!(
+            cohort
+                .try_lock_shared_range(byte_range(SHARED_WRITER_BYTE))
+                .unwrap()
+        );
+
+        assert!(refused(single_process(tmpfile.path(), true)));
+    }
+
+    /// Only a multi-writer cohort admits a second writer, and every mode byte is free again once
+    /// its holder closes
+    #[cfg(feature = "experimental-multiprocess")]
+    #[test]
+    fn the_modes_exclude_each_other() {
+        use ConcurrencyMode::{MultiWriterProcess, SingleWriterProcess};
+
+        let tmpfile = crate::create_tempfile();
+        for (held, joining, admitted) in [
+            (SingleWriterProcess, SingleWriterProcess, false),
+            (SingleWriterProcess, MultiWriterProcess, false),
+            (MultiWriterProcess, SingleWriterProcess, false),
+            (MultiWriterProcess, MultiWriterProcess, true),
+        ] {
+            let first = open(tmpfile.path(), false, held).unwrap();
+            let second = open(tmpfile.path(), false, joining);
+            assert_eq!(second.is_ok(), admitted, "{held:?} then {joining:?}");
+
+            let reader = open(tmpfile.path(), true, MultiWriterProcess).unwrap();
+            reader.close().unwrap();
+            if let Ok(second) = second {
+                second.close().unwrap();
+            }
+            first.close().unwrap();
+        }
+    }
+
+    /// A single-process handle joins nothing, so it and a multi-process one refuse each other --
+    /// unless both are read-only, since neither holds a byte the other could find
+    #[cfg(feature = "experimental-multiprocess")]
+    #[test]
+    fn a_single_process_handle_and_a_multi_process_one_refuse_each_other() {
+        let tmpfile = crate::create_tempfile();
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            for read_only in [false, true] {
+                let plain = single_process(tmpfile.path(), read_only).unwrap();
+                assert!(refused(open(tmpfile.path(), false, mode)));
+                assert_eq!(refused(open(tmpfile.path(), true, mode)), !read_only);
+                plain.close().unwrap();
+
+                let held = open(tmpfile.path(), read_only, mode).unwrap();
+                assert!(refused(single_process(tmpfile.path(), false)));
+                assert_eq!(refused(single_process(tmpfile.path(), true)), !read_only);
+                held.close().unwrap();
+            }
+        }
+    }
+
+    /// Dropping the file does not suffice: a caller holding a `try_clone()` of the file it
+    /// handed over keeps the open file description, and so the locks, alive
+    #[cfg(feature = "experimental-multiprocess")]
+    #[test]
+    fn a_refused_open_releases_the_bytes_it_took() {
+        use crate::db::{SHARED_WRITER_BYTE, WRITER_BYTE, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        assert!(holder.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+
+        // The shared writer byte is taken before the conflict on the writer byte
+        let file = reopen(tmpfile.path());
+        let kept_by_the_caller = file.try_clone().unwrap();
+        assert!(refused(open_file(
+            file,
+            false,
+            ConcurrencyMode::SingleWriterProcess
+        )));
+
+        let observer = reopen(tmpfile.path());
+        let byte = byte_range(SHARED_WRITER_BYTE);
+        assert!(observer.try_lock_range(byte.clone()).unwrap());
+        observer.unlock_range(byte).unwrap();
+        drop(kept_by_the_caller);
+
+        holder.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+        open(tmpfile.path(), false, ConcurrencyMode::SingleWriterProcess)
+            .unwrap()
+            .close()
+            .unwrap();
+    }
+}
+
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    use crate::db::{FULL_RANGE, InternalStorageBackend};
+    use crate::db::{ConcurrencyMode, FULL_RANGE, InternalStorageBackend};
     use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
@@ -2010,6 +2239,7 @@ mod lock_failure_test {
     struct AnsweringBackend {
         inner: InMemoryBackend,
         taking: Answer,
+        querying: Answer,
         held: Arc<Mutex<Vec<Range<u64>>>>,
         released: Arc<Mutex<Vec<Range<u64>>>>,
     }
@@ -2038,6 +2268,10 @@ mod lock_failure_test {
             self.held.lock().unwrap().retain(|held| *held != range);
             self.released.lock().unwrap().push(range);
             Ok(())
+        }
+
+        fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
+            self.querying.result()
         }
     }
 
@@ -2073,12 +2307,13 @@ mod lock_failure_test {
 
     type Released = Arc<Mutex<Vec<Range<u64>>>>;
 
-    fn storage(taking: Answer) -> (PagedCachedFile, Released) {
+    fn storage(taking: Answer, querying: Answer) -> (PagedCachedFile, Released) {
         let released: Released = Arc::new(Mutex::new(Vec::new()));
         let storage = PagedCachedFile::new(
             Box::new(AnsweringBackend {
                 inner: InMemoryBackend::new(),
                 taking,
+                querying,
                 held: Arc::new(Mutex::new(Vec::new())),
                 released: released.clone(),
             }),
@@ -2089,21 +2324,41 @@ mod lock_failure_test {
         (storage, released)
     }
 
-    fn open(read_only: bool, taking: Answer) -> Result<(), DatabaseError> {
-        TransactionalMemory::lock_whole_storage(&storage(taking).0, read_only)
+    fn open_as(
+        concurrency_mode: ConcurrencyMode,
+        read_only: bool,
+        taking: Answer,
+        querying: Answer,
+    ) -> Result<(), DatabaseError> {
+        TransactionalMemory::lock_for_open(
+            &storage(taking, querying).0,
+            read_only,
+            concurrency_mode,
+        )
+    }
+
+    fn open(read_only: bool, taking: Answer, querying: Answer) -> Result<(), DatabaseError> {
+        open_as(ConcurrencyMode::SingleProcess, read_only, taking, querying)
+    }
+
+    fn failed(result: Result<(), DatabaseError>) -> bool {
+        matches!(result, Err(DatabaseError::Storage(StorageError::Io(_))))
     }
 
     #[test]
     fn a_platform_without_locks_opens_anyway() {
-        open(false, Answer::Unsupported).unwrap();
-        open(true, Answer::Unsupported).unwrap();
+        open(false, Answer::Unsupported, Answer::Unsupported).unwrap();
+        open(true, Answer::Unsupported, Answer::Unsupported).unwrap();
+
+        // ... including one whose locks work but which cannot be asked about them
+        open(true, Answer::Acquired, Answer::Unsupported).unwrap();
     }
 
     #[test]
     fn a_conflicting_lock_reports_the_database_already_open() {
         for read_only in [false, true] {
             assert!(matches!(
-                open(read_only, Answer::Refused),
+                open(read_only, Answer::Refused, Answer::Acquired),
                 Err(DatabaseError::DatabaseAlreadyOpen)
             ));
         }
@@ -2111,19 +2366,39 @@ mod lock_failure_test {
 
     #[test]
     fn a_lock_that_fails_for_any_other_reason_fails_the_open() {
-        for read_only in [false, true] {
-            assert!(matches!(
-                open(read_only, Answer::Failed),
-                Err(DatabaseError::Storage(StorageError::Io(_)))
-            ));
+        assert!(failed(open(false, Answer::Failed, Answer::Acquired)));
+        assert!(failed(open(true, Answer::Failed, Answer::Acquired)));
+
+        // ... and so does a probe that fails, which only a read-only open makes
+        assert!(failed(open(true, Answer::Acquired, Answer::Failed)));
+        open(false, Answer::Acquired, Answer::Failed).unwrap();
+    }
+
+    // A read-only open included: its mode still declares writers that need the locks
+    #[cfg(feature = "experimental-multiprocess")]
+    #[test]
+    fn a_shared_mode_without_locks_fails_the_open() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            for read_only in [false, true] {
+                assert!(failed(open_as(
+                    mode,
+                    read_only,
+                    Answer::Unsupported,
+                    Answer::Unsupported
+                )));
+            }
         }
     }
 
     #[test]
     fn the_lock_is_released_at_close() {
         for taking in [Answer::Acquired, Answer::Unsupported] {
-            let (storage, released) = storage(taking);
-            TransactionalMemory::lock_whole_storage(&storage, false).unwrap();
+            let (storage, released) = storage(taking, Answer::Unsupported);
+            TransactionalMemory::lock_for_open(&storage, false, ConcurrencyMode::SingleProcess)
+                .unwrap();
             storage.close().unwrap();
 
             let expected: Vec<Range<u64>> = if taking == Answer::Acquired {
