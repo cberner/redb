@@ -49,7 +49,7 @@ database file.
 | padding                                                                                        |
 | padding                                                                                        |
 | padding                                                                                        |
-| collection horizon transaction id                                                              |
+| padding                                                                                        |
 | last committed transaction id                                                                  |
 | slot checksum                                                                                  |
 | slot checksum (cont.)                                                                          |
@@ -122,8 +122,7 @@ This field is only valid when the database does not need recovery. Otherwise it 
 * 8 bytes: system root page
 * 16 bytes: system root checksum
 * 8 bytes: system root length
-* 24 bytes: padding
-* 8 bytes: collection horizon transaction id
+* 32 bytes: padding
 * 8 bytes: last committed transaction id
 * 16 bytes: slot checksum
 
@@ -141,9 +140,6 @@ changed during an upgrade.
 `system root checksum` stores the XXH3_128bit checksum of the system root page, which in turn stores the checksum of its child pages.
 
 `system root length` is the number of tables in the system table tree. This field is new in file format v2.
-
-`collection horizon transaction id` is the newest transaction which has been garbage collected.
-i.e. its entry in the freed table has been processed. This field is new in file format v4.
 
 `slot checksum` is the XXH3_128bit checksum of all the preceding fields in the transaction slot.
 
@@ -581,16 +577,13 @@ consistent view of the transaction ids in the header and the "active transaction
 
 ### Cache invalidation
 
-Each process' page cache must track the oldest transaction id that the process has active when pages
-are inserted into the cache, so that these pages can be invalidated during a cross-process garbage
-collection event.
+Each process must assume that observing a new committed transaction id means that all pages the process
+does not have pinned (i.e. reachable from a live transaction) may have been freed and reused invalidating
+their cache entry.
 
-"header lock" is used to coordinate cache invalidation and transaction initiation.
-
-After acquiring a lock (shared or exclusive) on the header, processes read the `collection horizon transaction id`.
-If that id is newer than the oldest transaction id that was active when a page was cached, the
-process must invalidate those pages. For simplicity, redb invalidates all cached pages, except in
-single writer mode where the writer never needs to handle external cache invalidation events.
+For simplicity, redb currently invalidates all cached pages whenever a transaction begins and
+observes a new committed transaction id, except in single writer mode where the writer never needs
+to handle external cache invalidation events.
 
 ### Active transaction set
 
@@ -648,9 +641,6 @@ and one for the system tree.
 * Added an "allocated pages" system table which tracks the pages allocated by each transaction when
   a savepoint exists
 * Removed the allocator state. Instead, the "quick repair" code path is used.
-
-## v4
-* Added "collection horizon transaction id" field to the commit slots to support multi-process modes.
 
 # Assumptions about underlying media
 redb is designed to be safe even in the event of power failure or on poorly behaved media.
