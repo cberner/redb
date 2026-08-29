@@ -1,5 +1,6 @@
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
+use crate::tree_store::LocklessBackend;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
@@ -20,6 +21,7 @@ use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
+use core::ops::Range;
 #[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
 #[cfg(not(redb_no_std))]
@@ -69,6 +71,26 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
+}
+
+#[cfg_attr(redb_no_std, allow(dead_code))]
+pub(crate) const FULL_RANGE: Range<u64> = 0..u64::MAX;
+
+/// A range reaching [`u64::MAX`] covers the entire storage.
+#[cfg_attr(redb_no_std, allow(dead_code))]
+pub(crate) trait InternalStorageBackend: StorageBackend {
+    /// Whether this backend has locks to take at all -- custom backends do not.
+    fn locks_expected(&self) -> bool {
+        true
+    }
+
+    /// `Ok(false)` means a conflicting lock is held elsewhere.
+    fn try_lock_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
+
+    /// `Ok(false)` means a conflicting lock is held elsewhere.
+    fn try_lock_shared_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
+
+    fn unlock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
 }
 
 pub trait TableHandle: Sealed {
@@ -460,7 +482,7 @@ impl ReadOnlyDatabase {
     }
 
     fn new(
-        file: Box<dyn StorageBackend>,
+        file: Box<dyn InternalStorageBackend>,
         page_size: usize,
         region_size: Option<u64>,
         cache_size: usize,
@@ -1154,7 +1176,7 @@ impl Database {
     }
 
     fn new(
-        file: Box<dyn StorageBackend>,
+        file: Box<dyn InternalStorageBackend>,
         allow_initialize: bool,
         page_size: usize,
         region_size: Option<u64>,
@@ -1543,7 +1565,7 @@ impl Builder {
         let file = OpenOptions::new().read(true).open(path)?;
 
         ReadOnlyDatabase::new(
-            Box::new(FileBackend::new_internal(file, true)?),
+            Box::new(FileBackend::new(file)?),
             self.page_size,
             None,
             self.cache_size,
@@ -1571,7 +1593,7 @@ impl Builder {
         backend: impl StorageBackend,
     ) -> Result<Database, DatabaseError> {
         Database::new(
-            Box::new(backend),
+            LocklessBackend::boxed(backend),
             true,
             self.page_size,
             self.region_size,

@@ -1,3 +1,5 @@
+use crate::CacheStats;
+use crate::db::InternalStorageBackend;
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -14,7 +16,6 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
-use crate::{CacheStats, StorageBackend};
 use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -524,7 +525,7 @@ pub(crate) struct TransactionalMemory {
 
 impl TransactionalMemory {
     pub(crate) fn new(
-        file: Box<dyn StorageBackend>,
+        file: Box<dyn InternalStorageBackend>,
         // Allow initializing a new database in an empty file
         allow_initialize: bool,
         page_size: usize,
@@ -541,7 +542,7 @@ impl TransactionalMemory {
         );
         assert!(region_size.is_power_of_two());
 
-        let storage = PagedCachedFile::new(file, page_size as u64, cache_size)?;
+        let storage = PagedCachedFile::new(file, page_size as u64, cache_size, read_only)?;
 
         let initial_storage_len = storage.raw_file_len()?;
 
@@ -1754,11 +1755,17 @@ mod test {
     #[cfg(panic = "unwind")]
     fn invalidate_allocator_state_tolerates_poison() {
         use super::TransactionalMemory;
-        use crate::tree_store::InMemoryBackend;
+        use crate::tree_store::{InMemoryBackend, LocklessBackend};
 
-        let mem =
-            TransactionalMemory::new(Box::new(InMemoryBackend::new()), true, 4096, None, 0, false)
-                .unwrap();
+        let mem = TransactionalMemory::new(
+            LocklessBackend::boxed(InMemoryBackend::new()),
+            true,
+            4096,
+            None,
+            0,
+            false,
+        )
+        .unwrap();
         mem.reset_allocator_state().unwrap();
 
         std::thread::scope(|s| {
@@ -1789,11 +1796,11 @@ mod test {
         use super::{MAX_PAGE_INDEX, TransactionalMemory};
         use crate::StorageError;
         use crate::tree_store::page_store::base::MAX_REGIONS;
-        use crate::tree_store::{InMemoryBackend, PageNumber};
+        use crate::tree_store::{InMemoryBackend, LocklessBackend, PageNumber};
 
         let page_size = 4096;
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
             Some(64 * page_size as u64),
@@ -1837,11 +1844,11 @@ mod test {
         use super::TransactionalMemory;
         use crate::StorageError;
         use crate::tree_store::page_store::base::PageHint;
-        use crate::tree_store::{InMemoryBackend, Page, PageNumber, PageTracker};
+        use crate::tree_store::{InMemoryBackend, LocklessBackend, Page, PageNumber, PageTracker};
 
         let page_size = 4096;
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
             Some(64 * page_size as u64),
@@ -1878,13 +1885,13 @@ mod test {
     #[test]
     fn free_merge_remarks_region_tracker() {
         use super::TransactionalMemory;
-        use crate::tree_store::{InMemoryBackend, Page, PageTracker};
+        use crate::tree_store::{InMemoryBackend, LocklessBackend, Page, PageTracker};
 
         // Small pages and regions keep the reproduction cheap to set up.
         let page_size = 128 * 1024;
         let region_size = 16 * page_size as u64;
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
             Some(region_size),

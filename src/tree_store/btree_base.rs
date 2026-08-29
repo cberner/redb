@@ -2281,7 +2281,9 @@ impl<'b> BranchMutator<'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+    use crate::tree_store::{
+        AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
+    };
 
     const MAX_PAIRS: usize = u16::MAX as usize;
 
@@ -2291,7 +2293,7 @@ mod tests {
 
     fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
             None,

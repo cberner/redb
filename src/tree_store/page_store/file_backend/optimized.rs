@@ -1,7 +1,9 @@
+use crate::db::{FULL_RANGE, InternalStorageBackend};
 use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::{File, TryLockError};
 use std::io;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "logging")]
 use log::warn;
@@ -34,131 +36,145 @@ fn report_failed_release(result: io::Result<()>) {
 /// Stores a database as a file on-disk.
 #[derive(Debug)]
 pub struct FileBackend {
-    whole_file_locked: bool,
-    ranges_locked: bool,
+    whole_file_locked: AtomicBool,
+    ranges_locked: AtomicBool,
     file: File,
 }
 
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Self::new_internal(file, false)
-    }
-
-    pub(crate) fn new_internal(file: File, read_only: bool) -> Result<Self, DatabaseError> {
-        // Prefer range locks
-        if File::CONFLICTS_WITH_STD_FILE_LOCK == Some(true) {
-            return Self::new_holding_ranges(file, read_only);
-        }
-
-        let whole_file_locked = Self::try_whole_file_lock(&file, read_only)?;
-
-        if !whole_file_locked {
-            return Ok(Self {
-                whole_file_locked: false,
-                ranges_locked: false,
-                file,
-            });
-        }
-
-        if File::CONFLICTS_WITH_STD_FILE_LOCK.is_none()
-            && file
-                .query_lock(NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1)
-                .unwrap_or(false)
-        {
-            // Prefer range locks, so release the whole-file lock which maps to the range lock
-            file.unlock()?;
-            return Self::new_holding_ranges(file, read_only);
-        }
-
-        let ranges_locked = match Self::try_lock_protocol_ranges(&file, read_only) {
-            Ok(true) => true,
-            // A multi-process handle has the database open
-            Ok(false) => {
-                report_failed_release(file.unlock());
-                return Err(DatabaseError::DatabaseAlreadyOpen);
-            }
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                // no-op. If range locks are not supported, then multi-process access is not possible
-                false
-            }
-            Err(err) => {
-                report_failed_release(file.unlock());
-                return Err(err.into());
-            }
-        };
-
         Ok(Self {
-            whole_file_locked,
-            ranges_locked,
+            whole_file_locked: AtomicBool::new(false),
+            ranges_locked: AtomicBool::new(false),
             file,
         })
     }
 
-    fn new_holding_ranges(file: File, read_only: bool) -> Result<Self, DatabaseError> {
-        match Self::try_lock_protocol_ranges(&file, read_only) {
-            Ok(true) => Ok(Self {
-                whole_file_locked: false,
-                ranges_locked: true,
-                file,
-            }),
-            // Another handle has the database open, holding either kind of lock
-            Ok(false) => Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(err) if err.kind() == io::ErrorKind::Unsupported => {
-                let whole_file_locked = Self::try_whole_file_lock(&file, read_only)?;
-                Ok(Self {
-                    whole_file_locked,
-                    ranges_locked: false,
-                    file,
-                })
+    /// The whole storage, locked with the protocol ranges and -- where those are a namespace of
+    /// their own -- the whole-file lock an older redb takes as well.
+    fn lock_whole_storage(&self, shared: bool) -> io::Result<bool> {
+        // Prefer range locks
+        if File::CONFLICTS_WITH_STD_FILE_LOCK == Some(true) {
+            return match self.lock_protocol_ranges(shared) {
+                // Windows, whose range locks are not implemented yet and whose whole-file lock is
+                // itself one over every byte
+                Err(err) if err.kind() == io::ErrorKind::Unsupported => {
+                    self.lock_whole_file(shared)
+                }
+                result => result,
+            };
+        }
+
+        if !self.lock_whole_file(shared)? {
+            return Ok(false);
+        }
+
+        if File::CONFLICTS_WITH_STD_FILE_LOCK.is_none()
+            && self
+                .file
+                .query_lock(NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1)
+                .unwrap_or(false)
+        {
+            // Prefer range locks, so release the whole-file lock which maps to the range lock
+            self.release_whole_storage()?;
+            return self.lock_protocol_ranges(shared);
+        }
+
+        let acquired = self.lock_protocol_ranges(shared);
+        match acquired {
+            Ok(true) => Ok(true),
+            // Without range locks there is no multi-process access to exclude, and the whole-file
+            // lock already keeps every other process out
+            Err(ref err) if err.kind() == io::ErrorKind::Unsupported => Ok(true),
+            // A multi-process handle has the database open
+            _ => {
+                report_failed_release(self.release_whole_storage());
+                acquired
             }
-            Err(err) => Err(err.into()),
         }
     }
 
-    fn try_lock_protocol_ranges(file: &File, read_only: bool) -> io::Result<bool> {
+    /// The ranges alone, which is what a namespace shared with the whole-file lock calls for
+    fn lock_protocol_ranges(&self, shared: bool) -> io::Result<bool> {
         for (taken, range) in PROTOCOL_RANGES.into_iter().enumerate() {
-            let acquired = if read_only {
-                file.try_lock_shared_range(range)
+            let acquired = if shared {
+                self.file.try_lock_shared_range(range)
             } else {
-                file.try_lock_range(range)
+                self.file.try_lock_range(range)
             };
+            // Another handle has the database open, holding either kind of lock
             if !matches!(acquired, Ok(true)) {
-                Self::release_protocol_ranges(file, taken);
+                for range in PROTOCOL_RANGES.into_iter().take(taken) {
+                    report_failed_release(self.file.unlock_range(range));
+                }
                 return acquired;
             }
         }
+        self.ranges_locked.store(true, Ordering::Release);
+
         Ok(true)
     }
 
-    /// The first `taken` ranges of an open that is failing.
-    fn release_protocol_ranges(file: &File, taken: usize) {
-        for range in PROTOCOL_RANGES.into_iter().take(taken) {
-            report_failed_release(file.unlock_range(range));
+    fn release_whole_storage(&self) -> io::Result<()> {
+        // Every lock is released even where one fails: a lock left behind outlives this
+        // backend wherever the description is shared
+        let mut result = Ok(());
+        if self.ranges_locked.swap(false, Ordering::AcqRel) {
+            for range in PROTOCOL_RANGES {
+                result = result.and(self.file.unlock_range(range));
+            }
         }
+        if self.whole_file_locked.swap(false, Ordering::AcqRel) {
+            result = result.and(self.file.unlock());
+        }
+
+        result
     }
 
-    /// `Ok(false)` means the platform does not support file locks at all, which is reported
-    /// once rather than failing the open.
-    fn try_whole_file_lock(file: &File, read_only: bool) -> Result<bool, DatabaseError> {
-        let result = if read_only {
-            file.try_lock_shared()
+    fn lock_whole_file(&self, shared: bool) -> io::Result<bool> {
+        let result = if shared {
+            self.file.try_lock_shared()
         } else {
-            file.try_lock()
+            self.file.try_lock()
         };
 
         match result {
-            Ok(()) => Ok(true),
-            Err(TryLockError::WouldBlock) => Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(TryLockError::Error(err)) if err.kind() == io::ErrorKind::Unsupported => {
-                #[cfg(feature = "logging")]
-                warn!(
-                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
-                );
-
-                Ok(false)
+            Ok(()) => {
+                self.whole_file_locked.store(true, Ordering::Release);
+                Ok(true)
             }
-            Err(TryLockError::Error(err)) => Err(err.into()),
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(TryLockError::Error(err)) => Err(err),
+        }
+    }
+}
+
+/// The whole storage is what a single-process open locks, and the whole-file lock an older redb
+/// takes covers exactly that, so both kinds are held for that one range. Any other range is a
+/// byte-range lock alone.
+impl InternalStorageBackend for FileBackend {
+    fn try_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
+        if range == FULL_RANGE {
+            self.lock_whole_storage(false)
+        } else {
+            self.file.try_lock_range(range)
+        }
+    }
+
+    fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
+        if range == FULL_RANGE {
+            self.lock_whole_storage(true)
+        } else {
+            self.file.try_lock_shared_range(range)
+        }
+    }
+
+    fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
+        if range == FULL_RANGE {
+            self.release_whole_storage()
+        } else {
+            self.file.unlock_range(range)
         }
     }
 }
@@ -235,22 +251,6 @@ impl StorageBackend for FileBackend {
         }
         Ok(())
     }
-
-    fn close(&self) -> Result<(), io::Error> {
-        // Every lock is released even where one fails: a lock left behind outlives this
-        // backend wherever the description is shared
-        let mut result = Ok(());
-        if self.ranges_locked {
-            for range in PROTOCOL_RANGES {
-                result = result.and(self.file.unlock_range(range));
-            }
-        }
-        if self.whole_file_locked {
-            result = result.and(self.file.unlock());
-        }
-
-        result
-    }
 }
 
 // TODO: replace these with wasi::FileExt when https://github.com/rust-lang/rust/issues/71213
@@ -326,8 +326,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
 mod range_lock_tests {
-    use super::{FileBackend, NAMESPACE_PROBE_BYTE, RangeLock};
-    use crate::StorageBackend;
+    use super::{FULL_RANGE, FileBackend, InternalStorageBackend, NAMESPACE_PROBE_BYTE, RangeLock};
     use std::fs::{File, OpenOptions, TryLockError};
     use std::path::Path;
 
@@ -344,6 +343,30 @@ mod range_lock_tests {
             .unwrap()
     }
 
+    /// The whole-storage lock the core takes at open, mapped as the core maps it
+    fn open_file(file: File, read_only: bool) -> Result<FileBackend, crate::DatabaseError> {
+        let backend = FileBackend::new(file).unwrap();
+        let acquired = if read_only {
+            backend.try_lock_shared_range(FULL_RANGE)
+        } else {
+            backend.try_lock_range(FULL_RANGE)
+        };
+        match acquired {
+            Ok(true) => Ok(backend),
+            Ok(false) => Err(crate::DatabaseError::DatabaseAlreadyOpen),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn open(path: &Path, read_only: bool) -> Result<FileBackend, crate::DatabaseError> {
+        open_file(reopen(path), read_only)
+    }
+
+    /// ... and releases at close
+    fn close(backend: &FileBackend) {
+        backend.unlock_range(FULL_RANGE).unwrap();
+    }
+
     fn byte_is_free(file: &File, offset: u64, exclusive: bool) -> bool {
         let byte = offset..offset + 1;
         let acquired = if exclusive {
@@ -357,10 +380,35 @@ mod range_lock_tests {
         acquired
     }
 
+    /// Only the whole storage is locked with both kinds. A range short of it is the byte-range
+    /// lock alone, which is what the concurrency protocols take
+    #[test]
+    fn a_range_short_of_the_whole_storage_is_a_byte_range_lock_alone() {
+        let tmpfile = crate::create_tempfile();
+        let backend = open(tmpfile.path(), false).unwrap();
+        let byte = BASE..BASE + 1;
+        // Held by the open already, so it is released first: the same file description's locks
+        // replace each other rather than conflicting
+        backend.unlock_range(byte.clone()).unwrap();
+
+        let observer = reopen(tmpfile.path());
+        assert!(backend.try_lock_range(byte.clone()).unwrap());
+        assert!(!byte_is_free(&observer, BASE, false));
+        backend.unlock_range(byte.clone()).unwrap();
+        assert!(byte_is_free(&observer, BASE, true));
+
+        assert!(backend.try_lock_shared_range(byte.clone()).unwrap());
+        assert!(byte_is_free(&observer, BASE, false));
+        assert!(!byte_is_free(&observer, BASE, true));
+        backend.unlock_range(byte).unwrap();
+
+        close(&backend);
+    }
+
     #[test]
     fn a_writable_backend_holds_every_protocol_byte_exclusively() {
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new_internal(reopen(tmpfile.path()), false).unwrap();
+        let backend = open(tmpfile.path(), false).unwrap();
 
         let observer = reopen(tmpfile.path());
         for offset in PROTOCOL_OFFSETS {
@@ -369,7 +417,7 @@ mod range_lock_tests {
         }
 
         // ... and releases them all at close
-        backend.close().unwrap();
+        close(&backend);
         for offset in PROTOCOL_OFFSETS {
             assert!(byte_is_free(&observer, offset, true), "offset {offset}");
         }
@@ -378,7 +426,7 @@ mod range_lock_tests {
     #[test]
     fn read_only_backends_share_the_protocol_bytes_with_each_other() {
         let tmpfile = crate::create_tempfile();
-        let first = FileBackend::new_internal(reopen(tmpfile.path()), true).unwrap();
+        let first = open(tmpfile.path(), true).unwrap();
 
         let observer = reopen(tmpfile.path());
         for offset in PROTOCOL_OFFSETS {
@@ -386,9 +434,9 @@ mod range_lock_tests {
             assert!(!byte_is_free(&observer, offset, true), "offset {offset}");
         }
 
-        let second = FileBackend::new_internal(reopen(tmpfile.path()), true).unwrap();
-        first.close().unwrap();
-        second.close().unwrap();
+        let second = open(tmpfile.path(), true).unwrap();
+        close(&first);
+        close(&second);
     }
 
     #[test]
@@ -400,17 +448,17 @@ mod range_lock_tests {
         // A held byte anywhere in the range stands in for a multi-process handle having
         // the database open
         assert!(matches!(
-            FileBackend::new_internal(reopen(tmpfile.path()), false),
+            open(tmpfile.path(), false),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
         assert!(matches!(
-            FileBackend::new_internal(reopen(tmpfile.path()), true),
+            open(tmpfile.path(), true),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
 
         holder.unlock_range(BASE..BASE + 1).unwrap();
-        let backend = FileBackend::new_internal(reopen(tmpfile.path()), false).unwrap();
-        backend.close().unwrap();
+        let backend = open(tmpfile.path(), false).unwrap();
+        close(&backend);
     }
 
     /// Dropping the file does not suffice: a caller holding a `try_clone()` of the file it
@@ -425,7 +473,7 @@ mod range_lock_tests {
         let file = reopen(tmpfile.path());
         let kept_by_the_caller = file.try_clone().unwrap();
         assert!(matches!(
-            FileBackend::new_internal(file, false),
+            open_file(file, false),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
 
@@ -460,13 +508,13 @@ mod range_lock_tests {
     fn an_ordinary_filesystem_answers_that_the_two_kinds_are_separate() {
         assert!(File::CONFLICTS_WITH_STD_FILE_LOCK.is_none());
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new_internal(reopen(tmpfile.path()), false).unwrap();
+        let backend = open(tmpfile.path(), false).unwrap();
 
         let observer = reopen(tmpfile.path());
         assert!(matches!(observer.try_lock(), Err(TryLockError::WouldBlock)));
         assert!(!byte_is_free(&observer, BASE, true));
 
-        backend.close().unwrap();
+        close(&backend);
     }
 
     /// The open a platform whose two kinds of lock conflict takes, holding the ranges in place of
@@ -475,8 +523,16 @@ mod range_lock_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_open_holding_the_ranges_takes_no_whole_file_lock() {
+        use super::AtomicBool;
+
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new_holding_ranges(reopen(tmpfile.path()), false).unwrap();
+        let file = reopen(tmpfile.path());
+        let backend = FileBackend {
+            whole_file_locked: AtomicBool::new(false),
+            ranges_locked: AtomicBool::new(false),
+            file,
+        };
+        assert!(backend.lock_protocol_ranges(false).unwrap());
 
         let observer = reopen(tmpfile.path());
         for offset in PROTOCOL_OFFSETS {
@@ -487,7 +543,7 @@ mod range_lock_tests {
         observer.try_lock().unwrap();
         observer.unlock().unwrap();
 
-        backend.close().unwrap();
+        close(&backend);
         for offset in PROTOCOL_OFFSETS {
             assert!(byte_is_free(&observer, offset, true), "offset {offset}");
         }
@@ -500,13 +556,13 @@ mod range_lock_tests {
         let tmpfile = crate::create_tempfile();
         let observer = reopen(tmpfile.path());
 
-        let writable = FileBackend::new_internal(reopen(tmpfile.path()), false).unwrap();
+        let writable = open(tmpfile.path(), false).unwrap();
         assert!(byte_is_free(&observer, NAMESPACE_PROBE_BYTE, true));
-        writable.close().unwrap();
+        close(&writable);
 
-        let reader = FileBackend::new_internal(reopen(tmpfile.path()), true).unwrap();
+        let reader = open(tmpfile.path(), true).unwrap();
         assert!(byte_is_free(&observer, NAMESPACE_PROBE_BYTE, true));
-        reader.close().unwrap();
+        close(&reader);
     }
 
     /// The whole-file lock is all an older version of redb takes, so an open must keep
@@ -516,16 +572,16 @@ mod range_lock_tests {
         let tmpfile = crate::create_tempfile();
         let observer = reopen(tmpfile.path());
 
-        let writable = FileBackend::new_internal(reopen(tmpfile.path()), false).unwrap();
+        let writable = open(tmpfile.path(), false).unwrap();
         assert!(matches!(
             observer.try_lock_shared(),
             Err(TryLockError::WouldBlock)
         ));
-        writable.close().unwrap();
+        close(&writable);
 
-        let reader = FileBackend::new_internal(reopen(tmpfile.path()), true).unwrap();
+        let reader = open(tmpfile.path(), true).unwrap();
         assert!(matches!(observer.try_lock(), Err(TryLockError::WouldBlock)));
-        reader.close().unwrap();
+        close(&reader);
 
         observer.try_lock().unwrap();
     }
@@ -538,11 +594,11 @@ mod range_lock_tests {
         holder.try_lock().unwrap();
 
         assert!(matches!(
-            FileBackend::new_internal(reopen(tmpfile.path()), false),
+            open(tmpfile.path(), false),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
         assert!(matches!(
-            FileBackend::new_internal(reopen(tmpfile.path()), true),
+            open(tmpfile.path(), true),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
 
@@ -550,11 +606,11 @@ mod range_lock_tests {
         holder.unlock().unwrap();
         holder.try_lock_shared().unwrap();
         assert!(matches!(
-            FileBackend::new_internal(reopen(tmpfile.path()), false),
+            open(tmpfile.path(), false),
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
-        let reader = FileBackend::new_internal(reopen(tmpfile.path()), true).unwrap();
-        reader.close().unwrap();
+        let reader = open(tmpfile.path(), true).unwrap();
+        close(&reader);
         holder.unlock().unwrap();
     }
 }

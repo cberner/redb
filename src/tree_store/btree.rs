@@ -1430,11 +1430,11 @@ mod tests {
     fn test_cycle_detection_in_btree() {
         use crate::tree_store::btree_base::RawBranchBuilder;
         use crate::tree_store::{
-            AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+            AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
         };
 
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             PAGE_SIZE,
             None,

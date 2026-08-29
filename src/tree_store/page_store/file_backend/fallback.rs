@@ -1,51 +1,83 @@
+use crate::db::{FULL_RANGE, InternalStorageBackend};
 use crate::{DatabaseError, Result, StorageBackend};
-#[cfg(feature = "logging")]
-use log::warn;
 use std::fs::{File, TryLockError};
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Stores a database as a file on-disk.
 #[derive(Debug)]
 pub struct FileBackend {
-    lock_supported: bool,
+    whole_file_locked: AtomicBool,
     file: Mutex<File>,
 }
 
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Self::new_internal(file, false)
+        Ok(Self {
+            whole_file_locked: AtomicBool::new(false),
+            file: Mutex::new(file),
+        })
     }
 
-    pub(crate) fn new_internal(file: File, read_only: bool) -> Result<Self, DatabaseError> {
-        let result = if read_only {
+    fn lock_whole_file(&self, shared: bool) -> Result<bool, io::Error> {
+        let file = self.file.lock().unwrap();
+        let result = if shared {
             file.try_lock_shared()
         } else {
             file.try_lock()
         };
 
         match result {
-            Ok(()) => Ok(Self {
-                lock_supported: true,
-                file: Mutex::new(file),
-            }),
-            Err(TryLockError::WouldBlock) => Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(TryLockError::Error(err)) if err.kind() == io::ErrorKind::Unsupported => {
-                #[cfg(feature = "logging")]
-                warn!(
-                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
-                );
-
-                Ok(Self {
-                    lock_supported: false,
-                    file: Mutex::new(file),
-                })
+            Ok(()) => {
+                self.whole_file_locked.store(true, Ordering::Release);
+                Ok(true)
             }
-            Err(TryLockError::Error(err)) => Err(err.into()),
+            Err(TryLockError::WouldBlock) => Ok(false),
+            Err(TryLockError::Error(err)) => Err(err),
         }
     }
+}
+
+/// This backend has no byte-range locks. Only the whole storage can be locked, which a whole-file
+/// lock does, so that is the one range it supports.
+impl InternalStorageBackend for FileBackend {
+    fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        if range == FULL_RANGE {
+            self.lock_whole_file(false)
+        } else {
+            Err(unsupported())
+        }
+    }
+
+    fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        if range == FULL_RANGE {
+            self.lock_whole_file(true)
+        } else {
+            Err(unsupported())
+        }
+    }
+
+    fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        if range != FULL_RANGE {
+            return Err(unsupported());
+        }
+        if self.whole_file_locked.swap(false, Ordering::AcqRel) {
+            self.file.lock().unwrap().unlock()?;
+        }
+
+        Ok(())
+    }
+}
+
+fn unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "byte-range locks are not supported on this platform",
+    )
 }
 
 impl StorageBackend for FileBackend {
@@ -72,13 +104,5 @@ impl StorageBackend for FileBackend {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(data)
-    }
-
-    fn close(&self) -> Result<(), io::Error> {
-        if self.lock_supported {
-            self.file.lock().unwrap().unlock()?;
-        }
-
-        Ok(())
     }
 }
