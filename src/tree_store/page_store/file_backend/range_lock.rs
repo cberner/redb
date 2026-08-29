@@ -41,10 +41,148 @@ fn unsupported() -> io::Error {
 #[cfg(not(any(target_os = "linux", target_vendor = "apple", windows)))]
 impl RangeLock for File {}
 
-// std's whole-file lock is itself a LockFileEx over every byte, so it is one of these
+// LockFileEx region locks: per-handle, so they carry the same ownership model as open file
+// description locks, and mandatory rather than advisory. Unlike fcntl's, they do not split or
+// merge -- a lock is released only by an unlock over the range it was taken over, and a range
+// this handle already holds cannot be locked again -- so each range is taken and released whole.
+// The calls are the ones std's own whole-file locks use, made over a range rather than the file.
 #[cfg(windows)]
-impl RangeLock for File {
-    const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = Some(true);
+mod windows_imp {
+    use super::{File, RangeLock};
+    use std::io;
+    use std::ops::Range;
+    use std::os::windows::io::AsRawHandle;
+
+    type Handle = *mut core::ffi::c_void;
+    type Dword = u32;
+    type Bool = i32;
+
+    const LOCKFILE_FAIL_IMMEDIATELY: Dword = 0x0000_0001;
+    const LOCKFILE_EXCLUSIVE_LOCK: Dword = 0x0000_0002;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+
+    #[repr(C)]
+    struct Overlapped {
+        internal: usize,
+        internal_high: usize,
+        offset: Dword,
+        offset_high: Dword,
+        event: Handle,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn LockFileEx(
+            file: Handle,
+            flags: Dword,
+            reserved: Dword,
+            bytes_low: Dword,
+            bytes_high: Dword,
+            overlapped: *mut Overlapped,
+        ) -> Bool;
+        fn UnlockFile(
+            file: Handle,
+            offset_low: Dword,
+            offset_high: Dword,
+            bytes_low: Dword,
+            bytes_high: Dword,
+        ) -> Bool;
+    }
+
+    // The Win32 calls take 64-bit offsets and lengths as dword halves
+    fn low_dword(value: u64) -> Dword {
+        Dword::try_from(value & u64::from(Dword::MAX)).unwrap()
+    }
+
+    fn high_dword(value: u64) -> Dword {
+        Dword::try_from(value >> 32).unwrap()
+    }
+
+    fn try_lock(file: &File, exclusive: bool, range: Range<u64>) -> io::Result<bool> {
+        debug_assert!(!range.is_empty());
+        let flags = if exclusive {
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY
+        } else {
+            LOCKFILE_FAIL_IMMEDIATELY
+        };
+        let len = range.end - range.start;
+        // Only the offset is carried, and the struct is left on the stack, as std's try_lock
+        // does: LOCKFILE_FAIL_IMMEDIATELY is answered rather than queued, so nothing completes
+        // into it after the call returns
+        let mut overlapped = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: low_dword(range.start),
+            offset_high: high_dword(range.start),
+            event: core::ptr::null_mut(),
+        };
+        let ok = unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                flags,
+                0,
+                low_dword(len),
+                high_dword(len),
+                &raw mut overlapped,
+            )
+        };
+        if ok != 0 {
+            return Ok(true);
+        }
+
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(ERROR_LOCK_VIOLATION) {
+            Ok(false)
+        } else {
+            Err(err)
+        }
+    }
+
+    impl RangeLock for File {
+        // std's whole-file lock is itself a LockFileEx over every byte, so it is one of these
+        const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = Some(true);
+
+        fn try_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
+            try_lock(self, true, range)
+        }
+
+        fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
+            try_lock(self, false, range)
+        }
+
+        // UnlockFile rather than its Ex form, as std's unlock uses: it takes the range as
+        // arguments, so there is no overlapped structure for a queued request to complete into.
+        // One call releases the lock because the protocol takes one per range, where std has to
+        // unlock twice for a handle that took both an exclusive and a shared lock.
+        fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
+            debug_assert!(!range.is_empty());
+            let len = range.end - range.start;
+            let ok = unsafe {
+                UnlockFile(
+                    self.as_raw_handle(),
+                    low_dword(range.start),
+                    high_dword(range.start),
+                    low_dword(len),
+                    high_dword(len),
+                )
+            };
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+
+        // There is no query operation, so the range is acquired and released again to answer
+        fn query_lock(&self, range: Range<u64>) -> io::Result<bool> {
+            if try_lock(self, true, range.clone())? {
+                self.unlock_range(range)?;
+                Ok(false)
+            } else {
+                Ok(true)
+            }
+        }
+    }
 }
 
 // The lock-type constants are c_int on Linux and already c_short on the Apple platforms
