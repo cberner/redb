@@ -2455,11 +2455,13 @@ fn park_bound<K: Key + 'static, V: Value + 'static>(
 mod tests {
     use super::*;
     use crate::tree_store::btree_base::{DEFERRED, LeafBuilder};
-    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+    use crate::tree_store::{
+        AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
+    };
 
     fn test_page_allocator() -> PageAllocator {
         let mem = TransactionalMemory::new(
-            Box::new(InMemoryBackend::new()),
+            LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             PAGE_SIZE,
             None,
