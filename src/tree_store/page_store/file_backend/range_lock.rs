@@ -8,6 +8,7 @@ pub(crate) trait RangeLock {
     /// Whether these locks and [`File::lock`]'s conflict.
     /// `None` indicates that it can only be determined at runtime, e.g. because it is filesystem
     /// dependent.
+    #[cfg_attr(feature = "experimental-api-5", allow(dead_code))]
     const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = None;
 
     /// `Ok(false)` means a conflicting lock is held elsewhere. An end of `u64::MAX` covers
@@ -26,6 +27,7 @@ pub(crate) trait RangeLock {
 
     /// Whether an exclusive lock over the range would conflict with one already held.
     /// [`File::lock`] is included wherever it would in fact block a range lock
+    #[cfg_attr(feature = "experimental-api-5", allow(dead_code))]
     fn query_lock(&self, _range: Range<u64>) -> io::Result<bool> {
         Err(unsupported())
     }

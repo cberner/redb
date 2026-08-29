@@ -29,6 +29,8 @@
   the `experimental-api-5` feature flag, returning a `MultimapCursor` pointing at a gap between
   entries. The type reserves the constructors' signatures in the trait; navigation methods will
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
+* Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
+  alone, rather than also with the whole-file lock earlier versions take.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

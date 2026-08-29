@@ -51,8 +51,17 @@ impl FileBackend {
         })
     }
 
+    #[cfg(feature = "experimental-api-5")]
+    fn lock_whole_storage(&self, shared: bool) -> io::Result<bool> {
+        match self.lock_protocol_ranges(shared) {
+            Err(err) if err.kind() == io::ErrorKind::Unsupported => self.lock_whole_file(shared),
+            result => result,
+        }
+    }
+
     /// The whole storage, locked with the protocol ranges and -- where those are a namespace of
     /// their own -- the whole-file lock an older redb takes as well.
+    #[cfg(not(feature = "experimental-api-5"))]
     fn lock_whole_storage(&self, shared: bool) -> io::Result<bool> {
         // Prefer range locks, which cover the whole-file lock as well where the two conflict
         if File::CONFLICTS_WITH_STD_FILE_LOCK == Some(true) {
@@ -327,7 +336,9 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod range_lock_tests {
     use super::{FULL_RANGE, FileBackend, InternalStorageBackend, NAMESPACE_PROBE_BYTE, RangeLock};
-    use std::fs::{File, OpenOptions, TryLockError};
+    #[cfg(not(all(feature = "experimental-api-5", target_os = "linux")))]
+    use std::fs::TryLockError;
+    use std::fs::{File, OpenOptions};
     use std::path::Path;
 
     // Offsets docs/design.md assigns: the header lock, the coordination bytes at BASE, the
@@ -500,7 +511,7 @@ mod range_lock_tests {
 
     /// An ordinary Linux filesystem keeps the whole-file lock out of the range locks' table,
     /// so an open holds both: only the whole-file lock itself can refuse the observer's
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
     #[test]
     fn an_ordinary_filesystem_answers_that_the_two_kinds_are_separate() {
         assert!(File::CONFLICTS_WITH_STD_FILE_LOCK.is_none());
@@ -564,6 +575,7 @@ mod range_lock_tests {
 
     /// The whole-file lock is all an older version of redb takes, so an open must keep
     /// excluding it however the namespace question is answered
+    #[cfg(not(all(feature = "experimental-api-5", target_os = "linux")))]
     #[test]
     fn the_whole_file_lock_is_refused_while_a_backend_is_open() {
         let tmpfile = crate::create_tempfile();
@@ -584,6 +596,7 @@ mod range_lock_tests {
     }
 
     /// ... and be excluded by one: the same older version, having opened the database first
+    #[cfg(not(all(feature = "experimental-api-5", target_os = "linux")))]
     #[test]
     fn a_whole_file_lock_holder_reads_as_already_open() {
         let tmpfile = crate::create_tempfile();
@@ -609,5 +622,35 @@ mod range_lock_tests {
         let reader = open(tmpfile.path(), true).unwrap();
         close(&reader);
         holder.unlock().unwrap();
+    }
+
+    #[cfg(all(feature = "experimental-api-5", target_os = "linux"))]
+    #[test]
+    fn an_older_redb_is_neither_excluded_nor_excluding_where_the_two_kinds_are_separate() {
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        holder.try_lock().unwrap();
+
+        // Mapped together, this test has nothing to say
+        let asking = reopen(tmpfile.path());
+        if asking
+            .query_lock(NAMESPACE_PROBE_BYTE..NAMESPACE_PROBE_BYTE + 1)
+            .unwrap()
+        {
+            return;
+        }
+
+        let backend = open(tmpfile.path(), false).unwrap();
+        holder.unlock().unwrap();
+
+        let observer = reopen(tmpfile.path());
+        observer.try_lock().unwrap();
+        observer.unlock().unwrap();
+
+        assert!(matches!(
+            open(tmpfile.path(), false),
+            Err(crate::DatabaseError::DatabaseAlreadyOpen)
+        ));
+        close(&backend);
     }
 }
