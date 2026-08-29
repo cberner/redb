@@ -478,23 +478,23 @@ b) it is not referenced, in which case it is in the pending free state and is co
 # Multi-process concurrency
 
 The following concurrency modes are supported, and their locking protocol is described below:
-* Read-only
+* Immutable
 * Single process
 * Multi-process with a single writer process
 * Multi-process with multiple writer processes
 
-## Read-only
+Platforms that do not have file range locks only support Immutable and Single process modes, via
+shared and exclusive whole file locks, respectively.
 
-In this mode, multiple processes may open the database. Each takes a shared lock on the entire database file.
-On platforms that support both whole-file and range locks, both must be held, since some platforms
-such as Linux namespace them separately.
+## Immutable
+
+In this mode, multiple processes may open the database. Each takes a shared lock on the "immutable byte"
+and the rest of the database file, except for the "shared writer byte".
 
 ## Single process
 
 In this mode, only a single process may open the database. The process takes an exclusive lock on
 the entire database file.
-On platforms that support both whole-file and range locks, both must be held, since some platforms
-such as Linux namespace them separately.
 
 ## Multi-process with a single writer process
 
@@ -540,7 +540,8 @@ The multi-process concurrency modes rely on file range locks and define the foll
 | `BASE`                  | writer byte                        |
 | `BASE + 1`              | shared writer byte                 |
 | `BASE + 2`              | shared reader byte                 |
-| `BASE + 3..BASE + 1024` | reserved                           |
+| `BASE + 3`              | immutable byte                     |
+| `BASE + 4..BASE + 1024` | reserved                           |
 | `BASE + 1024`           | active transaction base (TXN_BASE) |
 | `TXN_BASE..2^63`        | active transaction range           |
 
@@ -553,11 +554,18 @@ multi-writer mode -- holds an exclusive lock on this byte until it is done writi
 
 The lock status of this byte is used to determine whether the database is open for a single writer
 or multiple writers.
+After locking this byte, the "immutable byte" must be checked, since that mode is incompatible.
 
 ### "shared reader byte"
 
 Read-only multi-process databases must hold a shared lock on this byte while they are open. This
 prevents a non-multi-process writer from opening the database.
+
+### "immutable byte"
+
+Processes hold a shared lock on this byte when the database is open in Immutable mode.
+After locking this byte, they must check if the "shared writer byte" is locked -- which would
+indicate an idle writer (if the "writer byte" is unlocked).
 
 ## Header synchronization
 
