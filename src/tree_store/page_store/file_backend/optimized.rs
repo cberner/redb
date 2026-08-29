@@ -54,11 +54,11 @@ impl FileBackend {
     /// The whole storage, locked with the protocol ranges and -- where those are a namespace of
     /// their own -- the whole-file lock an older redb takes as well.
     fn lock_whole_storage(&self, shared: bool) -> io::Result<bool> {
-        // Prefer range locks
+        // Prefer range locks, which cover the whole-file lock as well where the two conflict
         if File::CONFLICTS_WITH_STD_FILE_LOCK == Some(true) {
             return match self.lock_protocol_ranges(shared) {
-                // Windows, whose range locks are not implemented yet and whose whole-file lock is
-                // itself one over every byte
+                // A filesystem with no byte-range locks, whatever the platform has: the
+                // whole-file lock is the only exclusion left to take
                 Err(err) if err.kind() == io::ErrorKind::Unsupported => {
                     self.lock_whole_file(shared)
                 }
@@ -324,7 +324,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
     Ok(())
 }
 
-#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod range_lock_tests {
     use super::{FULL_RANGE, FileBackend, InternalStorageBackend, NAMESPACE_PROBE_BYTE, RangeLock};
     use std::fs::{File, OpenOptions, TryLockError};
@@ -385,11 +385,10 @@ mod range_lock_tests {
     #[test]
     fn a_range_short_of_the_whole_storage_is_a_byte_range_lock_alone() {
         let tmpfile = crate::create_tempfile();
-        let backend = open(tmpfile.path(), false).unwrap();
+        // No whole-storage lock: on the platforms whose locks do not split, a range it covered
+        // could not be locked or released on its own
+        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
         let byte = BASE..BASE + 1;
-        // Held by the open already, so it is released first: the same file description's locks
-        // replace each other rather than conflicting
-        backend.unlock_range(byte.clone()).unwrap();
 
         let observer = reopen(tmpfile.path());
         assert!(backend.try_lock_range(byte.clone()).unwrap());
@@ -401,8 +400,6 @@ mod range_lock_tests {
         assert!(byte_is_free(&observer, BASE, false));
         assert!(!byte_is_free(&observer, BASE, true));
         backend.unlock_range(byte).unwrap();
-
-        close(&backend);
     }
 
     #[test]
