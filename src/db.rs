@@ -76,6 +76,13 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 #[cfg_attr(redb_no_std, allow(dead_code))]
 pub(crate) const FULL_RANGE: Range<u64> = 0..u64::MAX;
 
+#[cfg(any(windows, unix, target_os = "wasi"))]
+const LOCK_BASE: u64 = 1 << 62;
+/// An offset that is not used in the multi-process locking protocol. Used to detect whether
+/// `flock()` and range locks share the same namespace.
+#[cfg(any(windows, unix, target_os = "wasi"))]
+pub(crate) const NAMESPACE_PROBE_BYTE: u64 = LOCK_BASE - 2;
+
 /// A range reaching [`u64::MAX`] covers the entire storage.
 #[cfg_attr(redb_no_std, allow(dead_code))]
 pub(crate) trait InternalStorageBackend: StorageBackend {
