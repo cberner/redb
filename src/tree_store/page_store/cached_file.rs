@@ -1,21 +1,18 @@
-use crate::db::{FULL_RANGE, InternalStorageBackend};
+use crate::db::InternalStorageBackend;
 use crate::io;
 use crate::sync::{Mutex, MutexGuard, RwLock};
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
-use crate::{CacheStats, DatabaseError, Result, StorageError};
+use crate::{CacheStats, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::{Index, IndexMut};
+use core::ops::{Index, IndexMut, Range};
 use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-#[cfg(feature = "logging")]
-use log::warn;
-
 // Allocates an `Arc<[u8]>` in one step. `Arc::<[u8]>::from(vec![0; len])` would
 // allocate the Vec and then allocate a new Arc and memcpy into it.
 fn zero_filled_arc(len: usize) -> Arc<[u8]> {
@@ -135,58 +132,30 @@ struct CheckedBackend {
 impl Drop for CheckedBackend {
     fn drop(&mut self) {
         if !self.closed.load(Ordering::Acquire) {
-            let _ = self.release_storage();
             let _ = self.file.close();
         }
     }
 }
 
 impl CheckedBackend {
-    fn new(file: Box<dyn InternalStorageBackend>, read_only: bool) -> Result<Self, DatabaseError> {
-        let backend = Self {
+    fn new(file: Box<dyn InternalStorageBackend>) -> Self {
+        Self {
             file,
             io_failed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
-        };
-        backend.lock_storage(read_only)?;
-
-        Ok(backend)
-    }
-
-    /// The whole storage is locked for as long as the database is open
-    fn lock_storage(&self, read_only: bool) -> Result<(), DatabaseError> {
-        if !self.file.locks_expected() {
-            return Ok(());
-        }
-
-        let acquired = if read_only {
-            self.file.try_lock_shared_range(FULL_RANGE)
-        } else {
-            self.file.try_lock_range(FULL_RANGE)
-        };
-        match acquired {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(err) if io::is_unsupported(&err) => {
-                #[cfg(feature = "logging")]
-                warn!(
-                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
-                );
-
-                Ok(())
-            }
-            Err(err) => Err(err.into()),
         }
     }
 
-    fn release_storage(&self) -> Result<(), io::Error> {
-        if !self.file.locks_expected() {
-            return Ok(());
-        }
-        match self.file.unlock_range(FULL_RANGE) {
-            Err(err) if io::is_unsupported(&err) => Ok(()),
-            result => result,
-        }
+    fn locks_expected(&self) -> bool {
+        self.file.locks_expected()
+    }
+
+    fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.try_lock_range(range)
+    }
+
+    fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.try_lock_shared_range(range)
     }
 
     fn check_failure(&self) -> Result<()> {
@@ -204,7 +173,6 @@ impl CheckedBackend {
     fn close(&self) -> Result {
         self.closed.store(true, Ordering::Release);
         self.io_failed.store(true, Ordering::Release);
-        self.release_storage()?;
         self.file.close()?;
 
         Ok(())
@@ -337,8 +305,7 @@ impl PagedCachedFile {
         file: Box<dyn InternalStorageBackend>,
         page_size: u64,
         max_cache_size: usize,
-        read_only: bool,
-    ) -> Result<Self, DatabaseError> {
+    ) -> Self {
         let read_cache = (0..Self::lock_stripes())
             .map(|_| RwLock::new(LRUCache::new()))
             .collect();
@@ -346,8 +313,8 @@ impl PagedCachedFile {
             .map(|_| Arc::new(Mutex::new(LRUWriteCache::new())))
             .collect();
 
-        Ok(Self {
-            file: CheckedBackend::new(file, read_only)?,
+        Self {
+            file: CheckedBackend::new(file),
             page_size,
             read_cache_bytes: AtomicUsize::new(0),
             write_buffer_bytes: AtomicUsize::new(0),
@@ -366,7 +333,19 @@ impl PagedCachedFile {
             evictions: AtomicU64::default(),
             read_cache,
             write_buffer,
-        })
+        }
+    }
+
+    pub(crate) fn locks_expected(&self) -> bool {
+        self.file.locks_expected()
+    }
+
+    pub(crate) fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.try_lock_range(range)
+    }
+
+    pub(crate) fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        self.file.try_lock_shared_range(range)
     }
 
     fn write_buffer_stripe(&self, offset: u64) -> &Arc<Mutex<LRUWriteCache>> {
@@ -952,8 +931,7 @@ mod test {
     fn cache_leak() {
         let backend = InMemoryBackend::new();
         backend.set_len(1024).unwrap();
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
         let cached_file = Arc::new(cached_file);
 
         let t1 = {
@@ -994,9 +972,7 @@ mod test {
             LocklessBackend::boxed(backend),
             page_size as u64,
             max_cache_size,
-            false,
-        )
-        .unwrap();
+        );
 
         // Dirty twice as many pages as the write budget holds. Consecutive page offsets land in
         // different stripes, so each over-budget write finds its own stripe empty and must cover
@@ -1023,8 +999,7 @@ mod test {
     fn resize_preserves_cached_pages() {
         let backend = InMemoryBackend::new();
         backend.set_len(1024).unwrap();
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 4096, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 4096);
 
         // Populate the read cache with two pages from opposite ends of the file.
         cached_file.read(0, 128, PageHint::None).unwrap();
@@ -1047,8 +1022,7 @@ mod test {
     #[test]
     fn write_barrier_issues_no_file_writes() {
         let (backend, writes) = CountingBackend::new(1024);
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0xAB);
@@ -1080,8 +1054,7 @@ mod test {
     #[test]
     fn discard_write_buffer_drops_buffered_pages() {
         let (backend, writes) = CountingBackend::new(1024);
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0xCD);
@@ -1107,13 +1080,8 @@ mod test {
         const FILE_LEN: u64 = 16 * 1024;
 
         let (backend, _writes) = CountingBackend::new(FILE_LEN);
-        let cached_file = PagedCachedFile::new(
-            LocklessBackend::boxed(backend),
-            PAGE as u64,
-            MAX_CACHE,
-            false,
-        )
-        .unwrap();
+        let cached_file =
+            PagedCachedFile::new(LocklessBackend::boxed(backend), PAGE as u64, MAX_CACHE);
 
         // Fill the write buffer to its half-of-cache cap, then commit non-durably so the pages
         // stay buffered
@@ -1151,8 +1119,7 @@ mod test {
     #[test]
     fn zero_size_cache_stays_empty_after_reclaim() {
         let (backend, _writes) = CountingBackend::new(1024);
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 0, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 0);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0x22);
@@ -1171,8 +1138,7 @@ mod test {
     fn buffered_pages_spill_under_pressure() {
         let (backend, writes) = CountingBackend::new(1024);
         // A two page budget caps the buffer at one page, so each write() spills an earlier one
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 256, false).unwrap();
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 256);
 
         for i in 0..4u8 {
             let offset = u64::from(i) * 128;

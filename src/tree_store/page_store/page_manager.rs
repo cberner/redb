@@ -1,5 +1,5 @@
 use crate::CacheStats;
-use crate::db::InternalStorageBackend;
+use crate::db::{FULL_RANGE, InternalStorageBackend};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -28,6 +28,8 @@ use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
 use core::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "logging")]
+use log::warn;
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -524,6 +526,33 @@ pub(crate) struct TransactionalMemory {
 }
 
 impl TransactionalMemory {
+    fn lock_whole_storage(storage: &PagedCachedFile, read_only: bool) -> Result<(), DatabaseError> {
+        // A caller-supplied backend has no locks, which is not a platform limitation
+        if !storage.locks_expected() {
+            return Ok(());
+        }
+
+        let result = if read_only {
+            storage.try_lock_shared_range(FULL_RANGE)
+        } else {
+            storage.try_lock_range(FULL_RANGE)
+        };
+
+        match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(DatabaseError::DatabaseAlreadyOpen),
+            Err(err) if io::is_unsupported(&err) => {
+                #[cfg(feature = "logging")]
+                warn!(
+                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
+                );
+
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
+
     pub(crate) fn new(
         file: Box<dyn InternalStorageBackend>,
         // Allow initializing a new database in an empty file
@@ -542,7 +571,8 @@ impl TransactionalMemory {
         );
         assert!(region_size.is_power_of_two());
 
-        let storage = PagedCachedFile::new(file, page_size as u64, cache_size, read_only)?;
+        let storage = PagedCachedFile::new(file, page_size as u64, cache_size);
+        Self::lock_whole_storage(&storage, read_only)?;
 
         let initial_storage_len = storage.raw_file_len()?;
 
@@ -1940,5 +1970,168 @@ mod test {
             0,
             "order-1 allocation should reuse the merged free block in region 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod lock_failure_test {
+    use super::TransactionalMemory;
+    use crate::db::{FULL_RANGE, InternalStorageBackend};
+    use crate::io;
+    use crate::sync::Mutex;
+    use crate::tree_store::InMemoryBackend;
+    use crate::tree_store::page_store::cached_file::PagedCachedFile;
+    use crate::{DatabaseError, StorageBackend, StorageError};
+    use alloc::boxed::Box;
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::ops::Range;
+
+    #[derive(Copy, Clone, Eq, PartialEq, Debug)]
+    enum Answer {
+        Acquired,
+        Refused,
+        Unsupported,
+        Failed,
+    }
+
+    impl Answer {
+        fn result(self) -> Result<bool, io::Error> {
+            match self {
+                Answer::Acquired => Ok(true),
+                Answer::Refused => Ok(false),
+                Answer::Unsupported => Err(io::unsupported("no byte-range locks here")),
+                Answer::Failed => Err(io::invalid_input("the lock could not be taken")),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct AnsweringBackend {
+        inner: InMemoryBackend,
+        taking: Answer,
+        held: Arc<Mutex<Vec<Range<u64>>>>,
+        released: Arc<Mutex<Vec<Range<u64>>>>,
+    }
+
+    impl AnsweringBackend {
+        fn take(&self, range: Range<u64>) -> Result<bool, io::Error> {
+            let acquired = self.taking.result();
+            if matches!(acquired, Ok(true)) {
+                self.held.lock().unwrap().push(range);
+            }
+
+            acquired
+        }
+    }
+
+    impl InternalStorageBackend for AnsweringBackend {
+        fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+            self.take(range)
+        }
+
+        fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+            self.take(range)
+        }
+
+        fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+            self.held.lock().unwrap().retain(|held| *held != range);
+            self.released.lock().unwrap().push(range);
+            Ok(())
+        }
+    }
+
+    impl StorageBackend for AnsweringBackend {
+        fn close(&self) -> Result<(), io::Error> {
+            for range in self.held.lock().unwrap().drain(..) {
+                self.released.lock().unwrap().push(range);
+            }
+
+            Ok(())
+        }
+
+        fn len(&self) -> Result<u64, io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), io::Error> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), io::Error> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+            self.inner.write(offset, data)
+        }
+    }
+
+    type Released = Arc<Mutex<Vec<Range<u64>>>>;
+
+    fn storage(taking: Answer) -> (PagedCachedFile, Released) {
+        let released: Released = Arc::new(Mutex::new(Vec::new()));
+        let storage = PagedCachedFile::new(
+            Box::new(AnsweringBackend {
+                inner: InMemoryBackend::new(),
+                taking,
+                held: Arc::new(Mutex::new(Vec::new())),
+                released: released.clone(),
+            }),
+            4096,
+            0,
+        );
+
+        (storage, released)
+    }
+
+    fn open(read_only: bool, taking: Answer) -> Result<(), DatabaseError> {
+        TransactionalMemory::lock_whole_storage(&storage(taking).0, read_only)
+    }
+
+    #[test]
+    fn a_platform_without_locks_opens_anyway() {
+        open(false, Answer::Unsupported).unwrap();
+        open(true, Answer::Unsupported).unwrap();
+    }
+
+    #[test]
+    fn a_conflicting_lock_reports_the_database_already_open() {
+        for read_only in [false, true] {
+            assert!(matches!(
+                open(read_only, Answer::Refused),
+                Err(DatabaseError::DatabaseAlreadyOpen)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_lock_that_fails_for_any_other_reason_fails_the_open() {
+        for read_only in [false, true] {
+            assert!(matches!(
+                open(read_only, Answer::Failed),
+                Err(DatabaseError::Storage(StorageError::Io(_)))
+            ));
+        }
+    }
+
+    #[test]
+    fn the_lock_is_released_at_close() {
+        for taking in [Answer::Acquired, Answer::Unsupported] {
+            let (storage, released) = storage(taking);
+            TransactionalMemory::lock_whole_storage(&storage, false).unwrap();
+            storage.close().unwrap();
+
+            let expected: Vec<Range<u64>> = if taking == Answer::Acquired {
+                vec![FULL_RANGE]
+            } else {
+                vec![]
+            };
+            assert_eq!(*released.lock().unwrap(), expected);
+        }
     }
 }

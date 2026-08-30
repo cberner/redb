@@ -1,8 +1,10 @@
-use crate::db::{FULL_RANGE, InternalStorageBackend};
+use crate::db::{FULL_RANGE, InternalStorageBackend, NAMESPACE_PROBE_BYTE};
 use crate::{DatabaseError, Result, StorageBackend};
+use std::collections::HashSet;
 use std::fs::{File, TryLockError};
 use std::io;
 use std::ops::Range;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "logging")]
@@ -15,10 +17,6 @@ use std::os::unix::fs::FileExt;
 use std::os::windows::fs::FileExt;
 
 use super::range_lock::RangeLock;
-
-// An offset that is not used in the multi-process locking protocol. Used to detect whether flock()
-// and range locks share the same namespace.
-const NAMESPACE_PROBE_BYTE: u64 = (1 << 62) - 2;
 
 /// Every offset the multi-process locking protocol uses
 const PROTOCOL_RANGES: [Range<u64>; 2] =
@@ -37,7 +35,9 @@ fn report_failed_release(result: io::Result<()>) {
 #[derive(Debug)]
 pub struct FileBackend {
     whole_file_locked: AtomicBool,
-    ranges_locked: AtomicBool,
+    // Every range this handle holds, so that close() can release exactly what was taken:
+    // UnlockFile neither splits nor merges, so an unlock must cover the range it was locked over
+    locked_ranges: Mutex<HashSet<Range<u64>>>,
     file: File,
 }
 
@@ -46,7 +46,7 @@ impl FileBackend {
     pub fn new(file: File) -> Result<Self, DatabaseError> {
         Ok(Self {
             whole_file_locked: AtomicBool::new(false),
-            ranges_locked: AtomicBool::new(false),
+            locked_ranges: Mutex::new(HashSet::new()),
             file,
         })
     }
@@ -86,7 +86,7 @@ impl FileBackend {
                 .unwrap_or(false)
         {
             // Prefer range locks, so release the whole-file lock which maps to the range lock
-            self.release_whole_storage()?;
+            self.release_all_locks()?;
             return self.lock_protocol_ranges(shared);
         }
 
@@ -98,7 +98,7 @@ impl FileBackend {
             Err(ref err) if err.kind() == io::ErrorKind::Unsupported => Ok(true),
             // A multi-process handle has the database open
             _ => {
-                report_failed_release(self.release_whole_storage());
+                report_failed_release(self.release_all_locks());
                 acquired
             }
         }
@@ -108,31 +108,28 @@ impl FileBackend {
     fn lock_protocol_ranges(&self, shared: bool) -> io::Result<bool> {
         for (taken, range) in PROTOCOL_RANGES.into_iter().enumerate() {
             let acquired = if shared {
-                self.file.try_lock_shared_range(range)
+                self.file.try_lock_shared_range(range.clone())
             } else {
-                self.file.try_lock_range(range)
+                self.file.try_lock_range(range.clone())
             };
             // Another handle has the database open, holding either kind of lock
             if !matches!(acquired, Ok(true)) {
                 for range in PROTOCOL_RANGES.into_iter().take(taken) {
-                    report_failed_release(self.file.unlock_range(range));
+                    report_failed_release(self.unlock_range(range));
                 }
                 return acquired;
             }
+            self.locked_ranges.lock().unwrap().insert(range.clone());
         }
-        self.ranges_locked.store(true, Ordering::Release);
 
         Ok(true)
     }
 
-    fn release_whole_storage(&self) -> io::Result<()> {
-        // Every lock is released even where one fails: a lock left behind outlives this
-        // backend wherever the description is shared
+    fn release_all_locks(&self) -> io::Result<()> {
+        // A lock left behind outlives this backend wherever the description is shared
         let mut result = Ok(());
-        if self.ranges_locked.swap(false, Ordering::AcqRel) {
-            for range in PROTOCOL_RANGES {
-                result = result.and(self.file.unlock_range(range));
-            }
+        for range in self.locked_ranges.lock().unwrap().drain() {
+            result = result.and(self.file.unlock_range(range));
         }
         if self.whole_file_locked.swap(false, Ordering::AcqRel) {
             result = result.and(self.file.unlock());
@@ -165,30 +162,40 @@ impl FileBackend {
 impl InternalStorageBackend for FileBackend {
     fn try_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
         if range == FULL_RANGE {
-            self.lock_whole_storage(false)
-        } else {
-            self.file.try_lock_range(range)
+            return self.lock_whole_storage(false);
         }
+        let acquired = self.file.try_lock_range(range.clone())?;
+        if acquired {
+            self.locked_ranges.lock().unwrap().insert(range);
+        }
+        Ok(acquired)
     }
 
     fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
         if range == FULL_RANGE {
-            self.lock_whole_storage(true)
-        } else {
-            self.file.try_lock_shared_range(range)
+            return self.lock_whole_storage(true);
         }
+        let acquired = self.file.try_lock_shared_range(range.clone())?;
+        if acquired {
+            self.locked_ranges.lock().unwrap().insert(range);
+        }
+        Ok(acquired)
     }
 
     fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
         if range == FULL_RANGE {
-            self.release_whole_storage()
-        } else {
-            self.file.unlock_range(range)
+            return self.release_all_locks();
         }
+        self.locked_ranges.lock().unwrap().remove(&range);
+        self.file.unlock_range(range)
     }
 }
 
 impl StorageBackend for FileBackend {
+    fn close(&self) -> Result<(), io::Error> {
+        self.unlock_range(FULL_RANGE)
+    }
+
     fn len(&self) -> Result<u64, io::Error> {
         Ok(self.file.metadata()?.len())
     }
@@ -373,9 +380,25 @@ mod range_lock_tests {
         open_file(reopen(path), read_only)
     }
 
-    /// ... and releases at close
+    /// ... and releases at close, which is what the core relies on
     fn close(backend: &FileBackend) {
-        backend.unlock_range(FULL_RANGE).unwrap();
+        crate::StorageBackend::close(backend).unwrap();
+    }
+
+    /// `close()` has to release rather than leaving it to the file being dropped: a read
+    /// transaction outliving the database keeps the backend, and so the file, alive past it
+    #[test]
+    fn close_releases_while_the_backend_is_still_alive() {
+        let tmpfile = crate::create_tempfile();
+        let backend = open(tmpfile.path(), false).unwrap();
+        close(&backend);
+
+        let observer = reopen(tmpfile.path());
+        for offset in PROTOCOL_OFFSETS {
+            assert!(byte_is_free(&observer, offset, false), "offset {offset}");
+        }
+        assert!(observer.try_lock().is_ok());
+        drop(backend);
     }
 
     fn byte_is_free(file: &File, offset: u64, exclusive: bool) -> bool {
@@ -537,7 +560,7 @@ mod range_lock_tests {
         let file = reopen(tmpfile.path());
         let backend = FileBackend {
             whole_file_locked: AtomicBool::new(false),
-            ranges_locked: AtomicBool::new(false),
+            locked_ranges: super::Mutex::new(super::HashSet::new()),
             file,
         };
         assert!(backend.lock_protocol_ranges(false).unwrap());

@@ -81,6 +81,10 @@ fn unsupported() -> io::Error {
 }
 
 impl StorageBackend for FileBackend {
+    fn close(&self) -> Result<(), io::Error> {
+        self.unlock_range(FULL_RANGE)
+    }
+
     fn len(&self) -> Result<u64, io::Error> {
         Ok(self.file.lock().unwrap().metadata()?.len())
     }
