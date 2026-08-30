@@ -516,6 +516,10 @@ pub(crate) struct TransactionalMemory {
     // While set, no allocator state is persisted and shutdowns are not recorded as clean,
     // forcing the next open to rebuild the state from the committed trees
     needs_repair: AtomicBool,
+    // Set while `grow()` has extended the file past the layout the header on disk records. Only
+    // a header write publishes the larger layout, so until one happens the file is longer than
+    // the durable header describes
+    layout_ahead_of_header: AtomicBool,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -661,6 +665,7 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             needs_repair: AtomicBool::new(false),
+            layout_ahead_of_header: AtomicBool::new(false),
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
@@ -887,8 +892,32 @@ impl TransactionalMemory {
             .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
             .copy_from_slice(&header.to_bytes(true));
+        // The header now records the current layout, so the file is no longer ahead of it
+        self.layout_ahead_of_header.store(false, Ordering::Release);
 
         Ok(())
+    }
+
+    // Publishes a layout that `grow()` left ahead of the header on disk.
+    //
+    // A commit always writes the header, so it republishes the layout itself. An aborted
+    // transaction does not, and rolling its allocations back does not shrink the file, so
+    // without this the durable header would keep describing fewer regions than the file holds.
+    // The next open -- including `check_integrity()` -- rebuilds the layout from the file length,
+    // finds it disagrees with the stored one, and reports the database as needing repair.
+    //
+    // A pending `Durability::None` commit is left alone: its slot names pages that have not been
+    // flushed, so the header must not reach the disk ahead of them, and the live state it
+    // describes is already what a reload verifies against.
+    pub(crate) fn flush_grown_layout(&self) -> Result {
+        if !self.layout_ahead_of_header.load(Ordering::Acquire) || self.pending_non_durable_commit()
+        {
+            return Ok(());
+        }
+        let state = self.state.lock()?;
+        self.write_header(&state.header)?;
+        drop(state);
+        self.storage.flush()
     }
 
     // Durably clears the recovery flag, marking the repair as complete.
@@ -1618,6 +1647,7 @@ impl TransactionalMemory {
 
         state.allocators_mut().resize_to(new_layout);
         state.header.set_layout(new_layout);
+        self.layout_ahead_of_header.store(true, Ordering::Release);
         Ok(())
     }
 

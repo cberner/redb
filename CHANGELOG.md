@@ -63,6 +63,9 @@
   with such keys use slightly less space, and lookups are faster.
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
+* Fix `check_integrity()` reporting a healthy database as corrupt, and repairing it, after a
+  write transaction that grew the database file was aborted or dropped. The abort left the
+  header on disk describing fewer regions than the file held, which the check read as damage.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator
   that yielded `Err(Corrupted)` could yield the rest of the table on later calls, skipping the
   unreadable entries with no further error. Iterators and read-only cursors now keep returning

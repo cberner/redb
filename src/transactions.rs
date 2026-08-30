@@ -1963,6 +1963,10 @@ impl WriteTransaction {
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
+        // Rolling the allocations back does not shrink the file, so a transaction that grew it
+        // leaves the layout ahead of the header on disk. Only a commit republishes it, so an
+        // abort must, or the durable header keeps describing fewer regions than the file holds.
+        self.mem.flush_grown_layout()?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
