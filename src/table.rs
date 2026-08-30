@@ -654,7 +654,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     ///
     /// let read_txn = db.begin_read()?;
     /// let table = read_txn.open_table(TABLE)?;
-    /// let mut iter = table.range("a".."c")?;
+    /// let mut iter = ReadableTable::range(&table, "a".."c")?;
     /// let (key, value) = iter.next().unwrap()?;
     /// assert_eq!("a", key.value());
     /// assert_eq!(0, value.value());
@@ -881,9 +881,25 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
-    /// and keeps the transaction alive until it is dropped.
+    /// This method is like [`ReadableTable::get()`], but the guard is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the returned guard does not itself keep
+    /// the transaction alive. It stays valid only while this table does, since the table is what
+    /// holds the transaction open. If the guard outlives the table, concurrent writers may
+    /// reclaim the pages it references, which panics in debug builds. Use
+    /// [`ReadableTable::get()`] instead, whose guard borrows from the table so that the compiler
+    /// enforces this, or [`Self::get_owned()`] if the guard needs to keep the transaction alive
+    /// on its own.
+    ///
+    /// Enabling the `experimental-pre-api-5-deprecations` feature marks this method deprecated.
     #[cfg(not(feature = "experimental-api-5"))]
+    #[cfg_attr(
+        feature = "experimental-pre-api-5-deprecations",
+        deprecated(
+            since = "4.2.0",
+            note = "the returned guard does not keep the transaction alive on its own, and can crash debug builds if it outlives this table; use ReadableTable::get(), or get_owned() if the guard needs to keep the transaction alive"
+        )
+    )]
     pub fn get<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -903,9 +919,25 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
             .map(|x| OwnedAccessGuard::new(x, self.transaction_guard.clone())))
     }
 
-    /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
+    /// This method is like [`ReadableTable::range()`], but the iterator is `'static`
+    ///
+    /// Note: contrary to what was previously documented, the guards yielded by the returned
+    /// iterator do not themselves keep the transaction alive. They stay valid only while this
+    /// table or the iterator does, since both hold the transaction open. If a guard outlives
+    /// them both, concurrent writers may reclaim the pages it references, which panics in debug
+    /// builds. Use [`ReadableTable::range()`] instead, whose guards borrow from the table so
+    /// that the compiler enforces this, or [`Self::range_owned()`] if the guards need to keep
+    /// the transaction alive on their own.
+    ///
+    /// Enabling the `experimental-pre-api-5-deprecations` feature marks this method deprecated.
     #[cfg(not(feature = "experimental-api-5"))]
+    #[cfg_attr(
+        feature = "experimental-pre-api-5-deprecations",
+        deprecated(
+            since = "4.2.0",
+            note = "the guards yielded by the iterator do not keep the transaction alive on their own, and can crash debug builds if they outlive both this table and the iterator; use ReadableTable::range(), or range_owned() if the guards need to keep the transaction alive"
+        )
+    )]
     pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
     where
         KR: Borrow<K::SelfType<'a>>,

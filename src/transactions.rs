@@ -2814,6 +2814,7 @@ mod test {
     // it completes. Verify the resulting contract: writes are refused, reads keep working, the
     // shutdown is not recorded as clean, and reopening repairs the database.
     #[test]
+    #[allow(deprecated)] // reads through the deprecated inherent ReadOnlyTable::get()
     fn discarded_allocator_state_poisons_database() {
         let tmpfile = crate::create_tempfile();
         let db = Database::create(tmpfile.path()).unwrap();
@@ -2990,6 +2991,7 @@ mod test {
     // close may record a clean shutdown again; a read-only open requires one
     #[cfg(panic = "unwind")]
     #[test]
+    #[allow(deprecated)] // reads through the deprecated inherent ReadOnlyTable::get()
     fn check_integrity_clears_leak_latch() {
         let tmpfile = crate::create_tempfile();
         let mut db = Database::create(tmpfile.path()).unwrap();

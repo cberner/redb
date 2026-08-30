@@ -54,6 +54,9 @@ struct LifetimeNames<'a, 'b> {
     reference2: &'b str,
 }
 
+// Reads through the inherent ReadOnlyTable::get(), which redb deprecates behind a feature flag.
+// This crate cannot see that flag, so the allowance is unconditional.
+#[allow(deprecated)]
 fn test_key_helper<K: Key + 'static>(key: &<K as Value>::SelfType<'_>) {
     let file = create_tempfile();
     let db = Database::create(file.path()).unwrap();
@@ -73,6 +76,7 @@ fn test_key_helper<K: Key + 'static>(key: &<K as Value>::SelfType<'_>) {
     assert_eq!(retrieved_value, 1);
 }
 
+#[allow(deprecated)]
 fn test_value_helper<V: Value + 'static>(
     value: <V as Value>::SelfType<'_>,
     expected_type_name: &str,

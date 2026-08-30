@@ -1,3 +1,14 @@
+// The deprecated ReadOnlyTable and ReadOnlyMultimapTable accessors are exercised throughout
+// these tests; they remain covered until they are removed. Scoped to the configuration that
+// deprecates them, so that unrelated deprecations are still reported in other builds.
+#![cfg_attr(
+    all(
+        feature = "experimental-pre-api-5-deprecations",
+        not(feature = "experimental-api-5")
+    ),
+    allow(deprecated)
+)]
+
 //! Regression test for a crash during a transaction that grows the database file.
 //!
 //! `grow()` extends the file with `set_len` and a subsequent commit writes the grown layout into
