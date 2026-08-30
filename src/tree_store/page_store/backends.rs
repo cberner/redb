@@ -62,6 +62,16 @@ impl InternalStorageBackend for LocklessBackend {
         Err(unsupported())
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
+        Err(unsupported())
+    }
+
     fn unlock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
         Err(unsupported())
     }
@@ -101,6 +111,16 @@ impl InternalStorageBackend for ReadOnlyBackend {
 
     fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, Error> {
         self.inner.try_lock_shared_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, range: Range<u64>) -> Result<(), Error> {
+        self.inner.lock_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, range: Range<u64>) -> Result<(), Error> {
+        self.inner.lock_shared_range(range)
     }
 
     fn unlock_range(&self, range: Range<u64>) -> Result<(), Error> {
@@ -230,6 +250,10 @@ mod test {
         for result in [
             backend.try_lock_range(FULL_RANGE).err(),
             backend.try_lock_shared_range(FULL_RANGE).err(),
+            #[cfg(feature = "experimental-multiprocess")]
+            backend.lock_range(FULL_RANGE).err(),
+            #[cfg(feature = "experimental-multiprocess")]
+            backend.lock_shared_range(FULL_RANGE).err(),
             backend.unlock_range(FULL_RANGE).err(),
             backend.query_lock_range(FULL_RANGE).err(),
         ] {

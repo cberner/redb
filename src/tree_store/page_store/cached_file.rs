@@ -159,6 +159,21 @@ impl CheckedBackend {
         self.file.try_lock_shared_range(range)
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.lock_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.lock_shared_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.unlock_range(range)
+    }
+
     fn query_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
         self.file.query_lock_range(range)
     }
@@ -351,6 +366,21 @@ impl PagedCachedFile {
 
     pub(crate) fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
         self.file.try_lock_shared_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.lock_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.lock_shared_range(range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+        self.file.unlock_range(range)
     }
 
     /// Whether an exclusive lock over the range would conflict with one held elsewhere.
@@ -549,6 +579,14 @@ impl PagedCachedFile {
         if self.write_buffer_bytes.load(Ordering::Acquire) > 0 {
             self.committed_pages_buffered.store(true, Ordering::Release);
         }
+    }
+
+    // Write directly to the file, bypassing the write buffer, so the bytes are on the file when
+    // this returns rather than whenever the buffer is next flushed
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn write_direct(&self, offset: u64, data: &[u8]) -> Result<()> {
+        self.invalidate_cache(offset, data.len());
+        self.file.write(offset, data)
     }
 
     // Read directly from the file, ignoring any cached data

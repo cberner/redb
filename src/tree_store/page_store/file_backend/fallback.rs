@@ -72,6 +72,16 @@ impl InternalStorageBackend for FileBackend {
         Ok(())
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
+        Err(unsupported())
+    }
+
     fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
         Err(unsupported())
     }

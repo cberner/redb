@@ -116,6 +116,14 @@ pub(crate) trait InternalStorageBackend: StorageBackend {
     /// `Ok(false)` means a conflicting lock is held elsewhere.
     fn try_lock_shared_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
 
+    /// Waits for the range rather than reporting a conflict. Only the multi-process header
+    /// lock waits: the ranges an open takes are refused rather than queued.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
+
     fn unlock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
 
     /// Whether an exclusive lock over the range would conflict with one held elsewhere.
@@ -1500,6 +1508,15 @@ pub enum ConcurrencyMode {
     /// Any number of processes may, concurrently open the database for reading and writing.
     /// Only one write transaction may be open at a time.
     MultiWriterProcess,
+}
+
+#[cfg(feature = "experimental-multiprocess")]
+impl ConcurrencyMode {
+    /// Whether another process may have the database open, concurrently, and one process
+    /// (possibly this one) is a writer
+    pub(crate) fn is_multi_process_writable(self) -> bool {
+        !matches!(self, ConcurrencyMode::SingleProcess)
+    }
 }
 
 /// Configuration builder of a redb [Database].
