@@ -203,12 +203,33 @@ impl InternalStorageBackend for FileBackend {
         Ok(acquired)
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, range: Range<u64>) -> io::Result<()> {
+        debug_assert!(range != FULL_RANGE);
+        self.file.lock_range(range.clone())?;
+        self.locked_ranges.lock().unwrap().insert(range);
+        Ok(())
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, range: Range<u64>) -> io::Result<()> {
+        debug_assert!(range != FULL_RANGE);
+        self.file.lock_shared_range(range.clone())?;
+        self.locked_ranges.lock().unwrap().insert(range);
+        Ok(())
+    }
+
     fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
         if range == FULL_RANGE {
             return self.release_all_locks();
         }
-        self.locked_ranges.lock().unwrap().remove(&range);
-        self.file.unlock_range(range)
+        // Forgotten only once it is really released, so that a failure leaves the range for
+        // close() to retry rather than leaving it held with nothing left to release it
+        let released = self.file.unlock_range(range.clone());
+        if released.is_ok() {
+            self.locked_ranges.lock().unwrap().remove(&range);
+        }
+        released
     }
 
     fn query_lock_range(&self, range: Range<u64>) -> io::Result<bool> {

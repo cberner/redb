@@ -21,6 +21,17 @@ pub(crate) trait RangeLock {
         Err(unsupported())
     }
 
+    /// Waits for the range. No deadlock detection, like the whole-file locks.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, _range: Range<u64>) -> io::Result<()> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, _range: Range<u64>) -> io::Result<()> {
+        Err(unsupported())
+    }
+
     fn unlock_range(&self, _range: Range<u64>) -> io::Result<()> {
         Err(unsupported())
     }
@@ -62,6 +73,8 @@ mod windows_imp {
     const LOCKFILE_FAIL_IMMEDIATELY: Dword = 0x0000_0001;
     const LOCKFILE_EXCLUSIVE_LOCK: Dword = 0x0000_0002;
     const ERROR_LOCK_VIOLATION: i32 = 33;
+    #[cfg(feature = "experimental-multiprocess")]
+    const ERROR_IO_PENDING: i32 = 997;
 
     #[repr(C)]
     struct Overlapped {
@@ -89,6 +102,22 @@ mod windows_imp {
             bytes_low: Dword,
             bytes_high: Dword,
         ) -> Bool;
+        #[cfg(feature = "experimental-multiprocess")]
+        fn CreateEventW(
+            attributes: *mut core::ffi::c_void,
+            manual_reset: Bool,
+            initial_state: Bool,
+            name: *const u16,
+        ) -> Handle;
+        #[cfg(feature = "experimental-multiprocess")]
+        fn GetOverlappedResult(
+            file: Handle,
+            overlapped: *mut Overlapped,
+            transferred: *mut Dword,
+            wait: Bool,
+        ) -> Bool;
+        #[cfg(feature = "experimental-multiprocess")]
+        fn CloseHandle(handle: Handle) -> Bool;
     }
 
     // The Win32 calls take 64-bit offsets and lengths as dword halves
@@ -140,6 +169,64 @@ mod windows_imp {
         }
     }
 
+    // Waits for the range, the way std's own File::lock waits for the whole file. A handle
+    // opened for asynchronous I/O answers ERROR_IO_PENDING and completes the request later,
+    // which is what the event is for: waiting on it settles the request before this returns,
+    // so the overlapped structure is safe on the stack.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_blocking(file: &File, exclusive: bool, range: Range<u64>) -> io::Result<()> {
+        debug_assert!(!range.is_empty());
+        let flags = if exclusive {
+            LOCKFILE_EXCLUSIVE_LOCK
+        } else {
+            0
+        };
+        let len = range.end - range.start;
+        let handle = file.as_raw_handle();
+        unsafe {
+            let event = CreateEventW(core::ptr::null_mut(), 0, 0, core::ptr::null());
+            if event.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            let mut overlapped = Overlapped {
+                internal: 0,
+                internal_high: 0,
+                offset: low_dword(range.start),
+                offset_high: high_dword(range.start),
+                event,
+            };
+            let acquired = LockFileEx(
+                handle,
+                flags,
+                0,
+                low_dword(len),
+                high_dword(len),
+                &raw mut overlapped,
+            );
+
+            let result = if acquired != 0 {
+                Ok(())
+            } else {
+                let err = io::Error::last_os_error();
+                if err.raw_os_error() == Some(ERROR_IO_PENDING) {
+                    let mut transferred: Dword = 0;
+                    let completed =
+                        GetOverlappedResult(handle, &raw mut overlapped, &raw mut transferred, 1);
+                    if completed != 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                } else {
+                    Err(err)
+                }
+            };
+            CloseHandle(event);
+
+            result
+        }
+    }
+
     impl RangeLock for File {
         // std's whole-file lock is itself a LockFileEx over every byte, so it is one of these
         const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = Some(true);
@@ -150,6 +237,16 @@ mod windows_imp {
 
         fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
             try_lock(self, false, range)
+        }
+
+        #[cfg(feature = "experimental-multiprocess")]
+        fn lock_range(&self, range: Range<u64>) -> io::Result<()> {
+            lock_blocking(self, true, range)
+        }
+
+        #[cfg(feature = "experimental-multiprocess")]
+        fn lock_shared_range(&self, range: Range<u64>) -> io::Result<()> {
+            lock_blocking(self, false, range)
         }
 
         // UnlockFile rather than its Ex form, as std's unlock uses: it takes the range as
@@ -249,6 +346,30 @@ fn set_lock(file: &File, exclusive: bool, range: Range<u64>) -> io::Result<bool>
     }
 }
 
+// EINTR is the caller's signal handler having run, not a failure to take the lock.
+#[cfg(all(
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple")
+))]
+fn set_lock_blocking(file: &File, exclusive: bool, range: Range<u64>) -> io::Result<()> {
+    let kind = lock_type(if exclusive {
+        libc::F_WRLCK
+    } else {
+        libc::F_RDLCK
+    });
+    loop {
+        let mut lock = flock_struct(kind, range.clone());
+        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLKW, &raw mut lock) };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 impl RangeLock for File {
     // The Apple platforms answer flock() with the same locks fcntl() takes; Linux keeps them
@@ -265,6 +386,16 @@ impl RangeLock for File {
 
     fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
         set_lock(self, false, range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_range(&self, range: Range<u64>) -> io::Result<()> {
+        set_lock_blocking(self, true, range)
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_shared_range(&self, range: Range<u64>) -> io::Result<()> {
+        set_lock_blocking(self, false, range)
     }
 
     fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {

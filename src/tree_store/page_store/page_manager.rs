@@ -31,6 +31,8 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
+#[cfg(feature = "experimental-multiprocess")]
+use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -506,6 +508,27 @@ impl UnpersistedState {
     }
 }
 
+/// The header bytes themselves rather than a byte standing for them, so that Windows' mandatory
+/// locks hold back another process's read of them.
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const HEADER_LOCK: Range<u64> = 0..DB_HEADER_SIZE as u64;
+
+/// A hold on the header lock, released when it drops.
+#[cfg(feature = "experimental-multiprocess")]
+struct HeaderGuard<'a> {
+    storage: Option<&'a PagedCachedFile>,
+    _in_process: crate::sync::MutexGuard<'a, ()>,
+}
+
+#[cfg(feature = "experimental-multiprocess")]
+impl Drop for HeaderGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(storage) = self.storage {
+            let _ = storage.unlock_range(HEADER_LOCK);
+        }
+    }
+}
+
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
@@ -522,6 +545,14 @@ pub(crate) struct TransactionalMemory {
     // While set, no allocator state is persisted and shutdowns are not recorded as clean,
     // forcing the next open to rebuild the state from the committed trees
     needs_repair: AtomicBool,
+    #[cfg(feature = "experimental-multiprocess")]
+    concurrency_mode: ConcurrencyMode,
+    // Held for the duration of every header file lock. Ensures in-process threads do not overlap
+    // acquiring the lock. Because it's an OFD lock on a single FD, only one may take it at a time.
+    // TODO: This could probably be optimized, so that multiple threads can read at once, by making
+    // this a counter or RwLock
+    #[cfg(feature = "experimental-multiprocess")]
+    in_process_header_lock: Mutex<()>,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -624,6 +655,34 @@ impl TransactionalMemory {
         }
     }
 
+    /// Takes the storage and the mutex rather than `&self`, so that the open path can hold the
+    /// header before there is a `TransactionalMemory` to hold it from.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_header<'a>(
+        storage: &'a PagedCachedFile,
+        in_process: &'a Mutex<()>,
+        concurrency_mode: ConcurrencyMode,
+        exclusive: bool,
+    ) -> Result<HeaderGuard<'a>> {
+        let guard = in_process.lock().unwrap();
+        if !concurrency_mode.is_multi_process_writable() {
+            return Ok(HeaderGuard {
+                storage: None,
+                _in_process: guard,
+            });
+        }
+        if exclusive {
+            storage.lock_range(HEADER_LOCK)?;
+        } else {
+            storage.lock_shared_range(HEADER_LOCK)?;
+        }
+
+        Ok(HeaderGuard {
+            storage: Some(storage),
+            _in_process: guard,
+        })
+    }
+
     pub(crate) fn new(
         file: Box<dyn InternalStorageBackend>,
         // Allow initializing a new database in an empty file
@@ -646,11 +705,16 @@ impl TransactionalMemory {
         let storage = PagedCachedFile::new(file, page_size as u64, cache_size);
         // Dropping the storage releases whatever this took, so an open that fails below does too
         Self::lock_for_open(&storage, read_only, concurrency_mode)?;
+        #[cfg(feature = "experimental-multiprocess")]
+        let in_process_header_lock = Mutex::new(());
 
         let initial_storage_len = storage.raw_file_len()?;
 
         let magic_number: [u8; MAGICNUMBER.len()] =
             if initial_storage_len >= MAGICNUMBER.len() as u64 {
+                #[cfg(feature = "experimental-multiprocess")]
+                let _guard =
+                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, false)?;
                 storage
                     .read_direct(0, MAGICNUMBER.len())?
                     .try_into()
@@ -714,21 +778,35 @@ impl TransactionalMemory {
 
             header.recovery_required = false;
             header.two_phase_commit = true;
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(false));
-
-            storage.flush()?;
+            {
+                #[cfg(feature = "experimental-multiprocess")]
+                let _guard =
+                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(false));
+                storage.flush()?;
+            }
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
+            {
+                #[cfg(feature = "experimental-multiprocess")]
+                let _guard =
+                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
+                storage
+                    .write(0, DB_HEADER_SIZE, true)?
+                    .mem_mut()
+                    .copy_from_slice(&header.to_bytes(true));
+                storage.flush()?;
+            }
         }
-        let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
+        let header_bytes = {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard =
+                Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, false)?;
+            storage.read_direct(0, DB_HEADER_SIZE)?
+        };
         let unrepaired =
             UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
@@ -738,6 +816,9 @@ impl TransactionalMemory {
         }
         let (header, _) = unrepaired.finalize(file_len)?;
         if needs_recovery {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard =
+                Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
@@ -764,6 +845,10 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             needs_repair: AtomicBool::new(false),
+            #[cfg(feature = "experimental-multiprocess")]
+            concurrency_mode,
+            #[cfg(feature = "experimental-multiprocess")]
+            in_process_header_lock,
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
@@ -847,14 +932,20 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
         self.storage.sync_file()?;
 
-        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let header_bytes = {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard = Self::lock_header(
+                &self.storage,
+                &self.in_process_header_lock,
+                self.concurrency_mode,
+                false,
+            )?;
+            self.storage.read_direct(0, DB_HEADER_SIZE)?
+        };
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         if !was_clean {
-            self.storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
+            self.write_header(&header)?;
             self.storage.flush()?;
         }
 
@@ -986,6 +1077,19 @@ impl TransactionalMemory {
     }
 
     fn write_header(&self, header: &DatabaseHeader) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.concurrency_mode.is_multi_process_writable() {
+            // Write directly, while holding the header lock, so that other processes cannot observe
+            // a torn write.
+            let bytes = header.to_bytes(true);
+            let _guard = Self::lock_header(
+                &self.storage,
+                &self.in_process_header_lock,
+                self.concurrency_mode,
+                true,
+            )?;
+            return self.storage.write_direct(0, &bytes);
+        }
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
             .mem_mut()
@@ -1368,7 +1472,16 @@ impl TransactionalMemory {
     // True if the on-disk durable primary slot's checksum is corrupt. Read from disk, since the
     // in-memory copy of an originally-clean slot wouldn't show external/failed-commit corruption.
     pub(crate) fn durable_primary_slot_corrupt(&self) -> Result<bool, DatabaseError> {
-        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let header_bytes = {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard = Self::lock_header(
+                &self.storage,
+                &self.in_process_header_lock,
+                self.concurrency_mode,
+                false,
+            )?;
+            self.storage.read_direct(0, DB_HEADER_SIZE)?
+        };
         let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         Ok(disk_header.primary_corrupted())
     }
@@ -2050,6 +2163,191 @@ mod test {
     }
 }
 
+/// The header lock, against real files.
+#[cfg(all(
+    test,
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
+mod header_lock_test {
+    use super::{HeaderGuard, TransactionalMemory};
+    use crate::db::ConcurrencyMode;
+    use crate::tree_store::PAGE_SIZE;
+    use crate::tree_store::page_store::file_backend::FileBackend;
+    use crate::{DatabaseError, Result};
+    use alloc::sync::Arc;
+    use std::path::Path;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn hold(mem: &TransactionalMemory, exclusive: bool) -> Result<HeaderGuard<'_>> {
+        TransactionalMemory::lock_header(
+            &mem.storage,
+            &mem.in_process_header_lock,
+            mem.concurrency_mode,
+            exclusive,
+        )
+    }
+
+    fn open(path: &Path, mode: ConcurrencyMode) -> Result<Arc<TransactionalMemory>, DatabaseError> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?;
+        Ok(Arc::new(TransactionalMemory::new(
+            Box::new(FileBackend::new(file)?),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+            mode,
+        )?))
+    }
+
+    fn open_read_only(
+        path: &Path,
+        mode: ConcurrencyMode,
+    ) -> Result<Arc<TransactionalMemory>, DatabaseError> {
+        let file = std::fs::OpenOptions::new().read(true).open(path)?;
+        Ok(Arc::new(TransactionalMemory::new(
+            Box::new(crate::tree_store::ReadOnlyBackend::new(Box::new(
+                FileBackend::new(file)?,
+            ))),
+            false,
+            PAGE_SIZE,
+            None,
+            0,
+            true,
+            mode,
+        )?))
+    }
+
+    /// Through the read-only backend the open wraps its storage in
+    #[test]
+    fn a_read_only_handle_takes_shared_holds() {
+        let tmpfile = crate::create_tempfile();
+        open(tmpfile.path(), ConcurrencyMode::SingleProcess).unwrap();
+
+        let reader = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let held = hold(&reader, false).unwrap();
+
+        let peer = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        drop(hold(&peer, false).unwrap());
+        drop(held);
+    }
+
+    /// The other half of the hold covering the write: the bytes are on the file when
+    /// `write_header()` returns, rather than waiting in the buffer for a flush outside the hold.
+    #[test]
+    fn the_header_reaches_the_file_before_write_header_returns() {
+        use super::DB_HEADER_SIZE;
+
+        let tmpfile = crate::create_tempfile();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+
+        let mut header = writer.state.lock().unwrap().header.clone();
+        header.recovery_required = !header.recovery_required;
+        let expected = header.to_bytes(true);
+        writer.write_header(&header).unwrap();
+
+        // Read around redb entirely, and with no flush in between
+        let on_disk = std::fs::read(tmpfile.path()).unwrap();
+        assert_eq!(&on_disk[..DB_HEADER_SIZE], &expected[..]);
+    }
+
+    /// The hold has to cover the write reaching the file, which is what `write_header()` does
+    /// directly rather than leaving to whenever the buffer is next flushed.
+    #[test]
+    fn the_hold_covers_the_write_reaching_the_file() {
+        let tmpfile = crate::create_tempfile();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+
+        // Taken before the hold: another one in this process would wait on it
+        let header = writer.state.lock().unwrap().header.clone();
+        let held = hold(&reader, false).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let writing = thread::spawn(move || {
+            writer.write_header(&header).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the header reached the file while a reader held the lock"
+        );
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the write never completed");
+        writing.join().unwrap();
+    }
+
+    /// Which is what keeps a header mid-write from being read in another process
+    #[test]
+    fn an_exclusive_hold_excludes_a_shared_one() {
+        let tmpfile = crate::create_tempfile();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+
+        let guard = hold(&writer, true).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let waiting = thread::spawn(move || {
+            let _held = hold(&reader, false).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the reader entered its hold while the writer held one"
+        );
+        drop(guard);
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the reader never entered its hold");
+        waiting.join().unwrap();
+    }
+
+    /// Only a write needs the header to itself
+    #[test]
+    fn shared_holds_admit_each_other() {
+        let tmpfile = crate::create_tempfile();
+        let first = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let second = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+
+        let held = hold(&first, false).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let waiting = thread::spawn(move || {
+            let _also = hold(&second, false).unwrap();
+            tx.send(()).unwrap();
+        });
+
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("a second reader was held off");
+        waiting.join().unwrap();
+        drop(held);
+    }
+
+    /// It holds the whole storage, which covers the header bytes: a hold that locked and
+    /// released them would punch a hole in that lock.
+    #[test]
+    fn a_hold_does_not_puncture_the_whole_storage_lock() {
+        let tmpfile = crate::create_tempfile();
+        let held = open(tmpfile.path(), ConcurrencyMode::SingleProcess).unwrap();
+
+        for exclusive in [false, true] {
+            let guard = hold(&held, exclusive).unwrap();
+            drop(guard);
+        }
+
+        assert!(matches!(
+            open(tmpfile.path(), ConcurrencyMode::SingleProcess),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+    }
+}
+
 /// The locking protocol an open runs before it reads anything, against real files. Only the
 /// platforms with byte-range locks can run it.
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
@@ -2262,6 +2560,16 @@ mod lock_failure_test {
 
         fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
             self.take(range)
+        }
+
+        #[cfg(feature = "experimental-multiprocess")]
+        fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+            self.take(range).map(|_| ())
+        }
+
+        #[cfg(feature = "experimental-multiprocess")]
+        fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+            self.take(range).map(|_| ())
         }
 
         fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
