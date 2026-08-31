@@ -1,6 +1,8 @@
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::LocklessBackend;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::MultiProcessWriterGuard;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
@@ -351,6 +353,12 @@ pub(crate) enum TransactionGuard {
     Write {
         tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
+        // Owned alongside the write slot so the two can be ordered against each other: a
+        // thread waiting on that slot takes the byte on this same file description the moment
+        // it is free, so the byte must be released first and taken after.
+        // None indicates that the writer lock is held at the database level -- i.e. in a single writer mode
+        #[cfg(feature = "experimental-multiprocess")]
+        multi_process_writer: Option<MultiProcessWriterGuard>,
     },
     // Used for internal accesses that happen outside of any tracked transaction,
     // such as opening the database, repairing it, and running integrity checks.
@@ -379,11 +387,27 @@ impl TransactionGuard {
     pub(crate) fn new_write(
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
-    ) -> Self {
-        Self::Write {
+        #[cfg(feature = "experimental-multiprocess")] mem: &Arc<TransactionalMemory>,
+    ) -> Result<Self> {
+        #[allow(unused_mut)]
+        let mut guard = Self::Write {
             tracker,
             transaction_id,
+            #[cfg(feature = "experimental-multiprocess")]
+            multi_process_writer: None,
+        };
+        // After the guard owns the slot, so that a failure here releases it rather than
+        // leaving the tracker with a live write transaction nothing will ever end
+        #[cfg(feature = "experimental-multiprocess")]
+        if let Self::Write {
+            multi_process_writer,
+            ..
+        } = &mut guard
+        {
+            *multi_process_writer = TransactionalMemory::lock_multi_process_writer(mem)?;
         }
+
+        Ok(guard)
     }
 
     pub(crate) fn untracked() -> Self {
@@ -412,7 +436,13 @@ impl Drop for TransactionGuard {
             Self::Write {
                 tracker,
                 transaction_id,
+                #[cfg(feature = "experimental-multiprocess")]
+                    multi_process_writer: writer,
             } => {
+                // Drop the "writer byte" multi-process file lock, before our in-process lock.
+                // Otherwise, another transaction in our process could re-enter the file lock
+                #[cfg(feature = "experimental-multiprocess")]
+                drop(writer.take());
                 if let Some(mem) = tracker.end_write_transaction(*transaction_id) {
                     // The Database was dropped while this transaction was live, deferring
                     // the database close to the end of this transaction
@@ -1374,7 +1404,9 @@ fn begin_write_with_allocation_policy(
     let guard = TransactionGuard::new_write(
         transaction_tracker.start_write_transaction(),
         transaction_tracker.clone(),
-    );
+        #[cfg(feature = "experimental-multiprocess")]
+        mem,
+    )?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption. Returning drops the guard,
@@ -2128,5 +2160,95 @@ mod test {
                 if err.kind() == ErrorKind::InvalidData => {}
             err => panic!("Unexpected error for empty file: {err}"),
         }
+    }
+}
+
+/// Probed directly, since the public API reports every lock conflict the same way and so
+/// cannot say which byte caused one.
+#[cfg(all(
+    test,
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
+mod writer_byte_test {
+    use super::{ConcurrencyMode, Database, WRITER_BYTE, byte_range};
+    use crate::TableDefinition;
+    use crate::tree_store::file_backend::range_lock::RangeLock;
+    use std::fs::{File, OpenOptions};
+    use std::path::Path;
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    fn create(path: &Path, mode: ConcurrencyMode) -> Database {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        builder.create(path).unwrap()
+    }
+
+    /// A separate description, so its locks conflict with the database's exactly as another
+    /// process's would
+    fn probe(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    }
+
+    fn commit_one(db: &Database) {
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        write.commit().unwrap();
+    }
+
+    /// Held for the transaction and no longer, which is what lets the next writer in
+    #[test]
+    fn a_multi_writer_transaction_holds_the_byte_and_gives_it_back() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let write = db.begin_write().unwrap();
+        assert!(
+            !probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the byte was free while a write transaction was open"
+        );
+        write.commit().unwrap();
+
+        assert!(
+            probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the byte was still held after the transaction ended"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+
+    /// This mode settles who writes at open instead, so the byte is held from then until the
+    /// database closes. A transaction taking it again would convert that hold and drop what
+    /// remained on release, so it takes nothing.
+    #[test]
+    fn a_single_writer_open_holds_the_byte_for_its_lifetime() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        assert!(
+            !probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the open did not take the writer byte"
+        );
+        commit_one(&db);
+        assert!(
+            !probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "a write transaction punctured the open's hold on the writer byte"
+        );
+
+        drop(db);
+        assert!(
+            probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the byte was still held after the database closed"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
     }
 }
