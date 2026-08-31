@@ -529,6 +529,20 @@ impl Drop for HeaderGuard<'_> {
     }
 }
 
+/// A hold on the writer byte, released when it drops. Owns its handle, unlike `HeaderGuard`,
+/// since a write transaction outlives the call that takes it.
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) struct MultiProcessWriterGuard {
+    mem: Arc<TransactionalMemory>,
+}
+
+#[cfg(feature = "experimental-multiprocess")]
+impl Drop for MultiProcessWriterGuard {
+    fn drop(&mut self) {
+        let _ = self.mem.storage.unlock_range(byte_range(WRITER_BYTE));
+    }
+}
+
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
     storage: PagedCachedFile,
@@ -681,6 +695,21 @@ impl TransactionalMemory {
             storage: Some(storage),
             _in_process: guard,
         })
+    }
+
+    /// Acquire the multi-process writer lock
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn lock_multi_process_writer(
+        mem: &Arc<Self>,
+    ) -> Result<Option<MultiProcessWriterGuard>> {
+        // The other modes settle who writes when the database is opened: a single-writer holds this byte
+        // for its lifetime, and taking it again here would convert that hold and then drop it.
+        if !matches!(mem.concurrency_mode, ConcurrencyMode::MultiWriterProcess) {
+            return Ok(None);
+        }
+        mem.storage.lock_range(byte_range(WRITER_BYTE))?;
+
+        Ok(Some(MultiProcessWriterGuard { mem: mem.clone() }))
     }
 
     pub(crate) fn new(
