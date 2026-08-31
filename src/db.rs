@@ -99,6 +99,10 @@ pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
 pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const IMMUTABLE_READER_BYTE: u64 = LOCK_BASE + 3;
+/// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
+/// shared for as long as it is reading it
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const TXN_BASE: u64 = LOCK_BASE + 1024;
 
 pub(crate) fn byte_range(offset: u64) -> Range<u64> {
     offset..offset + 1
@@ -349,9 +353,10 @@ pub(crate) enum TransactionGuard {
     Read {
         tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
-        // Cleared when a savepoint becomes persistent: the database record owns the
-        // transaction's reference from then on, and releases it when the savepoint is deleted
-        owns_reference: bool,
+        // `Some` while this guard owns the transaction's reference, carrying what the tracker
+        // needs to release it. `None` when a savepoint becomes persistent: the database
+        // owns the reference from then on and releases it when the savepoint is deleted
+        reference: Option<Arc<TransactionalMemory>>,
     },
     Write {
         tracker: Arc<TransactionTracker>,
@@ -372,11 +377,12 @@ impl TransactionGuard {
     pub(crate) fn new_read(
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
+        mem: &Arc<TransactionalMemory>,
     ) -> Self {
         Self::Read {
             tracker,
             transaction_id,
-            owns_reference: true,
+            reference: Some(mem.clone()),
         }
     }
 
@@ -388,7 +394,7 @@ impl TransactionGuard {
         Self::Read {
             tracker,
             transaction_id,
-            owns_reference: false,
+            reference: None,
         }
     }
 
@@ -396,14 +402,14 @@ impl TransactionGuard {
     // reference count.
     // Dropping this guard then releases nothing.
     pub(crate) fn release_to_database(&mut self) {
-        let Self::Read { owns_reference, .. } = self else {
+        let Self::Read { reference, .. } = self else {
             unreachable!("only a read transaction's reference may be leaked")
         };
-        *owns_reference = false;
+        drop(reference.take());
     }
 
     pub(crate) fn owns_reference(&self) -> bool {
-        matches!(self, Self::Read { owns_reference, .. } if *owns_reference)
+        matches!(self, Self::Read { reference, .. } if reference.is_some())
     }
 
     pub(crate) fn tracker(&self) -> &Arc<TransactionTracker> {
@@ -415,10 +421,11 @@ impl TransactionGuard {
 
     pub(crate) fn allocate_read(
         tracker: Arc<TransactionTracker>,
-        mem: &TransactionalMemory,
+        mem: &Arc<TransactionalMemory>,
     ) -> Result<Self> {
         let id = tracker.register_read_transaction(mem)?;
-        Ok(Self::new_read(id, tracker))
+
+        Ok(Self::new_read(id, tracker, mem))
     }
 
     pub(crate) fn new_write(
@@ -469,10 +476,10 @@ impl Drop for TransactionGuard {
             Self::Read {
                 tracker,
                 transaction_id,
-                owns_reference,
+                reference,
             } => {
-                if *owns_reference {
-                    tracker.deallocate_read_transaction(*transaction_id);
+                if let Some(mem) = reference {
+                    tracker.deallocate_read_transaction(mem, *transaction_id);
                 }
             }
             Self::Write {
@@ -566,13 +573,9 @@ impl Sealed for ReadOnlyDatabase {}
 #[cfg(not(redb_no_std))]
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let id = self
-            .transaction_tracker
-            .register_read_transaction(&self.mem)?;
+        let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
-        debug!("Beginning read transaction id={id:?}");
-
-        let guard = TransactionGuard::new_read(id, self.transaction_tracker.clone());
+        debug!("Beginning read transaction id={:?}", guard.id());
 
         ReadTransaction::new(self.mem.clone(), guard)
     }
@@ -1362,7 +1365,7 @@ impl Database {
                 },
             };
             db.transaction_tracker
-                .register_persistent_savepoint(&savepoint);
+                .register_persistent_savepoint(&db.mem, &savepoint)?;
         }
         txn.abort()?;
 
@@ -2292,5 +2295,254 @@ mod writer_byte_test {
             "the byte was still held after the database closed"
         );
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+}
+
+/// The "active transaction range" locks a read transaction publishes, probed directly: nothing
+/// consumes them yet, and a byte-range lock is invisible through the public API in any case
+#[cfg(all(
+    test,
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
+mod active_transaction_test {
+    use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, byte_range};
+    use crate::tree_store::file_backend::range_lock::RangeLock;
+    use crate::{Durability, TableDefinition};
+    use std::fs::{File, OpenOptions};
+    use std::path::Path;
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+    // The ids a freshly created database can have committed
+    const SEARCHED: std::ops::Range<u64> = 0..8;
+
+    fn create(path: &Path, mode: ConcurrencyMode) -> Database {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        let db = builder.create(path).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        write.commit().unwrap();
+        db
+    }
+
+    /// A separate description, so its locks conflict with the database's exactly as another
+    /// process's would
+    fn probe(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    }
+
+    /// Probed exclusively, since the byte is held shared and another process may hold the same
+    /// one. Reports the whole-file lock a single-process open holds as well, which is what
+    /// `a_single_process_read_does_not_puncture_the_whole_file_lock` relies on
+    fn is_held(probe: &File, id: u64) -> bool {
+        let free = probe.try_lock_range(byte_range(TXN_BASE + id)).unwrap();
+        if free {
+            probe.unlock_range(byte_range(TXN_BASE + id)).unwrap();
+        }
+        !free
+    }
+
+    fn held_ids(probe: &File) -> Vec<u64> {
+        SEARCHED.filter(|id| is_held(probe, *id)).collect()
+    }
+
+    #[test]
+    fn a_read_transaction_locks_the_id_it_reads_until_it_ends() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+        assert!(held_ids(&probe).is_empty());
+
+        let read = db.begin_read().unwrap();
+        assert_eq!(
+            held_ids(&probe).len(),
+            1,
+            "a read transaction locked {:?}",
+            held_ids(&probe)
+        );
+
+        drop(read);
+        assert!(
+            held_ids(&probe).is_empty(),
+            "a lock outlived the read transaction that took it"
+        );
+    }
+
+    /// Two readers of one snapshot take the byte once, since it does not nest through a single
+    /// file description: it is released only as the last of them ends
+    #[test]
+    fn concurrent_readers_of_one_snapshot_share_the_lock() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let first = db.begin_read().unwrap();
+        let second = db.begin_read().unwrap();
+        let held = held_ids(&probe);
+        assert_eq!(held.len(), 1, "expected one active id: {held:?}");
+
+        drop(first);
+        assert!(is_held(&probe, held[0]), "released early");
+        drop(second);
+        assert!(!is_held(&probe, held[0]), "never released");
+    }
+
+    /// A read-only handle is a participant like any other: its snapshot is exactly what a
+    /// writer in another process must not reclaim
+    #[test]
+    fn a_read_only_handle_locks_what_it_reads() {
+        let tmpfile = crate::create_tempfile();
+        // Dropped, so the read-only open is the only handle: it takes SHARED_READER_BYTE, and
+        // the writer that created the file would otherwise hold the whole storage
+        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess));
+        let probe = probe(tmpfile.path());
+
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let db = builder.open_read_only(tmpfile.path()).unwrap();
+        let read = db.begin_read().unwrap();
+        assert_eq!(
+            held_ids(&probe).len(),
+            1,
+            "a read-only handle locked {:?}",
+            held_ids(&probe)
+        );
+
+        drop(read);
+        assert!(held_ids(&probe).is_empty(), "the lock outlived the reader");
+    }
+
+    /// A savepoint holds a read transaction live, so its snapshot stays active for as long as
+    /// the savepoint does
+    #[test]
+    fn an_ephemeral_savepoint_locks_the_snapshot_it_references() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+        assert!(held_ids(&probe).is_empty());
+
+        let write = db.begin_write().unwrap();
+        let savepoint = write.ephemeral_savepoint().unwrap();
+        write.commit().unwrap();
+        assert_eq!(
+            held_ids(&probe).len(),
+            1,
+            "a savepoint locked {:?}",
+            held_ids(&probe)
+        );
+
+        drop(savepoint);
+        assert!(
+            held_ids(&probe).is_empty(),
+            "the lock outlived the savepoint"
+        );
+    }
+
+    /// A persistent savepoint outlives its handle -- and the process -- so its lock goes to the
+    /// database with the reference rather than being released when the handle drops. Nothing
+    /// releases it yet: deletion and re-locking at open both belong with the scan
+    #[test]
+    fn a_persistent_savepoint_keeps_its_lock_after_its_handle_drops() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let write = db.begin_write().unwrap();
+        write.persistent_savepoint().unwrap();
+        write.commit().unwrap();
+
+        assert_eq!(
+            held_ids(&probe).len(),
+            1,
+            "a persistent savepoint left {:?} locked",
+            held_ids(&probe)
+        );
+    }
+
+    /// A persistent savepoint survives the process that made it, so reopening has to take its
+    /// byte again: the snapshot its record names is still one a peer must not reclaim
+    #[test]
+    fn reopening_locks_a_persistent_savepoints_snapshot() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let write = db.begin_write().unwrap();
+        write.persistent_savepoint().unwrap();
+        write.commit().unwrap();
+        drop(db);
+
+        let probe = probe(tmpfile.path());
+        assert!(
+            held_ids(&probe).is_empty(),
+            "the closed database left a lock"
+        );
+
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let db = builder.open(tmpfile.path()).unwrap();
+        assert_eq!(
+            held_ids(&probe).len(),
+            1,
+            "reopening locked {:?}",
+            held_ids(&probe)
+        );
+        drop(db);
+    }
+
+    /// A non-durable commit is invisible to a peer, but the durable ancestor it builds on is not,
+    /// and its pages must survive until the commit is flushed
+    #[test]
+    fn a_non_durable_commit_locks_its_durable_ancestor() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+        assert!(held_ids(&probe).is_empty());
+
+        let mut write = db.begin_write().unwrap();
+        write.set_durability(Durability::None).unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(1, 1).unwrap();
+        }
+        write.commit().unwrap();
+        let ancestor = held_ids(&probe);
+        assert_eq!(
+            ancestor.len(),
+            1,
+            "a non-durable commit locked {ancestor:?}"
+        );
+
+        // The durable commit that flushes it releases the ancestor. Its own epilogue takes a
+        // reference on this commit in turn, so what is locked afterwards is a different id
+        let write = db.begin_write().unwrap();
+        write.commit().unwrap();
+        assert!(
+            !held_ids(&probe).contains(&ancestor[0]),
+            "the ancestor stayed locked after the commit that flushed it"
+        );
+    }
+
+    /// A single-process open holds the whole file, which covers these bytes. Locking one and
+    /// releasing it would punch a hole in that lock, so this mode locks nothing
+    #[test]
+    fn a_single_process_read_does_not_puncture_the_whole_file_lock() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleProcess);
+        let probe = probe(tmpfile.path());
+
+        drop(db.begin_read().unwrap());
+
+        assert_eq!(
+            held_ids(&probe),
+            SEARCHED.collect::<Vec<_>>(),
+            "a read transaction punctured the whole-file lock"
+        );
     }
 }

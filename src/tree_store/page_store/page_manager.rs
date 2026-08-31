@@ -3,7 +3,7 @@ use crate::db::{
     ConcurrencyMode, FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE, byte_range,
 };
 #[cfg(feature = "experimental-multiprocess")]
-use crate::db::{IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, WRITER_BYTE};
+use crate::db::{IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -710,6 +710,61 @@ impl TransactionalMemory {
         mem.storage.lock_range(byte_range(WRITER_BYTE))?;
 
         Ok(Some(MultiProcessWriterGuard { mem: mem.clone() }))
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn active_transaction_byte(id: TransactionId) -> Result<u64> {
+        match TXN_BASE.checked_add(id.raw_id()) {
+            Some(offset) if offset < 1 << 63 => Ok(offset),
+            _ => Err(StorageError::Corrupted(format!(
+                "transaction id {} is outside the multi-process lock range",
+                id.raw_id()
+            ))),
+        }
+    }
+
+    /// Marks `id` active, keeping the pages its snapshot references from being reclaimed by any
+    /// process until [`Self::unlock_mp_transaction`]. The shared header hold orders this against
+    /// a writer's reclamation scan, which holds it exclusively: the scan either sees this lock
+    /// or ran entirely before it.
+    ///
+    /// Caller must not attempt to re-lock an already locked transaction.
+    ///
+    /// The caller must guarantee that `id` cannot already have been collected.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn lock_mp_transaction(&self, id: TransactionId) -> Result {
+        // Nothing to publish to: a single-process writers lock the whole file
+        if !self.concurrency_mode.is_multi_process_writable() {
+            return Ok(());
+        }
+        let byte = Self::active_transaction_byte(id)?;
+        let _guard = Self::lock_header(
+            &self.storage,
+            &self.in_process_header_lock,
+            self.concurrency_mode,
+            false,
+        )?;
+        // Refused only by an exclusive holder, which the shared header hold excludes
+        if !self.storage.try_lock_shared_range(byte_range(byte))? {
+            return Err(StorageError::Corrupted(
+                "another process holds an active transaction byte exclusively".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Releases the byte. Taken without the header lock: releasing only widens what a scanning
+    /// writer may reclaim, and a scan that misses it reclaims less
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn unlock_mp_transaction(&self, id: TransactionId) -> Result {
+        if !self.concurrency_mode.is_multi_process_writable() {
+            return Ok(());
+        }
+        self.storage
+            .unlock_range(byte_range(Self::active_transaction_byte(id)?))?;
+
+        Ok(())
     }
 
     pub(crate) fn new(

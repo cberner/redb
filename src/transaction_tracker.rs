@@ -100,21 +100,38 @@ struct State {
 }
 
 impl State {
-    // The reference count on `id` is what keeps the pages its snapshot reaches from being freed,
-    // so every holder takes one here and gives it back here
-    fn reference_transaction(&mut self, id: TransactionId) {
-        self.live_read_transactions
-            .entry(id)
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+    // Takes the "active transaction byte" as the first reference to `id` appears, and releases it
+    // as the last goes away, so a writer in another process sees exactly the transactions this one
+    // is still reading. Done under the lock that holds the count, so the two cannot disagree: a
+    // reference taken between the count reaching zero and the byte being released would otherwise
+    // read a snapshot nothing protects
+    fn reference_transaction(&mut self, mem: &TransactionalMemory, id: TransactionId) -> Result {
+        let count = self.live_read_transactions.entry(id).or_insert(0);
+        *count += 1;
+        #[cfg(feature = "experimental-multiprocess")]
+        if *count == 1
+            && let Err(err) = mem.lock_mp_transaction(id)
+        {
+            self.live_read_transactions.remove(&id);
+            return Err(err);
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let _ = mem;
+
+        Ok(())
     }
 
-    fn dereference_transaction(&mut self, id: TransactionId) {
+    fn dereference_transaction(&mut self, mem: &TransactionalMemory, id: TransactionId) {
         let count = self.live_read_transactions.get_mut(&id).unwrap();
         *count -= 1;
         if *count == 0 {
             self.live_read_transactions.remove(&id);
+            // Failing to release only leaves a peer reclaiming less than it could
+            #[cfg(feature = "experimental-multiprocess")]
+            let _ = mem.unlock_mp_transaction(id);
         }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let _ = mem;
     }
 }
 
@@ -185,11 +202,11 @@ impl TransactionTracker {
         }
     }
 
-    pub(crate) fn clear_pending_non_durable_commits(&self) {
+    pub(crate) fn clear_pending_non_durable_commits(&self, memory: &TransactionalMemory) {
         let mut state = self.state.lock().unwrap();
         let ids = mem::take(&mut state.pending_non_durable_commits);
         for (_, durable_ancestor) in ids {
-            state.dereference_transaction(durable_ancestor);
+            state.dereference_transaction(memory, durable_ancestor);
         }
     }
 
@@ -222,12 +239,13 @@ impl TransactionTracker {
     // id becomes durable.
     pub(crate) fn register_non_durable_commit(
         &self,
+        mem: &TransactionalMemory,
         id: TransactionId,
         durable_ancestor: TransactionId,
         has_unprocessed_freed_pages: bool,
-    ) {
+    ) -> Result {
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(durable_ancestor);
+        state.reference_transaction(mem, durable_ancestor)?;
         assert!(
             state
                 .pending_non_durable_commits
@@ -237,6 +255,8 @@ impl TransactionTracker {
         if has_unprocessed_freed_pages {
             state.unprocessed_freed_non_durable_commits.insert(id);
         }
+
+        Ok(())
     }
 
     // Reserve a transaction id that was created without starting a new write transaction.
@@ -267,13 +287,19 @@ impl TransactionTracker {
         state.next_savepoint_id = next_savepoint;
     }
 
-    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {
+    pub(crate) fn register_persistent_savepoint(
+        &self,
+        mem: &TransactionalMemory,
+        savepoint: &Savepoint,
+    ) -> Result {
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(savepoint.get_transaction_id());
+        state.reference_transaction(mem, savepoint.get_transaction_id())?;
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
         state.persistent_savepoints.insert(savepoint.get_id());
+
+        Ok(())
     }
 
     // Marks an already-registered savepoint as persistent
@@ -289,14 +315,14 @@ impl TransactionTracker {
     ) -> Result<TransactionId> {
         let mut state = self.state.lock()?;
         let id = mem.get_last_committed_transaction_id()?;
-        state.reference_transaction(id);
+        state.reference_transaction(mem, id)?;
 
         Ok(id)
     }
 
-    pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
+    pub(crate) fn deallocate_read_transaction(&self, mem: &TransactionalMemory, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        state.dereference_transaction(id);
+        state.dereference_transaction(mem, id);
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
@@ -350,9 +376,14 @@ impl TransactionTracker {
     }
 
     // Deallocates the given savepoint and its matching reference count on the transcation
-    pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
+    pub(crate) fn deallocate_savepoint(
+        &self,
+        mem: &TransactionalMemory,
+        savepoint: SavepointId,
+        transaction: TransactionId,
+    ) {
         self.remove_savepoint(savepoint);
-        self.deallocate_read_transaction(transaction);
+        self.deallocate_read_transaction(mem, transaction);
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
@@ -434,14 +465,36 @@ impl TransactionTracker {
 mod test {
     use super::*;
 
+    // The tracker takes the "active transaction byte" through this, so it needs somewhere to
+    // take it. Opened SingleProcess, where that is a no-op
+    fn memory() -> TransactionalMemory {
+        use crate::tree_store::{InMemoryBackend, LocklessBackend, PAGE_SIZE};
+
+        TransactionalMemory::new(
+            LocklessBackend::boxed(InMemoryBackend::new()),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+            crate::db::ConcurrencyMode::SingleProcess,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn non_durable_commit_without_freed_pages_is_not_unprocessed() {
+        let mem = memory();
         let tracker = TransactionTracker::new(TransactionId::new(0));
 
-        tracker.register_non_durable_commit(TransactionId::new(1), TransactionId::new(0), false);
+        tracker
+            .register_non_durable_commit(&mem, TransactionId::new(1), TransactionId::new(0), false)
+            .unwrap();
         assert_eq!(None, tracker.oldest_unprocessed_non_durable_commit());
 
-        tracker.register_non_durable_commit(TransactionId::new(2), TransactionId::new(0), true);
+        tracker
+            .register_non_durable_commit(&mem, TransactionId::new(2), TransactionId::new(0), true)
+            .unwrap();
         assert_eq!(
             Some(TransactionId::new(2)),
             tracker.oldest_unprocessed_non_durable_commit()

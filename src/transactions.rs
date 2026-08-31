@@ -855,11 +855,11 @@ impl SavepointTransactionState {
         !self.created_persistent.is_empty() || !self.deleted_persistent.is_empty()
     }
 
-    fn apply_on_commit(&mut self, tracker: &TransactionTracker) {
+    fn apply_on_commit(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
         // Persistent savepoints whose on-disk entry was deleted: release their
         // tracker refcount now that the deletion is durable.
         for (savepoint, transaction) in self.deleted_persistent.drain(..) {
-            tracker.deallocate_savepoint(savepoint, transaction);
+            tracker.deallocate_savepoint(mem, savepoint, transaction);
         }
         // Savepoints that restore_savepoint() invalidated: remove them from the
         // shared valid_savepoints map. For persistent savepoints,
@@ -872,12 +872,12 @@ impl SavepointTransactionState {
         self.created_persistent.clear();
     }
 
-    fn apply_on_abort(&mut self, tracker: &TransactionTracker) {
+    fn apply_on_abort(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
         // Persistent savepoints created during this transaction: their
         // on-disk entries will be rolled back by rollback_uncommitted_writes(),
         // but the shared tracker registration must be released explicitly.
         for (savepoint, transaction) in mem::take(&mut self.created_persistent) {
-            tracker.deallocate_savepoint(savepoint, transaction);
+            tracker.deallocate_savepoint(mem, savepoint, transaction);
         }
         // Deleted-persistent entries will be rolled back on disk, so the
         // tracker state must NOT be released (it is still valid).
@@ -1261,8 +1261,7 @@ impl WriteTransaction {
     }
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionGuard)> {
-        // Built here rather than inside the savepoint, so that every holder of a read
-        // transaction gets its reference the same way
+        // Through the guard, so the savepoint's snapshot is held active like any other reader's
         let transaction =
             TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         let id = self
@@ -1782,7 +1781,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_commit(&self.transaction_tracker);
+            .apply_on_commit(&self.mem, &self.transaction_tracker);
     }
 
     fn store_data_freed_pages(&self, freed_pages: Vec<PageNumber>) -> Result<bool> {
@@ -1960,7 +1959,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_abort(&self.transaction_tracker);
+            .apply_on_abort(&self.mem, &self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
         #[cfg(feature = "logging")]
@@ -2051,7 +2050,8 @@ impl WriteTransaction {
         let _ = page_allocator.take_allocated_since_commit();
 
         // Mark any pending non-durable commits as fully committed.
-        self.transaction_tracker.clear_pending_non_durable_commits();
+        self.transaction_tracker
+            .clear_pending_non_durable_commits(&self.mem);
 
         // Immediately free the pages that were freed from the system-tree. These are only
         // accessed by write transactions, so it's safe to free them as soon as the commit is done.
@@ -2142,10 +2142,11 @@ impl WriteTransaction {
         self.transaction_tracker
             .reserve_transaction_id(epilogue_transaction, self.transaction_id);
         self.transaction_tracker.register_non_durable_commit(
+            &self.mem,
             epilogue_transaction,
             self.transaction_id,
             stored_system_freed_pages,
-        );
+        )?;
         // The epilogue only extracts DATA_FREED_TABLE entries. It is still correct to clear these
         // ids from the non-durable scan set: ordinary non-durable commits filter unpersisted
         // system pages before writing SYSTEM_FREED_TABLE, and durable commits process any
@@ -2212,10 +2213,11 @@ impl WriteTransaction {
         // Register this as a non-durable transaction to ensure that freed pages are only processed
         // after this transaction has been persisted.
         self.transaction_tracker.register_non_durable_commit(
+            &self.mem,
             self.transaction_id,
             self.mem.get_last_durable_transaction_id()?,
             stored_freed_pages,
-        );
+        )?;
 
         for page in post_commit_frees {
             let removed = self.mem.free_if_unpersisted(page, &PageTracker::ignore());
