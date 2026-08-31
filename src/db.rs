@@ -349,6 +349,9 @@ pub(crate) enum TransactionGuard {
     Read {
         tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
+        // Cleared when a savepoint becomes persistent: the database record owns the
+        // transaction's reference from then on, and releases it when the savepoint is deleted
+        owns_reference: bool,
     },
     Write {
         tracker: Arc<TransactionTracker>,
@@ -373,6 +376,40 @@ impl TransactionGuard {
         Self::Read {
             tracker,
             transaction_id,
+            owns_reference: true,
+        }
+    }
+
+    // A guard for a transaction whose reference the database already owns
+    pub(crate) fn new_read_unowned(
+        transaction_id: TransactionId,
+        tracker: Arc<TransactionTracker>,
+    ) -> Self {
+        Self::Read {
+            tracker,
+            transaction_id,
+            owns_reference: false,
+        }
+    }
+
+    // Leak the reference to the transaction. The caller becomes responsible for decrementing the
+    // reference count.
+    // Dropping this guard then releases nothing.
+    pub(crate) fn release_to_database(&mut self) {
+        let Self::Read { owns_reference, .. } = self else {
+            unreachable!("only a read transaction's reference may be leaked")
+        };
+        *owns_reference = false;
+    }
+
+    pub(crate) fn owns_reference(&self) -> bool {
+        matches!(self, Self::Read { owns_reference, .. } if *owns_reference)
+    }
+
+    pub(crate) fn tracker(&self) -> &Arc<TransactionTracker> {
+        match self {
+            Self::Read { tracker, .. } | Self::Write { tracker, .. } => tracker,
+            Self::Untracked => unreachable!("an untracked guard has no tracker"),
         }
     }
 
@@ -432,7 +469,12 @@ impl Drop for TransactionGuard {
             Self::Read {
                 tracker,
                 transaction_id,
-            } => tracker.deallocate_read_transaction(*transaction_id),
+                owns_reference,
+            } => {
+                if *owns_reference {
+                    tracker.deallocate_read_transaction(*transaction_id);
+                }
+            }
             Self::Write {
                 tracker,
                 transaction_id,

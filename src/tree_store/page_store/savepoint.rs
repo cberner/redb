@@ -1,3 +1,4 @@
+use crate::db::TransactionGuard;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION3;
 use crate::tree_store::{BtreeHeader, TransactionalMemory};
@@ -28,10 +29,8 @@ pub struct Savepoint {
     id: SavepointId,
     // Each savepoint has an associated read transaction id to ensure that any pages it references
     // are not freed
-    transaction_id: TransactionId,
+    transaction: TransactionGuard,
     user_root: Option<BtreeHeader>,
-    transaction_tracker: Arc<TransactionTracker>,
-    ephemeral: bool,
 }
 
 impl Savepoint {
@@ -45,11 +44,9 @@ impl Savepoint {
     ) -> Self {
         Self {
             id,
-            transaction_id,
             version: mem.get_version(),
             user_root,
-            transaction_tracker,
-            ephemeral: true,
+            transaction: TransactionGuard::new_read(transaction_id, transaction_tracker),
         }
     }
 
@@ -62,7 +59,7 @@ impl Savepoint {
     }
 
     pub(crate) fn get_transaction_id(&self) -> TransactionId {
-        self.transaction_id
+        self.transaction.id()
     }
 
     pub(crate) fn get_user_root(&self) -> Option<BtreeHeader> {
@@ -70,20 +67,22 @@ impl Savepoint {
     }
 
     pub(crate) fn db_address(&self) -> *const TransactionTracker {
-        core::ptr::from_ref(self.transaction_tracker.as_ref())
+        core::ptr::from_ref(self.transaction.tracker().as_ref())
     }
 
     pub(crate) fn set_persistent(&mut self) {
-        self.ephemeral = false;
+        self.transaction.release_to_database();
     }
 }
 
 impl Drop for Savepoint {
     fn drop(&mut self) {
-        if self.ephemeral {
-            self.transaction_tracker
-                .deallocate_savepoint(self.get_id(), self.get_transaction_id());
+        // A persistent savepoint outlives its handle: the database record owns both its entry
+        // and the transaction's reference until the savepoint is deleted
+        if self.transaction.owns_reference() {
+            self.transaction.tracker().remove_savepoint(self.id);
         }
+        // The guard releases the transaction as it drops
     }
 }
 
@@ -98,7 +97,7 @@ impl SerializedSavepoint<'_> {
         assert_eq!(savepoint.version, FILE_FORMAT_VERSION3);
         let mut result = vec![savepoint.version];
         result.extend(savepoint.id.0.to_le_bytes());
-        result.extend(savepoint.transaction_id.raw_id().to_le_bytes());
+        result.extend(savepoint.get_transaction_id().raw_id().to_le_bytes());
 
         if let Some(header) = savepoint.user_root {
             result.push(1);
@@ -175,10 +174,11 @@ impl SerializedSavepoint<'_> {
         Ok(Savepoint {
             version,
             id: SavepointId(id),
-            transaction_id: TransactionId::new(transaction_id),
             user_root,
-            transaction_tracker,
-            ephemeral: false,
+            transaction: TransactionGuard::new_read_unowned(
+                TransactionId::new(transaction_id),
+                transaction_tracker,
+            ),
         })
     }
 }
