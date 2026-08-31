@@ -346,13 +346,16 @@ impl TransactionTracker {
         id
     }
 
+    // Forgets the savepoint, leaving the transaction's reference to whoever owns it
+    pub(crate) fn remove_savepoint(&self, savepoint: SavepointId) {
+        let mut state = self.state.lock().unwrap();
+        state.valid_savepoints.remove(&savepoint);
+        state.persistent_savepoints.remove(&savepoint);
+    }
+
     // Deallocates the given savepoint and its matching reference count on the transcation
     pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
-        {
-            let mut state = self.state.lock().unwrap();
-            state.valid_savepoints.remove(&savepoint);
-            state.persistent_savepoints.remove(&savepoint);
-        }
+        self.remove_savepoint(savepoint);
         self.deallocate_read_transaction(transaction);
     }
 
