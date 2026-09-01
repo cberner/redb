@@ -99,6 +99,25 @@ struct State {
     deferred_close: Option<Arc<TransactionalMemory>>,
 }
 
+impl State {
+    // The reference count on `id` is what keeps the pages its snapshot reaches from being freed,
+    // so every holder takes one here and gives it back here
+    fn reference_transaction(&mut self, id: TransactionId) {
+        self.live_read_transactions
+            .entry(id)
+            .and_modify(|x| *x += 1)
+            .or_insert(1);
+    }
+
+    fn dereference_transaction(&mut self, id: TransactionId) {
+        let count = self.live_read_transactions.get_mut(&id).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            self.live_read_transactions.remove(&id);
+        }
+    }
+}
+
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
@@ -170,14 +189,7 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         let ids = mem::take(&mut state.pending_non_durable_commits);
         for (_, durable_ancestor) in ids {
-            let ref_count = state
-                .live_read_transactions
-                .get_mut(&durable_ancestor)
-                .unwrap();
-            *ref_count -= 1;
-            if *ref_count == 0 {
-                state.live_read_transactions.remove(&durable_ancestor);
-            }
+            state.dereference_transaction(durable_ancestor);
         }
     }
 
@@ -215,11 +227,7 @@ impl TransactionTracker {
         has_unprocessed_freed_pages: bool,
     ) {
         let mut state = self.state.lock().unwrap();
-        state
-            .live_read_transactions
-            .entry(durable_ancestor)
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+        state.reference_transaction(durable_ancestor);
         assert!(
             state
                 .pending_non_durable_commits
@@ -261,11 +269,7 @@ impl TransactionTracker {
 
     pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) {
         let mut state = self.state.lock().unwrap();
-        state
-            .live_read_transactions
-            .entry(savepoint.get_transaction_id())
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+        state.reference_transaction(savepoint.get_transaction_id());
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
@@ -285,22 +289,14 @@ impl TransactionTracker {
     ) -> Result<TransactionId> {
         let mut state = self.state.lock()?;
         let id = mem.get_last_committed_transaction_id()?;
-        state
-            .live_read_transactions
-            .entry(id)
-            .and_modify(|x| *x += 1)
-            .or_insert(1);
+        state.reference_transaction(id);
 
         Ok(id)
     }
 
     pub(crate) fn deallocate_read_transaction(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        let ref_count = state.live_read_transactions.get_mut(&id).unwrap();
-        *ref_count -= 1;
-        if *ref_count == 0 {
-            state.live_read_transactions.remove(&id);
-        }
+        state.dereference_transaction(id);
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
