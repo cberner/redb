@@ -34,19 +34,17 @@ pub struct Savepoint {
 }
 
 impl Savepoint {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_ephemeral(
         mem: &TransactionalMemory,
-        transaction_tracker: Arc<TransactionTracker>,
         id: SavepointId,
-        transaction_id: TransactionId,
+        transaction: TransactionGuard,
         user_root: Option<BtreeHeader>,
     ) -> Self {
         Self {
             id,
             version: mem.get_version(),
+            transaction,
             user_root,
-            transaction: TransactionGuard::new_read(transaction_id, transaction_tracker),
         }
     }
 

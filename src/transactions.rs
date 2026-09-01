@@ -1260,12 +1260,15 @@ impl WriteTransaction {
         Ok(savepoints.into_iter())
     }
 
-    fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionId)> {
-        let transaction_id = self
+    fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionGuard)> {
+        // Built here rather than inside the savepoint, so that every holder of a read
+        // transaction gets its reference the same way
+        let transaction =
+            TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
+        let id = self
             .transaction_tracker
-            .register_read_transaction(&self.mem)?;
-        let id = self.transaction_tracker.allocate_savepoint(transaction_id);
-        Ok((id, transaction_id))
+            .allocate_savepoint(transaction.id());
+        Ok((id, transaction))
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
@@ -1282,7 +1285,7 @@ impl WriteTransaction {
         // allocation tracking -- leaving a live savepoint with tracking `Ignore`d. A later
         // `restore_savepoint()` would then fail to free this transaction's pages, leaking them
         // (reclaimed only by a full repair).
-        let (id, transaction_id) = {
+        let (id, transaction) = {
             let _tables = self.tables.lock().unwrap();
             if self.dirty.load(Ordering::Acquire) {
                 return Err(SavepointError::InvalidSavepoint);
@@ -1290,16 +1293,13 @@ impl WriteTransaction {
             self.allocate_savepoint()?
         };
         #[cfg(feature = "logging")]
-        debug!("Creating savepoint id={id:?}, txn_id={transaction_id:?}");
+        debug!(
+            "Creating savepoint id={id:?}, txn_id={:?}",
+            transaction.id()
+        );
 
         let root = self.mem.get_data_root();
-        let savepoint = Savepoint::new_ephemeral(
-            &self.mem,
-            self.transaction_tracker.clone(),
-            id,
-            transaction_id,
-            root,
-        );
+        let savepoint = Savepoint::new_ephemeral(&self.mem, id, transaction, root);
 
         Ok(savepoint)
     }
