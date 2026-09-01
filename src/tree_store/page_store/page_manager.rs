@@ -515,7 +515,7 @@ pub(crate) const HEADER_LOCK: Range<u64> = 0..DB_HEADER_SIZE as u64;
 
 /// A hold on the header lock, released when it drops.
 #[cfg(feature = "experimental-multiprocess")]
-struct HeaderGuard<'a> {
+pub(crate) struct HeaderGuard<'a> {
     storage: Option<&'a PagedCachedFile>,
     _in_process: crate::sync::MutexGuard<'a, ()>,
 }
@@ -723,28 +723,36 @@ impl TransactionalMemory {
         }
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn lock_header_shared(&self) -> Result<HeaderGuard<'_>> {
+        Self::lock_header(
+            &self.storage,
+            &self.in_process_header_lock,
+            self.concurrency_mode,
+            false,
+        )
+    }
+
     /// Marks `id` active, keeping the pages its snapshot references from being reclaimed by any
-    /// process until [`Self::unlock_mp_transaction`]. The shared header hold orders this against
-    /// a writer's reclamation scan, which holds it exclusively: the scan either sees this lock
-    /// or ran entirely before it.
+    /// process until [`Self::unlock_mp_transaction`]. The caller's shared header hold orders this
+    /// against a writer's reclamation scan, which holds it exclusively: the scan either sees this
+    /// lock or ran entirely before `id` was read, so the hold must cover that read too.
     ///
     /// Caller must not attempt to re-lock an already locked transaction.
     ///
     /// The caller must guarantee that `id` cannot already have been collected.
     #[cfg(feature = "experimental-multiprocess")]
-    pub(crate) fn lock_mp_transaction(&self, id: TransactionId) -> Result {
+    pub(crate) fn lock_mp_transaction(
+        &self,
+        id: TransactionId,
+        _header: &HeaderGuard<'_>,
+    ) -> Result {
         // Nothing to publish to: a single-process writers lock the whole file
         if !self.concurrency_mode.is_multi_process_writable() {
             return Ok(());
         }
         let byte = Self::active_transaction_byte(id)?;
-        let _guard = Self::lock_header(
-            &self.storage,
-            &self.in_process_header_lock,
-            self.concurrency_mode,
-            false,
-        )?;
-        // Refused only by an exclusive holder, which the shared header hold excludes
+        // Refused only by an exclusive holder, which the caller's shared header hold excludes
         if !self.storage.try_lock_shared_range(byte_range(byte))? {
             return Err(StorageError::Corrupted(
                 "another process holds an active transaction byte exclusively".to_string(),

@@ -23,6 +23,8 @@ pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNum
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
 #[cfg(feature = "experimental-multiprocess")]
+pub(crate) use page_manager::HeaderGuard;
+#[cfg(feature = "experimental-multiprocess")]
 pub(crate) use page_manager::MultiProcessWriterGuard;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,

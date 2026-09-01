@@ -1,4 +1,6 @@
 use crate::sync::{Condvar, Mutex};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::HeaderGuard;
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;
@@ -105,12 +107,17 @@ impl State {
     // is still reading. Done under the lock that holds the count, so the two cannot disagree: a
     // reference taken between the count reaching zero and the byte being released would otherwise
     // read a snapshot nothing protects
-    fn reference_transaction(&mut self, mem: &TransactionalMemory, id: TransactionId) -> Result {
+    fn reference_transaction(
+        &mut self,
+        mem: &TransactionalMemory,
+        id: TransactionId,
+        #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
+    ) -> Result {
         let count = self.live_read_transactions.entry(id).or_insert(0);
         *count += 1;
         #[cfg(feature = "experimental-multiprocess")]
         if *count == 1
-            && let Err(err) = mem.lock_mp_transaction(id)
+            && let Err(err) = mem.lock_mp_transaction(id, header)
         {
             self.live_read_transactions.remove(&id);
             return Err(err);
@@ -244,8 +251,15 @@ impl TransactionTracker {
         durable_ancestor: TransactionId,
         has_unprocessed_freed_pages: bool,
     ) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let header = mem.lock_header_shared()?;
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(mem, durable_ancestor)?;
+        state.reference_transaction(
+            mem,
+            durable_ancestor,
+            #[cfg(feature = "experimental-multiprocess")]
+            &header,
+        )?;
         assert!(
             state
                 .pending_non_durable_commits
@@ -292,8 +306,15 @@ impl TransactionTracker {
         mem: &TransactionalMemory,
         savepoint: &Savepoint,
     ) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let header = mem.lock_header_shared()?;
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(mem, savepoint.get_transaction_id())?;
+        state.reference_transaction(
+            mem,
+            savepoint.get_transaction_id(),
+            #[cfg(feature = "experimental-multiprocess")]
+            &header,
+        )?;
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
@@ -313,9 +334,16 @@ impl TransactionTracker {
         &self,
         mem: &TransactionalMemory,
     ) -> Result<TransactionId> {
-        let mut state = self.state.lock()?;
+        #[cfg(feature = "experimental-multiprocess")]
+        let header = mem.lock_header_shared()?;
         let id = mem.get_last_committed_transaction_id()?;
-        state.reference_transaction(mem, id)?;
+        let mut state = self.state.lock()?;
+        state.reference_transaction(
+            mem,
+            id,
+            #[cfg(feature = "experimental-multiprocess")]
+            &header,
+        )?;
 
         Ok(id)
     }
