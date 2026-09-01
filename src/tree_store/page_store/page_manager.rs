@@ -1145,10 +1145,18 @@ impl TransactionalMemory {
                 other => StorageError::Corrupted(other.to_string()),
             })?;
         let header = unrepaired.finalize_transaction_slots()?;
-        let mut state = self.state.lock()?;
-        state.header = header;
+        let (previous, current) = {
+            let mut state = self.state.lock()?;
+            let previous = state.header.primary_slot().transaction_id;
+            state.header = header;
+            (previous, state.header.primary_slot().transaction_id)
+        };
+        // The peer's commits may have freed and rewritten pages this handle cached
+        if current != previous {
+            self.clear_read_cache();
+        }
 
-        Ok(state.header.primary_slot().transaction_id)
+        Ok(current)
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
