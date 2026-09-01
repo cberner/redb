@@ -608,6 +608,10 @@ impl PagedCachedFile {
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
     pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
+        // Before the caches, which would otherwise serve a page the file can no longer be read
+        // for: a read transaction outliving its Database must see DatabaseClosed, not a snapshot
+        // of whatever happened to be cached
+        self.check_io_errors()?;
         debug_assert_eq!(0, offset % self.page_size);
         #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);

@@ -194,6 +194,38 @@ fn deferred_close_invalidates_read_transactions() {
     ));
 }
 
+/// The guarantee above has to hold with a cache too: a warm page must not be served after the
+/// database is closed, or a read transaction outliving its handle keeps reading a snapshot no
+/// lock protects.
+#[test]
+fn a_warm_cache_does_not_outlive_the_database() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let setup_txn = db.begin_write().unwrap();
+    {
+        let mut table = setup_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    setup_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    // Read it once, so every page the read below needs is cached
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+    drop(table);
+
+    drop(db);
+
+    assert!(matches!(
+        read_txn.open_table(STR_TABLE).err().unwrap(),
+        TableError::Storage(StorageError::DatabaseClosed)
+    ));
+    assert!(matches!(
+        read_txn.list_tables().err().unwrap(),
+        StorageError::DatabaseClosed
+    ));
+}
+
 // Regression test for https://github.com/cberner/redb/issues/1072
 #[test]
 fn return_write_transaction_from_function() {
