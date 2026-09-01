@@ -36,6 +36,33 @@ mod shared_reader {
         table.get(0).unwrap().unwrap().value()
     }
 
+    /// Following a peer's commits means seeing its data, not only its newer id
+    #[test]
+    fn a_shared_reader_sees_a_peers_writes() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let writer = create(tmpfile.path());
+        let reader = shared().open_read_only(tmpfile.path()).unwrap();
+
+        // Caches the page the value lives on
+        assert_eq!(value(&reader), 0);
+
+        // Staleness needs the allocator to recycle the cached page, so churn until it does
+        for expected in 1..60u64 {
+            let write = writer.begin_write().unwrap();
+            {
+                let mut table = write.open_table(TABLE).unwrap();
+                table.insert(0, expected).unwrap();
+            }
+            write.commit().unwrap();
+
+            assert_eq!(
+                value(&reader),
+                expected,
+                "the reader served a cached page after the writer committed {expected}"
+            );
+        }
+    }
+
     /// A shared reader reads pages by the immutable geometry alone, so the region counts, which an
     /// unclean header leaves unvalidated, never reach it
     #[test]
