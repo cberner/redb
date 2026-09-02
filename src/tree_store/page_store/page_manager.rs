@@ -15,6 +15,7 @@ use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet, Shrink};
 use crate::tree_store::page_store::header::{
     DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
+    set_two_phase_bit,
 };
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -1168,6 +1169,24 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    /// Makes the header's 2-phase flag durable without publishing anything else. Every other byte
+    /// is written back as the file already has it, so a torn write can differ only in the god
+    /// byte, and that is a single byte. Goes straight to the file, so a pending non-durable
+    /// commit's pages stay buffered.
+    fn make_two_phase_flag_durable(&self) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let _guard = Self::lock_header(
+            &self.storage,
+            &self.in_process_header_lock,
+            self.concurrency_mode,
+            true,
+        )?;
+        let mut bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        set_two_phase_bit(&mut bytes);
+        self.storage.write_direct(0, &bytes)?;
+        self.storage.sync_file()
+    }
+
     fn write_header(&self, header: &DatabaseHeader) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         if self.concurrency_mode.is_multi_process_writable() {
@@ -1382,6 +1401,15 @@ impl TransactionalMemory {
         );
 
         let old_transaction_id = header.secondary_slot().transaction_id;
+        // The flag is the only thing keeping whoever reads the header between the two writes below
+        // on the old primary, so it has to be durable before the slot it guards is published: only
+        // single-byte writes are atomic, and the god byte holding the flag is 55 bytes from the
+        // nearest slot, so a crash can persist one without the other. Reached only by a 2-phase
+        // commit following a 1-phase one; a run of 2-phase commits finds the flag set already
+        if two_phase && !header.two_phase_commit {
+            self.make_two_phase_flag_durable()?;
+            header.two_phase_commit = true;
+        }
         header.write_secondary_slot(transaction_id, data_root, system_root);
 
         self.write_header(&header)?;

@@ -583,7 +583,6 @@ impl PagedCachedFile {
 
     // Write directly to the file, bypassing the write buffer, so the bytes are on the file when
     // this returns rather than whenever the buffer is next flushed
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn write_direct(&self, offset: u64, data: &[u8]) -> Result<()> {
         self.invalidate_cache(offset, data.len());
         self.file.write(offset, data)

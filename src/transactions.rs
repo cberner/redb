@@ -1493,10 +1493,15 @@ impl WriteTransaction {
     ///
     /// Alternatively, you can enable 2-phase commit, which writes data like this:
     ///
-    /// 1. Update the inactive commit slot with the new database state
-    /// 2. Call `fsync` to ensure the database slate and commit slot update have been persisted
-    /// 3. Flip the god byte primary bit to activate the newly updated commit slot
-    /// 4. Call `fsync` to ensure the write to the god byte has been persisted
+    /// 1. Set the god byte's 2-phase flag, if it is not already set, and call `fsync`. That flag
+    ///    is what keeps a crash between steps 2 and 4 from selecting the new slot, so it must be
+    ///    durable before the slot it guards. Only the god byte changes, so a torn write of this
+    ///    step cannot publish anything. Only a 2-phase commit following a 1-phase one reaches
+    ///    it; a run of 2-phase commits finds the flag set and pays nothing.
+    /// 2. Update the inactive commit slot with the new database state
+    /// 3. Call `fsync` to ensure the database slate and commit slot update have been persisted
+    /// 4. Flip the god byte primary bit to activate the newly updated commit slot
+    /// 5. Call `fsync` to ensure the write to the god byte has been persisted
     ///
     /// This mitigates a theoretical attack where an attacker who
     /// 1. can control the order in which pages are flushed to disk

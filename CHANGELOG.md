@@ -33,6 +33,10 @@
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
   takes a `ConcurrencyMode` configuring how processes may share the database.
+* Fix a crash-safety hole in 2-phase commit. A 2-phase commit that followed a 1-phase one published
+  its new commit slot before the flag protecting that slot was durable, so a crash in that window
+  could leave recovery selecting a transaction whose data had not been fully persisted. Such a
+  transition now performs one additional `fsync`; a run of 2-phase commits is unaffected.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
@@ -49,7 +53,6 @@
   tagged in the derived `TypeName`, so structs containing them change type identity: their
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
-
 ## 4.3.0 - 2026-XX-XX
 * Add `Key::separator()`, which returns a short byte string that separates two keys, as a
   `Cow` so it can also be synthesized rather than borrowed from the inputs. Internal btree

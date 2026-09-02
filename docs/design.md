@@ -353,8 +353,12 @@ occur during the fsync:
 ## 2-phase durable commits (2PC)
 A 2-phase commit strategy can also be used which mitigates a theoretical attack when handling malicious data
 and when the attacker has high degree of control over the redb process (see below).
-First, data is written to a new copy of the B+tree, second an `fsync` is performed,
-finally the byte controlling which copy of the B+tree is the primary is flipped and a second `fsync` is performed.
+First, the god byte's `two_phase_commit` flag is set and `fsync`ed, if a preceding 1PC commit left it
+clear: it is what keeps a crash before the final flip from selecting the new copy. Only that byte is
+changed -- every other byte of the header is written back as the file already has it -- since only
+single-byte writes are atomic, so it cannot be published in the same write as the slot it guards.
+Second, data is written to a new copy of the B+tree, third an `fsync` is performed, finally the byte
+controlling which copy of the B+tree is the primary is flipped and a second `fsync` is performed.
 
 ### Security of 1PC+C
 Given that the 1PC+C commit strategy relies on a non-cyptographic checksum (XXH3) there is, at least in theory, a way to attack it.

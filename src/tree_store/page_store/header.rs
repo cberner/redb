@@ -107,6 +107,12 @@ pub(super) struct DatabaseHeader {
     transaction_slots: [TransactionHeader; 2],
 }
 
+// Sets the 2-phase flag in a serialized header, leaving every other byte as it was. The flag
+// shares the god byte with the primary bit, so this changes one byte.
+pub(super) fn set_two_phase_bit(bytes: &mut [u8]) {
+    bytes[GOD_BYTE_OFFSET] |= TWO_PHASE_COMMIT;
+}
+
 impl UnrepairedDatabaseHeader {
     // `expected_page_size` is the page size this database was opened with.
     pub(super) fn from_bytes(data: &[u8], expected_page_size: u32) -> Result<Self, DatabaseError> {
