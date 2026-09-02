@@ -541,7 +541,8 @@ The multi-process concurrency modes rely on file range locks and define the foll
 | `BASE + 1`              | shared writer byte                 |
 | `BASE + 2`              | shared reader byte                 |
 | `BASE + 3`              | immutable byte                     |
-| `BASE + 4..BASE + 1024` | reserved                           |
+| `BASE + 4`              | consistent byte                    |
+| `BASE + 5..BASE + 1024` | reserved                           |
 | `BASE + 1024`           | active transaction base (TXN_BASE) |
 | `TXN_BASE..2^63`        | active transaction range           |
 
@@ -566,6 +567,17 @@ prevents a non-multi-process writer from opening the database.
 Processes hold a shared lock on this byte when the database is open in Immutable mode.
 After locking this byte, they must check if the "shared writer byte" is locked -- which would
 indicate an idle writer (if the "writer byte" is unlocked).
+
+### "consistent byte"
+
+Writing processes hold a shared lock on this byte from the point their open is complete --
+recovery has run and the allocator state is loaded -- until they close.
+
+The recovery flag in the header means "unrepaired" before a writer's recovery runs and "a writer
+is live" after it.
+If the "shared writer lock" is held, readers should consult this byte to determine if the database
+is consistent and a writer is live. Otherwise, they may consult the recovery required bit in the
+database header.
 
 ## Header synchronization
 

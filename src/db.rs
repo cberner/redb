@@ -99,6 +99,12 @@ pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
 pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const IMMUTABLE_READER_BYTE: u64 = LOCK_BASE + 3;
+/// Held shared by a writing process from the moment its open is complete -- past recovery and
+/// the allocator load -- until it closes: the file is consistent, and the recovery flag, set from
+/// here on, means only that a writer is live. `SHARED_WRITER_BYTE` is taken before recovery, so
+/// it cannot say that; this byte can.
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
 /// shared for as long as it is reading it
 #[cfg(feature = "experimental-multiprocess")]
@@ -1340,6 +1346,9 @@ impl Database {
         }
 
         mem.begin_writable()?;
+        // Past recovery, so a reader finding this byte held knows the flag means a live writer
+        #[cfg(feature = "experimental-multiprocess")]
+        mem.mark_consistent()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
         let db = Database {
@@ -2295,6 +2304,161 @@ mod writer_byte_test {
             "the byte was still held after the database closed"
         );
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+}
+
+/// The consistent byte, probed directly: a byte-range lock is invisible through the public API.
+#[cfg(all(
+    test,
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
+mod consistent_byte_test {
+    use super::{CONSISTENT_BYTE, ConcurrencyMode, Database, byte_range};
+    use crate::backends::FileBackend;
+    use crate::tree_store::file_backend::range_lock::RangeLock;
+    use crate::{StorageBackend, TableDefinition};
+    use std::fs::{File, OpenOptions};
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    fn builder(mode: ConcurrencyMode) -> crate::Builder {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        builder
+    }
+
+    /// A separate description, so its locks conflict with the database's exactly as another
+    /// process's would
+    fn probe(path: &Path) -> File {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap()
+    }
+
+    /// True when some writer asserts the database is consistent
+    fn held(probe: &File) -> bool {
+        let taken = probe.try_lock_range(byte_range(CONSISTENT_BYTE)).unwrap();
+        if taken {
+            probe.unlock_range(byte_range(CONSISTENT_BYTE)).unwrap();
+        }
+        !taken
+    }
+
+    /// Power loss: once armed, every write silently does nothing, so the close writes neither
+    /// the allocator record nor the clean-shutdown header
+    #[derive(Debug)]
+    struct CrashBackend {
+        inner: FileBackend,
+        dead: Arc<AtomicBool>,
+    }
+
+    impl StorageBackend for CrashBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.sync_data()
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.write(offset, data)
+        }
+    }
+
+    /// Leaves the file as a crashed writer would: a committed transaction, no allocator record
+    /// and the recovery flag still set, so the next open has to repair it. Built through a
+    /// caller-supplied backend, which takes no locks, so nothing of this handle outlives it.
+    fn dirty(path: &Path) {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let dead = Arc::new(AtomicBool::new(false));
+        let db = Database::builder()
+            .create_with_backend(CrashBackend {
+                inner: FileBackend::new(file).unwrap(),
+                dead: Arc::clone(&dead),
+            })
+            .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        write.commit().unwrap();
+        // Nothing this handle does from here on reaches the file, its close included
+        dead.store(true, Ordering::SeqCst);
+        drop(db);
+    }
+
+    #[test]
+    fn a_shared_writable_open_asserts_consistency_until_it_closes() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let db = builder(mode).create(tmpfile.path()).unwrap();
+            let probe = probe(tmpfile.path());
+            assert!(held(&probe), "{mode:?} open did not take the byte");
+
+            drop(db);
+            assert!(!held(&probe), "{mode:?} close did not release the byte");
+        }
+    }
+
+    /// The byte's whole purpose. `SHARED_WRITER_BYTE` is taken before recovery runs, so during a
+    /// repair it says a writer is here while the file is still the one the last writer left. This
+    /// byte is taken after, so it says nothing until the file is consistent.
+    #[test]
+    fn a_repairing_open_asserts_consistency_only_once_the_repair_is_done() {
+        let tmpfile = crate::create_tempfile();
+        dirty(tmpfile.path());
+
+        let probe = Arc::new(Mutex::new(probe(tmpfile.path())));
+        let during: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+
+        let db = {
+            let probe = probe.clone();
+            let during = during.clone();
+            let mut builder = builder(ConcurrencyMode::MultiWriterProcess);
+            builder.set_repair_callback(move |_| {
+                let mut during = during.lock().unwrap();
+                if during.is_none() {
+                    *during = Some(held(&probe.lock().unwrap()));
+                }
+            });
+            builder.open(tmpfile.path()).unwrap()
+        };
+
+        assert_eq!(
+            during.lock().unwrap().take(),
+            Some(false),
+            "the byte was held while the open was still repairing"
+        );
+        assert!(held(&probe.lock().unwrap()), "the open never took the byte");
+        drop(db);
     }
 }
 
