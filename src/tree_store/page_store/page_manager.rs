@@ -1,9 +1,11 @@
 use crate::CacheStats;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::db::{
+    CONSISTENT_BYTE, IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE,
+};
 use crate::db::{
     ConcurrencyMode, FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE, byte_range,
 };
-#[cfg(feature = "experimental-multiprocess")]
-use crate::db::{IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -1975,6 +1977,18 @@ impl TransactionalMemory {
 
     pub(crate) fn get_page_size(&self) -> usize {
         self.page_size.try_into().unwrap()
+    }
+
+    /// Asserts that the file is consistent and this handle a live writer: see `CONSISTENT_BYTE`.
+    /// Shared, since a multi-writer cohort has several, and released with every other range by
+    /// `close()`.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn mark_consistent(&self) -> Result {
+        if self.concurrency_mode.is_multi_process_writable() {
+            self.storage
+                .lock_shared_range(byte_range(CONSISTENT_BYTE))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn close(&self) -> Result {
