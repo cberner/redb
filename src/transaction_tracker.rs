@@ -479,6 +479,36 @@ impl TransactionTracker {
             .copied()
     }
 
+    /// The transaction up to which a durable commit may reclaim, exclusive: the one after the
+    /// oldest still being read, here or in another process, or `transaction_id` when there is
+    /// none. This process's reads are sampled once, for the local floor and for the ids the scan
+    /// steps over, so a read that begins or ends in between cannot hide a peer's pin on its id.
+    pub(crate) fn free_until_transaction(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] mem: &TransactionalMemory,
+        transaction_id: TransactionId,
+    ) -> Result<TransactionId> {
+        let state = self.state.lock().unwrap();
+        let oldest_local = state.live_read_transactions.keys().next().copied();
+        #[cfg(feature = "experimental-multiprocess")]
+        let own: BTreeSet<u64> = state
+            .live_read_transactions
+            .keys()
+            .map(|id| id.raw_id())
+            .collect();
+        drop(state);
+
+        let local = oldest_local.map_or(transaction_id, TransactionId::next);
+        #[cfg(feature = "experimental-multiprocess")]
+        if mem.concurrency_mode().is_multi_process_writable()
+            && let Some(oldest) =
+                mem.oldest_foreign_pin(mem.get_last_committed_transaction_id()?, &own)?
+        {
+            return Ok(local.min(oldest.next()));
+        }
+        Ok(local)
+    }
+
     // Returns the transaction id of the oldest non-durable transaction which has not been processed
     // for freeing, which has live read transactions
     pub(crate) fn oldest_live_read_nondurable_transaction(&self) -> Option<TransactionId> {

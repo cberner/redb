@@ -2002,10 +2002,11 @@ impl WriteTransaction {
             self.store_data_freed_pages_for(transaction_id, pages)?;
         }
 
-        let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
-            .map_or(self.transaction_id, |x| x.next());
+        let free_until_transaction = self.transaction_tracker.free_until_transaction(
+            #[cfg(feature = "experimental-multiprocess")]
+            &self.mem,
+            self.transaction_id,
+        )?;
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
         // becoming durable) AFTER process_freed_pages, so that any pages reclaimed here have
@@ -2087,7 +2088,14 @@ impl WriteTransaction {
 
         self.apply_savepoint_state_on_commit();
 
-        if self.post_commit_free == PostCommitFree::Enabled {
+        // The post-commit pass runs after publication, where a peer's pin on the transaction just
+        // superseded lands below any floor the scan above produced, so a shared file's pages wait
+        // for the next durable commit
+        #[cfg(feature = "experimental-multiprocess")]
+        let shared = self.mem.concurrency_mode().is_multi_process_writable();
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let shared = false;
+        if self.post_commit_free == PostCommitFree::Enabled && !shared {
             self.process_data_freed_pages_after_commit(
                 user_root,
                 &page_allocator,

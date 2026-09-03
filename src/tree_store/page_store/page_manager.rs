@@ -11,6 +11,8 @@ use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::page_store::active_transactions;
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -25,6 +27,8 @@ use crate::tree_store::{Page, PageNumber, PageTracker};
 use crate::{DatabaseError, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+#[cfg(feature = "experimental-multiprocess")]
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -571,6 +575,11 @@ pub(crate) struct TransactionalMemory {
     // this a counter or RwLock
     #[cfg(feature = "experimental-multiprocess")]
     in_process_header_lock: Mutex<()>,
+    // Where the next scan of the active transaction range starts, when it may remember: a pin
+    // lands only at or above the ceiling of the scan before it once every other handle reads the
+    // id it pins from the file, which a read-only handle does and a multi-writer one does not yet
+    #[cfg(feature = "experimental-multiprocess")]
+    scan_from: Mutex<u64>,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -812,6 +821,48 @@ impl TransactionalMemory {
         )
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_header_exclusive(&self) -> Result<HeaderGuard<'_>> {
+        Self::lock_header(
+            &self.storage,
+            &self.in_process_header_lock,
+            self.concurrency_mode,
+            true,
+        )
+    }
+
+    /// The oldest transaction another process is reading, at most `ceiling`, whose pages
+    /// reclamation must leave in place. Taken under the exclusive header hold, which every
+    /// registration waits behind, so none lands below what this reports. `own` names this
+    /// process's own reads, which a probe cannot tell from a peer's on Windows.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn oldest_foreign_pin(
+        &self,
+        ceiling: TransactionId,
+        own: &BTreeSet<u64>,
+    ) -> Result<Option<TransactionId>> {
+        // Every id scanned is at most the ceiling, so this bounds the whole scan's offsets
+        Self::active_transaction_byte(ceiling)?;
+        let _guard = self.lock_header_exclusive()?;
+        let mut scan_from = self.scan_from.lock().unwrap();
+        // Only while every peer reads the id it pins from the file: see `scan_from`
+        let remembers = matches!(self.concurrency_mode, ConcurrencyMode::SingleWriterProcess);
+        let oldest = active_transactions::oldest_foreign_pin(
+            |range| self.storage.query_lock_range(range),
+            if remembers { *scan_from } else { 0 },
+            ceiling.raw_id(),
+            own,
+        )?;
+        // Never above an own pin: on Windows it can hide a peer's pin on the same id, which the
+        // scan must find once the own one is released
+        *scan_from = own
+            .first()
+            .copied()
+            .unwrap_or(u64::MAX)
+            .min(oldest.unwrap_or(ceiling.raw_id()));
+        Ok(oldest.map(TransactionId::new))
+    }
+
     /// Marks `id` active, keeping the pages its snapshot references from being reclaimed by any
     /// process until [`Self::unlock_mp_transaction`]. The caller's shared header hold orders this
     /// against a writer's reclamation scan, which holds it exclusively: the scan either sees this
@@ -1006,6 +1057,8 @@ impl TransactionalMemory {
             read_only,
             #[cfg(feature = "experimental-multiprocess")]
             in_process_header_lock,
+            #[cfg(feature = "experimental-multiprocess")]
+            scan_from: Mutex::new(0),
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,

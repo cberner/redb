@@ -2487,8 +2487,8 @@ mod consistent_byte_test {
     }
 }
 
-/// The "active transaction range" locks a read transaction publishes, probed directly: nothing
-/// consumes them yet, and a byte-range lock is invisible through the public API in any case
+/// The "active transaction range" locks a read transaction publishes, probed directly: a
+/// byte-range lock is invisible through the public API
 #[cfg(all(
     test,
     feature = "experimental-multiprocess",
@@ -2496,8 +2496,10 @@ mod consistent_byte_test {
 ))]
 mod active_transaction_test {
     use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, byte_range};
+    use crate::transaction_tracker::TransactionId;
     use crate::tree_store::file_backend::range_lock::RangeLock;
     use crate::{Durability, SetDurabilityError, TableDefinition};
+    use std::collections::BTreeSet;
     use std::fs::{File, OpenOptions};
     use std::path::Path;
 
@@ -2869,5 +2871,33 @@ mod active_transaction_test {
             SEARCHED.collect::<Vec<_>>(),
             "a read transaction punctured the whole-file lock"
         );
+    }
+
+    /// A writable multi-writer handle pins an id it did not read from the file, so a pin can land
+    /// below where the last scan stopped; only the single-writer mode scans from there
+    #[test]
+    fn only_a_single_writer_scans_from_where_it_stopped() {
+        for (mode, remembers) in [
+            (ConcurrencyMode::SingleWriterProcess, true),
+            (ConcurrencyMode::MultiWriterProcess, false),
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let db = create(tmpfile.path(), mode);
+            let ceiling = db.mem.get_last_committed_transaction_id().unwrap();
+            let own = BTreeSet::new();
+            assert_eq!(db.mem.oldest_foreign_pin(ceiling, &own).unwrap(), None);
+
+            let probe = probe(tmpfile.path());
+            let below = ceiling.raw_id() - 1;
+            probe
+                .lock_shared_range(byte_range(TXN_BASE + below))
+                .unwrap();
+            let expected = (!remembers).then(|| TransactionId::new(below));
+            assert_eq!(
+                db.mem.oldest_foreign_pin(ceiling, &own).unwrap(),
+                expected,
+                "{mode:?}"
+            );
+        }
     }
 }
