@@ -336,7 +336,10 @@ impl TransactionTracker {
     ) -> Result<TransactionId> {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
-        let id = mem.get_last_committed_transaction_id()?;
+        let id = mem.latest_committed_transaction_id(
+            #[cfg(feature = "experimental-multiprocess")]
+            &header,
+        )?;
         let mut state = self.state.lock()?;
         state.reference_transaction(
             mem,
