@@ -1067,6 +1067,12 @@ impl TransactionalMemory {
         self.storage.flush()
     }
 
+    /// Whether another process may have this database open while one process writes.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn concurrency_mode(&self) -> ConcurrencyMode {
+        self.concurrency_mode
+    }
+
     pub(crate) fn used_two_phase_commit(&self) -> bool {
         self.state.lock().unwrap().header.two_phase_commit
     }
