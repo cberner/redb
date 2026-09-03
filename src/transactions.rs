@@ -1456,6 +1456,11 @@ impl WriteTransaction {
     ///
     /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
     /// be reduced below [`Durability::Immediate`]
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "[`Durability::None`] is refused, with [`SetDurabilityError::NonDurableCommitUnsupported`], in the multi-process concurrency modes: a commit held only in this process's memory would be invisible to the other processes. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
         let persistent_modified = self
             .savepoint_state
@@ -1464,6 +1469,13 @@ impl WriteTransaction {
             .has_created_or_deleted();
         if persistent_modified && !matches!(durability, Durability::Immediate) {
             return Err(SetDurabilityError::PersistentSavepointModified);
+        }
+        // A non-durable commit exists only in this process's memory
+        #[cfg(feature = "experimental-multiprocess")]
+        if matches!(durability, Durability::None)
+            && self.mem.concurrency_mode().is_multi_process_writable()
+        {
+            return Err(SetDurabilityError::NonDurableCommitUnsupported);
         }
 
         self.durability = match durability {

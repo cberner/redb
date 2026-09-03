@@ -404,12 +404,15 @@ impl core::error::Error for CompactionError {}
 pub enum SetDurabilityError {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// A non-durable commit would be invisible to the other processes sharing the database
+    NonDurableCommitUnsupported,
 }
 
 impl From<SetDurabilityError> for Error {
     fn from(err: SetDurabilityError) -> Error {
         match err {
             SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+            SetDurabilityError::NonDurableCommitUnsupported => Error::NonDurableCommitUnsupported,
         }
     }
 }
@@ -421,6 +424,12 @@ impl Display for SetDurabilityError {
                 write!(
                     f,
                     "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
+            }
+            SetDurabilityError::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when the database is shared with other processes"
                 )
             }
         }
@@ -546,6 +555,8 @@ pub enum Error {
     RepairAborted,
     /// A persistent savepoint was modified
     PersistentSavepointModified,
+    /// A non-durable commit would be invisible to the other processes sharing the database
+    NonDurableCommitUnsupported,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -612,6 +623,12 @@ impl Display for Error {
         match self {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
+            }
+            Error::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when the database is shared with other processes"
+                )
             }
             Error::UpgradeRequired(actual) => {
                 write!(
