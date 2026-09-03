@@ -563,6 +563,8 @@ pub(crate) struct TransactionalMemory {
     needs_repair: AtomicBool,
     #[cfg(feature = "experimental-multiprocess")]
     concurrency_mode: ConcurrencyMode,
+    #[cfg(feature = "experimental-multiprocess")]
+    read_only: bool,
     // Held for the duration of every header file lock. Ensures in-process threads do not overlap
     // acquiring the lock. Because it's an OFD lock on a single FD, only one may take it at a time.
     // TODO: This could probably be optimized, so that multiple threads can read at once, by making
@@ -1001,6 +1003,8 @@ impl TransactionalMemory {
             #[cfg(feature = "experimental-multiprocess")]
             concurrency_mode,
             #[cfg(feature = "experimental-multiprocess")]
+            read_only,
+            #[cfg(feature = "experimental-multiprocess")]
             in_process_header_lock,
             page_size: page_size.try_into().unwrap(),
             region_size,
@@ -1116,6 +1120,35 @@ impl TransactionalMemory {
         self.unpersisted.lock().unwrap().clear();
 
         Ok(was_clean)
+    }
+
+    /// The latest committed transaction id, read from the file by a shared reader since a peer
+    /// may have committed. The caller's `header` hold must also cover locking the id returned.
+    pub(crate) fn latest_committed_transaction_id(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
+    ) -> Result<TransactionId> {
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.read_only && self.concurrency_mode.is_multi_process_writable() {
+            return self.reload_header(header);
+        }
+        self.get_last_committed_transaction_id()
+    }
+
+    /// Adopts the header another process has written. Returns the transaction id now visible.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn reload_header(&self, _header: &HeaderGuard<'_>) -> Result<TransactionId> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(|err| match err {
+                DatabaseError::Storage(err) => err,
+                other => StorageError::Corrupted(other.to_string()),
+            })?;
+        let header = unrepaired.finalize_transaction_slots()?;
+        let mut state = self.state.lock()?;
+        state.header = header;
+
+        Ok(state.header.primary_slot().transaction_id)
     }
 
     pub(crate) fn begin_writable(&self) -> Result {

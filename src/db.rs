@@ -536,7 +536,7 @@ pub trait ReadableDatabase: SealedInApi5 {
 #[cfg_attr(
     feature = "experimental-multiprocess",
     doc = "",
-    doc = "The multi-process concurrency modes are the exception: a reader shares the file with the writer. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    doc = "The multi-process concurrency modes are the exception: a reader shares the file with the writer and follows its commits. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
 )]
 ///
 /// # Examples
@@ -576,6 +576,10 @@ pub trait ReadableDatabase: SealedInApi5 {
 pub struct ReadOnlyDatabase {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
+    // Serializes beginning a read, so that the id a transaction locks and the root it then
+    // reads come from the same state
+    #[cfg(feature = "experimental-multiprocess")]
+    begin_read: crate::sync::Mutex<()>,
 }
 
 #[cfg(not(redb_no_std))]
@@ -584,6 +588,8 @@ impl Sealed for ReadOnlyDatabase {}
 #[cfg(not(redb_no_std))]
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
+        #[cfg(feature = "experimental-multiprocess")]
+        let _begin = self.begin_read.lock().unwrap();
         let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
@@ -649,6 +655,8 @@ impl ReadOnlyDatabase {
         let db = Self {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+            #[cfg(feature = "experimental-multiprocess")]
+            begin_read: crate::sync::Mutex::new(()),
         };
 
         Ok(db)
@@ -1743,7 +1751,7 @@ impl Builder {
     #[cfg_attr(
         feature = "experimental-multiprocess",
         doc = "",
-        doc = "Only a single-process writer is refused: in the multi-process concurrency modes a reader opened in the same mode as the writer shares the file with it. See [`Self::set_concurrency_mode`]."
+        doc = "Only a single-process writer is refused: in the multi-process concurrency modes a reader opened in the same mode as the writer shares the file with it and picks up its commits. See [`Self::set_concurrency_mode`]."
     )]
     #[cfg(not(redb_no_std))]
     pub fn open_read_only(
@@ -2690,6 +2698,46 @@ mod active_transaction_test {
         ));
     }
 
+    /// A read-only participant sees what another process committed, not the header it read at open
+    #[test]
+    fn a_read_only_participant_picks_up_a_peers_commit() {
+        let tmpfile = crate::create_tempfile();
+        let writer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let reader = builder.open_read_only(tmpfile.path()).unwrap();
+        let probe = probe(tmpfile.path());
+
+        let read = reader.begin_read().unwrap();
+        let before = held_ids(&probe);
+        assert_eq!(before.len(), 1, "expected one active id: {before:?}");
+        let before = before[0];
+        drop(read);
+
+        let write = writer.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(1, 1).unwrap();
+        }
+        write.commit().unwrap();
+        drop(writer);
+        assert!(
+            held_ids(&probe).is_empty(),
+            "the closed writer left {:?} locked",
+            held_ids(&probe)
+        );
+
+        let read = reader.begin_read().unwrap();
+        let after = held_ids(&probe);
+        assert_eq!(after.len(), 1, "expected one active id: {after:?}");
+        assert!(
+            after[0] > before,
+            "the reader stayed at {before} after the writer committed"
+        );
+        drop(read);
+    }
+
     /// A read-only participant takes the primary as recorded: choosing between the slots is a
     /// repairing writer's job, and a newer secondary it can see is a commit whose pages are not in
     /// the file yet, or one a repair has just rolled back
@@ -2702,6 +2750,7 @@ mod active_transaction_test {
 
         let mut builder = Database::builder();
         builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let reader = builder.open_read_only(tmpfile.path()).unwrap();
 
         // A newer commit whose pages this file never received: made in a copy, then its slot
         // spliced into this file's secondary slot
@@ -2740,13 +2789,17 @@ mod active_transaction_test {
         assert!(id(&spliced, 1 - primary) > id(&spliced, primary));
         let probe = probe(tmpfile.path());
 
-        let opened = builder.open_read_only(tmpfile.path()).unwrap();
-        let read = opened.begin_read().unwrap();
+        // Reloading into that state, and opening in it
+        let read = reader.begin_read().unwrap();
         assert_eq!(
             held_ids(&probe),
             vec![id(&spliced, primary)],
             "the reader adopted a slot whose pages the file never received"
         );
+        drop(read);
+        let opened = builder.open_read_only(tmpfile.path()).unwrap();
+        let read = opened.begin_read().unwrap();
+        assert_eq!(held_ids(&probe), vec![id(&spliced, primary)]);
         drop(read);
     }
 
