@@ -11,6 +11,8 @@ use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::page_store::active_transactions;
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -571,6 +573,10 @@ pub(crate) struct TransactionalMemory {
     // this a counter or RwLock
     #[cfg(feature = "experimental-multiprocess")]
     in_process_header_lock: Mutex<()>,
+    // Where the next scan of the active transaction range starts: a pin lands only at or above
+    // the ceiling of the scan before it, since every handle reads the id it pins from the file
+    #[cfg(feature = "experimental-multiprocess")]
+    scan_from: Mutex<u64>,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -812,6 +818,58 @@ impl TransactionalMemory {
         )
     }
 
+    #[cfg(feature = "experimental-multiprocess")]
+    fn lock_header_exclusive(&self) -> Result<HeaderGuard<'_>> {
+        Self::lock_header(
+            &self.storage,
+            &self.in_process_header_lock,
+            self.concurrency_mode,
+            true,
+        )
+    }
+
+    /// The oldest transaction still being read in any process, given `local`, the oldest this
+    /// process reads. Where the file is shared it is found under the exclusive header hold, which
+    /// every registration waits behind, so no pin lands below what this reports.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn oldest_active_transaction(
+        &self,
+        local: Option<TransactionId>,
+    ) -> Result<Option<TransactionId>> {
+        if self.concurrency_mode.is_multi_process_writable() {
+            let _guard = self.lock_header_exclusive()?;
+            let ceiling = self.get_last_committed_transaction_id()?;
+            // Every id scanned is at most the ceiling, so this bounds the whole scan's offsets
+            Self::active_transaction_byte(ceiling)?;
+            let mut scan_from = self.scan_from.lock().unwrap();
+            // Only a byte below this process's own oldest read can lower the answer, and only
+            // there is a held byte another process's: on Windows a probe sees this description's
+            // own locks too
+            let high = local.map_or(Some(ceiling.raw_id()), |id| id.raw_id().checked_sub(1));
+            let peer = match high {
+                Some(high) => active_transactions::lowest_held(
+                    |range| self.storage.query_lock_range(range),
+                    *scan_from,
+                    high,
+                )?,
+                None => None,
+            };
+            let oldest = peer.map(TransactionId::new).or(local);
+            *scan_from = oldest.unwrap_or(ceiling).raw_id();
+            return Ok(oldest);
+        }
+        Ok(local)
+    }
+
+    #[cfg(not(feature = "experimental-multiprocess"))]
+    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
+    pub(crate) fn oldest_active_transaction(
+        &self,
+        local: Option<TransactionId>,
+    ) -> Result<Option<TransactionId>> {
+        Ok(local)
+    }
+
     /// Marks `id` active, keeping the pages its snapshot references from being reclaimed by any
     /// process until [`Self::unlock_mp_transaction`]. The caller's shared header hold orders this
     /// against a writer's reclamation scan, which holds it exclusively: the scan either sees this
@@ -1006,6 +1064,8 @@ impl TransactionalMemory {
             read_only,
             #[cfg(feature = "experimental-multiprocess")]
             in_process_header_lock,
+            #[cfg(feature = "experimental-multiprocess")]
+            scan_from: Mutex::new(0),
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,

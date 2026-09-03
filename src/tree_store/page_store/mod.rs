@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-multiprocess")]
+mod active_transactions;
 mod backends;
 mod base;
 mod bitmap;

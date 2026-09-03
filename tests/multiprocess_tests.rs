@@ -309,3 +309,70 @@ fn sharing_a_caller_supplied_backend_is_unsupported() {
         .create_with_backend(InMemoryBackend::new())
         .unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod reclamation {
+    use super::*;
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+    /// A read transaction in another process pins its snapshot: the writer's reclamation stops
+    /// at it, however many commits go by
+    #[test]
+    fn a_readers_pin_survives_heavy_reclamation() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let writer = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::SingleWriterProcess)
+            .create(tmpfile.path())
+            .unwrap();
+
+        let value = vec![7u8; 512];
+        let txn = writer.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for key in 0..128u64 {
+                t.insert(&key, value.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        let reader = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::SingleWriterProcess)
+            .open_read_only(tmpfile.path())
+            .unwrap();
+        let pinned = reader.begin_read().unwrap();
+
+        // Every round frees the previous round's pages; without the reader's pin bounding the
+        // writer's reclamation, the pinned snapshot's pages would be reused under it
+        for round in 0..20u8 {
+            let overwrite = vec![round; 512];
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                for key in 0..128u64 {
+                    t.insert(&key, overwrite.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+
+        let t = pinned.open_table(TABLE).unwrap();
+        for key in 0..128u64 {
+            assert_eq!(t.get(&key).unwrap().unwrap().value(), value.as_slice());
+        }
+        drop(t);
+        drop(pinned);
+
+        // With the pin gone the writer keeps going, and a fresh read sees the last round
+        let txn = writer.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            t.insert(&0, [0u8; 4].as_slice()).unwrap();
+        }
+        txn.commit().unwrap();
+        let read = reader.begin_read().unwrap();
+        let t = read.open_table(TABLE).unwrap();
+        assert_eq!(t.get(&0).unwrap().unwrap().value(), [0u8; 4].as_slice());
+    }
+}
