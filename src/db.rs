@@ -2472,7 +2472,7 @@ mod consistent_byte_test {
 mod active_transaction_test {
     use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, byte_range};
     use crate::tree_store::file_backend::range_lock::RangeLock;
-    use crate::{Durability, TableDefinition};
+    use crate::{Durability, SetDurabilityError, TableDefinition};
     use std::fs::{File, OpenOptions};
     use std::path::Path;
 
@@ -2660,37 +2660,17 @@ mod active_transaction_test {
         drop(db);
     }
 
-    /// A non-durable commit is invisible to a peer, but the durable ancestor it builds on is not,
-    /// and its pages must survive until the commit is flushed
+    /// A non-durable commit exists only in this process's memory, so a shared mode refuses it
     #[test]
-    fn a_non_durable_commit_locks_its_durable_ancestor() {
+    fn a_shared_mode_refuses_durability_none() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
-        let probe = probe(tmpfile.path());
-        assert!(held_ids(&probe).is_empty());
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
 
         let mut write = db.begin_write().unwrap();
-        write.set_durability(Durability::None).unwrap();
-        {
-            let mut table = write.open_table(TABLE).unwrap();
-            table.insert(1, 1).unwrap();
-        }
-        write.commit().unwrap();
-        let ancestor = held_ids(&probe);
-        assert_eq!(
-            ancestor.len(),
-            1,
-            "a non-durable commit locked {ancestor:?}"
-        );
-
-        // The durable commit that flushes it releases the ancestor. Its own epilogue takes a
-        // reference on this commit in turn, so what is locked afterwards is a different id
-        let write = db.begin_write().unwrap();
-        write.commit().unwrap();
-        assert!(
-            !held_ids(&probe).contains(&ancestor[0]),
-            "the ancestor stayed locked after the commit that flushed it"
-        );
+        assert!(matches!(
+            write.set_durability(Durability::None),
+            Err(SetDurabilityError::NonDurableCommitUnsupported)
+        ));
     }
 
     /// Sharing the file forces 2-phase, whatever the transaction asked for
