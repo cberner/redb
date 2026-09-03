@@ -699,6 +699,44 @@ impl TransactionalMemory {
         })
     }
 
+    /// Reads the header, reconciling the layout against the file's length and writing back a
+    /// repair if one was needed.
+    fn read_header(
+        storage: &PagedCachedFile,
+        #[cfg(feature = "experimental-multiprocess")] in_process_header_lock: &Mutex<()>,
+        #[cfg(feature = "experimental-multiprocess")] concurrency_mode: ConcurrencyMode,
+        page_size: usize,
+        read_only: bool,
+    ) -> Result<DatabaseHeader, DatabaseError> {
+        let header_bytes = {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard =
+                Self::lock_header(storage, in_process_header_lock, concurrency_mode, false)?;
+            storage.read_direct(0, DB_HEADER_SIZE)?
+        };
+        let unrepaired =
+            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
+        let file_len = storage.raw_file_len()?;
+        let needs_recovery = unrepaired.recovery_required(file_len);
+        if needs_recovery && read_only {
+            return Err(DatabaseError::RepairAborted);
+        }
+        let (header, _) = unrepaired.finalize(file_len)?;
+        if needs_recovery {
+            #[cfg(feature = "experimental-multiprocess")]
+            let _guard =
+                Self::lock_header(storage, in_process_header_lock, concurrency_mode, true)?;
+            storage
+                .write(0, DB_HEADER_SIZE, true)?
+                .mem_mut()
+                .copy_from_slice(&header.to_bytes(true));
+            storage.flush()?;
+        }
+        assert_eq!(header.layout().len(), storage.raw_file_len()?);
+
+        Ok(header)
+    }
+
     /// Acquire the multi-process writer lock
     #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_multi_process_writer(
@@ -895,33 +933,17 @@ impl TransactionalMemory {
                 storage.flush()?;
             }
         }
-        let header_bytes = {
+        let header = Self::read_header(
+            &storage,
             #[cfg(feature = "experimental-multiprocess")]
-            let _guard =
-                Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, false)?;
-            storage.read_direct(0, DB_HEADER_SIZE)?
-        };
-        let unrepaired =
-            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
-        let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
-        if needs_recovery && read_only {
-            return Err(DatabaseError::RepairAborted);
-        }
-        let (header, _) = unrepaired.finalize(file_len)?;
-        if needs_recovery {
+            &in_process_header_lock,
             #[cfg(feature = "experimental-multiprocess")]
-            let _guard =
-                Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
-            storage
-                .write(0, DB_HEADER_SIZE, true)?
-                .mem_mut()
-                .copy_from_slice(&header.to_bytes(true));
-            storage.flush()?;
-        }
+            concurrency_mode,
+            page_size,
+            read_only,
+        )?;
 
         let layout = header.layout();
-        assert_eq!(layout.len(), storage.raw_file_len()?);
         let region_size = layout.full_region_layout().len();
         let region_header_size = layout.full_region_layout().data_section().start;
         let state = InMemoryState::new(header);
