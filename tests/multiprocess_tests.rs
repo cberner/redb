@@ -309,3 +309,54 @@ fn sharing_a_caller_supplied_backend_is_unsupported() {
         .create_with_backend(InMemoryBackend::new())
         .unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod compaction {
+    use super::*;
+    use redb::{ReadableDatabase, TableDefinition};
+
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+    /// Compaction checks only this process's read transactions, and relocates and frees pages
+    /// out from under a peer's, so it is refused while the file is shared
+    #[test]
+    fn compaction_is_refused_while_the_file_is_shared() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = Database::builder()
+                .set_concurrency_mode(mode)
+                .create(tmpfile.path())
+                .unwrap();
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                t.insert(&0, [1u8; 512].as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+
+            let reader = Database::builder()
+                .set_concurrency_mode(mode)
+                .open_read_only(tmpfile.path())
+                .unwrap();
+            let pinned = reader.begin_read().unwrap();
+            // Frees the pinned snapshot's pages, which compaction would drain and reuse
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                t.insert(&0, [2u8; 512].as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+
+            match writer.compact().unwrap_err() {
+                redb::CompactionError::Storage(StorageError::Io(err)) => {
+                    assert_eq!(err.kind(), std::io::ErrorKind::Unsupported, "{mode:?}");
+                }
+                other => panic!("{mode:?}: unexpected error {other:?}"),
+            }
+            drop(pinned);
+        }
+    }
+}

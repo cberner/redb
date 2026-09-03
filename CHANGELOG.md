@@ -34,8 +34,9 @@
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
   takes a `ConcurrencyMode` configuring how processes may share the database.
   When `SingleWriterProcess` or `MultiWriterProcess` is configured, commits are always 2-phase,
-  `Durability::None` is refused, and the database may be opened read-only while another process has
-  it open for writing; each new read transaction then sees that process's durable commits.
+  `Durability::None` and `Database::compact()` are refused, and the database may be opened read-only
+  while another process has it open for writing; each new read transaction then sees that process's
+  durable commits.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

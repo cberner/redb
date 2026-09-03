@@ -965,7 +965,21 @@ impl Database {
     /// Compacts the database file
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
+    ///
+    /// Under the `experimental-multiprocess` feature, a database opened in a shared
+    /// `ConcurrencyMode` refuses compaction with [`CompactionError::Storage`] wrapping an I/O
+    /// error of kind `Unsupported`: the read transactions of other processes are invisible to it.
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
+        // The checks below see only this process's read transactions
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.mem.concurrency_mode().is_multi_process_writable() {
+            return Err(CompactionError::Storage(StorageError::Io(
+                crate::io::unsupported(
+                    "Compaction is not supported when the database is shared with other processes",
+                ),
+            )));
+        }
+
         // These checks must run before begin_write(): the caller may legally hold an open
         // WriteTransaction (it is not lifetime-bound to the Database), and if that transaction
         // created a savepoint, blocking in begin_write() below would deadlock. Savepoints must
