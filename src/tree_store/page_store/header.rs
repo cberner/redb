@@ -213,6 +213,12 @@ impl UnrepairedDatabaseHeader {
         self.inner.recovery_required || self.inner.layout().len() != file_len
     }
 
+    // The last writer did not shut down cleanly
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn unclean(&self) -> bool {
+        self.inner.recovery_required
+    }
+
     // Consume self, reconcile the layout against the actual file length, and select a primary slot
     // (repairing if necessary). Returns the usable DatabaseHeader along with a `clean` flag that is
     // true only when nothing had to be reconciled: the primary was kept and the stored layout
@@ -333,6 +339,19 @@ impl UnrepairedDatabaseHeader {
         }
 
         Ok(true)
+    }
+
+    // Keeps the primary as recorded. Choosing between the slots is a repairing writer's job: a
+    // newer secondary is a commit whose pages may not be in the file yet, or one a repair has
+    // rolled back.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn finalize_transaction_slots(self) -> Result<DatabaseHeader> {
+        if self.primary_corrupted {
+            return Err(StorageError::Corrupted(
+                "Primary commit slot is corrupted".to_string(),
+            ));
+        }
+        Ok(self.inner)
     }
 }
 
