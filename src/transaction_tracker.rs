@@ -469,7 +469,7 @@ impl TransactionTracker {
             .map(|(id, txn_id)| (*id, *txn_id))
     }
 
-    pub(crate) fn oldest_live_read_transaction(&self) -> Option<TransactionId> {
+    pub(crate) fn oldest_local_read_transaction(&self) -> Option<TransactionId> {
         self.state
             .lock()
             .unwrap()

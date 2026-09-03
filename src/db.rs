@@ -2487,8 +2487,8 @@ mod consistent_byte_test {
     }
 }
 
-/// The "active transaction range" locks a read transaction publishes, probed directly: nothing
-/// consumes them yet, and a byte-range lock is invisible through the public API in any case
+/// The "active transaction range" locks a read transaction publishes, probed directly: a
+/// byte-range lock is invisible through the public API
 #[cfg(all(
     test,
     feature = "experimental-multiprocess",
@@ -2869,5 +2869,53 @@ mod active_transaction_test {
             SEARCHED.collect::<Vec<_>>(),
             "a read transaction punctured the whole-file lock"
         );
+    }
+
+    /// The floor is the older of this process's oldest read and a peer's pin, and a peer's pin
+    /// only matters below the former, which is where the scan looks
+    #[test]
+    fn the_oldest_active_transaction_is_the_lower_of_ours_and_a_peers() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let db = create(tmpfile.path(), mode);
+            let first = db.mem.get_last_committed_transaction_id().unwrap();
+            assert_eq!(db.mem.oldest_active_transaction(None).unwrap(), None);
+
+            // A peer pins the last committed transaction, as its read of the header would
+            let probe = probe(tmpfile.path());
+            probe
+                .lock_shared_range(byte_range(TXN_BASE + first.raw_id()))
+                .unwrap();
+            assert_eq!(
+                db.mem.oldest_active_transaction(None).unwrap(),
+                Some(first),
+                "{mode:?}"
+            );
+
+            let write = db.begin_write().unwrap();
+            {
+                let mut table = write.open_table(TABLE).unwrap();
+                table.insert(1, 1).unwrap();
+            }
+            write.commit().unwrap();
+            let second = db.mem.get_last_committed_transaction_id().unwrap();
+            assert!(first < second);
+            assert_eq!(
+                db.mem.oldest_active_transaction(Some(second)).unwrap(),
+                Some(first),
+                "{mode:?}"
+            );
+            probe
+                .unlock_range(byte_range(TXN_BASE + first.raw_id()))
+                .unwrap();
+            assert_eq!(
+                db.mem.oldest_active_transaction(Some(second)).unwrap(),
+                Some(second),
+                "{mode:?}"
+            );
+        }
     }
 }

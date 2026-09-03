@@ -2003,8 +2003,8 @@ impl WriteTransaction {
         }
 
         let free_until_transaction = self
-            .transaction_tracker
-            .oldest_live_read_transaction()
+            .mem
+            .oldest_active_transaction(self.transaction_tracker.oldest_local_read_transaction())?
             .map_or(self.transaction_id, |x| x.next());
         self.process_freed_pages(free_until_transaction)?;
         // Flush allocated pages (including previously unpersisted allocations that are now
@@ -2087,7 +2087,14 @@ impl WriteTransaction {
 
         self.apply_savepoint_state_on_commit();
 
-        if self.post_commit_free == PostCommitFree::Enabled {
+        // The post-commit pass runs after publication, where a peer's pin on the transaction just
+        // superseded lands below any floor the scan above produced, so a multi-process writer's
+        // pages wait for the next durable commit
+        #[cfg(feature = "experimental-multiprocess")]
+        let multiprocess_writer = self.mem.concurrency_mode().is_multi_process_writable();
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let multiprocess_writer = false;
+        if self.post_commit_free == PostCommitFree::Enabled && !multiprocess_writer {
             self.process_data_freed_pages_after_commit(
                 user_root,
                 &page_allocator,
@@ -2107,10 +2114,10 @@ impl WriteTransaction {
         let epilogue_transaction = self.transaction_id.next();
         let mut free_until = self
             .transaction_tracker
-            .oldest_live_read_transaction()
+            .oldest_local_read_transaction()
             .map_or(epilogue_transaction, |x| x.next());
         // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
-        // is also a live read, so absent concurrency `oldest_live_read_transaction()` never
+        // is also a live read, so absent concurrency `oldest_local_read_transaction()` never
         // exceeds it and this is a no-op. But an ephemeral `Savepoint::drop` racing this commit
         // (legal since `WriteTransaction: Sync`) can land between the purge and here, advancing
         // the oldest live read past the savepoint the purge kept entries for. Freeing those pages
@@ -2323,7 +2330,7 @@ impl WriteTransaction {
         let page_allocator = self.page_allocator();
         let mut free_page = |page| {
             // These pages cannot be unpersisted: free_until is bounded by
-            // oldest_live_read_transaction, which pins back to the durable_ancestor of every
+            // oldest_local_read_transaction, which pins back to the durable_ancestor of every
             // pending non-durable commit (see register_non_durable_commit). As a result, no entry
             // whose pages are still unpersisted is eligible for processing here.
             debug_assert!(!self.mem.unpersisted(page));
