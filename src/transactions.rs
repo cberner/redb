@@ -1513,6 +1513,11 @@ impl WriteTransaction {
     /// database process to crash, can cause the database to crash with the god byte primary bit
     /// pointing to an invalid commit slot, leaving the database in an invalid, potentially attacker-
     /// controlled state.
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "Disabling it has no effect in the multi-process concurrency modes, which always commit in 2 phases. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn set_two_phase_commit(&mut self, enabled: bool) {
         self.two_phase_commit = enabled;
     }
@@ -1702,6 +1707,13 @@ impl WriteTransaction {
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
+            self.two_phase_commit = true;
+        }
+        // Multi-process modes with a writer require 2-phase commit: a 1-phase commit publishes the
+        // secondary slot before flushing the pages it names, which a reader in another process
+        // would then follow
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.mem.concurrency_mode().is_multi_process_writable() {
             self.two_phase_commit = true;
         }
 

@@ -2693,6 +2693,26 @@ mod active_transaction_test {
         );
     }
 
+    /// Sharing the file forces 2-phase, whatever the transaction asked for
+    #[test]
+    fn a_shared_commit_is_two_phase() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+
+        let mut write = db.begin_write().unwrap();
+        write.set_two_phase_commit(false);
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(1, 1).unwrap();
+        }
+        write.commit().unwrap();
+
+        assert!(
+            db.mem.used_two_phase_commit(),
+            "a shared commit published without the flush between the header writes"
+        );
+    }
+
     /// A single-process open holds the whole file, which covers these bytes. Locking one and
     /// releasing it would punch a hole in that lock, so this mode locks nothing
     #[test]

@@ -33,6 +33,7 @@
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
   takes a `ConcurrencyMode` configuring how processes may share the database.
+  When `SingleWriterProcess` or `MultiWriterProcess` is configured, commits are always 2-phase.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
