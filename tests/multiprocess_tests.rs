@@ -4,6 +4,161 @@ use redb::backends::InMemoryBackend;
 use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod shared_reader {
+    use super::*;
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    fn shared() -> redb::Builder {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder
+    }
+
+    fn create(path: &Path) -> Database {
+        let db = shared().create(path).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        write.commit().unwrap();
+        db
+    }
+
+    fn value(db: &impl ReadableDatabase) -> u64 {
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(TABLE).unwrap();
+        table.get(0).unwrap().unwrap().value()
+    }
+
+    /// A shared reader reads pages by the immutable geometry alone, so the region counts, which an
+    /// unclean header leaves unvalidated, never reach it
+    #[test]
+    fn a_shared_reader_ignores_the_layout() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let writer = create(tmpfile.path());
+        let write = writer.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 7).unwrap();
+        }
+        write.commit().unwrap();
+
+        // The region counts, torn to zero under the live writer
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        file.seek(SeekFrom::Start(24)).unwrap();
+        file.write_all(&[0u8; 8]).unwrap();
+        drop(file);
+
+        let reader = shared().open_read_only(tmpfile.path()).unwrap();
+        assert_eq!(value(&reader), 7);
+        // Its close would rewrite the header, which is not what this tests
+        std::mem::forget(writer);
+    }
+
+    /// Simulates power loss: once `dead`, every write is dropped
+    #[derive(Debug)]
+    struct CrashBackend {
+        inner: redb::backends::FileBackend,
+        dead: Arc<AtomicBool>,
+    }
+
+    impl redb::StorageBackend for CrashBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.sync_data()
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            if self.dead.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.inner.write(offset, data)
+        }
+    }
+
+    /// A writer takes `SHARED_WRITER_BYTE` before `do_repair()` runs, so a reader admitted on that
+    /// byte alone would walk a tree the repair is discarding. The consistent byte keeps it out
+    #[test]
+    fn a_repairing_writer_does_not_admit_a_shared_reader() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+
+        // Crashed after a commit, so the next open has to repair it
+        let dead = Arc::new(AtomicBool::new(false));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let db = Database::builder()
+            .create_with_backend(CrashBackend {
+                inner: redb::backends::FileBackend::new(file).unwrap(),
+                dead: Arc::clone(&dead),
+            })
+            .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 9).unwrap();
+        }
+        write.commit().unwrap();
+        dead.store(true, Ordering::SeqCst);
+        drop(db);
+
+        // The repair callback fires inside do_repair()
+        let path = tmpfile.path().to_path_buf();
+        let during: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let recorder = Arc::clone(&during);
+
+        let mut builder = shared();
+        builder.set_repair_callback(move |_| {
+            let mut recorded = recorder.lock().unwrap();
+            if recorded.is_some() {
+                return;
+            }
+            *recorded = Some(match shared().open_read_only(&path) {
+                Ok(_) => "opened".to_string(),
+                Err(err) => format!("{err:?}"),
+            });
+        });
+        let repaired = builder.open(tmpfile.path()).unwrap();
+
+        assert_eq!(
+            during.lock().unwrap().take().as_deref(),
+            Some("RepairAborted"),
+            "a shared reader was admitted while the database was still being repaired"
+        );
+
+        let reader = shared().open_read_only(tmpfile.path()).unwrap();
+        assert_eq!(value(&reader), 9);
+        drop(repaired);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod writer_byte {
     use super::*;
     use redb::TableDefinition;

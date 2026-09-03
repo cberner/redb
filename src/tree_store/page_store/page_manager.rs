@@ -700,7 +700,7 @@ impl TransactionalMemory {
     }
 
     /// Reads the header, reconciling the layout against the file's length and writing back a
-    /// repair if one was needed.
+    /// repair if one was needed. A shared reader does neither: see `read_shared_header()`.
     fn read_header(
         storage: &PagedCachedFile,
         #[cfg(feature = "experimental-multiprocess")] in_process_header_lock: &Mutex<()>,
@@ -708,6 +708,15 @@ impl TransactionalMemory {
         page_size: usize,
         read_only: bool,
     ) -> Result<DatabaseHeader, DatabaseError> {
+        #[cfg(feature = "experimental-multiprocess")]
+        if read_only && concurrency_mode.is_multi_process_writable() {
+            return Self::read_shared_header(
+                storage,
+                in_process_header_lock,
+                concurrency_mode,
+                page_size,
+            );
+        }
         let header_bytes = {
             #[cfg(feature = "experimental-multiprocess")]
             let _guard =
@@ -735,6 +744,34 @@ impl TransactionalMemory {
         assert_eq!(header.layout().len(), storage.raw_file_len()?);
 
         Ok(header)
+    }
+
+    /// Reads the header for a shared reader. It consults neither the layout nor the file's length:
+    /// it never allocates, and reads pages by the immutable geometry alone. A writer publishes the
+    /// recovery flag under its exclusive hold, and holds `CONSISTENT_BYTE` only while that flag
+    /// means a live writer.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn read_shared_header(
+        storage: &PagedCachedFile,
+        in_process_header_lock: &Mutex<()>,
+        concurrency_mode: ConcurrencyMode,
+        page_size: usize,
+    ) -> Result<DatabaseHeader, DatabaseError> {
+        let (header_bytes, consistent) = {
+            let _guard =
+                Self::lock_header(storage, in_process_header_lock, concurrency_mode, false)?;
+            (
+                storage.read_direct(0, DB_HEADER_SIZE)?,
+                storage.query_lock_range(byte_range(CONSISTENT_BYTE))?,
+            )
+        };
+        let unrepaired =
+            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
+        // An unclean file is a live writer's to repair, if there is one
+        if unrepaired.unclean() && !consistent {
+            return Err(DatabaseError::RepairAborted);
+        }
+        Ok(unrepaired.finalize_transaction_slots()?)
     }
 
     /// Acquire the multi-process writer lock

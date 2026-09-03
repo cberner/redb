@@ -533,6 +533,11 @@ pub trait ReadableDatabase: SealedInApi5 {
 ///
 /// Multiple processes may open a [`ReadOnlyDatabase`], but it may not be opened concurrently
 /// with a [`Database`].
+#[cfg_attr(
+    feature = "experimental-multiprocess",
+    doc = "",
+    doc = "The multi-process concurrency modes are the exception: a reader shares the file with the writer. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+)]
 ///
 /// # Examples
 ///
@@ -620,17 +625,24 @@ impl ReadOnlyDatabase {
             concurrency_mode,
         )?;
         let mem = Arc::new(mem);
-        // If the last transaction used 2-phase commit and updated the allocator state table, then
-        // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Database::get_allocator_state_table(&mem)? {
-            mem.load_allocator_state(&tree)?;
-        } else {
-            #[cfg(feature = "logging")]
-            warn!(
-                "Database {:?} not shutdown cleanly. Repair required",
-                &file_path
-            );
-            return Err(DatabaseError::RepairAborted);
+        // A reader beside a multi-process writer never allocates, so it loads no allocator state
+        #[cfg(feature = "experimental-multiprocess")]
+        let multiprocess_writer = concurrency_mode.is_multi_process_writable();
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let multiprocess_writer = false;
+        if !multiprocess_writer {
+            // If the last transaction used 2-phase commit and updated the allocator state table, then
+            // we can just load the allocator state from there. Otherwise, we need a full repair
+            if let Some(tree) = Database::get_allocator_state_table(&mem)? {
+                mem.load_allocator_state(&tree)?;
+            } else {
+                #[cfg(feature = "logging")]
+                warn!(
+                    "Database {:?} not shutdown cleanly. Repair required",
+                    &file_path
+                );
+                return Err(DatabaseError::RepairAborted);
+            }
         }
 
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
@@ -1728,6 +1740,11 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "Only a single-process writer is refused: in the multi-process concurrency modes a reader opened in the same mode as the writer shares the file with it. See [`Self::set_concurrency_mode`]."
+    )]
     #[cfg(not(redb_no_std))]
     pub fn open_read_only(
         &self,
@@ -2477,8 +2494,8 @@ mod active_transaction_test {
     use std::path::Path;
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
-    // The ids a freshly created database can have committed
-    const SEARCHED: std::ops::Range<u64> = 0..8;
+    // The ids a freshly created database can have committed, with room for a few more commits
+    const SEARCHED: std::ops::Range<u64> = 0..16;
 
     fn create(path: &Path, mode: ConcurrencyMode) -> Database {
         let mut builder = Database::builder();
@@ -2673,6 +2690,66 @@ mod active_transaction_test {
         ));
     }
 
+    /// A read-only participant takes the primary as recorded: choosing between the slots is a
+    /// repairing writer's job, and a newer secondary it can see is a commit whose pages are not in
+    /// the file yet, or one a repair has just rolled back
+    #[test]
+    fn a_read_only_participant_takes_the_primary_as_recorded() {
+        use std::io::{Read, Write};
+
+        let tmpfile = crate::create_tempfile();
+        drop(create(tmpfile.path(), ConcurrencyMode::SingleProcess));
+
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+
+        // A newer commit whose pages this file never received: made in a copy, then its slot
+        // spliced into this file's secondary slot
+        let copy = crate::create_tempfile();
+        std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+        let db = Database::open(copy.path()).unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 1).unwrap();
+        }
+        write.commit().unwrap();
+        drop(db);
+
+        let header = |path: &Path| -> Vec<u8> {
+            let mut header = vec![0u8; 320];
+            File::open(path).unwrap().read_exact(&mut header).unwrap();
+            header
+        };
+        let slot = |index: usize| 64 + index * 128..64 + (index + 1) * 128;
+        let id = |header: &[u8], index: usize| {
+            u64::from_le_bytes(header[slot(index)][104..112].try_into().unwrap())
+        };
+        let newer = header(copy.path());
+        let mut spliced = header(tmpfile.path());
+        let primary = usize::from(spliced[9] & 1);
+        spliced[slot(1 - primary)].copy_from_slice(&newer[slot(usize::from(newer[9] & 1))]);
+        // The god byte a repair leaves on a 1-phase history: recovery clear, 2-phase clear
+        spliced[9] &= !6;
+        OpenOptions::new()
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap()
+            .write_all(&spliced)
+            .unwrap();
+        assert!(id(&spliced, 1 - primary) > id(&spliced, primary));
+        let probe = probe(tmpfile.path());
+
+        let opened = builder.open_read_only(tmpfile.path()).unwrap();
+        let read = opened.begin_read().unwrap();
+        assert_eq!(
+            held_ids(&probe),
+            vec![id(&spliced, primary)],
+            "the reader adopted a slot whose pages the file never received"
+        );
+        drop(read);
+    }
+
     /// Sharing the file forces 2-phase, whatever the transaction asked for
     #[test]
     fn a_shared_commit_is_two_phase() {
@@ -2691,6 +2768,37 @@ mod active_transaction_test {
             db.mem.used_two_phase_commit(),
             "a shared commit published without the flush between the header writes"
         );
+    }
+
+    /// With no writer holding the file, an unclean one is refused: nothing is coming to repair it
+    #[test]
+    fn a_shared_read_refuses_an_unclean_file_with_no_writer() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let tmpfile = crate::create_tempfile();
+        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess));
+
+        // The god byte's recovery-required bit, which a clean shutdown clears
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let mut byte = [0u8; 1];
+            file.seek(SeekFrom::Start(9)).unwrap();
+            file.read_exact(&mut byte).unwrap();
+            byte[0] |= 2;
+            file.seek(SeekFrom::Start(9)).unwrap();
+            file.write_all(&byte).unwrap();
+        }
+
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        assert!(matches!(
+            builder.open_read_only(tmpfile.path()),
+            Err(crate::DatabaseError::RepairAborted)
+        ));
     }
 
     /// A single-process open holds the whole file, which covers these bytes. Locking one and
