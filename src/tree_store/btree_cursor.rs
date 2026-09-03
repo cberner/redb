@@ -2454,6 +2454,7 @@ fn park_bound<K: Key + 'static, V: Value + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree_store::AccessMode;
     use crate::tree_store::btree_base::{DEFERRED, LeafBuilder};
     use crate::tree_store::{
         AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
@@ -2466,7 +2467,7 @@ mod tests {
             PAGE_SIZE,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
             crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();

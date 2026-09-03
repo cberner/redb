@@ -2281,6 +2281,7 @@ impl<'b> BranchMutator<'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tree_store::AccessMode;
     use crate::tree_store::{
         AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
     };
@@ -2298,7 +2299,7 @@ mod tests {
             page_size,
             None,
             0,
-            false,
+            AccessMode::ReadWrite,
             crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap();

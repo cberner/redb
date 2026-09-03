@@ -855,11 +855,11 @@ impl SavepointTransactionState {
         !self.created_persistent.is_empty() || !self.deleted_persistent.is_empty()
     }
 
-    fn apply_on_commit(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
+    fn apply_on_commit(&mut self, tracker: &TransactionTracker) {
         // Persistent savepoints whose on-disk entry was deleted: release their
         // tracker refcount now that the deletion is durable.
         for (savepoint, transaction) in self.deleted_persistent.drain(..) {
-            tracker.deallocate_savepoint(mem, savepoint, transaction);
+            tracker.deallocate_savepoint(savepoint, transaction);
         }
         // Savepoints that restore_savepoint() invalidated: remove them from the
         // shared valid_savepoints map. For persistent savepoints,
@@ -872,12 +872,12 @@ impl SavepointTransactionState {
         self.created_persistent.clear();
     }
 
-    fn apply_on_abort(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
+    fn apply_on_abort(&mut self, tracker: &TransactionTracker) {
         // Persistent savepoints created during this transaction: their
         // on-disk entries will be rolled back by rollback_uncommitted_writes(),
         // but the shared tracker registration must be released explicitly.
         for (savepoint, transaction) in mem::take(&mut self.created_persistent) {
-            tracker.deallocate_savepoint(mem, savepoint, transaction);
+            tracker.deallocate_savepoint(savepoint, transaction);
         }
         // Deleted-persistent entries will be rolled back on disk, so the
         // tracker state must NOT be released (it is still valid).
@@ -892,13 +892,21 @@ impl SavepointTransactionState {
 // have returned pages to the allocator that the durable roots still reference through the
 // freed tables; such an allocator state must never be used, or persisted by a clean
 // shutdown, again.
+//
+// In multi-writer mode the transaction's buffers and cache go too: its pages are free in every
+// durable state, and once the writer byte is released another process may fill them, which a
+// later flush would overwrite and a cached copy would shadow.
 struct AllocatorStateLatch {
     mem: Option<Arc<TransactionalMemory>>,
+    multi_writer: bool,
 }
 
 impl AllocatorStateLatch {
-    fn arm(mem: Arc<TransactionalMemory>) -> Self {
-        Self { mem: Some(mem) }
+    fn arm(mem: Arc<TransactionalMemory>, multi_writer: bool) -> Self {
+        Self {
+            mem: Some(mem),
+            multi_writer,
+        }
     }
 
     fn disarm(mut self) {
@@ -909,6 +917,13 @@ impl AllocatorStateLatch {
 impl Drop for AllocatorStateLatch {
     fn drop(&mut self) {
         if let Some(mem) = self.mem.take() {
+            #[cfg(redb_multiprocess)]
+            if self.multi_writer {
+                mem.discard_buffered_writes();
+                mem.clear_read_cache();
+            }
+            #[cfg(not(redb_multiprocess))]
+            let _ = self.multi_writer;
             mem.invalidate_allocator_state();
         }
     }
@@ -1148,7 +1163,9 @@ impl WriteTransaction {
             return Err(SavepointError::ImmediateDurabilityRequired);
         }
 
-        let mut savepoint = self.ephemeral_savepoint()?;
+        // Through the inner constructor: the savepoint made here becomes persistent below, so
+        // the multi-writer restriction on user-held ephemeral savepoints does not apply to it
+        let mut savepoint = self.ephemeral_savepoint_inner()?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
 
@@ -1171,7 +1188,7 @@ impl WriteTransaction {
 
         savepoint.set_persistent();
         self.transaction_tracker
-            .mark_savepoint_persistent(savepoint.get_id());
+            .mark_savepoint_persistent(&self.mem, savepoint.get_id());
 
         self.savepoint_state
             .lock()
@@ -1276,7 +1293,21 @@ impl WriteTransaction {
     ///
     /// Returns [`SavepointError::InvalidSavepoint`] if the transaction is "dirty" (a data
     /// table has been opened, renamed, or deleted, or a savepoint has been restored)
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "Not supported in `ConcurrencyMode::MultiWriterProcess`, where savepoint ids come from the database so that they stay distinct across processes: returns [`SavepointError::InvalidSavepoint`]. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
+        // In multi-writer mode savepoint ids come from the counter in the database, which keeps
+        // them collision-free across processes; an ephemeral one's would not
+        if self.transaction_tracker.multi_writer() {
+            return Err(SavepointError::InvalidSavepoint);
+        }
+        self.ephemeral_savepoint_inner()
+    }
+
+    fn ephemeral_savepoint_inner(&self) -> Result<Savepoint, SavepointError> {
         // Serialize the dirty check and savepoint registration against
         // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
         // a concurrent first table-open (legal since `WriteTransaction: Sync`) can read the
@@ -1708,7 +1739,8 @@ impl WriteTransaction {
     fn commit_inner(&mut self) -> Result<(), CommitError> {
         // Covers both the error and the panic-unwind path. Without an allocator state,
         // begin_write() refuses new write transactions and the next open repairs.
-        let latch = AllocatorStateLatch::arm(self.mem.clone());
+        let latch =
+            AllocatorStateLatch::arm(self.mem.clone(), self.transaction_tracker.multi_writer());
         let result = self.commit_inner_helper();
         if result.is_ok() {
             latch.disarm();
@@ -1717,6 +1749,11 @@ impl WriteTransaction {
     }
 
     fn commit_inner_helper(&mut self) -> Result<(), CommitError> {
+        // The next process to take the writer byte loads the allocator state this records,
+        // rather than rebuilding it, so it is not optional
+        if self.transaction_tracker.multi_writer() {
+            self.quick_repair = true;
+        }
         // Quick-repair requires 2-phase commit
         if self.quick_repair {
             self.two_phase_commit = true;
@@ -1805,7 +1842,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_commit(&self.mem, &self.transaction_tracker);
+            .apply_on_commit(&self.transaction_tracker);
     }
 
     fn store_data_freed_pages(&self, freed_pages: Vec<PageNumber>) -> Result<bool> {
@@ -1983,9 +2020,16 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_abort(&self.mem, &self.transaction_tracker);
+            .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
+        // Free in every durable state, and once the writer byte is released another process may
+        // fill these pages with no horizon movement to invalidate stale copies
+        #[cfg(redb_multiprocess)]
+        if self.transaction_tracker.multi_writer() {
+            self.mem.discard_buffered_writes();
+            self.mem.clear_read_cache();
+        }
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())
@@ -2661,6 +2705,14 @@ impl Drop for WriteTransaction {
             // The abort is skipped while unwinding, leaking this transaction's pages: the
             // session stays usable, but the leak must not outlive the process
             assert!(crate::panicking());
+            #[cfg(redb_multiprocess)]
+            if self.transaction_tracker.multi_writer() {
+                // Once the writer byte is released another process may fill the pages these
+                // writes shadow, and a leaked page in the read cache is refilled without the
+                // collection that drops stale entries
+                self.mem.discard_buffered_writes();
+                self.mem.clear_read_cache();
+            }
             self.mem.mark_needs_repair();
         }
     }

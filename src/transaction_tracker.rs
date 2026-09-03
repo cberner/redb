@@ -1,6 +1,8 @@
 use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::MultiProcessWriterGuard;
 use crate::tree_store::TransactionalMemory;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;
@@ -82,6 +84,9 @@ struct State {
     next_savepoint_id: SavepointId,
     // reference count of read transactions per transaction id
     live_read_transactions: BTreeMap<TransactionId, u64>,
+    // How many of those references are persistent savepoints, which bound reclamation like any
+    // reference but take no cross-process lock: see adopt_persistent_savepoints()
+    savepoint_references: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
     live_write_transaction: Option<TransactionId>,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
@@ -95,6 +100,9 @@ struct State {
     pending_non_durable_commits: BTreeMap<TransactionId, TransactionId>,
     // Non-durable commits which have NOT been processed in the freed table
     unprocessed_freed_non_durable_commits: BTreeSet<TransactionId>,
+    // True while a thread is starting a write transaction but has no id yet: a multi-process
+    // database takes the writer byte and reloads in that window, without the state lock
+    write_transaction_starting: bool,
     // Set when the Database was dropped while a write transaction was live. That transaction
     // keeps the database open, and end_write_transaction() hands the close back to it when
     // it ends
@@ -102,7 +110,15 @@ struct State {
 }
 
 impl State {
-    // Takes the "active transaction byte" as the first reference to `id` appears, and releases it
+    // The references to `id` that are reads, which the "active transaction byte" announces to
+    // the other processes; `savepoint_references` are the ones it leaves out
+    #[cfg(feature = "experimental-multiprocess")]
+    fn read_references(&self, id: TransactionId) -> u64 {
+        self.live_read_transactions.get(&id).copied().unwrap_or(0)
+            - self.savepoint_references.get(&id).copied().unwrap_or(0)
+    }
+
+    // Takes the "active transaction byte" as the first read of `id` appears, and releases it
     // as the last goes away, so a writer in another process sees exactly the transactions this one
     // is still reading. Done under the lock that holds the count, so the two cannot disagree: a
     // reference taken between the count reaching zero and the byte being released would otherwise
@@ -113,13 +129,12 @@ impl State {
         id: TransactionId,
         #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
     ) -> Result {
-        let count = self.live_read_transactions.entry(id).or_insert(0);
-        *count += 1;
+        *self.live_read_transactions.entry(id).or_insert(0) += 1;
         #[cfg(feature = "experimental-multiprocess")]
-        if *count == 1
+        if self.read_references(id) == 1
             && let Err(err) = mem.lock_mp_transaction(id, header)
         {
-            self.live_read_transactions.remove(&id);
+            self.drop_reference(id);
             return Err(err);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
@@ -129,48 +144,108 @@ impl State {
     }
 
     fn dereference_transaction(&mut self, mem: &TransactionalMemory, id: TransactionId) {
-        let count = self.live_read_transactions.get_mut(&id).unwrap();
-        *count -= 1;
-        if *count == 0 {
-            self.live_read_transactions.remove(&id);
+        self.drop_reference(id);
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.read_references(id) == 0 {
             // Failing to release only leaves a peer reclaiming less than it could
-            #[cfg(feature = "experimental-multiprocess")]
             let _ = mem.unlock_mp_transaction(id);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
         let _ = mem;
+    }
+
+    // A persistent savepoint's reference: it bounds this handle's reclamation like a read, but
+    // announces nothing to the other processes. See `savepoint_references`
+    fn reference_savepoint(&mut self, id: TransactionId) {
+        *self.live_read_transactions.entry(id).or_insert(0) += 1;
+        *self.savepoint_references.entry(id).or_insert(0) += 1;
+    }
+
+    fn dereference_savepoint(&mut self, id: TransactionId) {
+        self.drop_reference(id);
+        let count = self.savepoint_references.get_mut(&id).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            self.savepoint_references.remove(&id);
+        }
+    }
+
+    // Hands the read reference a savepoint was created from over to the savepoint, releasing
+    // the byte with it: from here on the savepoint is protected the way an adopted one is
+    fn convert_reference_to_savepoint(&mut self, mem: &TransactionalMemory, id: TransactionId) {
+        *self.savepoint_references.entry(id).or_insert(0) += 1;
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.read_references(id) == 0 {
+            let _ = mem.unlock_mp_transaction(id);
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let _ = mem;
+    }
+
+    fn drop_reference(&mut self, id: TransactionId) {
+        let count = self.live_read_transactions.get_mut(&id).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            self.live_read_transactions.remove(&id);
+        }
     }
 }
 
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
+    // Present when the database is shared between processes: the coordinator that publishes
+    // this process's transaction pins and reads the other processes' state
+    #[cfg(redb_multiprocess)]
+    multiprocess: Option<Arc<crate::multiprocess::Coordinator>>,
 }
 
 impl TransactionTracker {
     pub(crate) fn new(next_transaction_id: TransactionId) -> Self {
+        Self::new_fields(next_transaction_id)
+    }
+
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn new_multiprocess(
+        next_transaction_id: TransactionId,
+        coordinator: Arc<crate::multiprocess::Coordinator>,
+    ) -> Self {
+        let mut tracker = Self::new_fields(next_transaction_id);
+        tracker.multiprocess = Some(coordinator);
+        tracker
+    }
+
+    fn new_fields(next_transaction_id: TransactionId) -> Self {
         Self {
             state: Mutex::new(State {
                 next_savepoint_id: SavepointId(0),
                 live_read_transactions: BTreeMap::default(),
+                savepoint_references: BTreeMap::default(),
                 next_transaction_id,
                 live_write_transaction: None,
                 valid_savepoints: BTreeMap::default(),
                 persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: BTreeMap::default(),
                 unprocessed_freed_non_durable_commits: BTreeSet::default(),
+                write_transaction_starting: false,
                 deferred_close: None,
             }),
             live_write_transaction_available: Condvar::new(),
+            #[cfg(redb_multiprocess)]
+            multiprocess: None,
         }
     }
 
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+    fn reserve_write_slot(&self) -> crate::sync::MutexGuard<'_, State> {
         let mut state = self.state.lock().unwrap();
-        while state.live_write_transaction.is_some() {
+        while state.live_write_transaction.is_some() || state.write_transaction_starting {
             state = self.live_write_transaction_available.wait(state).unwrap();
         }
-        assert!(state.live_write_transaction.is_none());
+        state
+    }
+
+    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+        let mut state = self.reserve_write_slot();
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
         debug!("Beginning write transaction id={transaction_id:?}");
@@ -179,14 +254,51 @@ impl TransactionTracker {
         transaction_id
     }
 
+    // Starts a write transaction for a multi-process database. `prepare` blocks on the writer
+    // byte, so it runs with the write slot reserved but the state lock released, and returns the
+    // last transaction any process committed, which numbers the new one.
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn start_write_transaction_prepared(
+        &self,
+        prepare: impl FnOnce() -> Result<TransactionId>,
+    ) -> Result<TransactionId> {
+        self.reserve_write_slot().write_transaction_starting = true;
+
+        let prepared = prepare();
+
+        let mut state = self.state.lock()?;
+        state.write_transaction_starting = false;
+        let last_committed = match prepared {
+            Ok(last_committed) => last_committed,
+            Err(err) => {
+                self.live_write_transaction_available.notify_one();
+                return Err(err);
+            }
+        };
+        // Ids come from the file, so they stay ordered across processes
+        state.next_transaction_id = state.next_transaction_id.max(last_committed);
+        let transaction_id = state.next_transaction_id.increment();
+        #[cfg(feature = "logging")]
+        debug!("Beginning write transaction id={transaction_id:?}");
+        state.live_write_transaction = Some(transaction_id);
+
+        Ok(transaction_id)
+    }
+
     // Returns the deferred close, if the Database was dropped while this transaction was live.
     // The caller must close the database, now that the write transaction has ended
     pub(crate) fn end_write_transaction(
         &self,
         id: TransactionId,
+        #[cfg(feature = "experimental-multiprocess")] writer: Option<MultiProcessWriterGuard>,
     ) -> Option<Arc<TransactionalMemory>> {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.live_write_transaction.unwrap(), id);
+        // The byte goes under the state lock, before the slot: a transaction of this process
+        // cannot take it on the same description while this one still holds it, and a read
+        // cannot find the slot live once the byte is gone
+        #[cfg(feature = "experimental-multiprocess")]
+        drop(writer);
         state.live_write_transaction = None;
         self.live_write_transaction_available.notify_one();
         state.deferred_close.take()
@@ -301,20 +413,10 @@ impl TransactionTracker {
         state.next_savepoint_id = next_savepoint;
     }
 
-    pub(crate) fn register_persistent_savepoint(
-        &self,
-        mem: &TransactionalMemory,
-        savepoint: &Savepoint,
-    ) -> Result {
-        #[cfg(feature = "experimental-multiprocess")]
-        let header = mem.lock_header_shared()?;
+    pub(crate) fn register_persistent_savepoint(&self, savepoint: &Savepoint) -> Result {
+        // No hold: a savepoint's reference takes no byte, so there is nothing to order against
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(
-            mem,
-            savepoint.get_transaction_id(),
-            #[cfg(feature = "experimental-multiprocess")]
-            &header,
-        )?;
+        state.reference_savepoint(savepoint.get_transaction_id());
         state
             .valid_savepoints
             .insert(savepoint.get_id(), savepoint.get_transaction_id());
@@ -324,10 +426,11 @@ impl TransactionTracker {
     }
 
     // Marks an already-registered savepoint as persistent
-    pub(crate) fn mark_savepoint_persistent(&self, id: SavepointId) {
+    pub(crate) fn mark_savepoint_persistent(&self, mem: &TransactionalMemory, id: SavepointId) {
         let mut state = self.state.lock().unwrap();
-        assert!(state.valid_savepoints.contains_key(&id));
+        let transaction = *state.valid_savepoints.get(&id).unwrap();
         state.persistent_savepoints.insert(id);
+        state.convert_reference_to_savepoint(mem, transaction);
     }
 
     pub(crate) fn register_read_transaction(
@@ -336,11 +439,13 @@ impl TransactionTracker {
     ) -> Result<TransactionId> {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
+        let mut state = self.state.lock()?;
         let id = mem.latest_committed_transaction_id(
+            #[cfg(feature = "experimental-multiprocess")]
+            state.live_write_transaction.is_some(),
             #[cfg(feature = "experimental-multiprocess")]
             &header,
         )?;
-        let mut state = self.state.lock()?;
         state.reference_transaction(
             mem,
             id,
@@ -354,6 +459,68 @@ impl TransactionTracker {
     pub(crate) fn deallocate_read_transaction(&self, mem: &TransactionalMemory, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
         state.dereference_transaction(mem, id);
+    }
+
+    /// Whether a cross-process coordinator is installed.
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn has_coordinator(&self) -> bool {
+        self.multiprocess.is_some()
+    }
+
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn coordinator(&self) -> Option<&Arc<crate::multiprocess::Coordinator>> {
+        self.multiprocess.as_ref()
+    }
+
+    // True when another process may take the writer byte between this process's transactions,
+    // so that everything this one leaves in memory has to be assumed stale
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn multi_writer(&self) -> bool {
+        self.multiprocess
+            .as_ref()
+            .is_some_and(|coordinator| coordinator.multi_writer())
+    }
+
+    #[cfg(not(redb_multiprocess))]
+    #[allow(clippy::unused_self)]
+    pub(crate) fn multi_writer(&self) -> bool {
+        false
+    }
+
+    // Replaces the persistent savepoints this process knows with the ones the file names, and
+    // adopts the file's id counter. The caller must hold the writer byte. The adopted savepoints
+    // take no pin: every writer adopts before it can free a page, and a pin would outlive a
+    // savepoint another process deletes.
+    #[cfg(redb_multiprocess)]
+    pub(crate) fn adopt_persistent_savepoints(
+        &self,
+        next_savepoint: Option<SavepointId>,
+        savepoints: &[(SavepointId, TransactionId)],
+    ) -> Result {
+        let mut state = self.state.lock()?;
+
+        let previous: Vec<(SavepointId, TransactionId)> = state
+            .persistent_savepoints
+            .iter()
+            .filter_map(|id| state.valid_savepoints.get(id).map(|txn| (*id, *txn)))
+            .collect();
+        for (id, transaction) in &previous {
+            state.persistent_savepoints.remove(id);
+            state.valid_savepoints.remove(id);
+            state.dereference_savepoint(*transaction);
+        }
+        if let Some(next_savepoint) = next_savepoint {
+            // Only ever forwards: this process may have handed out higher ids, which are still
+            // live and must not be handed out again
+            state.next_savepoint_id = state.next_savepoint_id.max(next_savepoint);
+        }
+        for (id, transaction) in savepoints {
+            state.reference_savepoint(*transaction);
+            state.valid_savepoints.insert(*id, *transaction);
+            state.persistent_savepoints.insert(*id);
+        }
+
+        Ok(())
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
@@ -406,15 +573,13 @@ impl TransactionTracker {
         state.persistent_savepoints.remove(&savepoint);
     }
 
-    // Deallocates the given savepoint and its matching reference count on the transcation
-    pub(crate) fn deallocate_savepoint(
-        &self,
-        mem: &TransactionalMemory,
-        savepoint: SavepointId,
-        transaction: TransactionId,
-    ) {
+    // Deallocates the given persistent savepoint and its matching reference on the transaction
+    pub(crate) fn deallocate_savepoint(&self, savepoint: SavepointId, transaction: TransactionId) {
         self.remove_savepoint(savepoint);
-        self.deallocate_read_transaction(mem, transaction);
+        self.state
+            .lock()
+            .unwrap()
+            .dereference_savepoint(transaction);
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
@@ -537,7 +702,7 @@ mod test {
             PAGE_SIZE,
             None,
             0,
-            false,
+            crate::tree_store::AccessMode::ReadWrite,
             crate::db::ConcurrencyMode::SingleProcess,
         )
         .unwrap()

@@ -214,7 +214,7 @@ impl UnrepairedDatabaseHeader {
     }
 
     // The last writer did not shut down cleanly
-    #[cfg(feature = "experimental-multiprocess")]
+    #[cfg(redb_multiprocess)]
     pub(super) fn unclean(&self) -> bool {
         self.inner.recovery_required
     }
