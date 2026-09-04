@@ -882,6 +882,8 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                #[cfg(feature = "experimental-multiprocess")]
+                None,
             )?;
             // Reserve the id, or the next write transaction would commit with the same one,
             // which crash recovery could then resolve to the wrong slot
@@ -1349,6 +1351,8 @@ impl Database {
                 next_transaction_id,
                 true,
                 ShrinkPolicy::Never,
+                #[cfg(feature = "experimental-multiprocess")]
+                None,
             )?;
         }
 
@@ -1445,31 +1449,50 @@ impl Database {
     /// database open: if the [`Database`] is dropped while the transaction is live, the
     /// transaction remains usable and the database closes when the transaction completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
+        self.begin_write_with(
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
+        )
+    }
+
+    fn begin_write_with(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
-            self.write_guard()?,
+            self.write_guard(
+                #[cfg(feature = "experimental-multiprocess")]
+                writer_lock,
+            )?,
             &self.transaction_tracker,
             &self.mem,
             AllocationPolicy::Default,
         )
     }
 
-    /// The write slot, and the lock the transaction will write under.
-    fn write_guard(&self) -> Result<TransactionGuard, TransactionError> {
+    /// The write slot, and the lock the transaction will write under: `writer_lock` where the
+    /// caller lends the one it holds, since a second lock on that byte from this file
+    /// description is the same lock, and this transaction's end would release the caller's.
+    fn write_guard(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result<TransactionGuard, TransactionError> {
         // Fail early if there has been an I/O error -- nothing can be committed in that case
         self.mem.check_io_errors()?;
         let transaction_id = self.transaction_tracker.start_write_transaction();
         #[cfg(feature = "experimental-multiprocess")]
-        let writer_lock = match self.mem.lock_writer() {
-            Ok(lock) => lock,
-            Err(err) => {
-                // Nothing owns the slot yet, and this database is live, so no close is deferred
-                let deferred = self
-                    .transaction_tracker
-                    .end_write_transaction(transaction_id, None);
-                assert!(deferred.is_none());
-                return Err(err.into());
-            }
-        };
+        let writer_lock =
+            match writer_lock.map_or_else(|| self.mem.lock_writer(), |lent| Ok(lent.clone())) {
+                Ok(lock) => lock,
+                Err(err) => {
+                    // Nothing owns the slot yet, and this database is live, so no close is deferred
+                    let deferred = self
+                        .transaction_tracker
+                        .end_write_transaction(transaction_id, None);
+                    assert!(deferred.is_none());
+                    return Err(err.into());
+                }
+            };
 
         Ok(TransactionGuard::new_write(
             transaction_id,
@@ -2541,7 +2564,8 @@ mod consistent_byte_test {
     any(target_os = "linux", target_vendor = "apple", windows)
 ))]
 mod active_transaction_test {
-    use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, byte_range};
+    use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, WRITER_BYTE, byte_range};
+    use crate::tree_store::HEADER_LOCK;
     use crate::tree_store::file_backend::range_lock::RangeLock;
     use crate::{Durability, SetDurabilityError, TableDefinition};
     use std::fs::{File, OpenOptions};
@@ -2927,19 +2951,21 @@ mod active_transaction_test {
         ] {
             let tmpfile = crate::create_tempfile();
             let db = create(tmpfile.path(), mode);
+            let scan = |local| {
+                let header_lock = db.mem.lock_header_exclusive().unwrap();
+                db.mem
+                    .oldest_active_transaction(local, &header_lock)
+                    .unwrap()
+            };
             let first = db.mem.get_last_committed_transaction_id().unwrap();
-            assert_eq!(db.mem.oldest_active_transaction(None).unwrap(), None);
+            assert_eq!(scan(None), None);
 
             // A peer pins the last committed transaction, as its read of the header would
             let probe = probe(tmpfile.path());
             probe
                 .lock_shared_range(byte_range(TXN_BASE + first.raw_id()))
                 .unwrap();
-            assert_eq!(
-                db.mem.oldest_active_transaction(None).unwrap(),
-                Some(first),
-                "{mode:?}"
-            );
+            assert_eq!(scan(None), Some(first), "{mode:?}");
 
             let write = db.begin_write().unwrap();
             {
@@ -2949,19 +2975,46 @@ mod active_transaction_test {
             write.commit().unwrap();
             let second = db.mem.get_last_committed_transaction_id().unwrap();
             assert!(first < second);
-            assert_eq!(
-                db.mem.oldest_active_transaction(Some(second)).unwrap(),
-                Some(first),
-                "{mode:?}"
-            );
+            assert_eq!(scan(Some(second)), Some(first), "{mode:?}");
             probe
                 .unlock_range(byte_range(TXN_BASE + first.raw_id()))
                 .unwrap();
-            assert_eq!(
-                db.mem.oldest_active_transaction(Some(second)).unwrap(),
-                Some(second),
-                "{mode:?}"
-            );
+            assert_eq!(scan(Some(second)), Some(second), "{mode:?}");
         }
+    }
+
+    /// A transaction lent the exclusive header hold commits under it and leaves it held
+    #[test]
+    fn a_lent_header_hold_outlives_the_commit() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let header_lock = db.mem.lock_header_exclusive().unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        txn.commit_with(Some(&header_lock)).unwrap();
+        assert!(!probe.try_lock_shared_range(HEADER_LOCK).unwrap());
+
+        drop(header_lock);
+        assert!(probe.try_lock_shared_range(HEADER_LOCK).unwrap());
+        probe.unlock_range(HEADER_LOCK).unwrap();
+    }
+
+    /// A transaction lent the writer byte leaves it held when it ends
+    #[test]
+    fn a_lent_writer_byte_outlives_the_transaction() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let writer_lock = db.mem.lock_writer().unwrap();
+        let txn = db.begin_write_with(Some(&writer_lock)).unwrap();
+        txn.abort().unwrap();
+        assert!(!probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+
+        drop(writer_lock);
+        assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
     }
 }

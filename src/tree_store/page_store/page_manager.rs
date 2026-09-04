@@ -36,7 +36,7 @@ use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
 #[cfg(feature = "experimental-multiprocess")]
-use core::ops::Range;
+use core::ops::{Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -517,7 +517,10 @@ impl UnpersistedState {
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const HEADER_LOCK: Range<u64> = 0..DB_HEADER_SIZE as u64;
 
-/// A hold on the header lock, released when it drops.
+/// A hold on the header lock, released when it drops. Taken ahead of the memory's and the
+/// tracker's state locks, which a reader's registration and the reclamation scan take under it.
+/// Lent to the work under it rather than taken again: the in-process half is a mutex, which its
+/// holder cannot take twice.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct HeaderGuard<'a> {
     storage: Option<&'a PagedCachedFile>,
@@ -529,6 +532,25 @@ impl Drop for HeaderGuard<'_> {
     fn drop(&mut self) {
         if let Some(storage) = self.storage {
             let _ = storage.unlock_range(HEADER_LOCK);
+        }
+    }
+}
+
+/// One operation's exclusive header hold, released after it unless it was the caller's
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) enum HeaderHold<'a> {
+    Lent(&'a HeaderGuard<'a>),
+    Own(HeaderGuard<'a>),
+}
+
+#[cfg(feature = "experimental-multiprocess")]
+impl<'a> Deref for HeaderHold<'a> {
+    type Target = HeaderGuard<'a>;
+
+    fn deref(&self) -> &HeaderGuard<'a> {
+        match self {
+            Self::Lent(guard) => guard,
+            Self::Own(guard) => guard,
         }
     }
 }
@@ -853,7 +875,7 @@ impl TransactionalMemory {
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    fn lock_header_exclusive(&self) -> Result<HeaderGuard<'_>> {
+    pub(crate) fn lock_header_exclusive(&self) -> Result<HeaderGuard<'_>> {
         Self::lock_header(
             &self.storage,
             &self.in_process_header_lock,
@@ -862,16 +884,29 @@ impl TransactionalMemory {
         )
     }
 
+    /// The exclusive header hold for one operation: `lent` where the caller holds it already, and
+    /// a hold of its own otherwise
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn header_hold<'a>(
+        &'a self,
+        lent: Option<&'a HeaderGuard<'a>>,
+    ) -> Result<HeaderHold<'a>> {
+        Ok(match lent {
+            Some(guard) => HeaderHold::Lent(guard),
+            None => HeaderHold::Own(self.lock_header_exclusive()?),
+        })
+    }
+
     /// The oldest transaction still being read in any process, given `local`, the oldest this
-    /// process reads. Where the file is shared it is found under the exclusive header hold, which
-    /// every registration waits behind, so no pin lands below what this reports.
+    /// process reads. Where the file is shared it is found under the caller's exclusive header
+    /// hold, which every registration waits behind, so no pin lands below what this reports.
     #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn oldest_active_transaction(
         &self,
         local: Option<TransactionId>,
+        _header_lock: &HeaderGuard<'_>,
     ) -> Result<Option<TransactionId>> {
         if self.concurrency_mode.is_multi_process_writable() {
-            let _guard = self.lock_header_exclusive()?;
             let ceiling = self.get_last_committed_transaction_id()?;
             // Every id scanned is at most the ceiling, so this bounds the whole scan's offsets
             Self::active_transaction_byte(ceiling)?;
@@ -1201,7 +1236,13 @@ impl TransactionalMemory {
         let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         if !was_clean {
-            self.write_header(&header)?;
+            #[cfg(feature = "experimental-multiprocess")]
+            let header_lock = self.lock_header_exclusive()?;
+            self.write_header(
+                &header,
+                #[cfg(feature = "experimental-multiprocess")]
+                &header_lock,
+            )?;
             self.storage.flush()?;
         }
 
@@ -1259,10 +1300,16 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let header_lock = self.lock_header_exclusive()?;
         let mut state = self.state.lock().unwrap();
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
-        self.write_header(&state.header)?;
+        self.write_header(
+            &state.header,
+            #[cfg(feature = "experimental-multiprocess")]
+            &header_lock,
+        )?;
         self.storage.flush()
     }
 
@@ -1375,19 +1422,18 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    fn write_header(&self, header: &DatabaseHeader) -> Result {
+    /// Writes the header under the caller's exclusive header hold, which is what keeps another
+    /// process from reading it torn where the file is shared.
+    fn write_header(
+        &self,
+        header: &DatabaseHeader,
+        #[cfg(feature = "experimental-multiprocess")] _header_lock: &HeaderGuard<'_>,
+    ) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         if self.concurrency_mode.is_multi_process_writable() {
-            // Write directly, while holding the header lock, so that other processes cannot observe
-            // a torn write.
-            let bytes = header.to_bytes(true);
-            let _guard = Self::lock_header(
-                &self.storage,
-                &self.in_process_header_lock,
-                self.concurrency_mode,
-                true,
-            )?;
-            return self.storage.write_direct(0, &bytes);
+            // Written directly rather than through the write buffer, so that the hold covers the
+            // bytes reaching the file
+            return self.storage.write_direct(0, &header.to_bytes(true));
         }
         self.storage
             .write(0, DB_HEADER_SIZE, true)?
@@ -1399,9 +1445,15 @@ impl TransactionalMemory {
 
     // Durably clears the recovery flag, marking the repair as complete.
     pub(crate) fn clear_recovery_required(&self) -> Result<()> {
+        #[cfg(feature = "experimental-multiprocess")]
+        let header_lock = self.lock_header_exclusive()?;
         let mut state = self.state.lock().unwrap();
         state.header.recovery_required = false;
-        self.write_header(&state.header)?;
+        self.write_header(
+            &state.header,
+            #[cfg(feature = "experimental-multiprocess")]
+            &header_lock,
+        )?;
         self.storage.flush()?;
         Ok(())
     }
@@ -1563,6 +1615,7 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
+        #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1591,7 +1644,17 @@ impl TransactionalMemory {
         let old_transaction_id = header.secondary_slot().transaction_id;
         header.write_secondary_slot(transaction_id, data_root, system_root);
 
-        self.write_header(&header)?;
+        // A hold of its own covers one write and not the flush between them, where the caller
+        // lends none
+        {
+            #[cfg(feature = "experimental-multiprocess")]
+            let hold = self.header_hold(header_lock)?;
+            self.write_header(
+                &header,
+                #[cfg(feature = "experimental-multiprocess")]
+                &hold,
+            )?;
+        }
 
         // Use 2-phase commit, if checksums are disabled
         if two_phase {
@@ -1604,7 +1667,15 @@ impl TransactionalMemory {
         header.two_phase_commit = two_phase;
 
         // Write the new header to disk
-        self.write_header(&header)?;
+        {
+            #[cfg(feature = "experimental-multiprocess")]
+            let hold = self.header_hold(header_lock)?;
+            self.write_header(
+                &header,
+                #[cfg(feature = "experimental-multiprocess")]
+                &hold,
+            )?;
+        }
         self.storage.flush()?;
 
         if shrunk {
@@ -2206,12 +2277,18 @@ impl TransactionalMemory {
 
     fn flush_shutdown_header(&self) -> Result {
         if self.storage.check_io_errors().is_ok() && !crate::panicking() {
+            #[cfg(feature = "experimental-multiprocess")]
+            let header_lock = self.lock_header_exclusive()?;
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
             // an allocator state describing what it wrote, and one not marked for repair.
             if state.allocators.is_some() && !self.needs_repair() && self.storage.flush().is_ok() {
                 state.header.recovery_required = false;
-                self.write_header(&state.header)?;
+                self.write_header(
+                    &state.header,
+                    #[cfg(feature = "experimental-multiprocess")]
+                    &header_lock,
+                )?;
                 self.storage.flush()?;
             }
         }
@@ -2561,7 +2638,9 @@ mod header_lock_test {
         let mut header = writer.state.lock().unwrap().header.clone();
         header.recovery_required = !header.recovery_required;
         let expected = header.to_bytes(true);
-        writer.write_header(&header).unwrap();
+        let header_lock = writer.lock_header_exclusive().unwrap();
+        writer.write_header(&header, &header_lock).unwrap();
+        drop(header_lock);
 
         // Read around redb entirely, and with no flush in between
         let on_disk = std::fs::read(tmpfile.path()).unwrap();
@@ -2582,7 +2661,8 @@ mod header_lock_test {
 
         let (tx, rx) = mpsc::channel();
         let writing = thread::spawn(move || {
-            writer.write_header(&header).unwrap();
+            let header_lock = writer.lock_header_exclusive().unwrap();
+            writer.write_header(&header, &header_lock).unwrap();
             tx.send(()).unwrap();
         });
 
