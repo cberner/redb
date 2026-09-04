@@ -10,6 +10,7 @@ use redb::{
     TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
+use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
 #[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
@@ -4084,6 +4085,197 @@ fn char_type() {
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroU32, NonZeroU64> = TableDefinition::new("x");
+
+    let (one, two) = (NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap());
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(two, NonZeroU64::new(20).unwrap()).unwrap();
+        table.insert(one, NonZeroU64::new(10).unwrap()).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.get(one).unwrap().unwrap().value().get(), 10);
+    assert_eq!(table.get(two).unwrap().unwrap().value().get(), 20);
+
+    // Keys sort by numeric value, matching the primitive they wrap
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), one);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), two);
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_signed_ordering() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroI32, ()> = TableDefinition::new("x");
+
+    // Deliberately inserted out of order, and spanning zero
+    let values = [-1i32, i32::MIN, 7, -300, i32::MAX];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for v in values {
+            table.insert(NonZeroI32::new(v).unwrap(), ()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let mut sorted = values;
+    sorted.sort_unstable();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let stored: Vec<i32> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().get())
+        .collect();
+    assert_eq!(stored, sorted);
+}
+
+#[test]
+fn option_nonzero_type() {
+    // The motivating case: `Option<NonZero*>` goes through the blanket `Option<T>`
+    // impl once `NonZero*` itself implements `Key`.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, Option<NonZeroU32>> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, Some(NonZeroU32::new(5).unwrap())).unwrap();
+        table.insert(1, None).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        table.get(0).unwrap().unwrap().value(),
+        Some(NonZeroU32::new(5).unwrap())
+    );
+    assert_eq!(table.get(1).unwrap().unwrap().value(), None);
+}
+
+#[test]
+fn option_nonzero_is_niche_encoded() {
+    // The point of the niche: `Option<NonZeroU32>` costs the same as `NonZeroU32`,
+    // where `Option<u32>` pays an extra discriminant byte.
+    assert_eq!(<NonZeroU32 as Value>::fixed_width(), Some(4));
+    assert_eq!(<Option<NonZeroU32> as Value>::fixed_width(), Some(4));
+    assert_eq!(<Option<u32> as Value>::fixed_width(), Some(5));
+
+    // `None` is the all-zeros encoding, which `NonZeroU32` can never produce
+    assert_eq!(
+        <Option<NonZeroU32> as Value>::as_bytes(&None),
+        vec![0, 0, 0, 0]
+    );
+    assert_eq!(
+        <Option<NonZeroU32> as Value>::as_bytes(&NonZeroU32::new(1)),
+        vec![1, 0, 0, 0]
+    );
+
+    // Round-trips both ways
+    for v in [None, NonZeroU32::new(1), NonZeroU32::new(u32::MAX)] {
+        let bytes = <Option<NonZeroU32> as Value>::as_bytes(&v);
+        assert_eq!(<Option<NonZeroU32> as Value>::from_bytes(&bytes), v);
+    }
+
+    // `None` still sorts below every `Some`
+    let none = <Option<NonZeroU32> as Value>::as_bytes(&None);
+    let some = <Option<NonZeroU32> as Value>::as_bytes(&NonZeroU32::new(1));
+    assert_eq!(
+        <Option<NonZeroU32> as Key>::compare(&none, &some),
+        Ordering::Less
+    );
+    assert_eq!(
+        <Option<NonZeroU32> as Key>::compare(&none, &none),
+        Ordering::Equal
+    );
+}
+
+#[test]
+fn option_nonzero_ordering_in_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Signed, so `None` must sort below a negative `Some` too
+    let definition: TableDefinition<Option<NonZeroI32>, ()> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for v in [
+            NonZeroI32::new(3),
+            None,
+            NonZeroI32::new(i32::MIN),
+            NonZeroI32::new(-9),
+        ] {
+            table.insert(v, ()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let stored: Vec<Option<i32>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().map(|n| n.get()))
+        .collect();
+    assert_eq!(stored, vec![None, Some(i32::MIN), Some(-9), Some(3)]);
+}
+
+#[test]
+fn option_non_niche_encoding_is_unchanged() {
+    // Types without a niche keep the discriminant encoding exactly as before,
+    // so existing databases are unaffected.
+    assert_eq!(<Option<u32> as Value>::as_bytes(&None), vec![0, 0, 0, 0, 0]);
+    assert_eq!(
+        <Option<u32> as Value>::as_bytes(&Some(1)),
+        vec![1, 1, 0, 0, 0]
+    );
+    assert_eq!(<Option<&str> as Value>::fixed_width(), None);
+    assert_eq!(<Option<&str> as Value>::as_bytes(&None), vec![0]);
+}
+
+#[test]
+fn nonzero_is_not_interchangeable_with_primitive() {
+    // `NonZero*` has a distinct type name, so a table written as `u32` cannot be
+    // reopened as `NonZeroU32` and hand back a zero that `NonZeroU32` cannot hold.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+    let wrong_definition: TableDefinition<NonZeroU32, NonZeroU32> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    txn.open_table(definition).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_table(wrong_definition),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    txn.abort().unwrap();
 }
 
 // Opening a multimap table via open_table() returns TableIsMultimap for both
