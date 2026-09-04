@@ -25,10 +25,10 @@ pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multim
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) use page_store::HeaderGuard;
 pub(crate) use page_store::LocklessBackend;
-#[cfg(feature = "experimental-multiprocess")]
-pub(crate) use page_store::MultiProcessWriterGuard;
 #[cfg(not(redb_no_std))]
 pub(crate) use page_store::ReadOnlyBackend;
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) use page_store::WriterLock;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
 pub(crate) use page_store::{

@@ -27,7 +27,7 @@ pub(crate) use header::PAGE_SIZE;
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) use page_manager::HeaderGuard;
 #[cfg(feature = "experimental-multiprocess")]
-pub(crate) use page_manager::MultiProcessWriterGuard;
+pub(crate) use page_manager::WriterLock;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, xxh3_checksum,
