@@ -2,6 +2,8 @@ use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
 use crate::tree_store::TransactionalMemory;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::WriterLock;
 use crate::{Key, Result, Savepoint, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -184,11 +186,17 @@ impl TransactionTracker {
     pub(crate) fn end_write_transaction(
         &self,
         id: TransactionId,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<Arc<WriterLock>>,
     ) -> Option<Arc<TransactionalMemory>> {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.live_write_transaction.unwrap(), id);
+        // Released before the slot is cleared, under the lock the slot uses: a thread waiting on
+        // it would take the same byte on this description, and this release would free theirs
+        #[cfg(feature = "experimental-multiprocess")]
+        drop(writer_lock);
         state.live_write_transaction = None;
         self.live_write_transaction_available.notify_one();
+
         state.deferred_close.take()
     }
 

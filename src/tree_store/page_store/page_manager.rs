@@ -533,23 +533,51 @@ impl Drop for HeaderGuard<'_> {
     }
 }
 
-/// A hold on the writer byte, released when it drops. Owns its handle, unlike `HeaderGuard`,
-/// since a write transaction outlives the call that takes it.
+/// The lock admitting this process to write, released when the last holder drops it. Holds the
+/// storage rather than the `TransactionalMemory`, which an integrity check takes by
+/// `Arc::get_mut()` and would find shared
 #[cfg(feature = "experimental-multiprocess")]
-pub(crate) struct MultiProcessWriterGuard {
-    mem: Arc<TransactionalMemory>,
+pub(crate) struct WriterLock {
+    storage: Arc<PagedCachedFile>,
+    range: Range<u64>,
 }
 
 #[cfg(feature = "experimental-multiprocess")]
-impl Drop for MultiProcessWriterGuard {
+impl Drop for WriterLock {
     fn drop(&mut self) {
-        let _ = self.mem.storage.unlock_range(byte_range(WRITER_BYTE));
+        // Errors where the backend has no locks, which the open found the same way
+        let _ = self.storage.unlock_range(self.range.clone());
     }
+}
+
+/// The writer lock a handle holds for the life of the database: the whole file where the
+/// database is not shared, and the writer byte where one process writes. Nothing in multi-writer
+/// mode, where a write transaction takes that byte itself, or for a read-only handle
+#[cfg(feature = "experimental-multiprocess")]
+fn database_writer_lock_for_mode(
+    storage: &Arc<PagedCachedFile>,
+    read_only: bool,
+    concurrency_mode: ConcurrencyMode,
+) -> Option<Arc<WriterLock>> {
+    if read_only {
+        return None;
+    }
+    let range = match concurrency_mode {
+        ConcurrencyMode::SingleProcess => FULL_RANGE,
+        ConcurrencyMode::SingleWriterProcess => byte_range(WRITER_BYTE),
+        ConcurrencyMode::MultiWriterProcess => return None,
+    };
+
+    Some(Arc::new(WriterLock {
+        storage: storage.clone(),
+        range,
+    }))
 }
 
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
-    storage: PagedCachedFile,
+    // Shared, so that a `WriterLock` can outlive this and still release its range
+    storage: Arc<PagedCachedFile>,
     state: Mutex<InMemoryState>,
     // The number of PageMut which are outstanding
     #[cfg(debug_assertions)]
@@ -577,6 +605,11 @@ pub(crate) struct TransactionalMemory {
     // the ceiling of the scan before it, since every handle reads the id it pins from the file
     #[cfg(feature = "experimental-multiprocess")]
     scan_from: Mutex<u64>,
+    // The lock the open took, which every write transaction holds while it runs. `None` in
+    // multi-writer mode, where a write transaction takes the writer byte itself, and for a
+    // read-only handle
+    #[cfg(feature = "experimental-multiprocess")]
+    writer_lock: Option<Arc<WriterLock>>,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
     // code path where there is no locking
@@ -782,19 +815,20 @@ impl TransactionalMemory {
         Ok(unrepaired.finalize_transaction_slots()?)
     }
 
-    /// Acquire the multi-process writer lock
+    /// The one the open took, or the writer byte a write transaction takes in multi-writer
+    /// mode, waiting on the peer that holds it. Taken after the in-process write slot: locks on
+    /// that byte from this file description are one lock, so the slot is what orders them
     #[cfg(feature = "experimental-multiprocess")]
-    pub(crate) fn lock_multi_process_writer(
-        mem: &Arc<Self>,
-    ) -> Result<Option<MultiProcessWriterGuard>> {
-        // The other modes settle who writes when the database is opened: a single-writer holds this byte
-        // for its lifetime, and taking it again here would convert that hold and then drop it.
-        if !matches!(mem.concurrency_mode, ConcurrencyMode::MultiWriterProcess) {
-            return Ok(None);
+    pub(crate) fn lock_writer(&self) -> Result<Arc<WriterLock>> {
+        if let Some(from_open) = &self.writer_lock {
+            return Ok(from_open.clone());
         }
-        mem.storage.lock_range(byte_range(WRITER_BYTE))?;
+        self.storage.lock_range(byte_range(WRITER_BYTE))?;
 
-        Ok(Some(MultiProcessWriterGuard { mem: mem.clone() }))
+        Ok(Arc::new(WriterLock {
+            storage: self.storage.clone(),
+            range: byte_range(WRITER_BYTE),
+        }))
     }
 
     #[cfg(feature = "experimental-multiprocess")]
@@ -931,7 +965,7 @@ impl TransactionalMemory {
         );
         assert!(region_size.is_power_of_two());
 
-        let storage = PagedCachedFile::new(file, page_size as u64, cache_size);
+        let storage = Arc::new(PagedCachedFile::new(file, page_size as u64, cache_size));
         // Dropping the storage releases whatever this took, so an open that fails below does too
         Self::lock_for_open(&storage, read_only, concurrency_mode)?;
         #[cfg(feature = "experimental-multiprocess")]
@@ -1047,6 +1081,9 @@ impl TransactionalMemory {
 
         assert!(page_size >= DB_HEADER_SIZE);
 
+        #[cfg(feature = "experimental-multiprocess")]
+        let writer_lock = database_writer_lock_for_mode(&storage, read_only, concurrency_mode);
+
         Ok(Self {
             unpersisted: Mutex::new(UnpersistedState::default()),
             storage,
@@ -1066,6 +1103,8 @@ impl TransactionalMemory {
             in_process_header_lock,
             #[cfg(feature = "experimental-multiprocess")]
             scan_from: Mutex::new(0),
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock,
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,

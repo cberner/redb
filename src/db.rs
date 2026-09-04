@@ -1,10 +1,10 @@
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 use crate::tree_store::LocklessBackend;
-#[cfg(feature = "experimental-multiprocess")]
-use crate::tree_store::MultiProcessWriterGuard;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::WriterLock;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
     PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
@@ -367,12 +367,10 @@ pub(crate) enum TransactionGuard {
     Write {
         tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
-        // Owned alongside the write slot so the two can be ordered against each other: a
-        // thread waiting on that slot takes the byte on this same file description the moment
-        // it is free, so the byte must be released first and taken after.
-        // None indicates that the writer lock is held at the database level -- i.e. in a single writer mode
+        // The writer lock, held as long as the transaction is. `Option` only so that `Drop`
+        // can move it out
         #[cfg(feature = "experimental-multiprocess")]
-        multi_process_writer: Option<MultiProcessWriterGuard>,
+        writer_lock: Option<Arc<WriterLock>>,
     },
     // Used for internal accesses that happen outside of any tracked transaction,
     // such as opening the database, repairing it, and running integrity checks.
@@ -434,30 +432,18 @@ impl TransactionGuard {
         Ok(Self::new_read(id, tracker, mem))
     }
 
+    /// The caller must already hold the write slot and the lock the transaction writes under.
     pub(crate) fn new_write(
         transaction_id: TransactionId,
         tracker: Arc<TransactionTracker>,
-        #[cfg(feature = "experimental-multiprocess")] mem: &Arc<TransactionalMemory>,
-    ) -> Result<Self> {
-        #[allow(unused_mut)]
-        let mut guard = Self::Write {
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Arc<WriterLock>,
+    ) -> Self {
+        Self::Write {
             tracker,
             transaction_id,
             #[cfg(feature = "experimental-multiprocess")]
-            multi_process_writer: None,
-        };
-        // After the guard owns the slot, so that a failure here releases it rather than
-        // leaving the tracker with a live write transaction nothing will ever end
-        #[cfg(feature = "experimental-multiprocess")]
-        if let Self::Write {
-            multi_process_writer,
-            ..
-        } = &mut guard
-        {
-            *multi_process_writer = TransactionalMemory::lock_multi_process_writer(mem)?;
+            writer_lock: Some(writer_lock),
         }
-
-        Ok(guard)
     }
 
     pub(crate) fn untracked() -> Self {
@@ -492,15 +478,16 @@ impl Drop for TransactionGuard {
                 tracker,
                 transaction_id,
                 #[cfg(feature = "experimental-multiprocess")]
-                    multi_process_writer: writer,
+                writer_lock,
             } => {
-                // Drop the "writer byte" multi-process file lock, before our in-process lock.
-                // Otherwise, another transaction in our process could re-enter the file lock
-                #[cfg(feature = "experimental-multiprocess")]
-                drop(writer.take());
-                if let Some(mem) = tracker.end_write_transaction(*transaction_id) {
-                    // The Database was dropped while this transaction was live, deferring
-                    // the database close to the end of this transaction
+                let deferred = tracker.end_write_transaction(
+                    *transaction_id,
+                    #[cfg(feature = "experimental-multiprocess")]
+                    writer_lock.take(),
+                );
+                // The Database was dropped while this transaction was live, deferring
+                // the database close to the end of this transaction
+                if let Some(mem) = deferred {
                     close_database(tracker, &mem);
                 }
             }
@@ -1459,28 +1446,48 @@ impl Database {
     /// transaction remains usable and the database closes when the transaction completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
+            self.write_guard()?,
             &self.transaction_tracker,
             &self.mem,
             AllocationPolicy::Default,
         )
+    }
+
+    /// The write slot, and the lock the transaction will write under.
+    fn write_guard(&self) -> Result<TransactionGuard, TransactionError> {
+        // Fail early if there has been an I/O error -- nothing can be committed in that case
+        self.mem.check_io_errors()?;
+        let transaction_id = self.transaction_tracker.start_write_transaction();
+        #[cfg(feature = "experimental-multiprocess")]
+        let writer_lock = match self.mem.lock_writer() {
+            Ok(lock) => lock,
+            Err(err) => {
+                // Nothing owns the slot yet, and this database is live, so no close is deferred
+                let deferred = self
+                    .transaction_tracker
+                    .end_write_transaction(transaction_id, None);
+                assert!(deferred.is_none());
+                return Err(err.into());
+            }
+        };
+
+        Ok(TransactionGuard::new_write(
+            transaction_id,
+            self.transaction_tracker.clone(),
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock,
+        ))
     }
 }
 
 // The allocation policy is fixed for the lifetime of the transaction; every page allocation
 // this transaction makes goes through it.
 fn begin_write_with_allocation_policy(
+    guard: TransactionGuard,
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
     allocation_policy: AllocationPolicy,
 ) -> Result<WriteTransaction, TransactionError> {
-    // Fail early if there has been an I/O error -- nothing can be committed in that case
-    mem.check_io_errors()?;
-    let guard = TransactionGuard::new_write(
-        transaction_tracker.start_write_transaction(),
-        transaction_tracker.clone(),
-        #[cfg(feature = "experimental-multiprocess")]
-        mem,
-    )?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption. Returning drops the guard,
@@ -1512,8 +1519,24 @@ fn ensure_allocator_state_table_and_trim(
     // commit's writes at high page indices (see AllocationPolicy::Lowest)
     // and try_shrink can't reclaim the growth. See
     // https://github.com/cberner/redb/issues/1165
-    let mut tx =
-        begin_write_with_allocation_policy(transaction_tracker, mem, AllocationPolicy::Lowest)?;
+    // Before the lock, which waits on a peer holding the writer byte: a latched I/O failure
+    // means there is nothing to write here anyway
+    mem.check_io_errors()?;
+    // The database is being closed, so nothing can be waiting on the write slot
+    #[cfg(feature = "experimental-multiprocess")]
+    let writer_lock = mem.lock_writer()?;
+    let guard = TransactionGuard::new_write(
+        transaction_tracker.start_write_transaction(),
+        transaction_tracker.clone(),
+        #[cfg(feature = "experimental-multiprocess")]
+        writer_lock,
+    );
+    let mut tx = begin_write_with_allocation_policy(
+        guard,
+        transaction_tracker,
+        mem,
+        AllocationPolicy::Lowest,
+    )?;
     tx.set_quick_repair(true);
     tx.disable_post_commit_free();
     tx.set_shrink_policy(ShrinkPolicy::Maximum);
@@ -2306,7 +2329,7 @@ mod writer_byte_test {
 
     /// This mode settles who writes at open instead, so the byte is held from then until the
     /// database closes. A transaction taking it again would convert that hold and drop what
-    /// remained on release, so it takes nothing.
+    /// remained on release, so it holds the open's instead.
     #[test]
     fn a_single_writer_open_holds_the_byte_for_its_lifetime() {
         let tmpfile = crate::create_tempfile();
@@ -2327,6 +2350,29 @@ mod writer_byte_test {
         assert!(
             probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
             "the byte was still held after the database closed"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+
+    /// A transaction that outlives the database keeps the lock, and the deferred close writes
+    /// the allocator state under it
+    #[test]
+    fn a_transaction_outliving_the_database_keeps_the_writer_lock() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let write = db.begin_write().unwrap();
+        drop(db);
+        assert!(
+            !probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "dropping the database released the byte from under a live transaction"
+        );
+
+        write.commit().unwrap();
+        assert!(
+            probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the byte was still held after the deferred close"
         );
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
     }
