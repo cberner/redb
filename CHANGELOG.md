@@ -35,7 +35,8 @@
   takes a `ConcurrencyMode` configuring how processes may share the database.
   When `SingleWriterProcess` or `MultiWriterProcess` is configured, commits are always 2-phase,
   `Durability::None` is refused, and the database may be opened read-only while another process has
-  it open for writing; each new read transaction then sees that process's durable commits.
+  it open for writing; each new read transaction then sees that process's durable commits, and
+  `Database::compact()` treats a read transaction in another process as a transaction in progress.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
