@@ -376,3 +376,112 @@ mod reclamation {
         assert_eq!(t.get(&0).unwrap().unwrap().value(), [0u8; 4].as_slice());
     }
 }
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod compaction {
+    use super::*;
+    use redb::{
+        CompactionError, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+    };
+    use std::path::Path;
+
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+
+    fn create(path: &Path, mode: ConcurrencyMode) -> Database {
+        Database::builder()
+            .set_concurrency_mode(mode)
+            .create(path)
+            .unwrap()
+    }
+
+    fn open_read_only(path: &Path, mode: ConcurrencyMode) -> ReadOnlyDatabase {
+        Database::builder()
+            .set_concurrency_mode(mode)
+            .open_read_only(path)
+            .unwrap()
+    }
+
+    fn insert(db: &Database, keys: std::ops::Range<u64>, value: &[u8]) {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut t = txn.open_table(TABLE).unwrap();
+            for key in keys {
+                t.insert(&key, value).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+    }
+
+    /// A read transaction in another process is a transaction in progress, as a local one is
+    #[test]
+    fn compaction_refuses_a_peers_read_transaction() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = create(tmpfile.path(), mode);
+            insert(&writer, 0..1, &[1u8; 512]);
+
+            let reader = open_read_only(tmpfile.path(), mode);
+            let pinned = reader.begin_read().unwrap();
+            assert!(
+                matches!(
+                    writer.compact(),
+                    Err(CompactionError::TransactionInProgress)
+                ),
+                "{mode:?}"
+            );
+
+            drop(pinned);
+            writer.compact().unwrap();
+            let read = reader.begin_read().unwrap();
+            let t = read.open_table(TABLE).unwrap();
+            assert_eq!(t.get(&0).unwrap().unwrap().value(), [1u8; 512].as_slice());
+        }
+    }
+
+    /// The file shrinks under a peer that has it open, and the peer's next read follows the pages
+    /// that moved
+    #[test]
+    fn compaction_shrinks_a_file_a_peer_has_open() {
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = create(tmpfile.path(), mode);
+            let value = vec![7u8; 1024];
+            insert(&writer, 0..512, &value);
+
+            // Caches the pages the compaction is about to move
+            let reader = open_read_only(tmpfile.path(), mode);
+            {
+                let read = reader.begin_read().unwrap();
+                let t = read.open_table(TABLE).unwrap();
+                assert_eq!(t.get(&511).unwrap().unwrap().value(), value.as_slice());
+            }
+
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                for key in 8..512u64 {
+                    t.remove(&key).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+
+            let before = std::fs::metadata(tmpfile.path()).unwrap().len();
+            assert!(writer.compact().unwrap(), "{mode:?}");
+            let after = std::fs::metadata(tmpfile.path()).unwrap().len();
+            assert!(after < before, "{mode:?}: {before} -> {after}");
+
+            let read = reader.begin_read().unwrap();
+            let t = read.open_table(TABLE).unwrap();
+            for key in 0..8u64 {
+                assert_eq!(t.get(&key).unwrap().unwrap().value(), value.as_slice());
+            }
+            assert!(t.get(&8).unwrap().is_none());
+        }
+    }
+}

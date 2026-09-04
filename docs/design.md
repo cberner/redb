@@ -622,6 +622,11 @@ and scans the active transaction range stopping at the first byte it cannot lock
 efficiency a binary interval search is recommended.
 It then takes the minimum of this id and the lowest one referenced by a persistent savepoint.
 
+To compact the file, a writer takes the writer byte (in multi-writer mode) and then an exclusive
+"header lock", and holds both until the compaction is complete, so that no other process begins a
+transaction while pages move. An active transaction byte that is held at that point is a transaction
+in progress, and the compaction is refused.
+
 ## Savepoints
 
 In single writer mode, an ephemeral savepoint pins a transaction exactly as a read transaction does.

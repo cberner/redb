@@ -1,5 +1,7 @@
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::HeaderGuard;
 use crate::tree_store::LocklessBackend;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -970,10 +972,33 @@ impl Database {
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
+        // Where the file is shared, held until the compaction is over and lent to the
+        // transactions it runs: no other process begins a transaction under them, and one that
+        // already has is a transaction in progress. Taken once a write transaction begun before
+        // this call has ended: its commit would wait on the holds, and in multi-writer mode its
+        // end would release the writer byte from under a hold taken meanwhile
+        #[cfg(feature = "experimental-multiprocess")]
+        let (writer_lock, header_lock) = if self.mem.concurrency_mode().is_multi_process_writable()
+        {
+            self.begin_write()
+                .map_err(|e| e.into_storage_error())?
+                .abort()?;
+            (
+                Some(self.mem.lock_writer()?),
+                Some(self.mem.lock_header_exclusive()?),
+            )
+        } else {
+            (None, None)
+        };
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
-        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        let txn = self
+            .begin_write_with(
+                #[cfg(feature = "experimental-multiprocess")]
+                writer_lock.as_ref(),
+            )
+            .map_err(|e| e.into_storage_error())?;
         // Re-check inside the write transaction: a concurrent writer may have created a
         // savepoint between the checks above and the start of this transaction.
         if txn.list_persistent_savepoints()?.next().is_some() {
@@ -985,26 +1010,57 @@ impl Database {
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
+        // No local read is left to bound the scan, so a pin it finds is a peer's
+        #[cfg(feature = "experimental-multiprocess")]
+        if let Some(header_lock) = &header_lock
+            && self
+                .mem
+                .oldest_active_transaction(None, header_lock)?
+                .is_some()
+        {
+            return Err(CompactionError::TransactionInProgress);
+        }
         txn.abort()?;
         // Commit to free up any pending free pages
-        self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
+        self.drain_pending_free_pages(
+            ShrinkPolicy::Maximum,
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock.as_ref(),
+            #[cfg(feature = "experimental-multiprocess")]
+            header_lock.as_ref(),
+        )?;
 
         let mut compacted = false;
         // Iteratively compact until no progress is made
         loop {
             let mut progress = false;
 
-            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let mut txn = self
+                .begin_write_with(
+                    #[cfg(feature = "experimental-multiprocess")]
+                    writer_lock.as_ref(),
+                )
+                .map_err(|e| e.into_storage_error())?;
             if txn.compact_pages()? {
                 progress = true;
-                txn.commit().map_err(|e| e.into_storage_error())?;
+                txn.commit_with(
+                    #[cfg(feature = "experimental-multiprocess")]
+                    header_lock.as_ref(),
+                )
+                .map_err(|e| e.into_storage_error())?;
             } else {
                 txn.abort()?;
             }
 
             // Drain pages freed by compact_pages(), including system pages queued by any
             // post-commit cleanup root updates.
-            self.drain_pending_free_pages(ShrinkPolicy::Maximum)?;
+            self.drain_pending_free_pages(
+                ShrinkPolicy::Maximum,
+                #[cfg(feature = "experimental-multiprocess")]
+                writer_lock.as_ref(),
+                #[cfg(feature = "experimental-multiprocess")]
+                header_lock.as_ref(),
+            )?;
 
             if !progress {
                 break;
@@ -1016,12 +1072,22 @@ impl Database {
         Ok(compacted)
     }
 
-    fn drain_pending_free_pages(&self, shrink_policy: ShrinkPolicy) -> Result {
+    fn drain_pending_free_pages(
+        &self,
+        shrink_policy: ShrinkPolicy,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+        #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
+    ) -> Result {
         // Preserve compact()'s empty durable commit, which also publishes pending
         // non-durable roots before checking for pending frees.
         let mut force_commit = true;
         loop {
-            let mut txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+            let mut txn = self
+                .begin_write_with(
+                    #[cfg(feature = "experimental-multiprocess")]
+                    writer_lock,
+                )
+                .map_err(|e| e.into_storage_error())?;
             if !force_commit && !txn.pending_free_pages()? {
                 txn.abort()?;
                 return Ok(());
@@ -1029,7 +1095,11 @@ impl Database {
             force_commit = false;
             txn.set_two_phase_commit(true);
             txn.set_shrink_policy(shrink_policy);
-            txn.commit().map_err(|e| e.into_storage_error())?;
+            txn.commit_with(
+                #[cfg(feature = "experimental-multiprocess")]
+                header_lock,
+            )
+            .map_err(|e| e.into_storage_error())?;
         }
     }
 
