@@ -572,9 +572,10 @@ impl Drop for WriterLock {
     }
 }
 
-/// The writer lock a handle holds for the life of the database: the whole file where the
-/// database is not shared, and the writer byte where one process writes. Nothing in multi-writer
-/// mode, where a write transaction takes that byte itself, or for a read-only handle
+/// The writer lock a handle holds from the open: for the life of the database, the whole file
+/// where the database is not shared and the writer byte where one process writes; in
+/// multi-writer mode, the writer byte until the handle is writable, which a write transaction
+/// takes itself from then on. Nothing for a read-only handle
 #[cfg(feature = "experimental-multiprocess")]
 fn database_writer_lock_for_mode(
     storage: &Arc<PagedCachedFile>,
@@ -586,8 +587,9 @@ fn database_writer_lock_for_mode(
     }
     let range = match concurrency_mode {
         ConcurrencyMode::SingleProcess => FULL_RANGE,
-        ConcurrencyMode::SingleWriterProcess => byte_range(WRITER_BYTE),
-        ConcurrencyMode::MultiWriterProcess => return None,
+        ConcurrencyMode::SingleWriterProcess | ConcurrencyMode::MultiWriterProcess => {
+            byte_range(WRITER_BYTE)
+        }
     };
 
     Some(Arc::new(WriterLock {
@@ -627,9 +629,9 @@ pub(crate) struct TransactionalMemory {
     // the ceiling of the scan before it, since every handle reads the id it pins from the file
     #[cfg(feature = "experimental-multiprocess")]
     scan_from: Mutex<u64>,
-    // The lock the open took, which every write transaction holds while it runs. `None` in
-    // multi-writer mode, where a write transaction takes the writer byte itself, and for a
-    // read-only handle
+    // The lock the open took, which every write transaction holds while it runs: for the life
+    // of the database, or in multi-writer mode until the handle is writable, when
+    // `take_open_writer_lock()` hands it to the database. `None` for a read-only handle
     #[cfg(feature = "experimental-multiprocess")]
     writer_lock: Option<Arc<WriterLock>>,
     page_size: u32,
@@ -853,6 +855,18 @@ impl TransactionalMemory {
         }))
     }
 
+    /// The writer byte a multi-writer open holds, for the database to hold until the handle is
+    /// writable and lend to the write transactions it begins meanwhile: a write transaction
+    /// takes the byte itself once it is released. `None` in every other mode, where the open's
+    /// lock is the handle's for the life of the database
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn take_open_writer_lock(&mut self) -> Option<Arc<WriterLock>> {
+        match self.concurrency_mode {
+            ConcurrencyMode::MultiWriterProcess => self.writer_lock.take(),
+            _ => None,
+        }
+    }
+
     #[cfg(feature = "experimental-multiprocess")]
     fn active_transaction_byte(id: TransactionId) -> Result<u64> {
         match TXN_BASE.checked_add(id.raw_id()) {
@@ -1003,6 +1017,12 @@ impl TransactionalMemory {
         let storage = Arc::new(PagedCachedFile::new(file, page_size as u64, cache_size));
         // Dropping the storage releases whatever this took, so an open that fails below does too
         Self::lock_for_open(&storage, read_only, concurrency_mode)?;
+        // A multi-writer open repairs and commits under the writer byte, as a write transaction
+        // does, so it waits on the peer holding it before it reads the header
+        #[cfg(feature = "experimental-multiprocess")]
+        if !read_only && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
+            storage.lock_range(byte_range(WRITER_BYTE))?;
+        }
         #[cfg(feature = "experimental-multiprocess")]
         let in_process_header_lock = Mutex::new(());
 
@@ -2583,7 +2603,7 @@ mod header_lock_test {
             .read(true)
             .write(true)
             .open(path)?;
-        Ok(Arc::new(TransactionalMemory::new(
+        let mut mem = TransactionalMemory::new(
             Box::new(FileBackend::new(file)?),
             true,
             PAGE_SIZE,
@@ -2591,7 +2611,10 @@ mod header_lock_test {
             0,
             false,
             mode,
-        )?))
+        )?;
+        // Which a `Database` holds until the handle is writable, as this one is at once
+        drop(mem.take_open_writer_lock());
+        Ok(Arc::new(mem))
     }
 
     fn open_read_only(

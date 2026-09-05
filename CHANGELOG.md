@@ -37,7 +37,8 @@
   `Durability::None` is refused, and the database may be opened read-only while another process has
   it open for writing; each new read transaction then sees that process's durable commits,
   `Database::compact()` treats a read transaction in another process as a transaction in progress,
-  and `Database::check_integrity()` waits for a write transaction in another process to end.
+  and a `MultiWriterProcess` open and `Database::check_integrity()` wait for a write transaction in
+  another process to end.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

@@ -938,17 +938,31 @@ impl Database {
         // The tracker holds the persistent savepoints the tables adopted above hold, as the
         // open's does: another process may have created, replaced or deleted any of them
         if adopted_peer_commits {
-            let txn = self
-                .begin_write_with(
-                    #[cfg(feature = "experimental-multiprocess")]
-                    Some(writer_lock),
-                )
-                .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
-            self.register_persistent_savepoints(&txn)?;
-            txn.abort()?;
+            self.restore_persistent_savepoints(
+                #[cfg(feature = "experimental-multiprocess")]
+                Some(writer_lock),
+            )?;
         }
 
         Ok(was_clean)
+    }
+
+    // Restores the tracker state for the file's persistent savepoints, in a transaction lent
+    // `writer_lock` where the caller holds it
+    fn restore_persistent_savepoints(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result<(), DatabaseError> {
+        let txn = self
+            .begin_write_with(
+                #[cfg(feature = "experimental-multiprocess")]
+                writer_lock,
+            )
+            .map_err(|e| e.into_storage_error())?;
+        self.register_persistent_savepoints(&txn)?;
+        txn.abort()?;
+
+        Ok(())
     }
 
     // Holds the file's persistent savepoints, which another process may have created, replaced
@@ -1464,7 +1478,8 @@ impl Database {
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
         debug!("Opening database {:?}", &file_path);
-        let mem = TransactionalMemory::new(
+        #[cfg_attr(not(feature = "experimental-multiprocess"), expect(unused_mut))]
+        let mut mem = TransactionalMemory::new(
             file,
             allow_initialize,
             page_size,
@@ -1473,6 +1488,10 @@ impl Database {
             false,
             concurrency_mode,
         )?;
+        // Held until the open is over, and lent to the transaction restoring the savepoints: a
+        // write transaction takes the byte itself once it is released
+        #[cfg(feature = "experimental-multiprocess")]
+        let open_writer_lock = mem.take_open_writer_lock();
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
@@ -1514,10 +1533,14 @@ impl Database {
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
         };
 
-        // Restore the tracker state for any persistent savepoints
-        let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
-        db.register_persistent_savepoints(&txn)?;
-        txn.abort()?;
+        let restored = db.restore_persistent_savepoints(
+            #[cfg(feature = "experimental-multiprocess")]
+            open_writer_lock.as_ref(),
+        );
+        // Released before an error drops `db`, whose close takes the byte itself
+        #[cfg(feature = "experimental-multiprocess")]
+        drop(open_writer_lock);
+        restored?;
 
         Ok(db)
     }
@@ -2505,6 +2528,77 @@ mod writer_byte_test {
             "the byte was still held after the database closed"
         );
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+
+    /// The open waits on a write transaction in another process, as one would, and gives the
+    /// byte back once the handle is writable
+    #[test]
+    fn a_multi_writer_open_holds_the_byte_until_it_is_writable() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpfile = crate::create_tempfile();
+        create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+        assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+
+        let path = tmpfile.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let opening = thread::spawn(move || {
+            let mut builder = Database::builder();
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            let db = builder.open(&path).unwrap();
+            tx.send(()).unwrap();
+            db
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the open ran under another process's hold on the writer byte"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the open never ran");
+        let db = opening.join().unwrap();
+
+        assert!(
+            probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap(),
+            "the byte was still held after the open"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+        drop(db);
+    }
+
+    /// Taken before the header is read: a peer's ordinary commit saves no allocator snapshot, so
+    /// the open rebuilds one and commits, which the byte keeps a peer's commit from interleaving
+    /// with
+    #[test]
+    fn a_multi_writer_open_repairs_under_the_byte() {
+        use std::sync::{Arc, Mutex};
+
+        let tmpfile = crate::create_tempfile();
+        let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        commit_one(&peer);
+
+        let probe = probe(tmpfile.path());
+        let held_during_repair = Arc::new(Mutex::new(None));
+        let seen = held_during_repair.clone();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_repair_callback(move |_| {
+            let free = probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap();
+            if free {
+                probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+            }
+            *seen.lock().unwrap() = Some(!free);
+        });
+        let db = builder.open(tmpfile.path()).unwrap();
+        assert_eq!(
+            *held_during_repair.lock().unwrap(),
+            Some(true),
+            "the open repaired without the writer byte"
+        );
+        drop(db);
     }
 
     /// A transaction that outlives the database keeps the lock, and the deferred close writes
