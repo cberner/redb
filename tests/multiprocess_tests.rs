@@ -290,6 +290,218 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     Database::open(tmpfile.path()).unwrap();
 }
 
+/// A multi-writer handle's write transaction begins from the file as another process last
+/// committed it, and so does its close
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod peer_commits {
+    use super::*;
+    use redb::{CompactionError, ReadableDatabase, ReadableTable, TableDefinition};
+    use std::path::Path;
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    fn open(path: &Path) -> Database {
+        Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .open(path)
+            .unwrap()
+    }
+
+    /// Two handles on a file a clean close left, so that neither open commits
+    fn two_handles(path: &Path) -> (Database, Database) {
+        Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .create(path)
+            .unwrap();
+        (open(path), open(path))
+    }
+
+    fn insert(db: &Database, key: u64) {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
+        txn.commit().unwrap();
+    }
+
+    fn value(db: &Database, key: u64) -> u64 {
+        let read = db.begin_read().unwrap();
+        let table = read.open_table(TABLE).unwrap();
+        table.get(key).unwrap().unwrap().value()
+    }
+
+    /// The transaction sees the peer's commit, and its own commit follows it, so neither is lost
+    #[test]
+    fn a_write_transaction_adopts_a_peers_commit() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+            table.insert(2, 2).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = peer.begin_write().unwrap();
+        {
+            let table = txn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+            assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+        }
+        txn.abort().unwrap();
+        drop(peer);
+        drop(db);
+
+        let db = open(tmpfile.path());
+        assert_eq!(value(&db, 1), 1);
+        assert_eq!(value(&db, 2), 2);
+    }
+
+    /// The persistent savepoint the peer created is held from the transaction on, and the
+    /// transaction's own takes a fresh id; the savepoint the peer deleted is forgotten from the
+    /// transaction on, with the pin it held
+    #[test]
+    fn a_write_transaction_adopts_a_peers_savepoint() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (mut db, peer) = two_handles(tmpfile.path());
+        let txn = peer.begin_write().unwrap();
+        let peers_savepoint = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+
+        db.begin_write().unwrap().abort().unwrap();
+        assert!(matches!(
+            db.compact(),
+            Err(CompactionError::PersistentSavepointExists)
+        ));
+        let txn = db.begin_write().unwrap();
+        let own_savepoint = txn.persistent_savepoint().unwrap();
+        assert_ne!(own_savepoint, peers_savepoint);
+        txn.commit().unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            let mut savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
+            savepoints.sort_unstable();
+            assert_eq!(savepoints, vec![peers_savepoint, own_savepoint]);
+            txn.abort().unwrap();
+        }
+
+        let txn = peer.begin_write().unwrap();
+        assert!(txn.delete_persistent_savepoint(peers_savepoint).unwrap());
+        assert!(txn.delete_persistent_savepoint(own_savepoint).unwrap());
+        txn.commit().unwrap();
+        db.begin_write().unwrap().abort().unwrap();
+        db.compact().unwrap();
+    }
+
+    /// The close's commit adopts the file's latest commit, and where it cannot, the shutdown
+    /// header is not written: it would put this handle's stale header, marked clean, over the
+    /// commit another process made
+    #[test]
+    fn a_close_writes_no_header_over_a_commit_it_could_not_adopt() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+        drop(peer);
+        // The peer's commit with its primary slot's checksum flipped on disk: a commit the close
+        // cannot adopt, since a shared commit is 2-phase, under which a corrupt primary is
+        // corruption rather than a torn write to fall back from. The god byte at 9 names the
+        // primary of the two 128-byte commit slots at 64 and 192, each ending in a 16-byte
+        // checksum
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut god_byte = [0u8];
+        file.seek(SeekFrom::Start(9)).unwrap();
+        file.read_exact(&mut god_byte).unwrap();
+        let checksum = 64 + 128 * u64::from(god_byte[0] & 1) + 112;
+        let mut flipped = [0u8; 16];
+        file.seek(SeekFrom::Start(checksum)).unwrap();
+        file.read_exact(&mut flipped).unwrap();
+        for byte in &mut flipped {
+            *byte ^= 0xFF;
+        }
+        file.seek(SeekFrom::Start(checksum)).unwrap();
+        file.write_all(&flipped).unwrap();
+        file.sync_all().unwrap();
+
+        drop(db);
+        let mut after = [0u8; 16];
+        file.seek(SeekFrom::Start(checksum)).unwrap();
+        file.read_exact(&mut after).unwrap();
+        assert_eq!(
+            after, flipped,
+            "the close wrote its header over the peer's commit"
+        );
+    }
+
+    /// The close commits from the file as the peer last committed it
+    #[test]
+    fn a_close_records_a_peers_commit() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+        drop(peer);
+        drop(db);
+
+        let db = open(tmpfile.path());
+        assert_eq!(value(&db, 1), 1);
+    }
+
+    /// A repair's commit records no allocator state, so the transaction that adopts one rebuilds
+    /// it from the trees
+    #[test]
+    fn a_write_transaction_rebuilds_the_allocator_a_peers_repair_left_unsaved() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        // The create's commit is a repair's, so the peer's open repairs and commits too
+        let db = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .create(tmpfile.path())
+            .unwrap();
+        let peer = open(tmpfile.path());
+        insert(&db, 1);
+        insert(&peer, 2);
+        drop(peer);
+        drop(db);
+
+        let db = open(tmpfile.path());
+        assert_eq!(value(&db, 1), 1);
+        assert_eq!(value(&db, 2), 2);
+    }
+
+    /// A transaction dropped while a panic unwinds leaves its pages in the write buffer, and the
+    /// peer can allocate and commit the same pages: the adoption discards the buffer with the
+    /// rest of the state it replaces, so the peer's page reads as committed
+    #[test]
+    fn a_write_transaction_reads_a_peers_page_over_a_page_a_panic_left_buffered() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+            panic!("unwinding through the transaction");
+        }));
+        assert!(unwound.is_err());
+        let txn = peer.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 2).unwrap();
+        txn.commit().unwrap();
+
+        let txn = db.begin_write().unwrap();
+        assert_eq!(
+            txn.open_table(TABLE)
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .unwrap()
+                .value(),
+            2
+        );
+    }
+}
+
 /// A caller-supplied backend has no locks to negotiate with, which is reported like a platform
 /// without them
 #[test]

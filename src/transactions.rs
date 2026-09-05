@@ -895,17 +895,19 @@ impl SavepointTransactionState {
 // Discards the in-memory allocator state on drop, unless disarmed. An incomplete commit may
 // have returned pages to the allocator that the durable roots still reference through the
 // freed tables; such an allocator state must never be used, or persisted by a clean
-// shutdown, again.
-struct AllocatorStateLatch {
+// shutdown, again. A load or a rebuild of the state, or a registration of the savepoints it
+// must not free from under, that stops part way leaves one that describes nothing, whether it
+// returned an error or a panic unwound through it.
+pub(crate) struct AllocatorStateLatch {
     mem: Option<Arc<TransactionalMemory>>,
 }
 
 impl AllocatorStateLatch {
-    fn arm(mem: Arc<TransactionalMemory>) -> Self {
+    pub(crate) fn arm(mem: Arc<TransactionalMemory>) -> Self {
         Self { mem: Some(mem) }
     }
 
-    fn disarm(mut self) {
+    pub(crate) fn disarm(mut self) {
         self.mem = None;
     }
 }
