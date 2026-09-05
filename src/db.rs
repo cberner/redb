@@ -914,7 +914,7 @@ impl Database {
             Ok(true) => {
                 let live_allocator_hash = self.mem.allocator_hash();
                 let live_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
-                match Self::rebuild_allocator_state(&mut self.mem, &|_| {}) {
+                match Self::rebuild_allocator_state(&self.mem, &|_| {}) {
                     // Only a durable root can be rewritten from here, so a live root whose table
                     // count was recomputed must be rolled back and repaired by the reload below
                     Ok(roots) if roots != live_roots => Ok(None),
@@ -1218,9 +1218,7 @@ impl Database {
     }
 
     #[cfg(debug_assertions)]
-    fn mark_allocated_page_for_debug(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
-    ) -> Result {
+    fn mark_allocated_page_for_debug(mem: &Arc<TransactionalMemory>) -> Result {
         let data_root = mem.get_data_root();
         {
             let untracked = Arc::new(TransactionGuard::untracked());
@@ -1328,8 +1326,11 @@ impl Database {
     // The returned roots carry table counts recounted from the trees that were walked. These
     // counts are stored in the commit slot rather than in a page, so no page checksum covers
     // them; recounting here is what lets the rest of the codebase trust them.
+    //
+    // Callers must ensure nothing else uses the allocator meanwhile: either no transaction is
+    // live, or the caller holds the write slot (read transactions never allocate or free).
     fn rebuild_allocator_state(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
+        mem: &Arc<TransactionalMemory>,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
         mem.reset_allocator_state()?;
@@ -1421,7 +1422,7 @@ impl Database {
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
-            Self::mark_allocated_page_for_debug(&mut mem)?;
+            Self::mark_allocated_page_for_debug(&mem)?;
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -1548,57 +1549,45 @@ impl Database {
         #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
     ) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
-            self.write_guard(
-                #[cfg(feature = "experimental-multiprocess")]
-                writer_lock,
-            )?,
             &self.transaction_tracker,
             &self.mem,
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock,
             AllocationPolicy::Default,
         )
     }
-
-    /// The write slot, and the lock the transaction will write under: `writer_lock` where the
-    /// caller lends the one it holds, since a second lock on that byte from this file
-    /// description is the same lock, and this transaction's end would release the caller's.
-    fn write_guard(
-        &self,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
-    ) -> Result<TransactionGuard, TransactionError> {
-        // Fail early if there has been an I/O error -- nothing can be committed in that case
-        self.mem.check_io_errors()?;
-        let transaction_id = self.transaction_tracker.start_write_transaction();
-        #[cfg(feature = "experimental-multiprocess")]
-        let writer_lock =
-            match writer_lock.map_or_else(|| self.mem.lock_writer(), |lent| Ok(lent.clone())) {
-                Ok(lock) => lock,
-                Err(err) => {
-                    // Nothing owns the slot yet, and this database is live, so no close is deferred
-                    let deferred = self
-                        .transaction_tracker
-                        .end_write_transaction(transaction_id, None);
-                    assert!(deferred.is_none());
-                    return Err(err.into());
-                }
-            };
-
-        Ok(TransactionGuard::new_write(
-            transaction_id,
-            self.transaction_tracker.clone(),
-            #[cfg(feature = "experimental-multiprocess")]
-            writer_lock,
-        ))
-    }
 }
 
-// The allocation policy is fixed for the lifetime of the transaction; every page allocation
-// this transaction makes goes through it.
+// Takes the write slot and the writer lock, and builds the transaction on them. A caller that
+// already holds the writer lock lends it as `writer_lock`: locking the byte again from this file
+// description would return the same lock, and this transaction's end would then release the
+// caller's. The allocation policy is fixed for the lifetime of the transaction; every page
+// allocation this transaction makes goes through it.
 fn begin_write_with_allocation_policy(
-    guard: TransactionGuard,
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
+    #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
     allocation_policy: AllocationPolicy,
 ) -> Result<WriteTransaction, TransactionError> {
+    // Fail early if there has been an I/O error -- nothing can be committed in that case
+    mem.check_io_errors()?;
+    let transaction_id = transaction_tracker.start_write_transaction();
+    #[cfg(feature = "experimental-multiprocess")]
+    let writer_lock = match writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone())) {
+        Ok(lock) => lock,
+        Err(err) => {
+            // Nothing owns the slot yet, and this database is live, so no close is deferred
+            let deferred = transaction_tracker.end_write_transaction(transaction_id, None);
+            assert!(deferred.is_none());
+            return Err(err.into());
+        }
+    };
+    let guard = TransactionGuard::new_write(
+        transaction_id,
+        transaction_tracker.clone(),
+        #[cfg(feature = "experimental-multiprocess")]
+        writer_lock,
+    );
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption. Returning drops the guard,
@@ -1635,24 +1624,11 @@ fn ensure_allocator_state_table_and_trim(
     // commit's writes at high page indices (see AllocationPolicy::Lowest)
     // and try_shrink can't reclaim the growth. See
     // https://github.com/cberner/redb/issues/1165
-    // Before the lock, which waits on a peer holding the writer byte: a latched I/O failure
-    // means there is nothing to write here anyway
-    mem.check_io_errors()?;
-    #[cfg(feature = "experimental-multiprocess")]
-    let writer_lock = match writer_lock {
-        Some(lent) => lent.clone(),
-        None => mem.lock_writer()?,
-    };
-    let guard = TransactionGuard::new_write(
-        transaction_tracker.start_write_transaction(),
-        transaction_tracker.clone(),
-        #[cfg(feature = "experimental-multiprocess")]
-        writer_lock,
-    );
     let mut tx = begin_write_with_allocation_policy(
-        guard,
         transaction_tracker,
         mem,
+        #[cfg(feature = "experimental-multiprocess")]
+        writer_lock,
         AllocationPolicy::Lowest,
     )
     .map_err(|e| e.into_storage_error())?;
