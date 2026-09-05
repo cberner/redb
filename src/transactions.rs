@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-multiprocess")]
+use crate::db::ConcurrencyMode;
 use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
@@ -975,6 +977,11 @@ impl WriteTransaction {
             poisoned: AtomicBool::new(false),
             durability: InternalDurability::Immediate,
             two_phase_commit: false,
+            // A multi-writer commit records the allocator state, which `set_quick_repair()`
+            // keeps on there
+            #[cfg(feature = "experimental-multiprocess")]
+            quick_repair: mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess,
+            #[cfg(not(feature = "experimental-multiprocess"))]
             quick_repair: false,
             post_commit_free: PostCommitFree::Enabled,
             restored_transaction: None,
@@ -1546,8 +1553,25 @@ impl WriteTransaction {
     /// as part of each commit (so it doesn't need to be reconstructed), and enables 2-phase commit
     /// (which guarantees that the primary commit slot is valid without needing to look at the
     /// checksums). This means commits are slower, but recovery after a crash is almost instant.
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "Disabling it has no effect in [`ConcurrencyMode::MultiWriterProcess`](crate::ConcurrencyMode::MultiWriterProcess), where every commit saves the allocator state, for the next write transaction, in any process, to load rather than reconstruct. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn set_quick_repair(&mut self, enabled: bool) {
+        // A multi-writer commit records the allocator state, for the next writer, in any
+        // process, to load rather than rebuild from the trees
+        #[cfg(feature = "experimental-multiprocess")]
+        if !enabled && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+            return;
+        }
         self.quick_repair = enabled;
+    }
+
+    // Compaction's commits record no allocator state, whatever the mode: the record is a table
+    // each commit frees and writes anew, which the next round would move again and find pending
+    pub(crate) fn skip_allocator_state_record(&mut self) {
+        self.quick_repair = false;
     }
 
     pub(crate) fn disable_post_commit_free(&mut self) {
