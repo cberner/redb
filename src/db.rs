@@ -1465,7 +1465,8 @@ impl Database {
                 Ok(savepoint) => savepoint,
                 Err(err) => match err {
                     SavepointError::InvalidSavepoint
-                    | SavepointError::ImmediateDurabilityRequired => unreachable!(),
+                    | SavepointError::ImmediateDurabilityRequired
+                    | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
                     SavepointError::Storage(storage) => {
                         return Err(storage.into());
                     }
@@ -2690,7 +2691,7 @@ mod active_transaction_test {
     use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, WRITER_BYTE, byte_range};
     use crate::tree_store::HEADER_LOCK;
     use crate::tree_store::file_backend::range_lock::RangeLock;
-    use crate::{Durability, SetDurabilityError, TableDefinition};
+    use crate::{Durability, SavepointError, SetDurabilityError, TableDefinition};
     use std::fs::{File, OpenOptions};
     use std::path::Path;
 
@@ -2803,11 +2804,11 @@ mod active_transaction_test {
     }
 
     /// A savepoint holds a read transaction live, so its snapshot stays active for as long as
-    /// the savepoint does
+    /// the savepoint does. In the shared mode that supports an ephemeral one
     #[test]
     fn an_ephemeral_savepoint_locks_the_snapshot_it_references() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
         let probe = probe(tmpfile.path());
         assert!(held_ids(&probe).is_empty());
 
@@ -2907,6 +2908,22 @@ mod active_transaction_test {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
+    /// a peer creates could take its id, so multi-writer mode refuses it
+    #[test]
+    fn a_multi_writer_mode_refuses_an_ephemeral_savepoint() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+
+        let write = db.begin_write().unwrap();
+        assert!(matches!(
+            write.ephemeral_savepoint(),
+            Err(SavepointError::EphemeralSavepointUnsupported)
+        ));
+        write.persistent_savepoint().unwrap();
+        write.commit().unwrap();
     }
 
     /// A read-only participant sees what another process committed, not the header it read at open

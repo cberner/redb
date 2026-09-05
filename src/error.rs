@@ -300,6 +300,9 @@ pub enum SavepointError {
     /// creating or deleting a persistent savepoint, or restoring an older savepoint while
     /// newer persistent savepoints exist that would need to be deleted.
     ImmediateDurabilityRequired,
+    /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
+    /// another process creates could take its id
+    EphemeralSavepointUnsupported,
     /// Error from underlying storage
     Storage(StorageError),
 }
@@ -309,6 +312,7 @@ impl From<SavepointError> for Error {
         match err {
             SavepointError::InvalidSavepoint => Error::InvalidSavepoint,
             SavepointError::ImmediateDurabilityRequired => Error::ImmediateDurabilityRequired,
+            SavepointError::EphemeralSavepointUnsupported => Error::EphemeralSavepointUnsupported,
             SavepointError::Storage(storage) => storage.into(),
         }
     }
@@ -330,6 +334,12 @@ impl Display for SavepointError {
                 write!(
                     f,
                     "Operation requires Durability::Immediate for the current transaction."
+                )
+            }
+            SavepointError::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported when the database is shared with other writer processes"
                 )
             }
             SavepointError::Storage(storage) => storage.fmt(f),
@@ -557,6 +567,9 @@ pub enum Error {
     PersistentSavepointModified,
     /// A non-durable commit would be invisible to the other processes sharing the database
     NonDurableCommitUnsupported,
+    /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
+    /// another process creates could take its id
+    EphemeralSavepointUnsupported,
     /// A persistent savepoint exists
     PersistentSavepointExists,
     /// An Ephemeral savepoint exists
@@ -628,6 +641,12 @@ impl Display for Error {
                 write!(
                     f,
                     "Non-durable commits are not supported when the database is shared with other processes"
+                )
+            }
+            Error::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported when the database is shared with other writer processes"
                 )
             }
             Error::UpgradeRequired(actual) => {

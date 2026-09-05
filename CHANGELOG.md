@@ -39,6 +39,7 @@
   `Database::compact()` treats a read transaction in another process as a transaction in progress.
   In `MultiWriterProcess`, every commit records the allocator state, for the next writer to load;
   compaction's own commits are the exception, and `Database::compact()` ends with one that does.
+  Ephemeral savepoints are refused there, with `SavepointError::EphemeralSavepointUnsupported`.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
