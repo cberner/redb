@@ -828,7 +828,8 @@ impl TableNamespace {
 #[derive(Default)]
 struct SavepointTransactionState {
     created_persistent: BTreeSet<(SavepointId, TransactionId)>,
-    deleted_persistent: Vec<(SavepointId, TransactionId)>,
+    // Each with the transaction and root its record named, for a handle to be checked against
+    deleted_persistent: Vec<(SavepointId, TransactionId, Option<BtreeHeader>)>,
     invalidated: BTreeSet<SavepointId>,
 }
 
@@ -837,8 +838,22 @@ impl SavepointTransactionState {
         self.created_persistent.insert((id, transaction_id));
     }
 
-    fn record_deleted(&mut self, id: SavepointId, transaction_id: TransactionId) {
-        self.deleted_persistent.push((id, transaction_id));
+    fn record_deleted(
+        &mut self,
+        id: SavepointId,
+        transaction_id: TransactionId,
+        user_root: Option<BtreeHeader>,
+    ) {
+        self.deleted_persistent
+            .push((id, transaction_id, user_root));
+    }
+
+    // The transaction and root of the record this transaction deleted under `id`, if any
+    fn deleted_record(&self, id: SavepointId) -> Option<(TransactionId, Option<BtreeHeader>)> {
+        self.deleted_persistent
+            .iter()
+            .find(|(deleted, _, _)| *deleted == id)
+            .map(|(_, transaction_id, user_root)| (*transaction_id, *user_root))
     }
 
     fn record_invalidated(&mut self, ids: impl IntoIterator<Item = SavepointId>) {
@@ -852,7 +867,10 @@ impl SavepointTransactionState {
     // Persistent savepoints whose deletion is staged in this transaction. They are still
     // present in the shared tracker until apply_on_commit() runs.
     fn pending_deleted_ids(&self) -> BTreeSet<SavepointId> {
-        self.deleted_persistent.iter().map(|(id, _)| *id).collect()
+        self.deleted_persistent
+            .iter()
+            .map(|(id, _, _)| *id)
+            .collect()
     }
 
     fn has_created_or_deleted(&self) -> bool {
@@ -862,7 +880,7 @@ impl SavepointTransactionState {
     fn apply_on_commit(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
         // Persistent savepoints whose on-disk entry was deleted: release their
         // tracker refcount now that the deletion is durable.
-        for (savepoint, transaction) in self.deleted_persistent.drain(..) {
+        for (savepoint, transaction, _) in self.deleted_persistent.drain(..) {
             tracker.deallocate_savepoint(mem, savepoint, transaction);
         }
         // Savepoints that restore_savepoint() invalidated: remove them from the
@@ -1249,10 +1267,11 @@ impl WriteTransaction {
             return Ok(false);
         };
         table.remove(SavepointId(id))?;
-        self.savepoint_state
-            .lock()
-            .unwrap()
-            .record_deleted(savepoint.get_id(), savepoint.get_transaction_id());
+        self.savepoint_state.lock().unwrap().record_deleted(
+            savepoint.get_id(),
+            savepoint.get_transaction_id(),
+            savepoint.get_user_root(),
+        );
         Ok(true)
     }
 
@@ -1332,6 +1351,11 @@ impl WriteTransaction {
     ///
     /// Calling this method invalidates all [`Savepoint`]s created after savepoint
     ///
+    /// A persistent savepoint's handle outlives the transaction that read it. If the savepoint
+    /// has been replaced under its id, or removed, since, by another process or by a file
+    /// replaced from a copy, the handle is invalid, and [`SavepointError::InvalidSavepoint`] is
+    /// returned.
+    ///
     /// A failure partway through restoring poisons the transaction, so a half-restored state
     /// can never be committed: [`Self::commit`] rolls the transaction back and returns
     /// [`CommitError::TransactionPoisoned`]. After an I/O error the storage layer is latched
@@ -1350,6 +1374,37 @@ impl WriteTransaction {
                 .lock()
                 .unwrap()
                 .is_invalidated(savepoint.get_id())
+        {
+            return Err(SavepointError::InvalidSavepoint);
+        }
+        // A handle is known by its id alone, and the file can have replaced the record under it
+        // since the handle was read, by another process or from a copy: the handle restores the
+        // record the file has, or the one this transaction deleted, which the tracker still pins
+        let stored = match self.get_persistent_savepoint(savepoint.get_id().0) {
+            Ok(stored) => Some((stored.get_transaction_id(), stored.get_user_root())),
+            // No record on file: one this transaction deleted, or an ephemeral savepoint's. A
+            // persistent savepoint's gone otherwise was removed from under the handle, by a file
+            // replaced from a copy
+            Err(SavepointError::InvalidSavepoint) => {
+                let deleted = self
+                    .savepoint_state
+                    .lock()
+                    .unwrap()
+                    .deleted_record(savepoint.get_id());
+                if deleted.is_none()
+                    && self
+                        .transaction_tracker
+                        .is_persistent_savepoint(savepoint.get_id())
+                {
+                    return Err(SavepointError::InvalidSavepoint);
+                }
+                deleted
+            }
+            Err(err) => return Err(err),
+        };
+        if let Some((transaction_id, user_root)) = stored
+            && (transaction_id != savepoint.get_transaction_id()
+                || user_root != savepoint.get_user_root())
         {
             return Err(SavepointError::InvalidSavepoint);
         }

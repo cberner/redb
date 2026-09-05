@@ -290,6 +290,124 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     Database::open(tmpfile.path()).unwrap();
 }
 
+/// Writes `with`'s contents over `path`'s, in place, so that a handle open on `path` finds
+/// them: a file replaced from a copy, out from under the database
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+fn overwrite(path: &std::path::Path, with: &std::path::Path) {
+    use std::io::Write;
+
+    let contents = std::fs::read(with).unwrap();
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all(&contents).unwrap();
+    file.set_len(contents.len() as u64).unwrap();
+    file.sync_all().unwrap();
+}
+
+/// A handle to a persistent savepoint outlives the transaction that read it, and a file copied
+/// in can replace the savepoint under its id with one of the same transaction and another root,
+/// whose pages the allocator state the handle adopts allocates without: the handle is invalid,
+/// and one read from the file restores
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn a_savepoint_handle_a_peer_replaced_under_its_id_is_invalid() {
+    use redb::{ReadableDatabase, ReadableTable, SavepointError, TableDefinition};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let copy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+    let db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    // The handle and the copy each commit a row of their own, then a savepoint of that commit:
+    // the same savepoint and transaction ids, counted from the same header, naming different
+    // roots
+    let txn = db.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    let handle = txn.get_persistent_savepoint(savepoint).unwrap();
+    txn.abort().unwrap();
+    let other = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(copy.path())
+        .unwrap();
+    let txn = other.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(2, 2).unwrap();
+    txn.commit().unwrap();
+    let txn = other.begin_write().unwrap();
+    assert_eq!(txn.persistent_savepoint().unwrap(), savepoint);
+    txn.commit().unwrap();
+    drop(other);
+    overwrite(tmpfile.path(), copy.path());
+
+    // The transaction adopts the copy's commit, and its savepoint under the id
+    let mut txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.restore_savepoint(&handle),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+    let current = txn.get_persistent_savepoint(savepoint).unwrap();
+    // Deleting the record leaves the stale handle invalid: it is compared against the record
+    // deleted, which the handle read from the file matches, so that one restores still
+    assert!(txn.delete_persistent_savepoint(savepoint).unwrap());
+    assert!(matches!(
+        txn.restore_savepoint(&handle),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+    txn.restore_savepoint(&current).unwrap();
+    txn.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TABLE).unwrap();
+    assert!(table.get(1).unwrap().is_none());
+    assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+}
+
+/// A handle to a persistent savepoint outlives the transaction that read it, and a check can
+/// reload a file copied in that lacks the savepoint while the tracker still holds its id: the
+/// handle is invalid, rather than restoring a root the rebuilt allocator state allocates without
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn a_savepoint_handle_a_reloaded_file_lacks_is_invalid() {
+    use redb::SavepointError;
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let copy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    let handle = txn.get_persistent_savepoint(savepoint).unwrap();
+    txn.abort().unwrap();
+    // The copy, from before the savepoint, written over the file and reloaded by a check
+    overwrite(tmpfile.path(), copy.path());
+    db.check_integrity().unwrap();
+
+    let mut txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.restore_savepoint(&handle),
+        Err(SavepointError::InvalidSavepoint)
+    ));
+    txn.abort().unwrap();
+}
+
 /// A multi-writer handle's write transaction begins from the file as another process last
 /// committed it, and so does its close
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]

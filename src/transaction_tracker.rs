@@ -463,6 +463,15 @@ impl TransactionTracker {
         self.deallocate_read_transaction(mem, transaction);
     }
 
+    // Whether `id` is a persistent savepoint the tracker holds, as against an ephemeral one
+    pub(crate) fn is_persistent_savepoint(&self, id: SavepointId) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .persistent_savepoints
+            .contains(&id)
+    }
+
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
         self.state
             .lock()

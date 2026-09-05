@@ -41,7 +41,8 @@
   compaction's own commits are the exception, and `Database::compact()` ends with one that does.
   Ephemeral savepoints are refused there, with `SavepointError::EphemeralSavepointUnsupported`,
   and a write transaction begins from the file as another process last committed it, as does the
-  close.
+  close. `WriteTransaction::restore_savepoint()` refuses a persistent savepoint's handle the
+  file's record no longer matches, with `SavepointError::InvalidSavepoint`.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
