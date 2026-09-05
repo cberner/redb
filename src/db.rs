@@ -18,6 +18,7 @@ use crate::{
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -901,6 +902,15 @@ impl Database {
         Ok(was_clean)
     }
 
+    // Restores the tracker state for the file's persistent savepoints
+    fn restore_persistent_savepoints(&self) -> Result<(), DatabaseError> {
+        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+        register_persistent_savepoints(&self.transaction_tracker, &self.mem, &txn)?;
+        txn.abort()?;
+
+        Ok(())
+    }
+
     // Verifies, and repairs in memory, the live (possibly non-durable) state. Returns:
     // - `None` if the live tree is corrupt and the commit must be rolled back;
     // - `Some(true)` if the live state is fully clean;
@@ -1456,27 +1466,7 @@ impl Database {
         };
 
         // Restore the tracker state for any persistent savepoints
-        let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
-        if let Some(next_id) = txn.next_persistent_savepoint_id()? {
-            db.transaction_tracker
-                .restore_savepoint_counter_state(next_id);
-        }
-        for id in txn.list_persistent_savepoints()? {
-            let savepoint = match txn.get_persistent_savepoint(id) {
-                Ok(savepoint) => savepoint,
-                Err(err) => match err {
-                    SavepointError::InvalidSavepoint
-                    | SavepointError::ImmediateDurabilityRequired
-                    | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
-                    SavepointError::Storage(storage) => {
-                        return Err(storage.into());
-                    }
-                },
-            };
-            db.transaction_tracker
-                .register_persistent_savepoint(&db.mem, &savepoint)?;
-        }
-        txn.abort()?;
+        db.restore_persistent_savepoints()?;
 
         Ok(db)
     }
@@ -1556,6 +1546,42 @@ impl Database {
             AllocationPolicy::Default,
         )
     }
+}
+
+// Holds the file's persistent savepoints, which another process may have created, replaced or
+// deleted since the tracker last saw the file, and continues savepoint ids past the file's.
+// Under the header lock
+fn register_persistent_savepoints(
+    transaction_tracker: &TransactionTracker,
+    mem: &TransactionalMemory,
+    txn: &WriteTransaction,
+) -> Result {
+    if let Some(next_id) = txn.next_persistent_savepoint_id()? {
+        transaction_tracker.restore_savepoint_counter_state(next_id);
+    }
+    let mut held = BTreeMap::new();
+    for id in txn.list_persistent_savepoints()? {
+        let savepoint = match txn.get_persistent_savepoint(id) {
+            Ok(savepoint) => savepoint,
+            Err(err) => match err {
+                SavepointError::InvalidSavepoint
+                | SavepointError::ImmediateDurabilityRequired
+                | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
+                SavepointError::Storage(storage) => {
+                    return Err(storage);
+                }
+            },
+        };
+        held.insert(savepoint.get_id(), savepoint.get_transaction_id());
+    }
+    #[cfg(feature = "experimental-multiprocess")]
+    let hold = mem.header_hold(None)?;
+    transaction_tracker.hold_persistent_savepoints(
+        mem,
+        &held,
+        #[cfg(feature = "experimental-multiprocess")]
+        &hold,
+    )
 }
 
 // Takes the write slot and the writer lock, and builds the transaction on them. A caller that
