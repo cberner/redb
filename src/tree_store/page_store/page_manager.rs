@@ -1213,7 +1213,10 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
     }
 
-    pub(crate) fn clear_cache_and_reload(&mut self) -> Result<bool, DatabaseError> {
+    // Returns whether the file was as this handle had it, layout and header both, and whether the
+    // commit it holds now is another than the one it had: one made from the same header carries
+    // the same id, so a commit is known by its roots as well
+    pub(crate) fn clear_cache_and_reload(&mut self) -> Result<(bool, bool), DatabaseError> {
         // The in-memory state is being discarded for the on-disk state, so buffered writes --
         // which can only belong to the discarded state -- are dropped rather than written out;
         // after an external truncation, writing them could even fail beyond the end of the file.
@@ -1246,20 +1249,22 @@ impl TransactionalMemory {
             self.storage.flush()?;
         }
 
-        {
+        let changed = {
             let mut state = self.state.lock().unwrap();
+            let changed = *header.primary_slot() != *state.header.primary_slot();
             state.header = header;
             state.read_from_secondary = false;
             // Drop the previous allocator state -- it described the layout that was in memory
             // before the reload. The caller is required to repopulate it (via reset_allocator_state or
             // load_allocator_state) before any allocation/free path runs.
             state.allocators = None;
-        }
+            changed
+        };
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
         // that belonged only to those roots.
         self.unpersisted.lock().unwrap().clear();
 
-        Ok(was_clean)
+        Ok((was_clean, changed))
     }
 
     /// The latest committed transaction id, read from the file by a shared reader since a peer

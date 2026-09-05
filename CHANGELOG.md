@@ -40,8 +40,9 @@
   In `MultiWriterProcess`, every commit records the allocator state, for the next writer to load;
   compaction's own commits are the exception, and `Database::compact()` ends with one that does.
   Ephemeral savepoints are refused there, with `SavepointError::EphemeralSavepointUnsupported`,
-  and a write transaction begins from the file as another process last committed it, as does the
-  close. `WriteTransaction::restore_savepoint()` refuses a persistent savepoint's handle the
+  a write transaction begins from the file as another process last committed it, as does the
+  close, and `Database::check_integrity()` waits for a write transaction in another process to
+  end. `WriteTransaction::restore_savepoint()` refuses a persistent savepoint's handle the
   file's record no longer matches, with `SavepointError::InvalidSavepoint`.
 
 ### redb-derive (unreleased)
