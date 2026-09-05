@@ -1157,7 +1157,7 @@ impl WriteTransaction {
             return Err(SavepointError::ImmediateDurabilityRequired);
         }
 
-        let mut savepoint = self.ephemeral_savepoint()?;
+        let mut savepoint = self.create_savepoint()?;
 
         let mut system_tables = self.system_tables.lock().unwrap();
 
@@ -1285,7 +1285,21 @@ impl WriteTransaction {
     ///
     /// Returns [`SavepointError::InvalidSavepoint`] if the transaction is "dirty" (a data
     /// table has been opened, renamed, or deleted, or a savepoint has been restored)
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "Refused, with [`SavepointError::EphemeralSavepointUnsupported`], in [`ConcurrencyMode::MultiWriterProcess`](crate::ConcurrencyMode::MultiWriterProcess): the savepoint would be known to this process alone, and a persistent savepoint another process creates could take its id. Persistent savepoints are supported. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+            return Err(SavepointError::EphemeralSavepointUnsupported);
+        }
+        self.create_savepoint()
+    }
+
+    // The savepoint, ephemeral until `persistent_savepoint()` records it
+    fn create_savepoint(&self) -> Result<Savepoint, SavepointError> {
         // Serialize the dirty check and savepoint registration against
         // `TableNamespace::set_dirty()`, which runs under the same tables lock. Without this,
         // a concurrent first table-open (legal since `WriteTransaction: Sync`) can read the
