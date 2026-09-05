@@ -2271,7 +2271,19 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn close(&self) -> Result {
+    // Writes the shutdown header, under `writer_lock` where the database is shared, and closes
+    // the storage. Without the lock the header is not written: it would overwrite a commit
+    // another process makes meanwhile
+    pub(crate) fn close(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let shutdown_result = match writer_lock {
+            Some(_held) => self.flush_shutdown_header(),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "experimental-multiprocess"))]
         let shutdown_result = self.flush_shutdown_header();
         // The backend's close() contract guarantees it is called exactly once, so it must be
         // called even if the shutdown writes above failed

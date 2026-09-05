@@ -1677,14 +1677,27 @@ fn ensure_allocator_state_table_and_trim(
 // write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
     // No saved allocator state when it needs repair: the next open must rebuild it instead
-    // of trusting the saved one
-    if !crate::panicking()
-        && !mem.needs_repair()
+    // of trusting the saved one. Nor after a latched I/O failure, decided ahead of the lock,
+    // which waits on a peer holding the writer byte
+    let writing = !crate::panicking() && !mem.needs_repair() && mem.check_io_errors().is_ok();
+    // One hold across the allocator state's commit and the shutdown header: a commit another
+    // process made between them would be overwritten by the header. Without the hold, neither
+    // is written: the commit would take one of its own and release it, and the header would
+    // then overwrite a commit made between them
+    #[cfg(feature = "experimental-multiprocess")]
+    let writer_lock = if writing {
+        mem.lock_writer().ok()
+    } else {
+        None
+    };
+    #[cfg(feature = "experimental-multiprocess")]
+    let writing = writing && writer_lock.is_some();
+    if writing
         && ensure_allocator_state_table_and_trim(
             transaction_tracker,
             mem,
             #[cfg(feature = "experimental-multiprocess")]
-            None,
+            writer_lock.as_ref(),
             #[cfg(feature = "experimental-multiprocess")]
             None,
         )
@@ -1694,7 +1707,13 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
         warn!("Failed to write allocator state table. Repair may be required at restart.");
     }
 
-    if mem.close().is_err() {
+    if mem
+        .close(
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock.as_ref(),
+        )
+        .is_err()
+    {
         #[cfg(feature = "logging")]
         warn!("Failed to flush database file. Repair may be required at restart.");
     }
@@ -2436,6 +2455,64 @@ mod writer_byte_test {
             table.insert(0, 0).unwrap();
         }
         write.commit().unwrap();
+    }
+
+    /// Whether the file is unclean, as a shared reader sees it: it is refused an unclean file
+    /// no live writer holds
+    fn left_unclean(path: &Path) -> bool {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        match builder.open_read_only(path) {
+            Err(super::DatabaseError::RepairAborted) => true,
+            Err(err) => panic!("{err}"),
+            Ok(_) => false,
+        }
+    }
+
+    /// The shutdown header is written under the writer byte, or not at all: written without it,
+    /// it would overwrite a commit another process makes meanwhile
+    #[test]
+    fn the_shutdown_header_is_written_under_the_writer_byte_or_not_at_all() {
+        // The memory's close alone, without the database's, which would write the header itself
+        fn close(path: &Path, under_the_byte: bool) {
+            let db = create(path, ConcurrencyMode::MultiWriterProcess);
+            commit_one(&db);
+            let mem = db.mem.clone();
+            std::mem::forget(db);
+            if under_the_byte {
+                let writer_lock = mem.lock_writer().unwrap();
+                mem.close(Some(&writer_lock)).unwrap();
+            } else {
+                mem.close(None).unwrap();
+            }
+        }
+
+        let tmpfile = crate::create_tempfile();
+        close(tmpfile.path(), false);
+        assert!(
+            left_unclean(tmpfile.path()),
+            "a header was written without the byte"
+        );
+
+        let tmpfile = crate::create_tempfile();
+        close(tmpfile.path(), true);
+        assert!(
+            !left_unclean(tmpfile.path()),
+            "no header was written under the byte"
+        );
+    }
+
+    /// The close takes the byte once, for its commit and for the header after it
+    #[test]
+    fn a_close_leaves_a_clean_file() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        commit_one(&db);
+        drop(db);
+        assert!(
+            !left_unclean(tmpfile.path()),
+            "the close left the file unclean"
+        );
     }
 
     /// A multi-writer compaction ends with a commit recording the allocator state, for the next
