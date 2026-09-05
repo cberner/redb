@@ -762,6 +762,15 @@ impl TransactionalMemory {
         })
     }
 
+    fn read_file_header(
+        storage: &PagedCachedFile,
+        page_size: u32,
+        #[cfg(feature = "experimental-multiprocess")] _header_lock: &HeaderGuard<'_>,
+    ) -> Result<UnrepairedDatabaseHeader, DatabaseError> {
+        let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
+        UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size)
+    }
+
     /// Reads the header, reconciling the layout against the file's length and writing back a
     /// repair if one was needed. A shared reader does neither: see `read_shared_header()`.
     fn read_header(
@@ -780,14 +789,17 @@ impl TransactionalMemory {
                 page_size,
             );
         }
-        let header_bytes = {
+        let unrepaired = {
             #[cfg(feature = "experimental-multiprocess")]
-            let _guard =
+            let header_lock =
                 Self::lock_header(storage, in_process_header_lock, concurrency_mode, false)?;
-            storage.read_direct(0, DB_HEADER_SIZE)?
+            Self::read_file_header(
+                storage,
+                page_size.try_into().unwrap(),
+                #[cfg(feature = "experimental-multiprocess")]
+                &header_lock,
+            )?
         };
-        let unrepaired =
-            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         let file_len = storage.raw_file_len()?;
         let needs_recovery = unrepaired.recovery_required(file_len);
         if needs_recovery && read_only {
@@ -820,16 +832,14 @@ impl TransactionalMemory {
         concurrency_mode: ConcurrencyMode,
         page_size: usize,
     ) -> Result<DatabaseHeader, DatabaseError> {
-        let (header_bytes, consistent) = {
-            let _guard =
+        let (unrepaired, consistent) = {
+            let header_lock =
                 Self::lock_header(storage, in_process_header_lock, concurrency_mode, false)?;
             (
-                storage.read_direct(0, DB_HEADER_SIZE)?,
+                Self::read_file_header(storage, page_size.try_into().unwrap(), &header_lock)?,
                 storage.query_lock_range(byte_range(CONSISTENT_BYTE))?,
             )
         };
-        let unrepaired =
-            UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size.try_into().unwrap())?;
         // An unclean file is a live writer's to repair, if there is one
         if unrepaired.unclean() && !consistent {
             return Err(DatabaseError::RepairAborted);
@@ -1223,17 +1233,16 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
         self.storage.sync_file()?;
 
-        let header_bytes = {
+        let unrepaired = {
             #[cfg(feature = "experimental-multiprocess")]
-            let _guard = Self::lock_header(
+            let header_lock = self.lock_header_shared()?;
+            Self::read_file_header(
                 &self.storage,
-                &self.in_process_header_lock,
-                self.concurrency_mode,
-                false,
-            )?;
-            self.storage.read_direct(0, DB_HEADER_SIZE)?
+                self.page_size,
+                #[cfg(feature = "experimental-multiprocess")]
+                &header_lock,
+            )?
         };
-        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         if !was_clean {
             #[cfg(feature = "experimental-multiprocess")]
@@ -1277,13 +1286,9 @@ impl TransactionalMemory {
 
     /// Adopts the header another process has written. Returns the transaction id now visible.
     #[cfg(feature = "experimental-multiprocess")]
-    fn reload_header(&self, _header: &HeaderGuard<'_>) -> Result<TransactionId> {
-        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
-        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
-            .map_err(|err| match err {
-                DatabaseError::Storage(err) => err,
-                other => StorageError::Corrupted(other.to_string()),
-            })?;
+    fn reload_header(&self, header: &HeaderGuard<'_>) -> Result<TransactionId> {
+        let unrepaired = Self::read_file_header(&self.storage, self.page_size, header)
+            .map_err(DatabaseError::into_storage_error_or_corrupted)?;
         let header = unrepaired.finalize_transaction_slots()?;
         let (previous, current) = {
             let mut state = self.state.lock()?;
@@ -1842,17 +1847,16 @@ impl TransactionalMemory {
     // True if the on-disk durable primary slot's checksum is corrupt. Read from disk, since the
     // in-memory copy of an originally-clean slot wouldn't show external/failed-commit corruption.
     pub(crate) fn durable_primary_slot_corrupt(&self) -> Result<bool, DatabaseError> {
-        let header_bytes = {
+        let disk_header = {
             #[cfg(feature = "experimental-multiprocess")]
-            let _guard = Self::lock_header(
+            let header_lock = self.lock_header_shared()?;
+            Self::read_file_header(
                 &self.storage,
-                &self.in_process_header_lock,
-                self.concurrency_mode,
-                false,
-            )?;
-            self.storage.read_direct(0, DB_HEADER_SIZE)?
+                self.page_size,
+                #[cfg(feature = "experimental-multiprocess")]
+                &header_lock,
+            )?
         };
-        let disk_header = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)?;
         Ok(disk_header.primary_corrupted())
     }
 

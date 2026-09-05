@@ -251,6 +251,16 @@ impl From<io::Error> for DatabaseError {
     }
 }
 
+impl DatabaseError {
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn into_storage_error_or_corrupted(self) -> StorageError {
+        match self {
+            DatabaseError::Storage(storage) => storage,
+            other => StorageError::Corrupted(other.to_string()),
+        }
+    }
+}
+
 impl From<StorageError> for DatabaseError {
     fn from(err: StorageError) -> DatabaseError {
         DatabaseError::Storage(err)
