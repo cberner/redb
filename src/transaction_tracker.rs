@@ -4,7 +4,7 @@ use crate::tree_store::HeaderGuard;
 use crate::tree_store::TransactionalMemory;
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::WriterLock;
-use crate::{Key, Result, Savepoint, TypeName, Value};
+use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::sync::Arc;
@@ -302,31 +302,50 @@ impl TransactionTracker {
         state.next_transaction_id = state.next_transaction_id.max(id);
     }
 
+    // Continues savepoint ids from `next_savepoint` where that is past the ones issued here:
+    // another process may have created the file's persistent savepoints
     pub(crate) fn restore_savepoint_counter_state(&self, next_savepoint: SavepointId) {
         let mut state = self.state.lock().unwrap();
-        assert!(state.valid_savepoints.is_empty());
-        assert!(state.persistent_savepoints.is_empty());
-        state.next_savepoint_id = next_savepoint;
+        state.next_savepoint_id = state.next_savepoint_id.max(next_savepoint);
     }
 
-    pub(crate) fn register_persistent_savepoint(
+    // Holds the file's persistent savepoints, `held`, and no other persistent ones, each pinning
+    // its transaction: registers those it lacked, moves those whose transaction changed, and
+    // forgets those gone, which another process created, replaced or deleted
+    pub(crate) fn hold_persistent_savepoints(
         &self,
         mem: &TransactionalMemory,
-        savepoint: &Savepoint,
+        held: &BTreeMap<SavepointId, TransactionId>,
     ) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(
-            mem,
-            savepoint.get_transaction_id(),
-            #[cfg(feature = "experimental-multiprocess")]
-            &header,
-        )?;
-        state
-            .valid_savepoints
-            .insert(savepoint.get_id(), savepoint.get_transaction_id());
-        state.persistent_savepoints.insert(savepoint.get_id());
+        let gone: Vec<SavepointId> = state
+            .persistent_savepoints
+            .iter()
+            .filter(|id| !held.contains_key(id))
+            .copied()
+            .collect();
+        for id in gone {
+            state.persistent_savepoints.remove(&id);
+            let transaction = state.valid_savepoints.remove(&id).unwrap();
+            state.dereference_transaction(mem, transaction);
+        }
+        for (&id, &transaction) in held {
+            if state.valid_savepoints.get(&id) == Some(&transaction) {
+                continue;
+            }
+            state.reference_transaction(
+                mem,
+                transaction,
+                #[cfg(feature = "experimental-multiprocess")]
+                &header,
+            )?;
+            if let Some(replaced) = state.valid_savepoints.insert(id, transaction) {
+                state.dereference_transaction(mem, replaced);
+            }
+            state.persistent_savepoints.insert(id);
+        }
 
         Ok(())
     }

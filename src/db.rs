@@ -18,6 +18,7 @@ use crate::{
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -788,6 +789,10 @@ impl Database {
     /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
     /// been made durable are made durable if the check passes, or rolled back if the database must
     /// be repaired.
+    ///
+    /// Where the database is shared with other processes, the check holds the writer lock: it
+    /// waits for a write transaction in another process to end, and no other process's write
+    /// transaction commits until it returns.
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
             return Err(DatabaseError::TransactionInProgress);
@@ -810,17 +815,27 @@ impl Database {
             .into());
         }
 
+        // Held until the check is over, so that the file it reloads is the file it repairs. Taken
+        // without the write slot: no transaction is live, and none can begin under `&mut self`
+        #[cfg(feature = "experimental-multiprocess")]
+        let writer_lock = self.mem.lock_writer()?;
         // Repairing rebuilds the allocator state, so a failure part way through leaves one that
         // describes neither the file nor anything else. Holding an allocator state must continue
         // to mean it describes the file.
-        let result = self.check_integrity_inner();
+        let result = self.check_integrity_inner(
+            #[cfg(feature = "experimental-multiprocess")]
+            &writer_lock,
+        );
         if result.is_err() {
             self.mem.invalidate_allocator_state();
         }
         result
     }
 
-    fn check_integrity_inner(&mut self) -> Result<bool, DatabaseError> {
+    fn check_integrity_inner(
+        &mut self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: &Arc<WriterLock>,
+    ) -> Result<bool, DatabaseError> {
         // A pending Durability::None commit is acknowledged, live data that the reload below would
         // discard. If the live state verifies, promote it to durable rather than losing it -- even
         // if the durable state it replaces turns out to be corrupt, in which case we recover from
@@ -854,22 +869,44 @@ impl Database {
             rolling_back_non_durable = true;
         }
 
-        // No pending commit, or fall-through: verify and repair the durable state. Capture the
-        // allocator hash to compare against the rebuild below; with the pending case handled above,
-        // the live and durable states are identical here, so this is a valid check.
+        // No pending commit, or fall-through: verify and repair the durable state. The allocator
+        // compared against the rebuild below is this handle's where the reload finds the commit
+        // it already had: with the pending case handled above, the live and durable states are
+        // then identical, so that allocator described the file. A commit another process made
+        // since is one it lagged, and the comparison is then against the snapshot that commit
+        // saved, which the next open would trust, where it saved one. A commit is known by its
+        // roots as well as its id: a process that committed from the same header used the same id.
         let allocator_hash = self.mem.allocator_hash();
+        let known_id = self.mem.get_last_committed_transaction_id()?;
+        let known_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
         let mem = Arc::get_mut(&mut self.mem).unwrap();
         let mut was_clean = mem.clear_cache_and_reload()?;
-
-        let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
+        let reloaded_id = self.mem.get_last_committed_transaction_id()?;
+        let reloaded_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
+        let adopted_peer_commits = reloaded_id != known_id || reloaded_roots != known_roots;
+        // Ids issued from here on follow the header this handle now has, which may carry another
+        // process's commits
+        self.transaction_tracker
+            .reserve_repair_transaction_id(reloaded_id);
+        let allocator_hash = if adopted_peer_commits {
+            match Self::get_allocator_state_table(&self.mem)? {
+                Some(tree) => {
+                    self.mem.load_allocator_state(&tree)?;
+                    Some(self.mem.allocator_hash())
+                }
+                None => None,
+            }
+        } else {
+            Some(allocator_hash)
+        };
 
         let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
 
-        if old_roots != new_roots
-            || allocator_hash != self.mem.allocator_hash()
+        if reloaded_roots != new_roots
+            || allocator_hash.is_some_and(|hash| hash != self.mem.allocator_hash())
             || rolling_back_non_durable
         {
             was_clean = false;
@@ -898,7 +935,47 @@ impl Database {
         self.mem.clear_needs_repair();
         self.mem.begin_writable()?;
 
+        // The tracker holds the persistent savepoints the tables adopted above hold, as the
+        // open's does: another process may have created, replaced or deleted any of them
+        if adopted_peer_commits {
+            let txn = self
+                .begin_write_with(
+                    #[cfg(feature = "experimental-multiprocess")]
+                    Some(writer_lock),
+                )
+                .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
+            self.register_persistent_savepoints(&txn)?;
+            txn.abort()?;
+        }
+
         Ok(was_clean)
+    }
+
+    // Holds the file's persistent savepoints, which another process may have created, replaced
+    // or deleted since the tracker last saw the file, and continues savepoint ids past the file's
+    fn register_persistent_savepoints(&self, txn: &WriteTransaction) -> Result<(), DatabaseError> {
+        if let Some(next_id) = txn.next_persistent_savepoint_id()? {
+            self.transaction_tracker
+                .restore_savepoint_counter_state(next_id);
+        }
+        let mut held = BTreeMap::new();
+        for id in txn.list_persistent_savepoints()? {
+            let savepoint = match txn.get_persistent_savepoint(id) {
+                Ok(savepoint) => savepoint,
+                Err(err) => match err {
+                    SavepointError::InvalidSavepoint
+                    | SavepointError::ImmediateDurabilityRequired => unreachable!(),
+                    SavepointError::Storage(storage) => {
+                        return Err(storage.into());
+                    }
+                },
+            };
+            held.insert(savepoint.get_id(), savepoint.get_transaction_id());
+        }
+        self.transaction_tracker
+            .hold_persistent_savepoints(&self.mem, &held)?;
+
+        Ok(())
     }
 
     // Verifies, and repairs in memory, the live (possibly non-durable) state. Returns:
@@ -1439,24 +1516,7 @@ impl Database {
 
         // Restore the tracker state for any persistent savepoints
         let txn = db.begin_write().map_err(|e| e.into_storage_error())?;
-        if let Some(next_id) = txn.next_persistent_savepoint_id()? {
-            db.transaction_tracker
-                .restore_savepoint_counter_state(next_id);
-        }
-        for id in txn.list_persistent_savepoints()? {
-            let savepoint = match txn.get_persistent_savepoint(id) {
-                Ok(savepoint) => savepoint,
-                Err(err) => match err {
-                    SavepointError::InvalidSavepoint
-                    | SavepointError::ImmediateDurabilityRequired => unreachable!(),
-                    SavepointError::Storage(storage) => {
-                        return Err(storage.into());
-                    }
-                },
-            };
-            db.transaction_tracker
-                .register_persistent_savepoint(&db.mem, &savepoint)?;
-        }
+        db.register_persistent_savepoints(&txn)?;
         txn.abort()?;
 
         Ok(db)
@@ -3051,6 +3111,29 @@ mod active_transaction_test {
                 .unwrap();
             assert_eq!(scan(Some(second)), Some(second), "{mode:?}");
         }
+    }
+
+    /// The snapshot an adopted commit saved is what the next open would trust, so the check
+    /// compares it against the rebuild as it compares this handle's own
+    #[test]
+    fn an_integrity_check_validates_an_adopted_allocator_snapshot() {
+        use crate::tree_store::{AllocationPolicy, PageAllocator, PageTracker};
+
+        let tmpfile = crate::create_tempfile();
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let peer = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .open(tmpfile.path())
+            .unwrap();
+        // A page the peer allocates and neither frees nor references: a leak, which the snapshot
+        // its close saves records as allocated
+        let allocator = PageAllocator::new(peer.mem.clone(), AllocationPolicy::Default);
+        drop(allocator.allocate(64, &PageTracker::ignore()).unwrap());
+        drop(allocator);
+        drop(peer);
+
+        assert!(!db.check_integrity().unwrap());
+        assert!(db.check_integrity().unwrap());
     }
 
     /// A transaction lent the exclusive header hold commits under it and leaves it held
