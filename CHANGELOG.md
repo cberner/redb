@@ -37,6 +37,8 @@
   `Durability::None` is refused, and the database may be opened read-only while another process has
   it open for writing; each new read transaction then sees that process's durable commits, and
   `Database::compact()` treats a read transaction in another process as a transaction in progress.
+  In `MultiWriterProcess`, `Database::compact()` ends with a commit recording the allocator state,
+  for the next writer to load.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

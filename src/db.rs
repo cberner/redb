@@ -13,8 +13,8 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{
-    CompactionError, DatabaseError, Error, ReadOnlyTable, ReadableTable, SavepointError,
-    StorageError, TableError,
+    CompactionError, DatabaseError, ReadOnlyTable, ReadableTable, SavepointError, StorageError,
+    TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
@@ -1069,6 +1069,21 @@ impl Database {
             compacted = true;
         }
 
+        // In multi-writer mode the file's latest commit records the allocator state, for the
+        // next writer, in any process, to load rather than rebuild: the commit the close makes.
+        // Not in the other modes, where the close records and a second record would leave the
+        // file one record larger, the pages of the one it replaces being freed only by the next
+        // commit
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+            ensure_allocator_state_table_and_trim(
+                &self.transaction_tracker,
+                &self.mem,
+                writer_lock.as_ref(),
+                header_lock.as_ref(),
+            )?;
+        }
+
         Ok(compacted)
     }
 
@@ -1601,10 +1616,15 @@ fn begin_write_with_allocation_policy(
     .map_err(|e| e.into())
 }
 
+// Records the allocator state in a commit that also trims the file: the close's last commit,
+// and compaction's. `writer_lock` and `header_lock` where the caller lends the ones it holds, as
+// compaction does; nothing is waiting on the write slot in either case
 fn ensure_allocator_state_table_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
-) -> Result<(), Error> {
+    #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
+) -> Result {
     // Make a new quick-repair commit to update the allocator state table
     #[cfg(feature = "logging")]
     debug!("Writing allocator state table");
@@ -1615,9 +1635,11 @@ fn ensure_allocator_state_table_and_trim(
     // Before the lock, which waits on a peer holding the writer byte: a latched I/O failure
     // means there is nothing to write here anyway
     mem.check_io_errors()?;
-    // The database is being closed, so nothing can be waiting on the write slot
     #[cfg(feature = "experimental-multiprocess")]
-    let writer_lock = mem.lock_writer()?;
+    let writer_lock = match writer_lock {
+        Some(lent) => lent.clone(),
+        None => mem.lock_writer()?,
+    };
     let guard = TransactionGuard::new_write(
         transaction_tracker.start_write_transaction(),
         transaction_tracker.clone(),
@@ -1629,11 +1651,16 @@ fn ensure_allocator_state_table_and_trim(
         transaction_tracker,
         mem,
         AllocationPolicy::Lowest,
-    )?;
+    )
+    .map_err(|e| e.into_storage_error())?;
     tx.set_quick_repair(true);
     tx.disable_post_commit_free();
     tx.set_shrink_policy(ShrinkPolicy::Maximum);
-    tx.commit()?;
+    tx.commit_with(
+        #[cfg(feature = "experimental-multiprocess")]
+        header_lock,
+    )
+    .map_err(|e| e.into_storage_error())?;
 
     Ok(())
 }
@@ -1649,7 +1676,15 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // of trusting the saved one
     if !crate::panicking()
         && !mem.needs_repair()
-        && ensure_allocator_state_table_and_trim(transaction_tracker, mem).is_err()
+        && ensure_allocator_state_table_and_trim(
+            transaction_tracker,
+            mem,
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
+        )
+        .is_err()
     {
         #[cfg(feature = "logging")]
         warn!("Failed to write allocator state table. Repair may be required at restart.");
@@ -2397,6 +2432,22 @@ mod writer_byte_test {
             table.insert(0, 0).unwrap();
         }
         write.commit().unwrap();
+    }
+
+    /// A multi-writer compaction ends with a commit recording the allocator state, for the next
+    /// writer, in any process, to load rather than rebuild
+    #[test]
+    fn a_multi_writer_compaction_records_the_allocator_state() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        commit_one(&db);
+
+        db.compact().unwrap();
+        assert!(
+            Database::get_allocator_state_table(&db.mem)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Held for the transaction and no longer, which is what lets the next writer in
