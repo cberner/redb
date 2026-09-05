@@ -1299,6 +1299,43 @@ impl TransactionalMemory {
         Ok(current)
     }
 
+    /// Adopts the commit another process made since this handle last loaded the file, ahead of
+    /// a write transaction: the header, with the cached pages dropped, since that process may
+    /// have reused any of them, and the allocator state dropped for the caller to load or
+    /// rebuild. Under the header lock, which `_header_lock` proves held, and the writer byte,
+    /// which the caller holds too, so the commit adopted is the one the transaction follows.
+    /// Returns whether there was one
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn reload_for_write(&self, _header_lock: &HeaderGuard<'_>) -> Result<bool> {
+        let header_bytes = self.storage.read_direct(0, DB_HEADER_SIZE)?;
+        let unrepaired = UnrepairedDatabaseHeader::from_bytes(&header_bytes, self.page_size)
+            .map_err(|err| match err {
+                DatabaseError::Storage(err) => err,
+                other => StorageError::Corrupted(other.to_string()),
+            })?;
+        let (header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+        if *header.primary_slot() == *self.state.lock().unwrap().header.primary_slot() {
+            return Ok(false);
+        }
+
+        // Buffered writes can only belong to the state being discarded: a commit flushes its
+        // own, and a transaction dropped while a panic unwinds leaves its pages behind, which
+        // that process may have allocated since
+        self.storage.discard_write_buffer();
+        self.storage.invalidate_cache_all();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.header = header;
+            state.read_from_secondary = false;
+            state.allocators = None;
+        }
+        // Mirrors the allocator state that was just dropped, so it is repopulated with it
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
+
+        Ok(true)
+    }
+
     pub(crate) fn begin_writable(&self) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         let header_lock = self.lock_header_exclusive()?;
@@ -1441,6 +1478,13 @@ impl TransactionalMemory {
             .copy_from_slice(&header.to_bytes(true));
 
         Ok(())
+    }
+
+    // Marks the header this process holds as a live writer's, for its next commit to write: the
+    // allocator state's load clears the flag, as it does for the open ahead of `begin_writable()`
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn mark_recovery_required(&self) {
+        self.state.lock().unwrap().header.recovery_required = true;
     }
 
     // Durably clears the recovery flag, marking the repair as complete.
@@ -2267,7 +2311,19 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    pub(crate) fn close(&self) -> Result {
+    // Writes the shutdown header, under `writer_lock` where the database is shared, and closes
+    // the storage. Without the lock the header is not written: it would overwrite a commit
+    // another process makes meanwhile
+    pub(crate) fn close(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result {
+        #[cfg(feature = "experimental-multiprocess")]
+        let shutdown_result = match writer_lock {
+            Some(_held) => self.flush_shutdown_header(),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "experimental-multiprocess"))]
         let shutdown_result = self.flush_shutdown_header();
         // The backend's close() contract guarantees it is called exactly once, so it must be
         // called even if the shutdown writes above failed
@@ -2624,6 +2680,46 @@ mod header_lock_test {
         let peer = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
         drop(hold(&peer, false).unwrap());
         drop(held);
+    }
+
+    /// The recovery flag is this handle's rather than the commit's: a peer's close clears it in
+    /// the file while this handle is still writing, and the commit that adopts the peer's close
+    /// writes it back, so that a crash of this handle is recovered from
+    #[test]
+    fn adopting_a_peers_close_keeps_the_recovery_flag() {
+        use super::DB_HEADER_SIZE;
+        use crate::tree_store::page_store::header::UnrepairedDatabaseHeader;
+        use crate::{Database, TableDefinition};
+        const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+        fn unclean(path: &Path) -> bool {
+            let bytes = std::fs::read(path).unwrap();
+            UnrepairedDatabaseHeader::from_bytes(
+                &bytes[..DB_HEADER_SIZE],
+                PAGE_SIZE.try_into().unwrap(),
+            )
+            .unwrap()
+            .unclean()
+        }
+
+        let tmpfile = crate::create_tempfile();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.create(tmpfile.path()).unwrap();
+        let db = builder.open(tmpfile.path()).unwrap();
+        let peer = builder.open(tmpfile.path()).unwrap();
+        drop(peer);
+        assert!(!unclean(tmpfile.path()), "the peer's close left the flag");
+
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        txn.commit().unwrap();
+        assert!(
+            unclean(tmpfile.path()),
+            "the commit did not write the flag back"
+        );
+        drop(db);
+        assert!(!unclean(tmpfile.path()), "the close left the flag");
     }
 
     /// The other half of the hold covering the write: the bytes are on the file when

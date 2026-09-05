@@ -294,6 +294,25 @@ impl TransactionTracker {
         state.next_transaction_id = id;
     }
 
+    // Numbers the live write transaction `id` past `last_committed`, the file's latest commit,
+    // which another process made after the id was issued
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn follow_committed_transaction(
+        &self,
+        id: TransactionId,
+        last_committed: TransactionId,
+    ) -> TransactionId {
+        let mut state = self.state.lock().unwrap();
+        assert_eq!(state.live_write_transaction, Some(id));
+        if last_committed < id {
+            return id;
+        }
+        state.next_transaction_id = last_committed;
+        let id = state.next_transaction_id.increment();
+        state.live_write_transaction = Some(id);
+        id
+    }
+
     // Reserves a repair commit's id so it is never issued again: crash recovery orders the
     // commit slots by transaction id, so an id must never be committed twice
     pub(crate) fn reserve_repair_transaction_id(&self, id: TransactionId) {

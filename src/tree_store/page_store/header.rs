@@ -474,7 +474,7 @@ impl DatabaseHeader {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct TransactionHeader {
     pub(super) version: u8,
     pub(super) user_root: Option<BtreeHeader>,
