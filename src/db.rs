@@ -1041,6 +1041,7 @@ impl Database {
                     writer_lock.as_ref(),
                 )
                 .map_err(|e| e.into_storage_error())?;
+            txn.skip_allocator_state_record();
             if txn.compact_pages()? {
                 progress = true;
                 txn.commit_with(
@@ -1108,6 +1109,7 @@ impl Database {
                 return Ok(());
             }
             force_commit = false;
+            txn.skip_allocator_state_record();
             txn.set_two_phase_commit(true);
             txn.set_shrink_policy(shrink_policy);
             txn.commit_with(
@@ -2887,6 +2889,24 @@ mod active_transaction_test {
             write.set_durability(Durability::None),
             Err(SetDurabilityError::NonDurableCommitUnsupported)
         ));
+    }
+
+    /// Every multi-writer commit records the allocator state, for the next writer, in any
+    /// process, to load rather than rebuild: turning quick-repair off has no effect there
+    #[test]
+    fn a_multi_writer_commit_records_the_allocator_state_regardless() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+
+        let mut write = db.begin_write().unwrap();
+        write.set_quick_repair(false);
+        write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        write.commit().unwrap();
+        assert!(
+            Database::get_allocator_state_table(&db.mem)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A read-only participant sees what another process committed, not the header it read at open
