@@ -972,14 +972,18 @@ impl Database {
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
-        // Where the file is shared, held until the compaction is over and lent to the
-        // transactions it runs: no other process begins a transaction under them, and one that
-        // already has is a transaction in progress. Taken once a write transaction begun before
-        // this call has ended: its commit would wait on the holds, and in multi-writer mode its
-        // end would release the writer byte from under a hold taken meanwhile
+        // Where the file is shared, the compaction holds the writer lock and the exclusive header
+        // lock until it returns, and lends them to every transaction it runs. No other process
+        // begins a transaction while they are held, so a pin still held once they are taken is a
+        // transaction in progress, refused below.
         #[cfg(feature = "experimental-multiprocess")]
         let (writer_lock, header_lock) = if self.mem.concurrency_mode().is_multi_process_writable()
         {
+            // Waits for a write transaction begun before this call to end. Its commit would wait
+            // on the header lock while this compaction waited on the write slot, and in
+            // multi-writer mode its end would release the writer byte from under this
+            // compaction's hold: a second lock on that byte from one file description is the
+            // same lock.
             self.begin_write()
                 .map_err(|e| e.into_storage_error())?
                 .abort()?;
@@ -988,6 +992,7 @@ impl Database {
                 Some(self.mem.lock_header_exclusive()?),
             )
         } else {
+            // Unshared, so there is no one to exclude
             (None, None)
         };
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
@@ -1010,7 +1015,7 @@ impl Database {
         if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(CompactionError::TransactionInProgress);
         }
-        // No local read is left to bound the scan, so a pin it finds is a peer's
+        // A pin still held is another process's read: this process's were refused above
         #[cfg(feature = "experimental-multiprocess")]
         if let Some(header_lock) = &header_lock
             && self
