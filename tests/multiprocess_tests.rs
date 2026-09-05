@@ -290,6 +290,149 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     Database::open(tmpfile.path()).unwrap();
 }
 
+/// A multi-writer check runs on the file as another process last committed it, and the handle
+/// goes on from there: its savepoint ids continue past the one it synced to, and its close commits
+/// after the commits it synced to
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_syncs_to_a_peers_commits() {
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = peer.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+    txn.commit().unwrap();
+    let txn = peer.begin_write().unwrap();
+    let peers_savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    drop(peer);
+
+    assert!(db.check_integrity().unwrap());
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    drop(table);
+    drop(read);
+    let txn = db.begin_write().unwrap();
+    let own_savepoint = txn.persistent_savepoint().unwrap();
+    assert_ne!(own_savepoint, peers_savepoint);
+    txn.commit().unwrap();
+    drop(db);
+
+    let db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    let txn = db.begin_write().unwrap();
+    let mut savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
+    savepoints.sort_unstable();
+    assert_eq!(savepoints, vec![peers_savepoint, own_savepoint]);
+}
+
+/// A shared commit is 2-phase, so a corrupt primary slot is corruption rather than a torn write
+/// to fall back from: the check repairs nothing from under a process still reading that slot
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    for key in [1, 2] {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
+        txn.commit().unwrap();
+    }
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open_read_only(tmpfile.path())
+        .unwrap();
+    let read = peer.begin_read().unwrap();
+
+    // The header: the god byte at 9, whose low bit names the primary of the two 128-byte commit
+    // slots at 64 and 192, each ending in a 16-byte checksum
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tmpfile.path())
+        .unwrap();
+    let mut god_byte = [0u8];
+    file.seek(SeekFrom::Start(9)).unwrap();
+    file.read_exact(&mut god_byte).unwrap();
+    let checksum = 64 + 128 * u64::from(god_byte[0] & 1) + 112;
+    let mut bytes = [0u8; 16];
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    file.read_exact(&mut bytes).unwrap();
+    for byte in &mut bytes {
+        *byte ^= 0xFF;
+    }
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    file.write_all(&bytes).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert!(matches!(
+        db.check_integrity(),
+        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+    ));
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+}
+
+/// The check waits for another process's write transaction to end, as a write transaction would
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_waits_for_a_peers_write_transaction() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = peer.begin_write().unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let checking = thread::spawn(move || {
+        tx.send(db.check_integrity().unwrap()).unwrap();
+        db
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the check ran under another process's write transaction"
+    );
+    txn.abort().unwrap();
+    assert!(
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the check never ran")
+    );
+    checking.join().unwrap();
+}
+
 /// A multi-writer handle's write transaction begins from the file as another process last
 /// committed it, and so does the commit its close makes.
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]

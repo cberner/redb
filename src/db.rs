@@ -791,11 +791,17 @@ impl Database {
     /// and `Err(Corrupted)` if the check failed and the file could not be repaired.
     ///
     /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
-    /// ephemeral [`Savepoint`](crate::Savepoint), is still alive when this method is called.
+    /// ephemeral [`Savepoint`](crate::Savepoint), is still alive on this handle when this method
+    /// is called.
     ///
     /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
     /// been made durable are made durable if the check passes, or rolled back if the database must
     /// be repaired.
+    #[cfg_attr(
+        feature = "experimental-multiprocess",
+        doc = "",
+        doc = "In the multi-process concurrency modes the check holds the writer lock: it waits for a write transaction in another process to end, and no other process writes to the file until it returns. A read transaction in another process neither blocks the check nor is disturbed by it. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    )]
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
             return Err(DatabaseError::TransactionInProgress);
@@ -818,17 +824,27 @@ impl Database {
             .into());
         }
 
+        // Held until the check is over, so that the file it reloads is the file it repairs, and
+        // no other process writes to it meanwhile
+        #[cfg(feature = "experimental-multiprocess")]
+        let writer_lock = self.mem.lock_writer()?;
         // Repairing rebuilds the allocator state, so a failure part way through leaves one that
         // describes neither the file nor anything else. Holding an allocator state must continue
         // to mean it describes the file.
-        let result = self.check_integrity_inner();
+        let result = self.check_integrity_inner(
+            #[cfg(feature = "experimental-multiprocess")]
+            &writer_lock,
+        );
         if result.is_err() {
             self.mem.invalidate_allocator_state();
         }
         result
     }
 
-    fn check_integrity_inner(&mut self) -> Result<bool, DatabaseError> {
+    fn check_integrity_inner(
+        &mut self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: &Arc<WriterLock>,
+    ) -> Result<bool, DatabaseError> {
         // A pending Durability::None commit is acknowledged, live data that the reload below would
         // discard. If the live state verifies, promote it to durable rather than losing it -- even
         // if the durable state it replaces turns out to be corrupt, in which case we recover from
@@ -864,10 +880,24 @@ impl Database {
 
         // No pending commit, or fall-through: verify and repair the durable state. Capture the
         // allocator hash to compare against the rebuild below; with the pending case handled above,
-        // the live and durable states are identical here, so this is a valid check.
-        let allocator_hash = self.mem.allocator_hash();
+        // the live and durable states are identical here, so this is a valid check. When the reload
+        // finds another process's commit, the snapshot that commit saved is compared instead: that
+        // is what the next open would trust, and this handle's own allocator lagged that commit. A
+        // commit that saved none leaves nothing an open could trust wrongly, so nothing to compare.
+        let own_allocator_hash = self.mem.allocator_hash();
         let mem = Arc::get_mut(&mut self.mem).unwrap();
-        let mut was_clean = mem.clear_cache_and_reload()?;
+        let (mut was_clean, peer_committed) = mem.clear_cache_and_reload()?;
+        let allocator_hash = if peer_committed {
+            match Self::get_allocator_state_table(&self.mem)? {
+                Some(tree) => {
+                    self.mem.load_allocator_state(&tree)?;
+                    Some(self.mem.allocator_hash())
+                }
+                None => None,
+            }
+        } else {
+            Some(own_allocator_hash)
+        };
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 
@@ -877,7 +907,7 @@ impl Database {
         })?;
 
         if old_roots != new_roots
-            || allocator_hash != self.mem.allocator_hash()
+            || allocator_hash.is_some_and(|hash| hash != self.mem.allocator_hash())
             || rolling_back_non_durable
         {
             was_clean = false;
@@ -906,11 +936,31 @@ impl Database {
         self.mem.clear_needs_repair();
         self.mem.begin_writable()?;
 
+        // The tracker holds the persistent savepoints the reloaded tables hold, as the open's does
+        if peer_committed {
+            self.sync_persistent_savepoints(
+                #[cfg(feature = "experimental-multiprocess")]
+                Some(writer_lock),
+            )?;
+        }
+        // In multi-writer mode a repair ends with a commit recording the allocator state, as the
+        // open's does, for the next writer in any process to load; after the savepoints are held,
+        // since a commit frees what nothing pins
+        #[cfg(feature = "experimental-multiprocess")]
+        if !was_clean && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+            ensure_allocator_state_table_and_trim(
+                &self.transaction_tracker,
+                &self.mem,
+                Some(writer_lock),
+                None,
+            )?;
+        }
+
         Ok(was_clean)
     }
 
     // Synchronizes the tracker state for the file's persistent savepoints. `writer_lock` is the
-    // lock the open holds, which the transaction this begins is lent
+    // caller's lock, when it holds one, which the transaction this begins is lent
     fn sync_persistent_savepoints(
         &self,
         #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
@@ -1538,7 +1588,7 @@ impl Database {
             writer_lock.as_ref(),
         )?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
-        // compaction does, so that the next open, in any process, loads it
+        // compaction and the integrity check do, so that the next open, in any process, loads it
         #[cfg(feature = "experimental-multiprocess")]
         if repaired && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
             ensure_allocator_state_table_and_trim(
@@ -1782,8 +1832,9 @@ fn begin_write_with_allocation_policy(
 }
 
 // Records the allocator state in a commit that also trims the file: the close's last commit,
-// and compaction's. `writer_lock` and `header_lock` where the caller lends the ones it holds, as
-// compaction does; nothing is waiting on the write slot in either case
+// compaction's, and the one ending a repair, in the open and in the integrity check.
+// `writer_lock` and `header_lock` are the ones the caller lends, when it holds them, as
+// compaction does; nothing is waiting on the write slot in any of these cases
 fn ensure_allocator_state_table_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
@@ -3344,6 +3395,35 @@ mod active_transaction_test {
         ));
         write.persistent_savepoint().unwrap();
         write.commit().unwrap();
+    }
+
+    /// A leak another process left in the file is repaired, and the repair ends with a commit
+    /// recording the allocator state, for the next writer in any process to load
+    #[test]
+    fn an_integrity_check_repairs_a_leak_a_peer_recorded() {
+        use crate::tree_store::{AllocationPolicy, PageAllocator, PageTracker};
+
+        let tmpfile = crate::create_tempfile();
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let peer = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .open(tmpfile.path())
+            .unwrap();
+        // A page the peer allocates and neither frees nor references: a leak, which the snapshot
+        // its close saves records as allocated
+        let allocator = PageAllocator::new(peer.mem.clone(), AllocationPolicy::Default);
+        drop(allocator.allocate(64, &PageTracker::ignore()).unwrap());
+        drop(allocator);
+        drop(peer);
+
+        assert!(!db.check_integrity().unwrap());
+        // The repair ends with a commit that records the allocator state, for a peer to load
+        assert!(
+            Database::get_allocator_state_table(&db.mem)
+                .unwrap()
+                .is_some()
+        );
+        assert!(db.check_integrity().unwrap());
     }
 
     /// A read-only participant sees what another process committed, not the header it read at open
