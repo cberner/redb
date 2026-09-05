@@ -408,6 +408,325 @@ fn a_savepoint_handle_a_reloaded_file_lacks_is_invalid() {
     txn.abort().unwrap();
 }
 
+/// A multi-writer check runs on the file as another process last committed it, and the handle
+/// goes on from there: its savepoint ids continue past the one it adopted, and its next commit,
+/// the close's here, follows the commits it adopted
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_adopts_a_peers_commits() {
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = peer.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+    txn.commit().unwrap();
+    let txn = peer.begin_write().unwrap();
+    let peers_savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    drop(peer);
+
+    assert!(db.check_integrity().unwrap());
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    drop(table);
+    drop(read);
+    let txn = db.begin_write().unwrap();
+    let own_savepoint = txn.persistent_savepoint().unwrap();
+    assert_ne!(own_savepoint, peers_savepoint);
+    txn.commit().unwrap();
+    drop(db);
+
+    let db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    let txn = db.begin_write().unwrap();
+    let mut savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
+    savepoints.sort_unstable();
+    assert_eq!(savepoints, vec![peers_savepoint, own_savepoint]);
+}
+
+/// A commit made from the same header elsewhere, and copied in, carries the transaction id of
+/// the handle's own. The check tells it from the handle's by its roots: the savepoint it
+/// carries is held, and the handle's allocator is not compared as the file's
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_adopts_a_commit_under_the_same_id() {
+    use redb::{ReadableDatabase, TableDefinition, TableError};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let copy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    for key in [1, 2] {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
+        txn.commit().unwrap();
+    }
+    // The copy's two commits, its close the second, carry the ids of the handle's two
+    let other = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(copy.path())
+        .unwrap();
+    let txn = other.begin_write().unwrap();
+    let others_savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    drop(other);
+    overwrite(tmpfile.path(), copy.path());
+
+    assert!(db.check_integrity().unwrap());
+    let read = db.begin_read().unwrap();
+    assert!(matches!(
+        read.open_table(TABLE),
+        Err(TableError::TableDoesNotExist(_))
+    ));
+    drop(read);
+    let txn = db.begin_write().unwrap();
+    let own_savepoint = txn.persistent_savepoint().unwrap();
+    assert_ne!(own_savepoint, others_savepoint);
+    txn.commit().unwrap();
+    drop(db);
+
+    let db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = db.begin_write().unwrap();
+    let mut savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
+    savepoints.sort_unstable();
+    assert_eq!(savepoints, vec![others_savepoint, own_savepoint]);
+}
+
+/// A persistent savepoint a file copied in replaced under the id of one this handle holds,
+/// over a commit made from the same header, is another savepoint: the check pins its
+/// transaction in place of the one it held, and deleting it releases that pin
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_moves_a_savepoint_replaced_under_its_id() {
+    use redb::TableDefinition;
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let copy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    // The copy's first commit replaces the handle's, and its savepoint's id counts from the
+    // same header
+    let other = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(copy.path())
+        .unwrap();
+    let txn = other.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+    txn.commit().unwrap();
+    let txn = other.begin_write().unwrap();
+    assert_eq!(txn.persistent_savepoint().unwrap(), savepoint);
+    txn.commit().unwrap();
+    drop(other);
+    overwrite(tmpfile.path(), copy.path());
+
+    assert!(db.check_integrity().unwrap());
+    let txn = db.begin_write().unwrap();
+    assert!(txn.delete_persistent_savepoint(savepoint).unwrap());
+    txn.commit().unwrap();
+    db.compact().unwrap();
+}
+
+/// A shared commit is 2-phase, under which a corrupt primary slot is corruption rather than a
+/// torn write to fall back from, so a check finds nothing to repair from under a process still
+/// reading that slot
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    for key in [1, 2] {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
+        txn.commit().unwrap();
+    }
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open_read_only(tmpfile.path())
+        .unwrap();
+    let read = peer.begin_read().unwrap();
+
+    // The header: the god byte at 9, whose low bit names the primary of the two 128-byte commit
+    // slots at 64 and 192, each ending in a 16-byte checksum
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tmpfile.path())
+        .unwrap();
+    let mut god_byte = [0u8];
+    file.seek(SeekFrom::Start(9)).unwrap();
+    file.read_exact(&mut god_byte).unwrap();
+    let checksum = 64 + 128 * u64::from(god_byte[0] & 1) + 112;
+    let mut bytes = [0u8; 16];
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    file.read_exact(&mut bytes).unwrap();
+    for byte in &mut bytes {
+        *byte ^= 0xFF;
+    }
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    file.write_all(&bytes).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+
+    assert!(matches!(
+        db.check_integrity(),
+        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+    ));
+    let table = read.open_table(TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+    assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+}
+
+/// The check waits for another process's write transaction to end, as a write transaction would
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_waits_for_a_peers_write_transaction() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    let mut db = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let peer = Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .open(tmpfile.path())
+        .unwrap();
+    let txn = peer.begin_write().unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let checking = thread::spawn(move || {
+        tx.send(db.check_integrity().unwrap()).unwrap();
+        db
+    });
+    assert!(
+        rx.recv_timeout(Duration::from_millis(200)).is_err(),
+        "the check ran under another process's write transaction"
+    );
+    txn.abort().unwrap();
+    assert!(
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the check never ran")
+    );
+    checking.join().unwrap();
+}
+
+/// A file copied in can carry a savepoint under an id the tracker holds, at an earlier
+/// transaction than the tracker's: the check moves the pin back to it, so a commit keeps the
+/// pages the copy's savepoint still needs, and restoring it finds them
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn an_integrity_check_keeps_the_pages_a_reloaded_savepoint_needs() {
+    use redb::{ReadableTable, TableDefinition};
+    const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let big = vec![7u8; 4000];
+    let open = |path: &std::path::Path| {
+        Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .open(path)
+            .unwrap()
+    };
+
+    let tmpfile = tempfile::NamedTempFile::new().unwrap();
+    Database::builder()
+        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .create(tmpfile.path())
+        .unwrap();
+    let copy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+    // The handle's savepoint comes after three commits of its own, so it names a later
+    // transaction than the copy's deletion below, let alone the copy's savepoint
+    let mut db = open(tmpfile.path());
+    for key in [1, 2, 8] {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE)
+            .unwrap()
+            .insert(key, &big[..])
+            .unwrap();
+        txn.commit().unwrap();
+    }
+    let txn = db.begin_write().unwrap();
+    let savepoint = txn.persistent_savepoint().unwrap();
+    txn.commit().unwrap();
+    // The copy: a row, the savepoint, and the row deleted, whose pages the savepoint still needs
+    let other = open(copy.path());
+    let txn = other.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().insert(3, &big[..]).unwrap();
+    txn.commit().unwrap();
+    let txn = other.begin_write().unwrap();
+    assert_eq!(txn.persistent_savepoint().unwrap(), savepoint);
+    txn.commit().unwrap();
+    let txn = other.begin_write().unwrap();
+    txn.open_table(TABLE).unwrap().remove(3).unwrap();
+    txn.commit().unwrap();
+    drop(other);
+    overwrite(tmpfile.path(), copy.path());
+
+    db.check_integrity().unwrap();
+    // Commits after the check reclaim what nothing pins, and reuse it
+    for key in 10..40 {
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE)
+            .unwrap()
+            .insert(key, &big[..])
+            .unwrap();
+        txn.commit().unwrap();
+    }
+    let mut txn = db.begin_write().unwrap();
+    let handle = txn.get_persistent_savepoint(savepoint).unwrap();
+    txn.restore_savepoint(&handle).unwrap();
+    {
+        let table = txn.open_table(TABLE).unwrap();
+        assert_eq!(table.get(3).unwrap().unwrap().value(), &big[..]);
+    }
+    txn.abort().unwrap();
+}
+
 /// A multi-writer handle's write transaction begins from the file as another process last
 /// committed it, and so does its close
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
