@@ -40,8 +40,9 @@
   In `MultiWriterProcess`, every commit records the allocator state, for the next writer to load;
   compaction's own commits are the exception, and `Database::compact()` ends with one that does.
   Ephemeral savepoints are refused there, with `SavepointError::EphemeralSavepointUnsupported`,
-  and a write transaction begins from the file as another process last committed it, as does the
-  close.
+  and a write transaction begins from the file as another process last committed it, as do the
+  close and `Database::check_integrity()`, which waits for a write transaction in another process
+  to end.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
