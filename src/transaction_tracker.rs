@@ -384,11 +384,17 @@ impl TransactionTracker {
     ) -> Result<TransactionId> {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
+        // Taken before the read below, so that the id it returns and the state this registers it
+        // against cannot be separated by a write transaction of this process starting
+        let mut state = self.state.lock()?;
+        #[cfg(feature = "experimental-multiprocess")]
+        let write_transaction_live = state.write_slot != WriteSlotState::Free;
         let id = mem.latest_committed_transaction_id(
+            #[cfg(feature = "experimental-multiprocess")]
+            write_transaction_live,
             #[cfg(feature = "experimental-multiprocess")]
             &header,
         )?;
-        let mut state = self.state.lock()?;
         state.reference_transaction(
             mem,
             id,
