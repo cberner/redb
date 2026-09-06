@@ -907,6 +907,16 @@ impl TransactionalMemory {
         }
     }
 
+    /// Checks that `id` is one this file's locks can announce. A persistent savepoint takes no
+    /// "active transaction byte", so nothing else checks the ids the file names.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn check_active_transaction_id(&self, id: TransactionId) -> Result {
+        if self.concurrency_mode.is_multi_process_writable() {
+            Self::active_transaction_byte(id)?;
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_header_shared(&self) -> Result<HeaderGuard<'_>> {
         Self::lock_header(

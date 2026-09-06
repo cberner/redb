@@ -859,15 +859,15 @@ impl SavepointTransactionState {
         !self.created_persistent.is_empty() || !self.deleted_persistent.is_empty()
     }
 
-    fn apply_on_commit(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
+    fn apply_on_commit(&mut self, tracker: &TransactionTracker) {
         // Persistent savepoints whose on-disk entry was deleted: release their
         // tracker refcount now that the deletion is durable.
         for (savepoint, transaction) in self.deleted_persistent.drain(..) {
-            tracker.deallocate_savepoint(mem, savepoint, transaction);
+            tracker.deallocate_persistent_savepoint(savepoint, transaction);
         }
         // Savepoints that restore_savepoint() invalidated: remove them from the
         // shared valid_savepoints map. For persistent savepoints,
-        // deallocate_savepoint above has already removed them; for ephemeral,
+        // deallocate_persistent_savepoint above has already removed them; for ephemeral,
         // the user's Savepoint handle still owns the live_read_transactions
         // refcount and will release it on drop.
         tracker.invalidate_savepoints(core::mem::take(&mut self.invalidated));
@@ -876,12 +876,12 @@ impl SavepointTransactionState {
         self.created_persistent.clear();
     }
 
-    fn apply_on_abort(&mut self, mem: &TransactionalMemory, tracker: &TransactionTracker) {
+    fn apply_on_abort(&mut self, tracker: &TransactionTracker) {
         // Persistent savepoints created during this transaction: their
         // on-disk entries will be rolled back by rollback_uncommitted_writes(),
         // but the shared tracker registration must be released explicitly.
         for (savepoint, transaction) in mem::take(&mut self.created_persistent) {
-            tracker.deallocate_savepoint(mem, savepoint, transaction);
+            tracker.deallocate_persistent_savepoint(savepoint, transaction);
         }
         // Deleted-persistent entries will be rolled back on disk, so the
         // tracker state must NOT be released (it is still valid).
@@ -1182,7 +1182,7 @@ impl WriteTransaction {
 
         savepoint.set_persistent();
         self.transaction_tracker
-            .mark_savepoint_persistent(savepoint.get_id());
+            .convert_savepoint_to_persistent(&self.mem, savepoint.get_id());
 
         self.savepoint_state
             .lock()
@@ -1875,7 +1875,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_commit(&self.mem, &self.transaction_tracker);
+            .apply_on_commit(&self.transaction_tracker);
     }
 
     fn store_data_freed_pages(&self, freed_pages: Vec<PageNumber>) -> Result<bool> {
@@ -2053,7 +2053,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .apply_on_abort(&self.mem, &self.transaction_tracker);
+            .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
         #[cfg(feature = "logging")]
@@ -2077,7 +2077,8 @@ impl WriteTransaction {
             #[cfg(feature = "experimental-multiprocess")]
             let hold = self.mem.header_hold(header_lock)?;
             self.mem.oldest_active_transaction(
-                self.transaction_tracker.oldest_local_read_transaction(),
+                self.transaction_tracker
+                    .oldest_local_referenced_transaction(),
                 #[cfg(feature = "experimental-multiprocess")]
                 &hold,
             )?
@@ -2193,10 +2194,10 @@ impl WriteTransaction {
         let epilogue_transaction = self.transaction_id.next();
         let mut free_until = self
             .transaction_tracker
-            .oldest_local_read_transaction()
+            .oldest_local_referenced_transaction()
             .map_or(epilogue_transaction, |x| x.next());
         // Clamp the free horizon to the savepoint horizon captured during the purge. A savepoint
-        // is also a live read, so absent concurrency `oldest_local_read_transaction()` never
+        // is also a live read, so absent concurrency `oldest_local_referenced_transaction()` never
         // exceeds it and this is a no-op. But an ephemeral `Savepoint::drop` racing this commit
         // (legal since `WriteTransaction: Sync`) can land between the purge and here, advancing
         // the oldest live read past the savepoint the purge kept entries for. Freeing those pages
@@ -2409,7 +2410,7 @@ impl WriteTransaction {
         let page_allocator = self.page_allocator();
         let mut free_page = |page| {
             // These pages cannot be unpersisted: free_until is bounded by
-            // oldest_local_read_transaction, which pins back to the durable_ancestor of every
+            // oldest_local_referenced_transaction, which pins back to the durable_ancestor of every
             // pending non-durable commit (see register_non_durable_commit). As a result, no entry
             // whose pages are still unpersisted is eligible for processing here.
             debug_assert!(!self.mem.unpersisted(page));
@@ -2920,6 +2921,54 @@ mod test {
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
     const BIG_VALUE: TableDefinition<u64, &[u8]> = TableDefinition::new("big_value");
+
+    // A persistent savepoint takes no "active transaction byte", so nothing on the way in checks
+    // that its transaction id is one the multi-process protocol can represent. The file names it,
+    // so it is untrusted: an id past the lock range must be reported as corruption rather than
+    // tracked as this process's oldest read, where the next commit's scan and `TransactionId::next`
+    // would run past the end of the range.
+    #[cfg(all(
+        feature = "experimental-multiprocess",
+        any(target_os = "linux", target_vendor = "apple", windows)
+    ))]
+    #[test]
+    fn a_savepoint_naming_an_unrepresentable_transaction_is_corruption() {
+        use super::{SAVEPOINT_TABLE, SavepointId, SerializedSavepoint};
+        use crate::tree_store::BtreeHeader;
+        use crate::{ConcurrencyMode, DatabaseError};
+
+        let tmpfile = crate::create_tempfile();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let db = builder.create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+
+        // The record as the format has it, naming a transaction no lock byte can address
+        let mut record = vec![3u8];
+        record.extend(id.to_le_bytes());
+        record.extend(u64::MAX.to_le_bytes());
+        record.push(0);
+        record.extend([0; BtreeHeader::serialized_size()]);
+
+        let txn = db.begin_write().unwrap();
+        txn.system_tables
+            .lock()
+            .unwrap()
+            .open_system_table(SAVEPOINT_TABLE)
+            .unwrap()
+            .insert(SavepointId(id), SerializedSavepoint::Ref(&record))
+            .unwrap();
+        txn.commit().unwrap();
+        drop(db);
+
+        // The open syncs the file's persistent savepoints, which is where the id arrives
+        assert!(matches!(
+            builder.open(tmpfile.path()),
+            Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+        ));
+    }
 
     // A commit that stops part way may leave pages returned to the allocator while the durable
     // freed tables still reference them, so commit_inner() discards the allocator state unless

@@ -93,6 +93,8 @@ struct State {
     next_savepoint_id: SavepointId,
     // reference count of read transactions per transaction id
     live_read_transactions: BTreeMap<TransactionId, u64>,
+    // Subset of live_read_transactions which are persistent savepoints
+    persistent_savepoint_references: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
     write_slot: WriteSlotState,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
@@ -113,24 +115,35 @@ struct State {
 }
 
 impl State {
-    // Takes the "active transaction byte" as the first reference to `id` appears, and releases it
+    // The references to `id` that are reads, which the "active transaction byte" announces to the
+    // other processes. Persistent savepoints are excluded
+    #[cfg(feature = "experimental-multiprocess")]
+    fn active_transaction_lock_references(&self, id: TransactionId) -> u64 {
+        self.live_read_transactions.get(&id).copied().unwrap_or(0)
+            - self
+                .persistent_savepoint_references
+                .get(&id)
+                .copied()
+                .unwrap_or(0)
+    }
+
+    // Takes the "active transaction byte" as the first read of `id` appears, and releases it
     // as the last goes away, so a writer in another process sees exactly the transactions this one
     // is still reading. Done under the lock that holds the count, so the two cannot disagree: a
     // reference taken between the count reaching zero and the byte being released would otherwise
     // read a snapshot nothing protects
-    fn reference_transaction(
+    fn add_active_transaction_lock_reference(
         &mut self,
         mem: &TransactionalMemory,
         id: TransactionId,
         #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
     ) -> Result {
-        let count = self.live_read_transactions.entry(id).or_insert(0);
-        *count += 1;
+        *self.live_read_transactions.entry(id).or_insert(0) += 1;
         #[cfg(feature = "experimental-multiprocess")]
-        if *count == 1
+        if self.active_transaction_lock_references(id) == 1
             && let Err(err) = mem.lock_mp_transaction(id, header)
         {
-            self.live_read_transactions.remove(&id);
+            self.decrement_reference_count(id);
             return Err(err);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
@@ -139,17 +152,58 @@ impl State {
         Ok(())
     }
 
-    fn dereference_transaction(&mut self, mem: &TransactionalMemory, id: TransactionId) {
-        let count = self.live_read_transactions.get_mut(&id).unwrap();
-        *count -= 1;
-        if *count == 0 {
-            self.live_read_transactions.remove(&id);
-            // Failing to release only leaves a peer reclaiming less than it could
-            #[cfg(feature = "experimental-multiprocess")]
+    fn remove_active_transaction_lock_reference(
+        &mut self,
+        mem: &TransactionalMemory,
+        id: TransactionId,
+    ) {
+        self.decrement_reference_count(id);
+        // Failing to release only leaves a peer reclaiming less than it could
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.active_transaction_lock_references(id) == 0 {
             let _ = mem.unlock_mp_transaction(id);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
         let _ = mem;
+    }
+
+    // A persistent savepoint's reference, which takes no byte. See `persistent_savepoint_references`
+    fn reference_persistent_savepoint(&mut self, id: TransactionId) {
+        *self.live_read_transactions.entry(id).or_insert(0) += 1;
+        *self.persistent_savepoint_references.entry(id).or_insert(0) += 1;
+    }
+
+    fn dereference_persistent_savepoint(&mut self, id: TransactionId) {
+        self.decrement_reference_count(id);
+        let count = self.persistent_savepoint_references.get_mut(&id).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            self.persistent_savepoint_references.remove(&id);
+        }
+    }
+
+    // Hands the read transaction's reference over to the savepoint made from it, releasing the
+    // byte with it: from here on the savepoint is protected the way a synced one is
+    fn convert_reference_to_persistent_savepoint(
+        &mut self,
+        mem: &TransactionalMemory,
+        id: TransactionId,
+    ) {
+        *self.persistent_savepoint_references.entry(id).or_insert(0) += 1;
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.active_transaction_lock_references(id) == 0 {
+            let _ = mem.unlock_mp_transaction(id);
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let _ = mem;
+    }
+
+    fn decrement_reference_count(&mut self, id: TransactionId) {
+        let count = self.live_read_transactions.get_mut(&id).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            self.live_read_transactions.remove(&id);
+        }
     }
 }
 
@@ -164,6 +218,7 @@ impl TransactionTracker {
             state: Mutex::new(State {
                 next_savepoint_id: SavepointId(0),
                 live_read_transactions: BTreeMap::default(),
+                persistent_savepoint_references: BTreeMap::default(),
                 next_transaction_id,
                 write_slot: WriteSlotState::Free,
                 valid_savepoints: BTreeMap::default(),
@@ -244,7 +299,7 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         let ids = mem::take(&mut state.pending_non_durable_commits);
         for (_, durable_ancestor) in ids {
-            state.dereference_transaction(memory, durable_ancestor);
+            state.remove_active_transaction_lock_reference(memory, durable_ancestor);
         }
     }
 
@@ -285,7 +340,7 @@ impl TransactionTracker {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
         let mut state = self.state.lock().unwrap();
-        state.reference_transaction(
+        state.add_active_transaction_lock_reference(
             mem,
             durable_ancestor,
             #[cfg(feature = "experimental-multiprocess")]
@@ -338,9 +393,7 @@ impl TransactionTracker {
     // Sync the file's persistent savepoints. `current` must be the current set of persistent savepoints.
     pub(crate) fn sync_persistent_savepoints(
         &self,
-        mem: &TransactionalMemory,
         current: &BTreeMap<SavepointId, TransactionId>,
-        #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
     ) -> Result {
         let mut state = self.state.lock().unwrap();
         let gone: Vec<SavepointId> = state
@@ -352,18 +405,13 @@ impl TransactionTracker {
         for id in gone {
             state.persistent_savepoints.remove(&id);
             let transaction = state.valid_savepoints.remove(&id).unwrap();
-            state.dereference_transaction(mem, transaction);
+            state.dereference_persistent_savepoint(transaction);
         }
         for (&id, &transaction) in current {
             if state.valid_savepoints.contains_key(&id) {
                 continue;
             }
-            state.reference_transaction(
-                mem,
-                transaction,
-                #[cfg(feature = "experimental-multiprocess")]
-                header,
-            )?;
+            state.reference_persistent_savepoint(transaction);
             assert!(state.valid_savepoints.insert(id, transaction).is_none());
             state.persistent_savepoints.insert(id);
         }
@@ -371,11 +419,17 @@ impl TransactionTracker {
         Ok(())
     }
 
-    // Marks an already-registered savepoint as persistent
-    pub(crate) fn mark_savepoint_persistent(&self, id: SavepointId) {
+    // Marks an already-registered savepoint as persistent, which hands it the reference held by
+    // the read transaction it was created from
+    pub(crate) fn convert_savepoint_to_persistent(
+        &self,
+        mem: &TransactionalMemory,
+        id: SavepointId,
+    ) {
         let mut state = self.state.lock().unwrap();
-        assert!(state.valid_savepoints.contains_key(&id));
+        let transaction = *state.valid_savepoints.get(&id).unwrap();
         state.persistent_savepoints.insert(id);
+        state.convert_reference_to_persistent_savepoint(mem, transaction);
     }
 
     pub(crate) fn register_read_transaction(
@@ -389,7 +443,7 @@ impl TransactionTracker {
             &header,
         )?;
         let mut state = self.state.lock()?;
-        state.reference_transaction(
+        state.add_active_transaction_lock_reference(
             mem,
             id,
             #[cfg(feature = "experimental-multiprocess")]
@@ -401,7 +455,7 @@ impl TransactionTracker {
 
     pub(crate) fn deallocate_read_transaction(&self, mem: &TransactionalMemory, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        state.dereference_transaction(mem, id);
+        state.remove_active_transaction_lock_reference(mem, id);
     }
 
     pub(crate) fn any_savepoint_exists(&self) -> bool {
@@ -448,21 +502,23 @@ impl TransactionTracker {
     }
 
     // Forgets the savepoint, leaving the transaction's reference to whoever owns it
-    pub(crate) fn remove_savepoint(&self, savepoint: SavepointId) {
+    pub(crate) fn remove_savepoint_registration(&self, savepoint: SavepointId) {
         let mut state = self.state.lock().unwrap();
         state.valid_savepoints.remove(&savepoint);
         state.persistent_savepoints.remove(&savepoint);
     }
 
-    // Deallocates the given savepoint and its matching reference count on the transcation
-    pub(crate) fn deallocate_savepoint(
+    // Deallocates the given persistent savepoint and its matching reference on the transaction
+    pub(crate) fn deallocate_persistent_savepoint(
         &self,
-        mem: &TransactionalMemory,
         savepoint: SavepointId,
         transaction: TransactionId,
     ) {
-        self.remove_savepoint(savepoint);
-        self.deallocate_read_transaction(mem, transaction);
+        self.remove_savepoint_registration(savepoint);
+        self.state
+            .lock()
+            .unwrap()
+            .dereference_persistent_savepoint(transaction);
     }
 
     pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
@@ -488,10 +544,10 @@ impl TransactionTracker {
 
     // Removes the given savepoints from the in-memory `valid_savepoints` map without touching
     // live_read_transactions refs. The caller is responsible for making sure those refs are
-    // released by some other means: ephemeral `Savepoint::drop` or `deallocate_savepoint`
+    // released by some other means: ephemeral `Savepoint::drop` or `deallocate_persistent_savepoint`
     // (called via `delete_persistent_savepoint`) do that for their respective savepoint kinds.
     //
-    // Savepoints that have already been removed (for example, by `deallocate_savepoint` earlier
+    // Savepoints that have already been removed (for example, by `deallocate_persistent_savepoint` earlier
     // in the same transaction) are silently skipped.
     pub(crate) fn invalidate_savepoints(&self, savepoints: impl IntoIterator<Item = SavepointId>) {
         let mut state = self.state.lock().unwrap();
@@ -517,7 +573,7 @@ impl TransactionTracker {
             .map(|(id, txn_id)| (*id, *txn_id))
     }
 
-    pub(crate) fn oldest_local_read_transaction(&self) -> Option<TransactionId> {
+    pub(crate) fn oldest_local_referenced_transaction(&self) -> Option<TransactionId> {
         self.state
             .lock()
             .unwrap()

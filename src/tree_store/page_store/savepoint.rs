@@ -78,7 +78,9 @@ impl Drop for Savepoint {
         // A persistent savepoint outlives its handle: the database record owns both its entry
         // and the transaction's reference until the savepoint is deleted
         if self.transaction.owns_reference() {
-            self.transaction.tracker().remove_savepoint(self.id);
+            self.transaction
+                .tracker()
+                .remove_savepoint_registration(self.id);
         }
         // The guard releases the transaction as it drops
     }

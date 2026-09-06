@@ -981,10 +981,9 @@ impl Database {
             .map_err(|e| e.into_storage_error())?;
         sync_persistent_savepoints(
             &self.transaction_tracker,
+            #[cfg(feature = "experimental-multiprocess")]
             &self.mem,
             &txn,
-            #[cfg(feature = "experimental-multiprocess")]
-            None,
         )?;
         txn.abort()?;
 
@@ -1708,12 +1707,10 @@ impl Database {
 
 // Syncs the file's persistent savepoints, which another process may have created or
 // deleted since the tracker last saw the file, and continues savepoint ids past the file's.
-// `header_lock` is the header lock the caller already holds, if any.
 fn sync_persistent_savepoints(
     transaction_tracker: &TransactionTracker,
-    mem: &TransactionalMemory,
+    #[cfg(feature = "experimental-multiprocess")] mem: &TransactionalMemory,
     txn: &WriteTransaction,
-    #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result {
     if let Some(next_id) = txn.next_persistent_savepoint_id()? {
         transaction_tracker.restore_savepoint_counter_state(next_id);
@@ -1731,16 +1728,13 @@ fn sync_persistent_savepoints(
                 }
             },
         };
+        // The file names its persistent savepoints, so the transaction each points at is
+        // untrusted: one outside the lock range would be tracked as a read this process holds
+        #[cfg(feature = "experimental-multiprocess")]
+        mem.check_active_transaction_id(savepoint.get_transaction_id())?;
         current.insert(savepoint.get_id(), savepoint.get_transaction_id());
     }
-    #[cfg(feature = "experimental-multiprocess")]
-    let hold = mem.header_hold(header_lock)?;
-    transaction_tracker.sync_persistent_savepoints(
-        mem,
-        &current,
-        #[cfg(feature = "experimental-multiprocess")]
-        &hold,
-    )
+    transaction_tracker.sync_persistent_savepoints(&current)
 }
 
 /// Brings this handle up to the file's latest commit, in multi-writer mode, when it is not
@@ -1841,7 +1835,7 @@ fn begin_write_with_allocation_policy(
     // aborted and the latch then discards the allocator state.
     #[cfg(feature = "experimental-multiprocess")]
     if latch.is_some() {
-        sync_persistent_savepoints(transaction_tracker, mem, &transaction, header_lock)?;
+        sync_persistent_savepoints(transaction_tracker, mem, &transaction)?;
     }
     #[cfg(feature = "experimental-multiprocess")]
     if let Some(latch) = latch {
@@ -3466,31 +3460,52 @@ mod active_transaction_test {
         );
     }
 
-    /// A persistent savepoint outlives its handle -- and the process -- so its lock goes to the
-    /// database with the reference rather than being released when the handle drops. Nothing
-    /// releases it yet: deletion and re-locking at open both belong with the scan
+    /// A persistent savepoint bounds this process's reclamation, but takes no byte: the file
+    /// names it, so every process protects it by syncing, and a byte would go on pinning the
+    /// transaction after another process deleted the savepoint, until this one next synced
     #[test]
-    fn a_persistent_savepoint_keeps_its_lock_after_its_handle_drops() {
+    fn a_persistent_savepoint_takes_no_active_transaction_byte() {
         let tmpfile = crate::create_tempfile();
         let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
         let probe = probe(tmpfile.path());
 
+        // Nothing else references the savepoint's transaction, so the byte is the savepoint's to
+        // take or leave
+        let pinned = db.mem.get_last_committed_transaction_id().unwrap();
         let write = db.begin_write().unwrap();
-        write.persistent_savepoint().unwrap();
+        let savepoint = write.persistent_savepoint().unwrap();
         write.commit().unwrap();
-
-        assert_eq!(
-            held_ids(&probe).len(),
-            1,
-            "a persistent savepoint left {:?} locked",
+        assert!(
+            held_ids(&probe).is_empty(),
+            "the savepoint locked {:?}",
             held_ids(&probe)
         );
+        assert_eq!(
+            db.transaction_tracker.oldest_local_referenced_transaction(),
+            Some(pinned),
+            "the savepoint stopped bounding this process's reclamation"
+        );
+        // The probe does see a byte where there is one to see
+        let read = db.begin_read().unwrap();
+        assert_eq!(held_ids(&probe).len(), 1);
+        drop(read);
+        assert!(held_ids(&probe).is_empty());
+
+        let write = db.begin_write().unwrap();
+        assert!(write.delete_persistent_savepoint(savepoint).unwrap());
+        write.commit().unwrap();
+        assert_eq!(
+            db.transaction_tracker.oldest_local_referenced_transaction(),
+            None,
+            "the deleted savepoint kept its reference"
+        );
+        assert!(held_ids(&probe).is_empty());
     }
 
-    /// A persistent savepoint survives the process that made it, so reopening has to take its
-    /// byte again: the snapshot its record names is still one a peer must not reclaim
+    /// The same for a savepoint this handle adopted rather than created: the open syncs the
+    /// file's persistent savepoints, and references them without locking them either
     #[test]
-    fn reopening_locks_a_persistent_savepoints_snapshot() {
+    fn a_synced_persistent_savepoint_takes_no_active_transaction_byte() {
         let tmpfile = crate::create_tempfile();
         let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
         let write = db.begin_write().unwrap();
@@ -3504,16 +3519,22 @@ mod active_transaction_test {
             "the closed database left a lock"
         );
 
-        let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
-        let db = builder.open(tmpfile.path()).unwrap();
-        assert_eq!(
-            held_ids(&probe).len(),
-            1,
-            "reopening locked {:?}",
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        assert!(
+            held_ids(&probe).is_empty(),
+            "the open locked {:?} for the file's savepoint",
             held_ids(&probe)
         );
-        drop(db);
+        assert!(
+            db.transaction_tracker
+                .oldest_local_referenced_transaction()
+                .is_some(),
+            "the open did not adopt the file's savepoint"
+        );
+        // The probe does see a byte where there is one to see
+        let read = db.begin_read().unwrap();
+        assert_eq!(held_ids(&probe).len(), 1);
+        drop(read);
     }
 
     /// A non-durable commit exists only in this process's memory, so a shared mode refuses it
