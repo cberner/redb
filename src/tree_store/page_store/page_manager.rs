@@ -1304,6 +1304,54 @@ impl TransactionalMemory {
         Ok(current)
     }
 
+    /// Brings this handle up to the file's latest commit, when it is not already on it, so that
+    /// a write transaction starts from whatever another process committed last. The cached
+    /// pages, the buffered writes and the allocator state all describe the commit being left
+    /// behind, so they are dropped here; the caller then loads the allocator state that the new
+    /// commit recorded. Returns whether anything was synced.
+    ///
+    /// `writer_lock` and `header_lock` prove that the caller holds the writer byte and the
+    /// header lock, so that no other process commits while this reads the file.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn reload_for_write(
+        &self,
+        _writer_lock: &WriterLock,
+        header_lock: &HeaderGuard<'_>,
+    ) -> Result<bool> {
+        let unrepaired = Self::read_file_header(&self.storage, self.page_size, header_lock)
+            .map_err(DatabaseError::into_storage_error_or_corrupted)?;
+        let (header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+        // Every writer holds the writer byte while it reloads, so transaction ids only move
+        // forward, and comparing them says whether the file has moved on. A latched repair
+        // syncs whatever the ids say: the pages it leaked are this handle's alone, and the
+        // allocator state the file's latest commit recorded does not include them.
+        if header.primary_slot().transaction_id == self.get_last_durable_transaction_id()?
+            && !self.needs_repair()
+        {
+            return Ok(false);
+        }
+
+        // Discarding the write buffer cannot lose a commit: only a non-durable commit leaves
+        // its pages buffered, and the multi-process modes refuse `Durability::None`. What can
+        // be buffered here are the writes of a transaction that was dropped while a panic
+        // unwound, which never committed, over pages the other process may have reused since.
+        assert!(!self.storage.has_committed_pages_buffered());
+        self.storage.discard_write_buffer();
+        // The other process may have rewritten any page this handle has cached
+        self.storage.invalidate_cache_all();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.header = header;
+            state.read_from_secondary = false;
+            state.allocators = None;
+        }
+        // Mirrors the allocator state, which was just dropped, so it is rebuilt along with it
+        #[cfg(debug_assertions)]
+        self.allocated_pages.lock().unwrap().clear();
+
+        Ok(true)
+    }
+
     pub(crate) fn begin_writable(&self) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         let header_lock = self.lock_header_exclusive()?;
@@ -1446,6 +1494,13 @@ impl TransactionalMemory {
             .copy_from_slice(&header.to_bytes(true));
 
         Ok(())
+    }
+
+    // Sets the recovery flag that a live writer keeps in its header. Loading the allocator
+    // state clears that flag, so a handle that has just synced must set it again.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn mark_recovery_required(&self) {
+        self.state.lock().unwrap().header.recovery_required = true;
     }
 
     // Durably clears the recovery flag, marking the repair as complete.
@@ -2640,6 +2695,46 @@ mod header_lock_test {
         let peer = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
         drop(hold(&peer, false).unwrap());
         drop(held);
+    }
+
+    /// A peer's close clears the recovery flag in the file while this handle is still writing.
+    /// The commit that syncs to that close sets the flag again, so that a crash of this handle
+    /// is still recovered from.
+    #[test]
+    fn syncing_to_a_peers_close_keeps_the_recovery_flag() {
+        use super::DB_HEADER_SIZE;
+        use crate::tree_store::page_store::header::UnrepairedDatabaseHeader;
+        use crate::{Database, TableDefinition};
+        const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+        fn unclean(path: &Path) -> bool {
+            let bytes = std::fs::read(path).unwrap();
+            UnrepairedDatabaseHeader::from_bytes(
+                &bytes[..DB_HEADER_SIZE],
+                PAGE_SIZE.try_into().unwrap(),
+            )
+            .unwrap()
+            .unclean()
+        }
+
+        let tmpfile = crate::create_tempfile();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.create(tmpfile.path()).unwrap();
+        let db = builder.open(tmpfile.path()).unwrap();
+        let peer = builder.open(tmpfile.path()).unwrap();
+        drop(peer);
+        assert!(!unclean(tmpfile.path()), "the peer's close left the flag");
+
+        let txn = db.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        txn.commit().unwrap();
+        assert!(
+            unclean(tmpfile.path()),
+            "the commit did not write the flag back"
+        );
+        drop(db);
+        assert!(!unclean(tmpfile.path()), "the close left the flag");
     }
 
     /// The other half of the hold covering the write: the bytes are on the file when

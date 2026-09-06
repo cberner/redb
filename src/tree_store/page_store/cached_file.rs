@@ -581,6 +581,14 @@ impl PagedCachedFile {
         }
     }
 
+    // Whether a commit has left pages in the write buffer instead of writing them to the file.
+    // Only a non-durable commit does that, so this is always false in the multi-process modes,
+    // which refuse `Durability::None`.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn has_committed_pages_buffered(&self) -> bool {
+        self.committed_pages_buffered.load(Ordering::Acquire)
+    }
+
     // Write directly to the file, bypassing the write buffer, so the bytes are on the file when
     // this returns rather than whenever the buffer is next flushed
     #[cfg(feature = "experimental-multiprocess")]

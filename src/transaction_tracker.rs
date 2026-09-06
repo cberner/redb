@@ -2,6 +2,8 @@ use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
 use crate::tree_store::TransactionalMemory;
+#[cfg(feature = "experimental-multiprocess")]
+use crate::tree_store::WriterLock;
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -78,8 +80,8 @@ impl Key for SavepointId {
     }
 }
 
-// The write slot's state: taken ahead of the writer byte, and given its transaction's id once
-// the locks are held
+// The write slot's state. It is taken ahead of the writer byte, and given its transaction's id
+// once the writer byte is held and the file's latest commit is known.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WriteSlotState {
     Free,
@@ -174,8 +176,9 @@ impl TransactionTracker {
         }
     }
 
-    // Takes the write slot, waiting for the write transaction holding it to end. The
-    // transaction's id is issued by `issue_write_transaction_id()`, once the locks are held
+    // Takes the write slot, waiting for the write transaction that holds it to end. The
+    // transaction's id is issued separately, by `issue_write_transaction_id()`, once the file's
+    // latest commit is known.
     pub(crate) fn take_write_slot(&self) {
         let mut state = self.state.lock().unwrap();
         while state.write_slot != WriteSlotState::Free {
@@ -184,16 +187,29 @@ impl TransactionTracker {
         state.write_slot = WriteSlotState::Taken;
     }
 
-    // Issues the slot's transaction its id
-    pub(crate) fn issue_write_transaction_id(&self) -> TransactionId {
+    // Issues the slot's transaction an id that follows `last_committed`, the id of the file's
+    // latest commit. `writer_lock` proves that the caller holds the writer byte, so that no
+    // other process commits between reading that id and issuing this one.
+    pub(crate) fn issue_write_transaction_id(
+        &self,
+        last_committed: TransactionId,
+        #[cfg(feature = "experimental-multiprocess")] _writer_lock: &WriterLock,
+    ) -> TransactionId {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.write_slot, WriteSlotState::Taken);
+        state.next_transaction_id = state.next_transaction_id.max(last_committed);
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
         debug!("Beginning write transaction id={transaction_id:?}");
         state.write_slot = WriteSlotState::Live(transaction_id);
 
         transaction_id
+    }
+
+    // Whether a write transaction holds the write slot in this process
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn write_transaction_live(&self) -> bool {
+        self.state.lock().unwrap().write_slot != WriteSlotState::Free
     }
 
     // Returns the deferred close, if the Database was dropped while this transaction was live.

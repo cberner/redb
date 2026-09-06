@@ -1,6 +1,8 @@
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(feature = "experimental-multiprocess")]
+use crate::transactions::AllocatorStateLatch;
+#[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
 use crate::tree_store::LocklessBackend;
 #[cfg(not(redb_no_std))]
@@ -910,7 +912,13 @@ impl Database {
     // Synchronizes the tracker state for the file's persistent savepoints
     fn sync_persistent_savepoints(&self) -> Result<(), DatabaseError> {
         let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
-        sync_persistent_savepoints(&self.transaction_tracker, &self.mem, &txn)?;
+        sync_persistent_savepoints(
+            &self.transaction_tracker,
+            &self.mem,
+            &txn,
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
+        )?;
         txn.abort()?;
 
         Ok(())
@@ -978,6 +986,19 @@ impl Database {
         // be diagnosed before read references, because every live savepoint also holds a read
         // reference. The tracker covers persistent savepoints created by previous Database
         // instances, because they are re-registered when the database is opened.
+        // In multi-writer mode the tracker's savepoints go stale: a peer may have deleted one
+        // since this handle last synced, and only a write transaction of this handle's own syncs
+        // them again. Refresh before reporting one as a blocker, unless this process already has
+        // a write transaction live, since beginning another would block on it.
+        #[cfg(feature = "experimental-multiprocess")]
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess
+            && self.transaction_tracker.any_persistent_savepoint_exists()
+            && !self.transaction_tracker.write_transaction_live()
+        {
+            self.begin_write()
+                .map_err(|e| e.into_storage_error())?
+                .abort()?;
+        }
         if self.transaction_tracker.any_persistent_savepoint_exists() {
             return Err(CompactionError::PersistentSavepointExists);
         }
@@ -1012,6 +1033,8 @@ impl Database {
             .begin_write_with(
                 #[cfg(feature = "experimental-multiprocess")]
                 writer_lock.as_ref(),
+                #[cfg(feature = "experimental-multiprocess")]
+                header_lock.as_ref(),
             )
             .map_err(|e| e.into_storage_error())?;
         // Re-check inside the write transaction: a concurrent writer may have created a
@@ -1054,6 +1077,8 @@ impl Database {
                 .begin_write_with(
                     #[cfg(feature = "experimental-multiprocess")]
                     writer_lock.as_ref(),
+                    #[cfg(feature = "experimental-multiprocess")]
+                    header_lock.as_ref(),
                 )
                 .map_err(|e| e.into_storage_error())?;
             txn.skip_allocator_state_record();
@@ -1117,6 +1142,8 @@ impl Database {
                 .begin_write_with(
                     #[cfg(feature = "experimental-multiprocess")]
                     writer_lock,
+                    #[cfg(feature = "experimental-multiprocess")]
+                    header_lock,
                 )
                 .map_err(|e| e.into_storage_error())?;
             if !force_commit && !txn.pending_free_pages()? {
@@ -1407,6 +1434,26 @@ impl Database {
         root.map(|header| BtreeHeader::new(header.root, header.checksum, length))
     }
 
+    /// Loads the allocator state that the file's latest commit recorded. In multi-writer mode
+    /// every commit records one, including the repair an open performs, so a commit that
+    /// recorded none has broken the protocol and is refused as corruption.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn load_synced_allocator_state(mem: &Arc<TransactionalMemory>) -> Result {
+        let Some(tree) = Self::get_allocator_state_table(mem)? else {
+            return Err(StorageError::Corrupted(
+                "The latest commit recorded no allocator state, which every commit in multi-writer mode does".to_string(),
+            ));
+        };
+        mem.load_allocator_state(&tree)?;
+        #[cfg(debug_assertions)]
+        Self::mark_allocated_page_for_debug(mem)?;
+        // This allocator state came from the file, so it holds none of the pages leaked by a
+        // transaction that was dropped while a panic unwound. Commits may record again.
+        mem.clear_needs_repair();
+
+        Ok(())
+    }
+
     fn new(
         file: Box<dyn InternalStorageBackend>,
         allow_initialize: bool,
@@ -1546,18 +1593,23 @@ impl Database {
         self.begin_write_with(
             #[cfg(feature = "experimental-multiprocess")]
             None,
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
         )
     }
 
     fn begin_write_with(
         &self,
         #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+        #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
             &self.transaction_tracker,
             &self.mem,
             #[cfg(feature = "experimental-multiprocess")]
             writer_lock,
+            #[cfg(feature = "experimental-multiprocess")]
+            header_lock,
             AllocationPolicy::Default,
         )
     }
@@ -1565,10 +1617,12 @@ impl Database {
 
 // Syncs the file's persistent savepoints, which another process may have created or
 // deleted since the tracker last saw the file, and continues savepoint ids past the file's.
+// `header_lock` is the header lock the caller already holds, if any.
 fn sync_persistent_savepoints(
     transaction_tracker: &TransactionTracker,
     mem: &TransactionalMemory,
     txn: &WriteTransaction,
+    #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result {
     if let Some(next_id) = txn.next_persistent_savepoint_id()? {
         transaction_tracker.restore_savepoint_counter_state(next_id);
@@ -1589,7 +1643,7 @@ fn sync_persistent_savepoints(
         current.insert(savepoint.get_id(), savepoint.get_transaction_id());
     }
     #[cfg(feature = "experimental-multiprocess")]
-    let hold = mem.header_hold(None)?;
+    let hold = mem.header_hold(header_lock)?;
     transaction_tracker.sync_persistent_savepoints(
         mem,
         &current,
@@ -1598,15 +1652,60 @@ fn sync_persistent_savepoints(
     )
 }
 
-// Takes the write slot and the writer lock, and builds the transaction on them. A caller that
-// already holds the writer lock lends it as `writer_lock`: locking the byte again from this file
-// description would return the same lock, and this transaction's end would then release the
-// caller's. The allocation policy is fixed for the lifetime of the transaction; every page
-// allocation this transaction makes goes through it.
+/// Brings this handle up to the file's latest commit, in multi-writer mode, when it is not
+/// already on it. That is the case when another process has committed since this handle last
+/// read the file, and when a panic latched a repair, which leaves this handle's allocator state
+/// holding pages that the file's latest commit does not.
+///
+/// `writer_lock` proves that the caller holds the writer byte, so that no other process commits
+/// while the header is read and the allocator state loaded from it; `header_lock` is the header
+/// lock the caller already holds, if any.
+///
+/// Returns `None` when the handle was already on the file's latest commit. Otherwise returns a
+/// latch that discards the allocator state unless the caller finishes the sync.
+#[cfg(feature = "experimental-multiprocess")]
+fn sync_to_latest_commit(
+    mem: &Arc<TransactionalMemory>,
+    writer_lock: &WriterLock,
+    header_lock: Option<&HeaderGuard<'_>>,
+) -> Result<Option<AllocatorStateLatch>> {
+    if mem.concurrency_mode() != ConcurrencyMode::MultiWriterProcess {
+        return Ok(None);
+    }
+    let synced = {
+        let hold = mem.header_hold(header_lock)?;
+        mem.reload_for_write(writer_lock, &hold)?
+    };
+    if !synced {
+        return Ok(None);
+    }
+    // Armed before the load, because a load that stops part way leaves an allocator state that
+    // describes neither the commit it came from nor the one it was going to
+    let latch = AllocatorStateLatch::arm(mem.clone());
+    Database::load_synced_allocator_state(mem)?;
+    // Loading the allocator state cleared the recovery flag that a live writer keeps set, and a
+    // peer's close may have cleared it in the file as well. Set it again, so that the next
+    // commit writes it back and a crash of this handle is still recovered from.
+    mem.mark_recovery_required();
+
+    Ok(Some(latch))
+}
+
+// Takes the write slot and the writer byte, syncs to the file's latest commit, and builds the
+// transaction on them.
+//
+// A caller that already holds the writer byte lends its lock as `writer_lock`. Taking the writer
+// byte again from this file description would return that same lock, and the end of this
+// transaction would then release the caller's. A caller that holds the header lock lends it as
+// `header_lock`, because the in-process half of that lock cannot be taken twice.
+//
+// The allocation policy is fixed for the lifetime of the transaction; every page allocation the
+// transaction makes goes through it.
 fn begin_write_with_allocation_policy(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
     #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     allocation_policy: AllocationPolicy,
 ) -> Result<WriteTransaction, TransactionError> {
     // Fail early if there has been an I/O error -- nothing can be committed in that case
@@ -1616,6 +1715,8 @@ fn begin_write_with_allocation_policy(
     let slot = WriteSlot::take(transaction_tracker.clone());
     #[cfg(feature = "experimental-multiprocess")]
     let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
+    #[cfg(feature = "experimental-multiprocess")]
+    let latch = sync_to_latest_commit(mem, &writer_lock, header_lock)?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption
@@ -1626,19 +1727,37 @@ fn begin_write_with_allocation_policy(
         )
         .into());
     }
+    // Issued once the sync is done, so that the id follows the file's latest commit
+    let transaction_id = transaction_tracker.issue_write_transaction_id(
+        mem.get_last_committed_transaction_id()?,
+        #[cfg(feature = "experimental-multiprocess")]
+        &writer_lock,
+    );
     let guard = TransactionGuard::new_write(
-        transaction_tracker.issue_write_transaction_id(),
+        transaction_id,
         slot,
         #[cfg(feature = "experimental-multiprocess")]
         writer_lock,
     );
-    WriteTransaction::new(
+    let transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
         mem.clone(),
         allocation_policy,
-    )
-    .map_err(|e| e.into())
+    )?;
+    // The file's persistent savepoints are synced here, before this transaction frees anything,
+    // so that the transactions they point at stay pinned. If the sync fails, the transaction is
+    // aborted and the latch then discards the allocator state.
+    #[cfg(feature = "experimental-multiprocess")]
+    if latch.is_some() {
+        sync_persistent_savepoints(transaction_tracker, mem, &transaction, header_lock)?;
+    }
+    #[cfg(feature = "experimental-multiprocess")]
+    if let Some(latch) = latch {
+        latch.disarm();
+    }
+
+    Ok(transaction)
 }
 
 // Records the allocator state in a commit that also trims the file: the close's last commit,
@@ -1662,6 +1781,8 @@ fn ensure_allocator_state_table_and_trim(
         mem,
         #[cfg(feature = "experimental-multiprocess")]
         writer_lock,
+        #[cfg(feature = "experimental-multiprocess")]
+        header_lock,
         AllocationPolicy::Lowest,
     )
     .map_err(|e| e.into_storage_error())?;
@@ -1700,7 +1821,7 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     };
     #[cfg(feature = "experimental-multiprocess")]
     let writing = writing && writer_lock.is_some();
-    if writing
+    let recorded = writing
         && ensure_allocator_state_table_and_trim(
             transaction_tracker,
             mem,
@@ -1709,11 +1830,16 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
             #[cfg(feature = "experimental-multiprocess")]
             None,
         )
-        .is_err()
-    {
+        .is_ok();
+    if writing && !recorded {
         #[cfg(feature = "logging")]
         warn!("Failed to write allocator state table. Repair may be required at restart.");
     }
+    // The shutdown header describes this handle, which matches the file only once the commit
+    // above has synced to the file's latest commit. Without that commit, write no header, and
+    // leave the file for the next open to recover.
+    #[cfg(feature = "experimental-multiprocess")]
+    let writer_lock = writer_lock.filter(|_| recorded);
 
     if mem
         .close(
@@ -2536,6 +2662,82 @@ mod writer_byte_test {
         );
     }
 
+    /// Every commit in multi-writer mode records the allocator state. A sync that finds a
+    /// commit without one refuses it as corruption.
+    #[test]
+    fn a_sync_refuses_a_commit_without_an_allocator_state() {
+        use crate::{StorageError, TransactionError};
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let peer = builder.open(tmpfile.path()).unwrap();
+        let mut write = peer.begin_write().unwrap();
+        write.skip_allocator_state_record();
+        write.open_table(TABLE).unwrap().insert(0, 0).unwrap();
+        write.commit().unwrap();
+
+        assert!(matches!(
+            db.begin_write(),
+            Err(TransactionError::Storage(StorageError::Corrupted(_)))
+        ));
+    }
+
+    /// A transaction dropped while a panic unwinds leaks its pages, which latches a repair.
+    /// Syncing to a peer's commit replaces the allocator state with the file's, which does not
+    /// hold those pages, so the next commit records the state again.
+    #[test]
+    fn syncing_to_a_peers_commit_releases_the_repair_a_panic_latched() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let peer = builder.open(tmpfile.path()).unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let write = db.begin_write().unwrap();
+            write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+            panic!("unwinding through the transaction");
+        }));
+        assert!(unwound.is_err());
+        assert!(db.mem.needs_repair());
+
+        commit_one(&peer);
+        commit_one(&db);
+        assert!(!db.mem.needs_repair());
+        assert!(
+            Database::get_allocator_state_table(&db.mem)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// A commit made while a repair is latched records no allocator state, and a peer that
+    /// syncs to such a commit refuses it. So the first transaction after the panic releases the
+    /// latch itself, without waiting for a peer to commit.
+    #[test]
+    fn a_transaction_releases_the_repair_a_panic_latched_without_a_peers_commit() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        let peer = builder.open(tmpfile.path()).unwrap();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let write = db.begin_write().unwrap();
+            write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+            panic!("unwinding through the transaction");
+        }));
+        assert!(unwound.is_err());
+        assert!(db.mem.needs_repair());
+
+        commit_one(&db);
+        assert!(!db.mem.needs_repair());
+        peer.begin_write()
+            .expect("the peer syncs to a commit that recorded the allocator state")
+            .abort()
+            .unwrap();
+    }
+
     /// A multi-writer compaction ends with a commit recording the allocator state, for the next
     /// writer, in any process, to load rather than rebuild
     #[test]
@@ -3240,7 +3442,62 @@ mod active_transaction_test {
         }
     }
 
-    /// A transaction lent the exclusive header hold commits under it and leaves it held
+    /// A transaction that is lent the exclusive header lock syncs to a peer's commit under that
+    /// lock, savepoints included, rather than trying to take the lock a second time.
+    #[test]
+    fn a_lent_header_lock_covers_syncing_to_a_peers_commit() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        fn open(path: &Path) -> Database {
+            let mut builder = Database::builder();
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.open(path).unwrap()
+        }
+
+        let tmpfile = crate::create_tempfile();
+        create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let peer = open(tmpfile.path());
+        // The handle syncs to the commit under holds it took itself, as compaction does, in a
+        // thread, so that taking the header lock again fails rather than hangs
+        let path = tmpfile.path().to_path_buf();
+        let (opened, wait_for_open) = mpsc::channel();
+        let (committed, wait_for_commit) = mpsc::channel();
+        let (synced, wait_for_sync) = mpsc::channel();
+        let syncing = thread::spawn(move || {
+            let db = open(&path);
+            opened.send(()).unwrap();
+            wait_for_commit.recv().unwrap();
+            let writer_lock = db.mem.lock_writer().unwrap();
+            let header_lock = db.mem.lock_header_exclusive().unwrap();
+            let txn = db
+                .begin_write_with(Some(&writer_lock), Some(&header_lock))
+                .unwrap();
+            let savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
+            txn.abort().unwrap();
+            drop(header_lock);
+            drop(writer_lock);
+            synced.send(savepoints).unwrap();
+        });
+        wait_for_open.recv().unwrap();
+        let txn = peer.begin_write().unwrap();
+        let peers_savepoint = txn.persistent_savepoint().unwrap();
+        txn.commit().unwrap();
+        // Closed first: otherwise its close would wait on the writer byte that a hung
+        // transaction still holds
+        drop(peer);
+        committed.send(()).unwrap();
+
+        let savepoints = wait_for_sync
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the transaction took the header lock its caller holds");
+        assert_eq!(savepoints, vec![peers_savepoint]);
+        syncing.join().unwrap();
+    }
+
+    /// A transaction that is lent the exclusive header lock begins and commits under it, and
+    /// leaves the lock held afterwards.
     #[test]
     fn a_lent_header_hold_outlives_the_commit() {
         let tmpfile = crate::create_tempfile();
@@ -3248,7 +3505,7 @@ mod active_transaction_test {
         let probe = probe(tmpfile.path());
 
         let header_lock = db.mem.lock_header_exclusive().unwrap();
-        let txn = db.begin_write().unwrap();
+        let txn = db.begin_write_with(None, Some(&header_lock)).unwrap();
         txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
         txn.commit_with(Some(&header_lock)).unwrap();
         assert!(!probe.try_lock_shared_range(HEADER_LOCK).unwrap());
@@ -3266,7 +3523,7 @@ mod active_transaction_test {
         let probe = probe(tmpfile.path());
 
         let writer_lock = db.mem.lock_writer().unwrap();
-        let txn = db.begin_write_with(Some(&writer_lock)).unwrap();
+        let txn = db.begin_write_with(Some(&writer_lock), None).unwrap();
         txn.abort().unwrap();
         assert!(!probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
 
