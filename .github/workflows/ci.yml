@@ -49,11 +49,19 @@ jobs:
 
     env:
       RUSTFLAGS: --deny warnings
+      # Nothing reuses the incremental compilation caches: they are not saved between runs, so
+      # producing them is pure overhead
+      CARGO_INCREMENTAL: 0
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_FUZZ_VERSION: "0.12.0"
+      JUST_VERSION: "1.36.0"
 
     steps:
       - uses: actions/checkout@v6
-      - name: Cache
-        id: rust-cache
+      # Kept out of the build cache below, and keyed on the pinned versions alone, so that a
+      # dependency change does not rebuild all three from source
+      - name: Cache tools
+        id: tool-cache
         uses: actions/cache@v5
         with:
             path: |
@@ -63,6 +71,13 @@ jobs:
                 ~/.cargo/bin/cargo-fuzz.exe
                 ~/.cargo/bin/just
                 ~/.cargo/bin/just.exe
+            key: ${{ runner.os }}-${{ runner.arch }}-tools-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_FUZZ_VERSION }}-${{ env.JUST_VERSION }}
+
+      - name: Cache
+        id: rust-cache
+        uses: actions/cache@v5
+        with:
+            path: |
                 ~/.cargo/registry/index/
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
@@ -100,21 +115,22 @@ jobs:
           rustup target add x86_64-apple-darwin
 
       - name: Setup wasmtime
+        if: runner.os != 'Windows'
         uses: bytecodealliance/actions/wasmtime/setup@v1
         with:
             version: "24.0.0"
 
       - name: Install cargo-deny
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.20.2 cargo-deny --locked
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.CARGO_DENY_VERSION }} cargo-deny --locked
 
       - name: Install cargo-fuzz
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 0.12.0 cargo-fuzz --locked
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
 
       - name: Install just
-        if: steps.rust-cache.outputs.cache-hit != 'true'
-        run: cargo install --force --version 1.36.0 just --locked
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.JUST_VERSION }} just --locked
 
       - name: Format
         run: cargo fmt --all -- --check

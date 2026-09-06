@@ -67,6 +67,12 @@ experimental-multiprocess = ["std", "experimental-api-5"]
 [profile.bench]
 debug = true
 
+# RocksDB, a dev-dependency of the comparison benchmarks, carries more debug info than everything
+# else in a debug build put together, and nothing here steps through it. Leaving it out keeps the
+# build small enough for CI to cache.
+[profile.dev.package.librocksdb-sys]
+debug = false
+
 [lints.clippy]
 big_endian_bytes = "deny"
 dbg_macro = "deny"
