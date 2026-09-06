@@ -358,6 +358,27 @@ impl CacheStats {
     }
 }
 
+// The write slot, taken ahead of the writer byte and held until the transaction ends. Releases
+// it on drop, and performs the close a `Database::drop()` deferred to that end
+pub(crate) struct WriteSlot {
+    tracker: Arc<TransactionTracker>,
+}
+
+impl WriteSlot {
+    fn take(tracker: Arc<TransactionTracker>) -> Self {
+        tracker.take_write_slot();
+        Self { tracker }
+    }
+}
+
+impl Drop for WriteSlot {
+    fn drop(&mut self) {
+        if let Some(mem) = self.tracker.end_write_transaction() {
+            close_database(&self.tracker, &mem);
+        }
+    }
+}
+
 pub(crate) enum TransactionGuard {
     Read {
         tracker: Arc<TransactionTracker>,
@@ -368,12 +389,13 @@ pub(crate) enum TransactionGuard {
         reference: Option<Arc<TransactionalMemory>>,
     },
     Write {
-        tracker: Arc<TransactionTracker>,
         transaction_id: TransactionId,
-        // The writer lock, held as long as the transaction is. `Option` only so that `Drop`
-        // can move it out
+        // Held for the transaction's span, and dropped ahead of the slot, in this order: a
+        // thread waiting on the slot would take the same byte on this file description, and
+        // this release would free theirs
         #[cfg(feature = "experimental-multiprocess")]
-        writer_lock: Option<Arc<WriterLock>>,
+        _writer_lock: Arc<WriterLock>,
+        slot: WriteSlot,
     },
     // Used for internal accesses that happen outside of any tracked transaction,
     // such as opening the database, repairing it, and running integrity checks.
@@ -421,7 +443,8 @@ impl TransactionGuard {
 
     pub(crate) fn tracker(&self) -> &Arc<TransactionTracker> {
         match self {
-            Self::Read { tracker, .. } | Self::Write { tracker, .. } => tracker,
+            Self::Read { tracker, .. } => tracker,
+            Self::Write { slot, .. } => &slot.tracker,
             Self::Untracked => unreachable!("an untracked guard has no tracker"),
         }
     }
@@ -435,17 +458,16 @@ impl TransactionGuard {
         Ok(Self::new_read(id, tracker, mem))
     }
 
-    /// The caller must already hold the write slot and the lock the transaction writes under.
     pub(crate) fn new_write(
         transaction_id: TransactionId,
-        tracker: Arc<TransactionTracker>,
+        slot: WriteSlot,
         #[cfg(feature = "experimental-multiprocess")] writer_lock: Arc<WriterLock>,
     ) -> Self {
         Self::Write {
-            tracker,
             transaction_id,
             #[cfg(feature = "experimental-multiprocess")]
-            writer_lock: Some(writer_lock),
+            _writer_lock: writer_lock,
+            slot,
         }
     }
 
@@ -477,24 +499,7 @@ impl Drop for TransactionGuard {
                     tracker.deallocate_read_transaction(mem, *transaction_id);
                 }
             }
-            Self::Write {
-                tracker,
-                transaction_id,
-                #[cfg(feature = "experimental-multiprocess")]
-                writer_lock,
-            } => {
-                let deferred = tracker.end_write_transaction(
-                    *transaction_id,
-                    #[cfg(feature = "experimental-multiprocess")]
-                    writer_lock.take(),
-                );
-                // The Database was dropped while this transaction was live, deferring
-                // the database close to the end of this transaction
-                if let Some(mem) = deferred {
-                    close_database(tracker, &mem);
-                }
-            }
-            Self::Untracked => {}
+            Self::Write { .. } | Self::Untracked => {}
         }
     }
 }
@@ -1596,27 +1601,14 @@ fn begin_write_with_allocation_policy(
 ) -> Result<WriteTransaction, TransactionError> {
     // Fail early if there has been an I/O error -- nothing can be committed in that case
     mem.check_io_errors()?;
-    let transaction_id = transaction_tracker.start_write_transaction();
+    // The slot ahead of the byte: locks on the byte from one file description are one lock, so
+    // the slot is what orders this process's writers. An error return drops both
+    let slot = WriteSlot::take(transaction_tracker.clone());
     #[cfg(feature = "experimental-multiprocess")]
-    let writer_lock = match writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone())) {
-        Ok(lock) => lock,
-        Err(err) => {
-            // Nothing owns the slot yet, and this database is live, so no close is deferred
-            let deferred = transaction_tracker.end_write_transaction(transaction_id, None);
-            assert!(deferred.is_none());
-            return Err(err.into());
-        }
-    };
-    let guard = TransactionGuard::new_write(
-        transaction_id,
-        transaction_tracker.clone(),
-        #[cfg(feature = "experimental-multiprocess")]
-        writer_lock,
-    );
+    let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
-    // first so a backend failure is not misreported as corruption. Returning drops the guard,
-    // releasing the slot.
+    // first so a backend failure is not misreported as corruption
     mem.check_io_errors()?;
     if !mem.allocator_state_loaded() {
         return Err(StorageError::Corrupted(
@@ -1624,6 +1616,12 @@ fn begin_write_with_allocation_policy(
         )
         .into());
     }
+    let guard = TransactionGuard::new_write(
+        transaction_tracker.issue_write_transaction_id(),
+        slot,
+        #[cfg(feature = "experimental-multiprocess")]
+        writer_lock,
+    );
     WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
