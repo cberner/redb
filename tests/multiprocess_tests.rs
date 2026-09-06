@@ -329,6 +329,45 @@ mod peer_commits {
         table.get(key).unwrap().unwrap().value()
     }
 
+    /// A read transaction on a writable handle reads the file again, so it sees what a peer has
+    /// committed since this handle last read it, without this handle writing anything itself.
+    #[test]
+    fn a_read_transaction_on_a_writable_handle_sees_a_peers_commit() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+
+        assert_eq!(value(&db, 1), 1);
+    }
+
+    /// The reload a read transaction does adopts the peer's header without its allocator state,
+    /// so the write transaction that follows must still sync rather than take that header as its
+    /// own.
+    #[test]
+    fn a_write_transaction_syncs_after_a_read_adopted_a_peers_header() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+        // Adopts the peer's header on this handle
+        assert_eq!(value(&db, 1), 1);
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+            table.insert(2, 2).unwrap();
+        }
+        txn.commit().unwrap();
+
+        // Both survive: a transaction that skipped the sync would allocate against the state it
+        // had before the peer's commit
+        drop(db);
+        drop(peer);
+        let reopened = open(tmpfile.path());
+        assert_eq!(value(&reopened, 1), 1);
+        assert_eq!(value(&reopened, 2), 2);
+    }
+
     /// The transaction sees the peer's commit, and its own commit lands after it, so that
     /// neither one is lost.
     #[test]

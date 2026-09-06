@@ -707,12 +707,18 @@ impl ReadOnlyDatabase {
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
+    // Serializes beginning a read, so that the id a transaction locks and the root it then reads
+    // come from the same state: a handle a peer may commit behind reloads on every read
+    #[cfg(feature = "experimental-multiprocess")]
+    begin_read: crate::sync::Mutex<()>,
 }
 
 impl Sealed for Database {}
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
+        #[cfg(feature = "experimental-multiprocess")]
+        let _begin = self.begin_read.lock().unwrap();
         let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
@@ -1530,6 +1536,8 @@ impl Database {
         let db = Database {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
+            #[cfg(feature = "experimental-multiprocess")]
+            begin_read: crate::sync::Mutex::new(()),
         };
 
         // Restore the tracker state for any persistent savepoints
@@ -2668,6 +2676,18 @@ mod writer_byte_test {
             !left_unclean(tmpfile.path()),
             "the close left the file unclean"
         );
+    }
+
+    /// Nothing the open takes may outlive the handle: the writer lock holds the storage, not the
+    /// memory, which an integrity check takes by `Arc::get_mut()` and would find shared
+    #[test]
+    fn a_closed_multi_writer_database_frees_its_memory() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let weak = std::sync::Arc::downgrade(&db.mem);
+        drop(db);
+
+        assert!(weak.upgrade().is_none());
     }
 
     /// A multi-writer repair, the create's included, ends with a commit recording the allocator

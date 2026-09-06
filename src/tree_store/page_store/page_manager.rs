@@ -313,11 +313,18 @@ struct InMemoryState {
     // to readers until a durable commit promotes it to the primary slot on disk. Protected by the
     // enclosing Mutex so updates happen atomically with the header changes they describe.
     read_from_secondary: bool,
+    // The commit the whole state describes, the allocators included, which a read transaction
+    // adopting a peer's header does not advance. Only a full reload, or this handle's own
+    // commit, does.
+    #[cfg(feature = "experimental-multiprocess")]
+    loaded: TransactionId,
 }
 
 impl InMemoryState {
     fn new(header: DatabaseHeader) -> Self {
         Self {
+            #[cfg(feature = "experimental-multiprocess")]
+            loaded: header.primary_slot().transaction_id,
             header,
             allocators: None,
             read_from_secondary: false,
@@ -1301,6 +1308,10 @@ impl TransactionalMemory {
 
         {
             let mut state = self.state.lock().unwrap();
+            #[cfg(feature = "experimental-multiprocess")]
+            {
+                state.loaded = header.primary_slot().transaction_id;
+            }
             state.header = header;
             state.read_from_secondary = false;
             // Drop the previous allocator state -- it described the layout that was in memory
@@ -1317,15 +1328,39 @@ impl TransactionalMemory {
 
     /// The latest committed transaction id, read from the file by a shared reader since a peer
     /// may have committed. The caller's `header` hold must also cover locking the id returned.
+    /// The latest commit a read transaction beginning now should see. Where a peer may have
+    /// committed since this handle last read the file, that means reading the header again;
+    /// `local_write_transaction_live` says a write transaction of this process holds the writer
+    /// byte, in which case no peer can be committing and this handle's own state is the latest.
     pub(crate) fn latest_committed_transaction_id(
         &self,
+        #[cfg(feature = "experimental-multiprocess")] local_write_transaction_live: bool,
         #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
     ) -> Result<TransactionId> {
         #[cfg(feature = "experimental-multiprocess")]
-        if self.read_only && self.concurrency_mode.is_multi_process_writable() {
+        if self.peers_may_commit() && !local_write_transaction_live {
             return self.reload_header(header);
         }
         self.get_last_committed_transaction_id()
+    }
+
+    /// The commit this handle has loaded in full: the allocators, not only the header a read
+    /// transaction adopts. See `InMemoryState::loaded`.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn loaded_transaction_id(&self) -> Result<TransactionId> {
+        Ok(self.state.lock()?.loaded)
+    }
+
+    /// Whether another process may commit behind this handle's back: any read-only participant,
+    /// and a multi-writer one between its own transactions. A single-writer handle is the only
+    /// writer.
+    #[cfg(feature = "experimental-multiprocess")]
+    fn peers_may_commit(&self) -> bool {
+        match self.concurrency_mode {
+            ConcurrencyMode::SingleProcess => false,
+            ConcurrencyMode::SingleWriterProcess => self.read_only,
+            ConcurrencyMode::MultiWriterProcess => true,
+        }
     }
 
     /// Adopts the header another process has written. Returns the transaction id now visible.
@@ -1366,10 +1401,12 @@ impl TransactionalMemory {
             .map_err(DatabaseError::into_storage_error_or_corrupted)?;
         let (header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         // Every writer holds the writer byte while it reloads, so transaction ids only move
-        // forward, and comparing them says whether the file has moved on. A latched repair
+        // forward, and comparing them says whether the file has moved on. The comparison is
+        // against the commit the whole state describes, not the header: a read transaction on
+        // this handle may have adopted a peer's header without its allocators. A latched repair
         // syncs whatever the ids say: the pages it leaked are this handle's alone, and the
         // allocator state the file's latest commit recorded does not include them.
-        if header.primary_slot().transaction_id == self.get_last_durable_transaction_id()?
+        if header.primary_slot().transaction_id == self.loaded_transaction_id()?
             && !self.needs_repair()
         {
             return Ok(false);
@@ -1385,6 +1422,7 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
         {
             let mut state = self.state.lock().unwrap();
+            state.loaded = header.primary_slot().transaction_id;
             state.header = header;
             state.read_from_secondary = false;
             state.allocators = None;
@@ -1796,6 +1834,11 @@ impl TransactionalMemory {
         );
         state.header = header;
         state.read_from_secondary = false;
+        // The file is now exactly this state, allocators included
+        #[cfg(feature = "experimental-multiprocess")]
+        {
+            state.loaded = transaction_id;
+        }
         drop(state);
 
         Ok(())
