@@ -471,6 +471,17 @@ mod peer_commits {
         table.get(key).unwrap().unwrap().value()
     }
 
+    /// A read on a writable handle reads the file, so it sees a peer's commit without this
+    /// handle writing anything itself.
+    #[test]
+    fn a_read_transaction_on_a_writable_handle_sees_a_peers_commit() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&peer, 1);
+
+        assert_eq!(value(&db, 1), 1);
+    }
+
     /// The transaction sees the peer's commit, and its own commit lands after it, so that
     /// neither one is lost.
     #[test]
