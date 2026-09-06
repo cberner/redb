@@ -1432,12 +1432,13 @@ impl Database {
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, we need a full repair
-        if let Some(tree) = Self::get_allocator_state_table(&mem)? {
+        let repaired = if let Some(tree) = Self::get_allocator_state_table(&mem)? {
             #[cfg(feature = "logging")]
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
             Self::mark_allocated_page_for_debug(&mem)?;
+            false
         } else {
             #[cfg(feature = "logging")]
             warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
@@ -1457,7 +1458,8 @@ impl Database {
                 #[cfg(feature = "experimental-multiprocess")]
                 None,
             )?;
-        }
+            true
+        };
 
         mem.begin_writable()?;
         // Past recovery, so a reader finding this byte held knows the flag means a live writer
@@ -1472,6 +1474,14 @@ impl Database {
 
         // Restore the tracker state for any persistent savepoints
         db.sync_persistent_savepoints()?;
+        // In multi-writer mode a repair ends with a commit recording the allocator state, as
+        // compaction does, so that the next open, in any process, loads it
+        #[cfg(feature = "experimental-multiprocess")]
+        if repaired && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
+            ensure_allocator_state_table_and_trim(&db.transaction_tracker, &db.mem, None, None)?;
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let _ = repaired;
 
         Ok(db)
     }
@@ -2510,6 +2520,19 @@ mod writer_byte_test {
         assert!(
             !left_unclean(tmpfile.path()),
             "the close left the file unclean"
+        );
+    }
+
+    /// A multi-writer repair, the create's included, ends with a commit recording the allocator
+    /// state it rebuilt, for the next open to load
+    #[test]
+    fn a_multi_writer_repair_records_the_allocator_state() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        assert!(
+            Database::get_allocator_state_table(&db.mem)
+                .unwrap()
+                .is_some()
         );
     }
 
