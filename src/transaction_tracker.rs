@@ -2,8 +2,6 @@ use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
 use crate::tree_store::TransactionalMemory;
-#[cfg(feature = "experimental-multiprocess")]
-use crate::tree_store::WriterLock;
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -80,12 +78,21 @@ impl Key for SavepointId {
     }
 }
 
+// The write slot's state: taken ahead of the writer byte, and given its transaction's id once
+// the locks are held
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum WriteSlotState {
+    Free,
+    Taken,
+    Live(TransactionId),
+}
+
 struct State {
     next_savepoint_id: SavepointId,
     // reference count of read transactions per transaction id
     live_read_transactions: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
-    live_write_transaction: Option<TransactionId>,
+    write_slot: WriteSlotState,
     valid_savepoints: BTreeMap<SavepointId, TransactionId>,
     // Subset of valid_savepoints that are persistent
     persistent_savepoints: BTreeSet<SavepointId>,
@@ -156,7 +163,7 @@ impl TransactionTracker {
                 next_savepoint_id: SavepointId(0),
                 live_read_transactions: BTreeMap::default(),
                 next_transaction_id,
-                live_write_transaction: None,
+                write_slot: WriteSlotState::Free,
                 valid_savepoints: BTreeMap::default(),
                 persistent_savepoints: BTreeSet::default(),
                 pending_non_durable_commits: BTreeMap::default(),
@@ -167,34 +174,34 @@ impl TransactionTracker {
         }
     }
 
-    pub(crate) fn start_write_transaction(&self) -> TransactionId {
+    // Takes the write slot, waiting for the write transaction holding it to end. The
+    // transaction's id is issued by `issue_write_transaction_id()`, once the locks are held
+    pub(crate) fn take_write_slot(&self) {
         let mut state = self.state.lock().unwrap();
-        while state.live_write_transaction.is_some() {
+        while state.write_slot != WriteSlotState::Free {
             state = self.live_write_transaction_available.wait(state).unwrap();
         }
-        assert!(state.live_write_transaction.is_none());
+        state.write_slot = WriteSlotState::Taken;
+    }
+
+    // Issues the slot's transaction its id
+    pub(crate) fn issue_write_transaction_id(&self) -> TransactionId {
+        let mut state = self.state.lock().unwrap();
+        assert_eq!(state.write_slot, WriteSlotState::Taken);
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
         debug!("Beginning write transaction id={transaction_id:?}");
-        state.live_write_transaction = Some(transaction_id);
+        state.write_slot = WriteSlotState::Live(transaction_id);
 
         transaction_id
     }
 
     // Returns the deferred close, if the Database was dropped while this transaction was live.
     // The caller must close the database, now that the write transaction has ended
-    pub(crate) fn end_write_transaction(
-        &self,
-        id: TransactionId,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<Arc<WriterLock>>,
-    ) -> Option<Arc<TransactionalMemory>> {
+    pub(crate) fn end_write_transaction(&self) -> Option<Arc<TransactionalMemory>> {
         let mut state = self.state.lock().unwrap();
-        assert_eq!(state.live_write_transaction.unwrap(), id);
-        // Released before the slot is cleared, under the lock the slot uses: a thread waiting on
-        // it would take the same byte on this description, and this release would free theirs
-        #[cfg(feature = "experimental-multiprocess")]
-        drop(writer_lock);
-        state.live_write_transaction = None;
+        assert_ne!(state.write_slot, WriteSlotState::Free);
+        state.write_slot = WriteSlotState::Free;
         self.live_write_transaction_available.notify_one();
 
         state.deferred_close.take()
@@ -209,7 +216,7 @@ impl TransactionTracker {
         mem: &Arc<TransactionalMemory>,
     ) -> bool {
         let mut state = self.state.lock().unwrap();
-        if state.live_write_transaction.is_some() {
+        if state.write_slot != WriteSlotState::Free {
             state.deferred_close = Some(mem.clone());
             true
         } else {
@@ -289,7 +296,10 @@ impl TransactionTracker {
         live_write_transaction: TransactionId,
     ) {
         let mut state = self.state.lock().unwrap();
-        assert_eq!(state.live_write_transaction, Some(live_write_transaction));
+        assert_eq!(
+            state.write_slot,
+            WriteSlotState::Live(live_write_transaction)
+        );
         assert_eq!(id, state.next_transaction_id.next());
         state.next_transaction_id = id;
     }
@@ -298,7 +308,7 @@ impl TransactionTracker {
     // commit slots by transaction id, so an id must never be committed twice
     pub(crate) fn reserve_repair_transaction_id(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        assert!(state.live_write_transaction.is_none());
+        assert_eq!(state.write_slot, WriteSlotState::Free);
         state.next_transaction_id = state.next_transaction_id.max(id);
     }
 
