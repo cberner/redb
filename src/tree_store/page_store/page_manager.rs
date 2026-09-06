@@ -1348,20 +1348,30 @@ impl TransactionalMemory {
         Ok((was_clean, changed))
     }
 
-    /// Captures the committed id and data root together, reading the file for a shared read-only handle.
-    /// The caller's `header` hold must also cover registering the returned id as active.
+    /// Captures the committed id and data root together, reading the file when a peer may have
+    /// committed. The caller's `header` hold must also cover registering the returned id as active.
     pub(crate) fn latest_committed_snapshot(
         &self,
         #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
     ) -> Result<(TransactionId, Option<BtreeHeader>)> {
         #[cfg(feature = "experimental-multiprocess")]
-        if self.read_only && self.concurrency_mode.is_multi_process_writable() {
+        if self.externally_writable() {
             return self.read_snapshot_from_file(header);
         }
         // Local commits can publish their in-memory state without holding the header lock.
         let state = self.state.lock()?;
         let slot = state.latest_slot();
         Ok((slot.transaction_id, slot.user_root))
+    }
+
+    /// Whether another process may commit to this file
+    #[cfg(feature = "experimental-multiprocess")]
+    fn externally_writable(&self) -> bool {
+        match self.concurrency_mode {
+            ConcurrencyMode::SingleProcess => false,
+            ConcurrencyMode::SingleWriterProcess => self.read_only,
+            ConcurrencyMode::MultiWriterProcess => true,
+        }
     }
 
     /// Reads a snapshot without changing the in-memory header or allocator state.
