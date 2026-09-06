@@ -596,6 +596,39 @@ fn database_writer_lock_for_mode(
     }))
 }
 
+// Typename used here so that with the feature off it can be an empty type
+#[cfg(feature = "experimental-multiprocess")]
+pub(crate) type OpenWriterLock = Arc<WriterLock>;
+/// Without the feature there are no writer locks to hand an open
+#[cfg(not(feature = "experimental-multiprocess"))]
+pub(crate) type OpenWriterLock = ();
+
+// Acquire the writer byte lock that open() should use for repair
+#[cfg(feature = "experimental-multiprocess")]
+fn open_writer_lock_for_mode(
+    storage: &Arc<PagedCachedFile>,
+    read_only: bool,
+    concurrency_mode: ConcurrencyMode,
+    database_writer_lock: Option<Arc<WriterLock>>,
+) -> Result<Option<Arc<WriterLock>>> {
+    if read_only {
+        return Ok(None);
+    }
+    match concurrency_mode {
+        ConcurrencyMode::SingleProcess | ConcurrencyMode::SingleWriterProcess => {
+            Ok(database_writer_lock)
+        }
+        ConcurrencyMode::MultiWriterProcess => {
+            storage.lock_range(byte_range(WRITER_BYTE))?;
+
+            Ok(Some(Arc::new(WriterLock {
+                storage: storage.clone(),
+                range: byte_range(WRITER_BYTE),
+            })))
+        }
+    }
+}
+
 pub(crate) struct TransactionalMemory {
     unpersisted: Mutex<UnpersistedState>,
     // Shared, so that a `WriterLock` can outlive this and still release its range
@@ -991,6 +1024,8 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    /// Returns the memory and if opened for writing, the writer lock, which should be held if
+    /// repair is needed to complete the opening process
     pub(crate) fn new(
         file: Box<dyn InternalStorageBackend>,
         // Allow initializing a new database in an empty file
@@ -1000,7 +1035,7 @@ impl TransactionalMemory {
         cache_size: usize,
         read_only: bool,
         concurrency_mode: ConcurrencyMode,
-    ) -> Result<Self, DatabaseError> {
+    ) -> Result<(Self, Option<OpenWriterLock>), DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
@@ -1013,6 +1048,16 @@ impl TransactionalMemory {
         let storage = Arc::new(PagedCachedFile::new(file, page_size as u64, cache_size));
         // Dropping the storage releases whatever this took, so an open that fails below does too
         Self::lock_for_open(&storage, read_only, concurrency_mode)?;
+        #[cfg(feature = "experimental-multiprocess")]
+        let writer_lock = database_writer_lock_for_mode(&storage, read_only, concurrency_mode);
+        // The lock the open() runs under: its own where it took one, and the handle's otherwise
+        // Taken before anything is read, so that the header the open reads is the header it
+        // repairs and commits over
+        #[cfg(feature = "experimental-multiprocess")]
+        let open_writer_lock =
+            open_writer_lock_for_mode(&storage, read_only, concurrency_mode, writer_lock.clone())?;
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        let open_writer_lock = None;
         #[cfg(feature = "experimental-multiprocess")]
         let in_process_header_lock = Mutex::new(());
 
@@ -1126,10 +1171,7 @@ impl TransactionalMemory {
 
         assert!(page_size >= DB_HEADER_SIZE);
 
-        #[cfg(feature = "experimental-multiprocess")]
-        let writer_lock = database_writer_lock_for_mode(&storage, read_only, concurrency_mode);
-
-        Ok(Self {
+        let mem = Self {
             unpersisted: Mutex::new(UnpersistedState::default()),
             storage,
             state: Mutex::new(state),
@@ -1153,7 +1195,9 @@ impl TransactionalMemory {
             page_size: page_size.try_into().unwrap(),
             region_size,
             region_header_with_padding_size: region_header_size,
-        })
+        };
+
+        Ok((mem, open_writer_lock))
     }
 
     // An order read from a corrupted file would otherwise size a multi-terabyte read buffer, whose
@@ -2432,7 +2476,7 @@ mod test {
         use super::TransactionalMemory;
         use crate::tree_store::{InMemoryBackend, LocklessBackend};
 
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             4096,
@@ -2475,7 +2519,7 @@ mod test {
         use crate::tree_store::{InMemoryBackend, LocklessBackend, PageNumber};
 
         let page_size = 4096;
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
@@ -2524,7 +2568,7 @@ mod test {
         use crate::tree_store::{InMemoryBackend, LocklessBackend, Page, PageNumber, PageTracker};
 
         let page_size = 4096;
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
@@ -2568,7 +2612,7 @@ mod test {
         // Small pages and regions keep the reproduction cheap to set up.
         let page_size = 128 * 1024;
         let region_size = 16 * page_size as u64;
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,
@@ -2654,7 +2698,9 @@ mod header_lock_test {
             .read(true)
             .write(true)
             .open(path)?;
-        Ok(Arc::new(TransactionalMemory::new(
+        // These stand in for separate processes' handles, so each gives the writer byte back as
+        // the end of an open does, by dropping the lock its open held
+        let (mem, _writer_lock) = TransactionalMemory::new(
             Box::new(FileBackend::new(file)?),
             true,
             PAGE_SIZE,
@@ -2662,7 +2708,9 @@ mod header_lock_test {
             0,
             false,
             mode,
-        )?))
+        )?;
+
+        Ok(Arc::new(mem))
     }
 
     fn open_read_only(
@@ -2670,7 +2718,7 @@ mod header_lock_test {
         mode: ConcurrencyMode,
     ) -> Result<Arc<TransactionalMemory>, DatabaseError> {
         let file = std::fs::OpenOptions::new().read(true).open(path)?;
-        Ok(Arc::new(TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             Box::new(crate::tree_store::ReadOnlyBackend::new(Box::new(
                 FileBackend::new(file)?,
             ))),
@@ -2680,7 +2728,9 @@ mod header_lock_test {
             0,
             true,
             mode,
-        )?))
+        )?;
+
+        Ok(Arc::new(mem))
     }
 
     /// Through the read-only backend the open wraps its storage in

@@ -1433,7 +1433,7 @@ mod tests {
             AllocationPolicy, InMemoryBackend, LocklessBackend, PAGE_SIZE, TransactionalMemory,
         };
 
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             PAGE_SIZE,
