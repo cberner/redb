@@ -549,7 +549,7 @@ mod test {
     fn memory() -> TransactionalMemory {
         use crate::tree_store::{InMemoryBackend, LocklessBackend, PAGE_SIZE};
 
-        TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             PAGE_SIZE,
@@ -558,7 +558,9 @@ mod test {
             false,
             crate::db::ConcurrencyMode::SingleProcess,
         )
-        .unwrap()
+        .unwrap();
+
+        mem
     }
 
     #[test]

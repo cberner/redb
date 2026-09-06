@@ -1842,7 +1842,7 @@ mod tests {
     const HUGE_PAGE: usize = 4 * 1024 * 1024;
 
     fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             LocklessBackend::boxed(InMemoryBackend::new()),
             true,
             page_size,

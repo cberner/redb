@@ -618,7 +618,7 @@ impl ReadOnlyDatabase {
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
         debug!("Opening database in read-only {:?}", &file_path);
-        let mem = TransactionalMemory::new(
+        let (mem, _writer_lock) = TransactionalMemory::new(
             Box::new(ReadOnlyBackend::new(file)),
             false,
             page_size,
@@ -909,9 +909,20 @@ impl Database {
         Ok(was_clean)
     }
 
-    // Synchronizes the tracker state for the file's persistent savepoints
-    fn sync_persistent_savepoints(&self) -> Result<(), DatabaseError> {
-        let txn = self.begin_write().map_err(|e| e.into_storage_error())?;
+    // Synchronizes the tracker state for the file's persistent savepoints. `writer_lock` is the
+    // lock the open holds, which the transaction this begins is lent
+    fn sync_persistent_savepoints(
+        &self,
+        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    ) -> Result<(), DatabaseError> {
+        let txn = self
+            .begin_write_with(
+                #[cfg(feature = "experimental-multiprocess")]
+                writer_lock,
+                #[cfg(feature = "experimental-multiprocess")]
+                None,
+            )
+            .map_err(|e| e.into_storage_error())?;
         sync_persistent_savepoints(
             &self.transaction_tracker,
             &self.mem,
@@ -1467,7 +1478,9 @@ impl Database {
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
         debug!("Opening database {:?}", &file_path);
-        let mem = TransactionalMemory::new(
+        // The open runs under this lock, which the multi-writer open took for the header read
+        // below and the repair after it, and which the transactions it runs are lent
+        let (mem, writer_lock) = TransactionalMemory::new(
             file,
             allow_initialize,
             page_size,
@@ -1520,16 +1533,24 @@ impl Database {
         };
 
         // Restore the tracker state for any persistent savepoints
-        db.sync_persistent_savepoints()?;
+        db.sync_persistent_savepoints(
+            #[cfg(feature = "experimental-multiprocess")]
+            writer_lock.as_ref(),
+        )?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction does, so that the next open, in any process, loads it
         #[cfg(feature = "experimental-multiprocess")]
         if repaired && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
-            ensure_allocator_state_table_and_trim(&db.transaction_tracker, &db.mem, None, None)?;
+            ensure_allocator_state_table_and_trim(
+                &db.transaction_tracker,
+                &db.mem,
+                writer_lock.as_ref(),
+                None,
+            )?;
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = repaired;
-
+        let _ = (repaired, writer_lock);
+        // Dropped here: a write transaction takes the writer byte for itself from now on
         Ok(db)
     }
 
@@ -2738,6 +2759,104 @@ mod writer_byte_test {
             .unwrap();
     }
 
+    /// A multi-writer open runs under the writer byte, so that two processes do not repair the
+    /// same file at once and commit over each other
+    #[test]
+    fn a_multi_writer_open_waits_for_the_writer_byte() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        // A commit recording nothing leaves the file for the next open to repair. The handle
+        // stays open, since its close would record
+        let mut write = db.begin_write().unwrap();
+        write.skip_allocator_state_record();
+        write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        write.commit().unwrap();
+
+        let probe = probe(tmpfile.path());
+        assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+        let path = tmpfile.path().to_path_buf();
+        let (repairing, repairs) = mpsc::channel();
+        let opening = thread::spawn(move || {
+            let mut builder = Database::builder();
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_repair_callback(move |_| {
+                let _ = repairing.send(());
+            });
+            builder.open(&path).unwrap()
+        });
+
+        assert!(
+            repairs.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the open repaired while the writer byte was held"
+        );
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+        repairs
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the repair runs once the byte is free");
+        opening.join().unwrap();
+    }
+
+    /// A peer can commit while an open waits for the writer byte. The open reads the file only
+    /// once it holds the byte, so it sees that commit and repairs nothing it recorded.
+    #[test]
+    fn a_multi_writer_open_reads_the_file_a_peer_committed_while_it_waited() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut write = db.begin_write().unwrap();
+        write.skip_allocator_state_record();
+        write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        write.commit().unwrap();
+        // Holds the byte across the open, and records the allocator state when it commits
+        let held = db.begin_write().unwrap();
+        held.open_table(TABLE).unwrap().insert(2, 2).unwrap();
+
+        let path = tmpfile.path().to_path_buf();
+        let (repairing, repairs) = mpsc::channel();
+        let (opened, opens) = mpsc::channel();
+        let opening = thread::spawn(move || {
+            let mut builder = Database::builder();
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_repair_callback(move |_| {
+                let _ = repairing.send(());
+            });
+            let db = builder.open(&path).unwrap();
+            opened.send(()).unwrap();
+            db
+        });
+
+        assert!(
+            opens.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the open did not wait for the byte"
+        );
+        held.commit().unwrap();
+        opens
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the open takes the byte the commit released");
+        let peer = opening.join().unwrap();
+
+        assert!(
+            repairs.try_recv().is_err(),
+            "the open repaired a file the commit had recorded"
+        );
+        // A repair from the header read before that commit would have committed over it
+        let read = super::ReadableDatabase::begin_read(&peer).unwrap();
+        let table = read.open_table(TABLE).unwrap();
+        assert_eq!(
+            crate::ReadableTable::get(&table, 2)
+                .unwrap()
+                .unwrap()
+                .value(),
+            2
+        );
+    }
     /// A multi-writer compaction ends with a commit recording the allocator state, for the next
     /// writer, in any process, to load rather than rebuild
     #[test]
