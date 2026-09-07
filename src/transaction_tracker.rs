@@ -85,8 +85,16 @@ impl Key for SavepointId {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum WriteSlotState {
     Free,
-    Taken,
+    // The slot is taken and the writer byte is being acquired, which waits on any peer that
+    // holds it. There is no transaction id yet: it is issued from the file's latest commit,
+    // which is only known once the byte is held
+    Initializing,
+    // A live transaction guarantees that this process holds the writer byte
     Live(TransactionId),
+    // The transaction is releasing its writer-lock reference while still holding the slot.
+    // Another owner of the lock may keep the writer byte held after the transaction ends.
+    #[cfg(feature = "experimental-multiprocess")]
+    Finalizing,
 }
 
 struct State {
@@ -239,7 +247,7 @@ impl TransactionTracker {
         while state.write_slot != WriteSlotState::Free {
             state = self.live_write_transaction_available.wait(state).unwrap();
         }
-        state.write_slot = WriteSlotState::Taken;
+        state.write_slot = WriteSlotState::Initializing;
     }
 
     // Issues the slot's transaction an id that follows `last_committed`, the id of the file's
@@ -251,7 +259,7 @@ impl TransactionTracker {
         #[cfg(feature = "experimental-multiprocess")] _writer_lock: &WriterLock,
     ) -> TransactionId {
         let mut state = self.state.lock().unwrap();
-        assert_eq!(state.write_slot, WriteSlotState::Taken);
+        assert_eq!(state.write_slot, WriteSlotState::Initializing);
         state.next_transaction_id = state.next_transaction_id.max(last_committed);
         let transaction_id = state.next_transaction_id.increment();
         #[cfg(feature = "logging")]
@@ -259,6 +267,22 @@ impl TransactionTracker {
         state.write_slot = WriteSlotState::Live(transaction_id);
 
         transaction_id
+    }
+
+    // Leave `Live` before releasing the transaction's writer-lock reference
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn begin_finalizing(&self) {
+        let mut state = self.state.lock().unwrap();
+        assert!(matches!(state.write_slot, WriteSlotState::Live(_)));
+        state.write_slot = WriteSlotState::Finalizing;
+    }
+
+    #[cfg(all(test, feature = "experimental-multiprocess"))]
+    pub(crate) fn holds_writer_byte(&self) -> bool {
+        matches!(
+            self.state.lock().unwrap().write_slot,
+            WriteSlotState::Live(_)
+        )
     }
 
     // Whether a write transaction holds the write slot in this process
@@ -271,6 +295,14 @@ impl TransactionTracker {
     // The caller must close the database, now that the write transaction has ended
     pub(crate) fn end_write_transaction(&self) -> Option<Arc<TransactionalMemory>> {
         let mut state = self.state.lock().unwrap();
+        // A transaction that reached `Live` must finalize before releasing the slot.
+        // Initialization failures release the slot directly from `Initializing`.
+        #[cfg(feature = "experimental-multiprocess")]
+        assert!(matches!(
+            state.write_slot,
+            WriteSlotState::Initializing | WriteSlotState::Finalizing
+        ));
+        #[cfg(not(feature = "experimental-multiprocess"))]
         assert_ne!(state.write_slot, WriteSlotState::Free);
         state.write_slot = WriteSlotState::Free;
         self.live_write_transaction_available.notify_one();

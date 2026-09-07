@@ -392,9 +392,8 @@ pub(crate) enum TransactionGuard {
     },
     Write {
         transaction_id: TransactionId,
-        // Held for the transaction's span, and dropped ahead of the slot, in this order: a
-        // thread waiting on the slot would take the same byte on this file description, and
-        // this release would free theirs
+        // Dropped ahead of the slot, in this order: a thread waiting on the slot would take the
+        // same byte on this file description, and this release would free theirs
         #[cfg(feature = "experimental-multiprocess")]
         _writer_lock: Arc<WriterLock>,
         slot: WriteSlot,
@@ -501,7 +500,16 @@ impl Drop for TransactionGuard {
                     tracker.deallocate_read_transaction(mem, *transaction_id);
                 }
             }
-            Self::Write { .. } | Self::Untracked => {}
+            Self::Write {
+                #[cfg(feature = "experimental-multiprocess")]
+                slot,
+                ..
+            } => {
+                // Leave `Live` before the fields drop the writer lock and then the slot.
+                #[cfg(feature = "experimental-multiprocess")]
+                slot.tracker.begin_finalizing();
+            }
+            Self::Untracked => {}
         }
     }
 }
@@ -3616,6 +3624,24 @@ mod active_transaction_test {
                 .is_some()
         );
         drop(peer);
+    }
+
+    #[test]
+    fn a_write_transaction_releases_the_writer_byte_and_slot() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let probe = probe(tmpfile.path());
+
+        let txn = db.begin_write().unwrap();
+        assert!(db.transaction_tracker.holds_writer_byte());
+        assert!(db.transaction_tracker.write_transaction_live());
+        assert!(!probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+
+        txn.abort().unwrap();
+        assert!(!db.transaction_tracker.holds_writer_byte());
+        assert!(!db.transaction_tracker.write_transaction_live());
+        assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+        probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
     }
 
     /// A leak another process left in the file is repaired, and the repair records the allocator
