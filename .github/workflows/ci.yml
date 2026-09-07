@@ -163,6 +163,16 @@ jobs:
       - name: Clippy (default features)
         run: cargo clippy --all --all-targets -- -Dwarnings
 
+      - name: Run 32-bit locking tests
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes gcc-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --lib range_lock_tests
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --all-features --lib range_lock_tests
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --all-features --test multiprocess_tests
+
       - name: Fuzzer
         if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
         run: just fuzz_ci

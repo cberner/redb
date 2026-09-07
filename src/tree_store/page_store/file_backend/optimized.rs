@@ -580,6 +580,78 @@ mod range_lock_tests {
         assert!(!asking.query_lock(byte).unwrap());
     }
 
+    #[test]
+    fn large_lock_offsets_do_not_alias_lower_bytes() {
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        let observer = reopen(tmpfile.path());
+
+        for offset in PROTOCOL_OFFSETS
+            .into_iter()
+            .filter(|offset| *offset >= BASE)
+        {
+            let byte = offset..offset + 1;
+            let low_offset = offset & u64::from(u32::MAX);
+            let low_byte = low_offset..low_offset + 1;
+            for exclusive in [false, true] {
+                let acquired = if exclusive {
+                    holder.try_lock_range(byte.clone())
+                } else {
+                    holder.try_lock_shared_range(byte.clone())
+                };
+                assert!(acquired.unwrap());
+                assert!(observer.query_lock(byte.clone()).unwrap());
+                assert!(!observer.try_lock_range(byte.clone()).unwrap());
+                assert!(!observer.query_lock(low_byte.clone()).unwrap());
+                assert!(observer.try_lock_range(low_byte.clone()).unwrap());
+                observer.unlock_range(low_byte.clone()).unwrap();
+
+                holder.unlock_range(byte.clone()).unwrap();
+                assert!(!observer.query_lock(byte.clone()).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn large_lock_lengths_preserve_range_boundaries() {
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        let observer = reopen(tmpfile.path());
+
+        for range in [0..BASE, BASE..(1 << 63) - 1] {
+            let last_byte = range.end - 1..range.end;
+            assert!(holder.try_lock_shared_range(range.clone()).unwrap());
+            assert!(observer.query_lock(last_byte.clone()).unwrap());
+            assert!(!observer.try_lock_range(last_byte.clone()).unwrap());
+            assert!(observer.try_lock_shared_range(last_byte.clone()).unwrap());
+            observer.unlock_range(last_byte.clone()).unwrap();
+            assert!(!observer.query_lock(range.end..range.end + 1).unwrap());
+
+            holder.unlock_range(range).unwrap();
+            assert!(!observer.query_lock(last_byte).unwrap());
+        }
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    #[test]
+    fn blocking_locks_use_large_offsets() {
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        let observer = reopen(tmpfile.path());
+        let byte = BASE + 4..BASE + 5;
+
+        holder.lock_shared_range(byte.clone()).unwrap();
+        assert!(observer.query_lock(byte.clone()).unwrap());
+        assert!(!observer.try_lock_range(byte.clone()).unwrap());
+        holder.unlock_range(byte.clone()).unwrap();
+
+        holder.lock_range(byte.clone()).unwrap();
+        assert!(observer.query_lock(byte.clone()).unwrap());
+        assert!(!observer.try_lock_shared_range(byte.clone()).unwrap());
+        holder.unlock_range(byte.clone()).unwrap();
+        assert!(!observer.query_lock(byte).unwrap());
+    }
+
     /// An ordinary Linux filesystem keeps the whole-file lock out of the range locks' table,
     /// so an open holds both: only the whole-file lock itself can refuse the observer's
     #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]

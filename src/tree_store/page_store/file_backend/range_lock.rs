@@ -4,6 +4,14 @@ use std::ops::Range;
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 use std::os::unix::io::AsRawFd;
 
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "gnu")),
+    target_vendor = "apple"
+))]
+use libc::flock as Flock;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use libc::flock64 as Flock;
+
 pub(crate) trait RangeLock {
     /// Whether these locks and [`File::lock`]'s conflict.
     /// `None` indicates that it can only be determined at runtime, e.g. because it is filesystem
@@ -296,7 +304,7 @@ fn lock_type(kind: libc::c_short) -> libc::c_short {
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-fn flock_struct(kind: libc::c_short, range: Range<u64>) -> libc::flock {
+fn flock_struct(kind: libc::c_short, range: Range<u64>) -> Flock {
     debug_assert!(!range.is_empty());
     let len = if range.end == u64::MAX {
         0
@@ -305,12 +313,41 @@ fn flock_struct(kind: libc::c_short, range: Range<u64>) -> libc::flock {
     };
     // Zeroed rather than written field by field: struct flock's layout differs between Linux
     // and the Apple platforms
-    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    let mut lock: Flock = unsafe { std::mem::zeroed() };
     lock.l_type = kind;
     lock.l_whence = libc::SEEK_SET.try_into().unwrap();
-    lock.l_start = libc::off_t::try_from(range.start).unwrap();
-    lock.l_len = libc::off_t::try_from(len).unwrap();
+    lock.l_start = range.start.try_into().unwrap();
+    lock.l_len = len.try_into().unwrap();
     lock
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn fcntl_lock(file: &File, command: libc::c_int, lock: &mut Flock) -> libc::c_long {
+    // GNU's off_t can be 32 bits. Use the kernel's large-file ABI directly: glibc's fcntl
+    // translates through off_t, and its fcntl64 symbol requires glibc 2.28 or later.
+    // x32 and RISC-V already use 64-bit offsets with SYS_fcntl.
+    #[cfg(any(
+        target_pointer_width = "64",
+        target_arch = "x86_64",
+        target_arch = "riscv32"
+    ))]
+    use libc::SYS_fcntl as SYSCALL;
+    #[cfg(not(any(
+        target_pointer_width = "64",
+        target_arch = "x86_64",
+        target_arch = "riscv32"
+    )))]
+    use libc::SYS_fcntl64 as SYSCALL;
+
+    unsafe { libc::syscall(SYSCALL, file.as_raw_fd(), command, &raw mut *lock) }
+}
+
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "gnu")),
+    target_vendor = "apple"
+))]
+fn fcntl_lock(file: &File, command: libc::c_int, lock: &mut Flock) -> libc::c_int {
+    unsafe { libc::fcntl(file.as_raw_fd(), command, &raw mut *lock) }
 }
 
 /// The last lock failure, as `Unsupported` where the filesystem has no byte-range locks.
@@ -335,7 +372,7 @@ fn set_lock(file: &File, exclusive: bool, range: Range<u64>) -> io::Result<bool>
         libc::F_RDLCK
     });
     let mut lock = flock_struct(kind, range);
-    let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLK, &raw mut lock) };
+    let rc = fcntl_lock(file, libc::F_OFD_SETLK, &mut lock);
     if rc == 0 {
         return Ok(true);
     }
@@ -359,7 +396,7 @@ fn set_lock_blocking(file: &File, exclusive: bool, range: Range<u64>) -> io::Res
     });
     loop {
         let mut lock = flock_struct(kind, range.clone());
-        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_OFD_SETLKW, &raw mut lock) };
+        let rc = fcntl_lock(file, libc::F_OFD_SETLKW, &mut lock);
         if rc == 0 {
             return Ok(());
         }
@@ -400,13 +437,13 @@ impl RangeLock for File {
 
     fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
         let mut lock = flock_struct(lock_type(libc::F_UNLCK), range);
-        let rc = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_OFD_SETLK, &raw mut lock) };
+        let rc = fcntl_lock(self, libc::F_OFD_SETLK, &mut lock);
         if rc == 0 { Ok(()) } else { Err(lock_error()) }
     }
 
     fn query_lock(&self, range: Range<u64>) -> io::Result<bool> {
         let mut lock = flock_struct(lock_type(libc::F_WRLCK), range);
-        let rc = unsafe { libc::fcntl(self.as_raw_fd(), libc::F_OFD_GETLK, &raw mut lock) };
+        let rc = fcntl_lock(self, libc::F_OFD_GETLK, &mut lock);
         if rc != 0 {
             return Err(lock_error());
         }
