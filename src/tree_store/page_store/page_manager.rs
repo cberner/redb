@@ -1071,13 +1071,19 @@ impl TransactionalMemory {
         #[cfg(feature = "experimental-multiprocess")]
         let in_process_header_lock = Mutex::new(());
 
+        // Ensure that we have a consistent view across reading the file length and metadata
+        #[cfg(feature = "experimental-multiprocess")]
+        let init_guard = Self::lock_header(
+            &storage,
+            &in_process_header_lock,
+            concurrency_mode,
+            allow_initialize,
+        )?;
+
         let initial_storage_len = storage.raw_file_len()?;
 
         let magic_number: [u8; MAGICNUMBER.len()] =
             if initial_storage_len >= MAGICNUMBER.len() as u64 {
-                #[cfg(feature = "experimental-multiprocess")]
-                let _guard =
-                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, false)?;
                 storage
                     .read_direct(0, MAGICNUMBER.len())?
                     .try_into()
@@ -1141,29 +1147,22 @@ impl TransactionalMemory {
 
             header.recovery_required = false;
             header.two_phase_commit = true;
-            {
-                #[cfg(feature = "experimental-multiprocess")]
-                let _guard =
-                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
-                storage
-                    .write(0, DB_HEADER_SIZE, true)?
-                    .mem_mut()
-                    .copy_from_slice(&header.to_bytes(false));
-                storage.flush()?;
-            }
+            storage
+                .write(0, DB_HEADER_SIZE, true)?
+                .mem_mut()
+                .copy_from_slice(&header.to_bytes(false));
+            storage.flush()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
-            {
-                #[cfg(feature = "experimental-multiprocess")]
-                let _guard =
-                    Self::lock_header(&storage, &in_process_header_lock, concurrency_mode, true)?;
-                storage
-                    .write(0, DB_HEADER_SIZE, true)?
-                    .mem_mut()
-                    .copy_from_slice(&header.to_bytes(true));
-                storage.flush()?;
-            }
+            storage
+                .write(0, DB_HEADER_SIZE, true)?
+                .mem_mut()
+                .copy_from_slice(&header.to_bytes(true));
+            storage.flush()?;
         }
+        // Given up before the read below takes it again: neither hold nests
+        #[cfg(feature = "experimental-multiprocess")]
+        drop(init_guard);
         let header = Self::read_header(
             &storage,
             #[cfg(feature = "experimental-multiprocess")]
