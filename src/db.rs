@@ -2662,6 +2662,7 @@ mod test {
 mod writer_byte_test {
     use super::{ConcurrencyMode, Database, WRITER_BYTE, byte_range};
     use crate::TableDefinition;
+    use crate::tree_store::HEADER_LOCK;
     use crate::tree_store::file_backend::range_lock::RangeLock;
     use std::fs::{File, OpenOptions};
     use std::path::Path;
@@ -2984,6 +2985,66 @@ mod writer_byte_test {
             .expect("the peer syncs to a commit that recorded the allocator state")
             .abort()
             .unwrap();
+    }
+
+    /// An open reads the file's length under the header lock, so a create holding that lock is
+    /// waited for and its result read, rather than the file being sampled part way through it.
+    /// Before, the length was sampled outside any lock: an empty file was called empty and a
+    /// resized one not a redb database, however far the create had got by the time it was read
+    #[test]
+    fn an_open_waits_behind_a_creator_instead_of_calling_the_file_empty() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        // What the create will have produced by the time it releases the lock
+        let initialized = crate::create_tempfile();
+        drop(create(
+            initialized.path(),
+            ConcurrencyMode::MultiWriterProcess,
+        ));
+        let mut bytes = Vec::new();
+        File::open(initialized.path())
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+
+        let tmpfile = crate::create_tempfile();
+        let probe = probe(tmpfile.path());
+        // Stands in for a create holding the header lock across its initialization
+        assert!(probe.try_lock_range(HEADER_LOCK).unwrap());
+
+        let path = tmpfile.path().to_path_buf();
+        let (opened, opens) = mpsc::channel();
+        let opening = thread::spawn(move || {
+            let mut builder = Database::builder();
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            let result = builder.open(&path);
+            opened.send(()).unwrap();
+            result
+        });
+
+        assert!(
+            opens.recv_timeout(Duration::from_millis(500)).is_err(),
+            "the open read the file while the creator held the header lock"
+        );
+        // The create finishes: from here the file is a database, as it would be at the release.
+        // Written through the handle that holds the lock, as a create writes under its own: on
+        // Windows a byte-range lock is mandatory, and excludes writes from every other handle
+        (&probe).seek(SeekFrom::Start(0)).unwrap();
+        (&probe).write_all(&bytes).unwrap();
+        probe.sync_all().unwrap();
+        probe.unlock_range(HEADER_LOCK).unwrap();
+
+        opens
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the open never took the header lock");
+        // A length sampled before the lock would still be the zero it read at the start
+        opening
+            .join()
+            .unwrap()
+            .expect("the open used a length it read before the creator finished");
     }
 
     /// A multi-writer open runs under the writer byte, so that two processes do not repair the
