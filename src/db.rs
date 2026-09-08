@@ -825,7 +825,7 @@ impl Database {
         self.mem.check_io_errors()?;
         // Once the allocator state has been discarded (by a failed commit or integrity check),
         // the database must be reopened to rebuild it; this check requires one to compare against
-        if !self.mem.allocator_state_loaded() {
+        if self.mem.allocator_state_invalidated() {
             return Err(StorageError::Corrupted(
                 "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
             )
@@ -1822,7 +1822,7 @@ fn begin_write_with_allocation_policy(
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption
     mem.check_io_errors()?;
-    if !mem.allocator_state_loaded() {
+    if mem.allocator_state_invalidated() {
         return Err(StorageError::Corrupted(
             "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
         )

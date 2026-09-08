@@ -304,11 +304,28 @@ pub(crate) fn xxh3_checksum(data: &[u8]) -> Checksum {
     hash128_with_seed(data, 0)
 }
 
+enum AllocatorState {
+    /// Not loaded yet, either during open or after reloading the header.
+    None,
+    Loaded(Allocators),
+    /// An interrupted operation left the allocator state unreliable.
+    /// Reopen the database to rebuild it before writing.
+    Invalidated,
+}
+
+impl AllocatorState {
+    fn is_loaded(&self) -> bool {
+        matches!(self, AllocatorState::Loaded(_))
+    }
+
+    fn is_invalidated(&self) -> bool {
+        matches!(self, AllocatorState::Invalidated)
+    }
+}
+
 struct InMemoryState {
     header: DatabaseHeader,
-    // None until the Database finishes loading allocator state from disk or rebuilding it via
-    // repair.
-    allocators: Option<Allocators>,
+    allocators: AllocatorState,
     // True if a non-durable commit has updated the secondary slot and that data should be served
     // to readers until a durable commit promotes it to the primary slot on disk. Protected by the
     // enclosing Mutex so updates happen atomically with the header changes they describe.
@@ -319,21 +336,25 @@ impl InMemoryState {
     fn new(header: DatabaseHeader) -> Self {
         Self {
             header,
-            allocators: None,
+            allocators: AllocatorState::None,
             read_from_secondary: false,
         }
     }
 
     fn allocators(&self) -> &Allocators {
-        self.allocators
-            .as_ref()
-            .expect("allocators have not been loaded yet")
+        match &self.allocators {
+            AllocatorState::Loaded(allocators) => allocators,
+            AllocatorState::None => panic!("allocator state has not been loaded yet"),
+            AllocatorState::Invalidated => panic!("allocator state has been invalidated"),
+        }
     }
 
     fn allocators_mut(&mut self) -> &mut Allocators {
-        self.allocators
-            .as_mut()
-            .expect("allocators have not been loaded yet")
+        match &mut self.allocators {
+            AllocatorState::Loaded(allocators) => allocators,
+            AllocatorState::None => panic!("allocator state has not been loaded yet"),
+            AllocatorState::Invalidated => panic!("allocator state has been invalidated"),
+        }
     }
 
     fn get_region(&self, region: u32) -> &BuddyAllocator {
@@ -1317,7 +1338,7 @@ impl TransactionalMemory {
             // Drop the previous allocator state -- it described the layout that was in memory
             // before the reload. The caller is required to repopulate it (via reset_allocator_state or
             // load_allocator_state) before any allocation/free path runs.
-            state.allocators = None;
+            state.allocators = AllocatorState::None;
             changed
         };
         // Reloading from disk discards in-memory roots, so drop volatile allocation state
@@ -1399,7 +1420,7 @@ impl TransactionalMemory {
             let mut state = self.state.lock().unwrap();
             state.header = header;
             state.read_from_secondary = false;
-            state.allocators = None;
+            state.allocators = AllocatorState::None;
         }
         // Mirrors the allocator state, which was just dropped, so it is rebuilt along with it
         #[cfg(debug_assertions)]
@@ -1452,7 +1473,7 @@ impl TransactionalMemory {
     // layout. The caller is responsible for repopulating it by marking reachable pages allocated.
     pub(crate) fn reset_allocator_state(&self) -> Result<()> {
         let mut state = self.state.lock().unwrap();
-        state.allocators = Some(Allocators::new(state.header.layout()));
+        state.allocators = AllocatorState::Loaded(Allocators::new(state.header.layout()));
         #[cfg(debug_assertions)]
         self.allocated_pages.lock().unwrap().clear();
 
@@ -1466,10 +1487,12 @@ impl TransactionalMemory {
     // The poison is deliberately left set: subsequent lock users fail rather than trusting state
     // touched by a panicking thread.
     pub(crate) fn invalidate_allocator_state(&self) {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(crate::sync::PoisonError::into_inner)
-            .allocators = None;
+            .unwrap_or_else(crate::sync::PoisonError::into_inner);
+        state.allocators = AllocatorState::Invalidated;
+        drop(state);
         #[cfg(debug_assertions)]
         self.allocated_pages
             .lock()
@@ -1477,8 +1500,15 @@ impl TransactionalMemory {
             .clear();
     }
 
+    #[cfg(test)]
     pub(crate) fn allocator_state_loaded(&self) -> bool {
-        self.state.lock().unwrap().allocators.is_some()
+        self.state.lock().unwrap().allocators.is_loaded()
+    }
+
+    /// Whether an interrupted operation invalidated the allocator state.
+    /// Unlike `None` after a header reload, this requires reopening before writing.
+    pub(crate) fn allocator_state_invalidated(&self) -> bool {
+        self.state.lock().unwrap().allocators.is_invalidated()
     }
 
     pub(crate) fn mark_needs_repair(&self) {
@@ -1695,7 +1725,7 @@ impl TransactionalMemory {
         );
 
         let mut state = self.state.lock().unwrap();
-        state.allocators = Some(Allocators {
+        state.allocators = AllocatorState::Loaded(Allocators {
             region_tracker,
             region_allocators,
         });
@@ -2409,7 +2439,8 @@ impl TransactionalMemory {
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
             // an allocator state describing what it wrote, and one not marked for repair.
-            if state.allocators.is_some() && !self.needs_repair() && self.storage.flush().is_ok() {
+            if state.allocators.is_loaded() && !self.needs_repair() && self.storage.flush().is_ok()
+            {
                 state.header.recovery_required = false;
                 self.write_header(
                     &state.header,
@@ -2477,6 +2508,40 @@ mod test {
 
         let mut db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
+    }
+
+    // Missing allocator state is distinct from state invalidated by a failed operation.
+    #[test]
+    fn an_invalidated_allocator_state_is_not_merely_an_unloaded_one() {
+        use super::TransactionalMemory;
+        use crate::tree_store::{InMemoryBackend, LocklessBackend};
+
+        let (mem, _writer_lock) = TransactionalMemory::new(
+            LocklessBackend::boxed(InMemoryBackend::new()),
+            true,
+            4096,
+            None,
+            0,
+            false,
+            crate::db::ConcurrencyMode::SingleProcess,
+        )
+        .unwrap();
+
+        // Freshly opened: nothing loaded yet, and nothing invalidated
+        assert!(!mem.allocator_state_loaded());
+        assert!(!mem.allocator_state_invalidated());
+
+        mem.reset_allocator_state().unwrap();
+        assert!(mem.allocator_state_loaded());
+        assert!(!mem.allocator_state_invalidated());
+
+        mem.invalidate_allocator_state();
+        assert!(!mem.allocator_state_loaded());
+        assert!(mem.allocator_state_invalidated());
+
+        // Rebuilding the allocator state clears invalidation.
+        mem.reset_allocator_state().unwrap();
+        assert!(!mem.allocator_state_invalidated());
     }
 
     // A panic raised while the state mutex is held (e.g. an allocator assertion) poisons it.
