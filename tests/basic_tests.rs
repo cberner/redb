@@ -10,6 +10,7 @@ use redb::{
     TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
+use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
 #[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
@@ -4084,6 +4085,115 @@ fn char_type() {
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroU32, NonZeroU64> = TableDefinition::new("x");
+
+    let (one, two) = (NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap());
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(two, NonZeroU64::new(20).unwrap()).unwrap();
+        table.insert(one, NonZeroU64::new(10).unwrap()).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.get(one).unwrap().unwrap().value().get(), 10);
+    assert_eq!(table.get(two).unwrap().unwrap().value().get(), 20);
+
+    // Keys sort by numeric value, matching the primitive they wrap
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), one);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), two);
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_signed_ordering() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroI32, ()> = TableDefinition::new("x");
+
+    // Deliberately inserted out of order, and spanning zero
+    let values = [-1i32, i32::MIN, 7, -300, i32::MAX];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for v in values {
+            table.insert(NonZeroI32::new(v).unwrap(), ()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let mut sorted = values;
+    sorted.sort_unstable();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let stored: Vec<i32> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().get())
+        .collect();
+    assert_eq!(stored, sorted);
+}
+
+#[test]
+fn option_nonzero_type() {
+    // The motivating case: `Option<NonZero*>` goes through the blanket `Option<T>`
+    // impl once `NonZero*` itself implements `Key`.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, Option<NonZeroU32>> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, Some(NonZeroU32::new(5).unwrap())).unwrap();
+        table.insert(1, None).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        table.get(0).unwrap().unwrap().value(),
+        Some(NonZeroU32::new(5).unwrap())
+    );
+    assert_eq!(table.get(1).unwrap().unwrap().value(), None);
+}
+
+#[test]
+fn nonzero_is_not_interchangeable_with_primitive() {
+    // `NonZero*` has a distinct type name, so a table written as `u32` cannot be
+    // reopened as `NonZeroU32` and hand back a zero that `NonZeroU32` cannot hold.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+    let wrong_definition: TableDefinition<NonZeroU32, NonZeroU32> = TableDefinition::new("x");
+
+    let txn = db.begin_write().unwrap();
+    txn.open_table(definition).unwrap();
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    assert!(matches!(
+        txn.open_table(wrong_definition),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    txn.abort().unwrap();
 }
 
 // Opening a multimap table via open_table() returns TableIsMultimap for both
