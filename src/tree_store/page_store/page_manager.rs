@@ -1348,22 +1348,25 @@ impl TransactionalMemory {
         Ok((was_clean, changed))
     }
 
-    /// The latest committed transaction id, read from the file by a shared reader since a peer
-    /// may have committed. The caller's `header` hold must also cover locking the id returned.
-    pub(crate) fn latest_committed_transaction_id(
+    /// Captures the committed id and data root together, reloading for a shared read-only handle.
+    /// The caller's `header` hold must also cover registering the returned id as active.
+    pub(crate) fn latest_committed_snapshot(
         &self,
         #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
-    ) -> Result<TransactionId> {
+    ) -> Result<(TransactionId, Option<BtreeHeader>)> {
         #[cfg(feature = "experimental-multiprocess")]
         if self.read_only && self.concurrency_mode.is_multi_process_writable() {
-            return self.reload_header(header);
+            self.reload_header(header)?;
         }
-        self.get_last_committed_transaction_id()
+        // Local commits can publish their in-memory state without holding the header lock.
+        let state = self.state.lock()?;
+        let slot = state.latest_slot();
+        Ok((slot.transaction_id, slot.user_root))
     }
 
-    /// Adopts the header another process has written. Returns the transaction id now visible.
+    /// Adopts the header another process has written.
     #[cfg(feature = "experimental-multiprocess")]
-    fn reload_header(&self, header: &HeaderGuard<'_>) -> Result<TransactionId> {
+    fn reload_header(&self, header: &HeaderGuard<'_>) -> Result {
         let unrepaired = Self::read_file_header(&self.storage, self.page_size, header)
             .map_err(DatabaseError::into_storage_error_or_corrupted)?;
         let header = unrepaired.finalize_transaction_slots()?;
@@ -1378,7 +1381,7 @@ impl TransactionalMemory {
             self.clear_read_cache();
         }
 
-        Ok(current)
+        Ok(())
     }
 
     /// Brings this handle up to the file's latest commit, when it is not already on it, so that
