@@ -1567,6 +1567,32 @@ fn explicit_close() {
 }
 
 #[test]
+fn untyped_tables_keep_read_transaction_alive() {
+    const MULTIMAP: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("multi");
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write = db.begin_write().unwrap();
+    write.open_table(U64_TABLE).unwrap();
+    write.open_multimap_table(MULTIMAP).unwrap();
+    write.commit().unwrap();
+
+    for multimap in [false, true] {
+        let read = db.begin_read().unwrap();
+        let table: Box<dyn ReadableTableMetadata> = if multimap {
+            Box::new(read.open_untyped_multimap_table(MULTIMAP).unwrap())
+        } else {
+            Box::new(read.open_untyped_table(U64_TABLE).unwrap())
+        };
+        let read = match read.close() {
+            Err(TransactionError::ReadTransactionStillInUse(read)) => read,
+            result => panic!("close with an untyped table alive: {result:?}"),
+        };
+        drop(table);
+        read.close().unwrap();
+    }
+}
+
+#[test]
 fn read_only_get_guard_keeps_transaction_alive() {
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();

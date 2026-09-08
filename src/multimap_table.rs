@@ -1100,6 +1100,8 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
 }
 
 /// A read-only untyped multimap table
+///
+/// Keeps its read transaction alive until the table is dropped.
 pub struct ReadOnlyUntypedMultimapTable {
     name: String,
     num_values: u64,
@@ -1108,6 +1110,7 @@ pub struct ReadOnlyUntypedMultimapTable {
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
     mem: PageResolver,
+    _transaction_guard: Arc<TransactionGuard>,
 }
 
 impl Sealed for ReadOnlyUntypedMultimapTable {}
@@ -1149,9 +1152,9 @@ impl ReadOnlyUntypedMultimapTable {
         name: &str,
         root: Option<BtreeHeader>,
         num_values: u64,
-        hint: PageHint,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
+        guard: Arc<TransactionGuard>,
         mem: PageResolver,
     ) -> Self {
         Self {
@@ -1162,12 +1165,13 @@ impl ReadOnlyUntypedMultimapTable {
                 fixed_key_size,
                 DynamicCollection::<()>::fixed_width_with(fixed_value_size),
                 mem.clone(),
-                hint,
+                PageHint::Clean,
             ),
-            hint,
+            hint: PageHint::Clean,
             fixed_key_size,
             fixed_value_size,
             mem,
+            _transaction_guard: guard,
         }
     }
 }

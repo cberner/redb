@@ -715,7 +715,8 @@ mod reclamation {
 mod compaction {
     use super::*;
     use redb::{
-        CompactionError, ReadOnlyDatabase, ReadableDatabase, ReadableTable, TableDefinition,
+        CompactionError, MultimapTableDefinition, ReadOnlyDatabase, ReadableDatabase,
+        ReadableTable, ReadableTableMetadata, TableDefinition,
     };
     use std::path::Path;
 
@@ -772,6 +773,72 @@ mod compaction {
             let read = reader.begin_read().unwrap();
             let t = read.open_table(TABLE).unwrap();
             assert_eq!(t.get(&0).unwrap().unwrap().value(), [1u8; 512].as_slice());
+        }
+    }
+
+    #[test]
+    fn untyped_tables_pin_a_peers_snapshot_until_dropped() {
+        const MULTIMAP: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("multi");
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            for multimap in [false, true] {
+                let tmpfile = tempfile::NamedTempFile::new().unwrap();
+                let mut writer = create(tmpfile.path(), mode);
+                let value = [7u8; 512];
+                let write = writer.begin_write().unwrap();
+                {
+                    let mut table = write.open_table(TABLE).unwrap();
+                    let mut multi = write.open_multimap_table(MULTIMAP).unwrap();
+                    for key in 0..128u64 {
+                        table.insert(key, value.as_slice()).unwrap();
+                        multi.insert(key, value.as_slice()).unwrap();
+                    }
+                }
+                write.commit().unwrap();
+
+                let reader = Database::builder()
+                    .set_concurrency_mode(mode)
+                    .set_cache_size(0)
+                    .open_read_only(tmpfile.path())
+                    .unwrap();
+                let read = reader.begin_read().unwrap();
+                let table: Box<dyn ReadableTableMetadata> = if multimap {
+                    Box::new(read.open_untyped_multimap_table(MULTIMAP).unwrap())
+                } else {
+                    Box::new(read.open_untyped_table(TABLE).unwrap())
+                };
+                let before = table.stats().unwrap();
+                assert!(before.branch_pages() > 0);
+                drop(read);
+
+                let write = writer.begin_write().unwrap();
+                write.delete_table(TABLE).unwrap();
+                write.delete_multimap_table(MULTIMAP).unwrap();
+                write.commit().unwrap();
+                for _ in 0..3 {
+                    writer.begin_write().unwrap().commit().unwrap();
+                }
+                assert!(
+                    matches!(
+                        writer.compact(),
+                        Err(CompactionError::TransactionInProgress)
+                    ),
+                    "{mode:?}, multimap={multimap}"
+                );
+
+                // The table alone pins the snapshot, and an empty cache forces stats to read it.
+                let after = table.stats().unwrap();
+                assert_eq!(table.len().unwrap(), 128);
+                assert_eq!(after.stored_bytes(), before.stored_bytes());
+                assert_eq!(after.tree_height(), before.tree_height());
+                assert_eq!(after.leaf_pages(), before.leaf_pages());
+                assert_eq!(after.branch_pages(), before.branch_pages());
+
+                drop(table);
+                writer.compact().unwrap();
+            }
         }
     }
 
