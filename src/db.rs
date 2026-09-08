@@ -945,7 +945,9 @@ impl Database {
 
         // The tracker holds the persistent savepoints the reloaded tables hold, as the open's does
         if peer_committed {
-            self.sync_persistent_savepoints(
+            Self::sync_persistent_savepoints(
+                &self.transaction_tracker,
+                &self.mem,
                 #[cfg(feature = "experimental-multiprocess")]
                 Some(writer_lock),
             )?;
@@ -968,21 +970,24 @@ impl Database {
     // Synchronizes the tracker state for the file's persistent savepoints. The transaction this
     // begins is lent `writer_lock`, when the caller holds one
     fn sync_persistent_savepoints(
-        &self,
+        transaction_tracker: &Arc<TransactionTracker>,
+        mem: &Arc<TransactionalMemory>,
         #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
     ) -> Result<(), DatabaseError> {
-        let txn = self
-            .begin_write_with(
-                #[cfg(feature = "experimental-multiprocess")]
-                writer_lock,
-                #[cfg(feature = "experimental-multiprocess")]
-                None,
-            )
-            .map_err(|e| e.into_storage_error())?;
-        sync_persistent_savepoints(
-            &self.transaction_tracker,
+        let txn = begin_write_with_allocation_policy(
+            transaction_tracker,
+            mem,
             #[cfg(feature = "experimental-multiprocess")]
-            &self.mem,
+            writer_lock,
+            #[cfg(feature = "experimental-multiprocess")]
+            None,
+            AllocationPolicy::Default,
+        )
+        .map_err(|e| e.into_storage_error())?;
+        sync_persistent_savepoints(
+            transaction_tracker,
+            #[cfg(feature = "experimental-multiprocess")]
+            mem,
             &txn,
         )?;
         txn.abort()?;
@@ -1596,13 +1601,12 @@ impl Database {
         mem.mark_consistent()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
-        let db = Database {
-            mem,
-            transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
-        };
+        let transaction_tracker = Arc::new(TransactionTracker::new(next_transaction_id));
 
         // Restore the tracker state for any persistent savepoints
-        db.sync_persistent_savepoints(
+        Self::sync_persistent_savepoints(
+            &transaction_tracker,
+            &mem,
             #[cfg(feature = "experimental-multiprocess")]
             writer_lock.as_ref(),
         )?;
@@ -1611,16 +1615,20 @@ impl Database {
         #[cfg(feature = "experimental-multiprocess")]
         if repaired && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
             ensure_allocator_state_table_and_trim(
-                &db.transaction_tracker,
-                &db.mem,
+                &transaction_tracker,
+                &mem,
                 writer_lock.as_ref(),
                 None,
             )?;
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
         let _ = (repaired, writer_lock);
-        // Dropped here: a write transaction takes the writer byte for itself from now on
-        Ok(db)
+        // Construct only after initialization succeeds: Database::drop takes the writer lock,
+        // which the open still holds, and assumes the savepoint tracker is complete.
+        Ok(Database {
+            mem,
+            transaction_tracker,
+        })
     }
 
     fn get_allocator_state_table(

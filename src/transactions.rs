@@ -2970,6 +2970,90 @@ mod test {
         ));
     }
 
+    #[cfg(all(
+        feature = "experimental-multiprocess",
+        any(target_os = "linux", target_vendor = "apple", windows)
+    ))]
+    #[test]
+    fn failed_multi_writer_open_releases_locks_without_committing() {
+        use super::{SAVEPOINT_TABLE, SavepointId, SerializedSavepoint};
+        use crate::db::FULL_RANGE;
+        use crate::tree_store::file_backend::range_lock::RangeLock;
+        use crate::tree_store::{PAGE_SIZE, TransactionalMemory};
+        use crate::{ConcurrencyMode, DatabaseError, backends::FileBackend};
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .create(tmpfile.path())
+            .unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(X).unwrap().insert("key", "value").unwrap();
+        txn.commit().unwrap();
+
+        // A valid tree and allocator snapshot, with a savepoint that fails to deserialize.
+        // The open reaches tracker initialization without latching an I/O error.
+        let txn = db.begin_write().unwrap();
+        let id = txn.persistent_savepoint().unwrap();
+        txn.system_tables
+            .lock()
+            .unwrap()
+            .open_system_table(SAVEPOINT_TABLE)
+            .unwrap()
+            .insert(SavepointId(id), SerializedSavepoint::Ref(&[]))
+            .unwrap();
+        txn.commit().unwrap();
+        let mem = db.get_memory();
+        drop(db);
+        let committed_id = mem.get_last_committed_transaction_id().unwrap();
+        drop(mem);
+
+        let file = tmpfile.reopen().unwrap();
+        let kept_by_caller = file.try_clone().unwrap();
+        let (completed, completion) = mpsc::channel();
+        let opening = thread::spawn(move || {
+            let result = Database::builder()
+                .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+                .set_repair_callback(|_| panic!("the allocator snapshot should be valid"))
+                .create_file(file);
+            completed.send(result).unwrap();
+        });
+        let result = completion
+            .recv_timeout(Duration::from_secs(10))
+            .expect("failed open deadlocked during cleanup");
+        opening.join().unwrap();
+        assert!(matches!(
+            result,
+            Err(DatabaseError::Storage(StorageError::Corrupted(message)))
+                if message == "Corrupted savepoint record"
+        ));
+
+        // A caller's duplicate keeps the file description alive, so dropping the backend's
+        // File alone would leave its locks held on platforms with open-file-description locks.
+        let observer = tmpfile.reopen().unwrap();
+        assert!(observer.try_lock_range(FULL_RANGE).unwrap());
+        observer.unlock_range(FULL_RANGE).unwrap();
+        drop(kept_by_caller);
+
+        let (mem, _writer) = TransactionalMemory::new(
+            Box::new(FileBackend::new(observer).unwrap()),
+            false,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+            ConcurrencyMode::MultiWriterProcess,
+        )
+        .unwrap();
+        assert_eq!(
+            mem.get_last_committed_transaction_id().unwrap(),
+            committed_id
+        );
+    }
+
     // A commit that stops part way may leave pages returned to the allocator while the durable
     // freed tables still reference them, so commit_inner() discards the allocator state unless
     // it completes. Verify the resulting contract: writes are refused, reads keep working, the
