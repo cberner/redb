@@ -1273,7 +1273,7 @@ impl WriteTransaction {
 
     fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionGuard)> {
         // Through the guard, so the savepoint's snapshot is held active like any other reader's
-        let transaction =
+        let (transaction, _) =
             TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         let id = self
             .transaction_tracker
@@ -2757,8 +2757,8 @@ impl ReadTransaction {
     pub(crate) fn new(
         mem: Arc<TransactionalMemory>,
         guard: TransactionGuard,
+        root_page: Option<BtreeHeader>,
     ) -> Result<Self, TransactionError> {
-        let root_page = mem.get_data_root();
         let guard = Arc::new(guard);
         let resolver = PageResolver::new(mem.clone());
         Ok(Self {

@@ -450,13 +450,14 @@ impl TransactionGuard {
         }
     }
 
+    // Returns a read guard and the data root its registration protects.
     pub(crate) fn allocate_read(
         tracker: Arc<TransactionTracker>,
         mem: &Arc<TransactionalMemory>,
-    ) -> Result<Self> {
-        let id = tracker.register_read_transaction(mem)?;
+    ) -> Result<(Self, Option<BtreeHeader>)> {
+        let (id, root) = tracker.register_read_transaction(mem)?;
 
-        Ok(Self::new_read(id, tracker, mem))
+        Ok((Self::new_read(id, tracker, mem), root))
     }
 
     pub(crate) fn new_write(
@@ -581,10 +582,6 @@ pub trait ReadableDatabase: SealedInApi5 {
 pub struct ReadOnlyDatabase {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
-    // Serializes beginning a read, so that the id a transaction locks and the root it then
-    // reads come from the same state
-    #[cfg(feature = "experimental-multiprocess")]
-    begin_read: crate::sync::Mutex<()>,
 }
 
 #[cfg(not(redb_no_std))]
@@ -593,13 +590,12 @@ impl Sealed for ReadOnlyDatabase {}
 #[cfg(not(redb_no_std))]
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        #[cfg(feature = "experimental-multiprocess")]
-        let _begin = self.begin_read.lock().unwrap();
-        let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
+        let (guard, root) =
+            TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
 
-        ReadTransaction::new(self.mem.clone(), guard)
+        ReadTransaction::new(self.mem.clone(), guard, root)
     }
 
     fn cache_stats(&self) -> CacheStats {
@@ -660,8 +656,6 @@ impl ReadOnlyDatabase {
         let db = Self {
             mem,
             transaction_tracker: Arc::new(TransactionTracker::new(next_transaction_id)),
-            #[cfg(feature = "experimental-multiprocess")]
-            begin_read: crate::sync::Mutex::new(()),
         };
 
         Ok(db)
@@ -721,10 +715,11 @@ impl Sealed for Database {}
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        let guard = TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
+        let (guard, root) =
+            TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
         debug!("Beginning read transaction id={:?}", guard.id());
-        ReadTransaction::new(self.get_memory(), guard)
+        ReadTransaction::new(self.get_memory(), guard, root)
     }
 
     fn cache_stats(&self) -> CacheStats {
@@ -2293,6 +2288,47 @@ mod test {
     }
 
     #[test]
+    fn read_snapshot_survives_commits_before_construction() {
+        use super::{ReadTransaction, TransactionGuard};
+
+        const TABLE: TableDefinition<u64, u64> = TableDefinition::new("snapshot");
+        for durability in [Durability::Immediate, Durability::None] {
+            let tmpfile = crate::create_tempfile();
+            let db = Database::create(tmpfile.path()).unwrap();
+            let mut write = db.begin_write().unwrap();
+            write.set_durability(durability).unwrap();
+            write.open_table(TABLE).unwrap().insert(0, 0).unwrap();
+            write.commit().unwrap();
+
+            let (guard, root) =
+                TransactionGuard::allocate_read(db.transaction_tracker.clone(), &db.mem).unwrap();
+            assert_eq!(
+                guard.id(),
+                db.mem.get_last_committed_transaction_id().unwrap()
+            );
+
+            // Commits between registration and construction must not change this read's root.
+            for value in 1..4 {
+                let mut write = db.begin_write().unwrap();
+                write.set_durability(durability).unwrap();
+                write.open_table(TABLE).unwrap().insert(0, value).unwrap();
+                write.commit().unwrap();
+            }
+
+            let read = ReadTransaction::new(db.mem.clone(), guard, root).unwrap();
+            assert_eq!(
+                read.open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0
+            );
+        }
+    }
+
+    #[test]
     fn crash_regression4() {
         let tmpfile = crate::create_tempfile();
         let (file, path) = tmpfile.into_parts();
@@ -3509,6 +3545,56 @@ mod active_transaction_test {
 
         drop(read);
         assert!(held_ids(&probe).is_empty(), "the lock outlived the reader");
+    }
+
+    #[test]
+    fn read_only_snapshot_survives_reload_before_construction() {
+        use super::{ReadTransaction, TransactionGuard};
+        use crate::ReadableTable;
+
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let writer = create(tmpfile.path(), mode);
+            let db = Database::builder()
+                .set_concurrency_mode(mode)
+                .set_cache_size(0)
+                .open_read_only(tmpfile.path())
+                .unwrap();
+            let (guard, root) =
+                TransactionGuard::allocate_read(db.transaction_tracker.clone(), &db.mem).unwrap();
+
+            for value in 1..4 {
+                let write = writer.begin_write().unwrap();
+                write.open_table(TABLE).unwrap().insert(0, value).unwrap();
+                write.commit().unwrap();
+            }
+            // Another read reloads the shared header before the first read is constructed.
+            let latest = db.begin_read().unwrap();
+            assert_eq!(
+                latest
+                    .open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                3
+            );
+
+            let read = ReadTransaction::new(db.mem.clone(), guard, root).unwrap();
+            assert_eq!(
+                read.open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0
+            );
+        }
     }
 
     /// A savepoint holds a read transaction live, so its snapshot stays active for as long as

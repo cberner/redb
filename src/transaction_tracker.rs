@@ -1,9 +1,9 @@
 use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
-use crate::tree_store::TransactionalMemory;
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::WriterLock;
+use crate::tree_store::{BtreeHeader, TransactionalMemory};
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -467,14 +467,16 @@ impl TransactionTracker {
     pub(crate) fn register_read_transaction(
         &self,
         mem: &TransactionalMemory,
-    ) -> Result<TransactionId> {
+    ) -> Result<(TransactionId, Option<BtreeHeader>)> {
         #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
-        let id = mem.latest_committed_transaction_id(
+        // Hold the tracker across snapshot capture and registration so reclamation cannot
+        // miss this reader. The header lock also excludes peer commits and local reloads.
+        let mut state = self.state.lock()?;
+        let (id, root) = mem.latest_committed_snapshot(
             #[cfg(feature = "experimental-multiprocess")]
             &header,
         )?;
-        let mut state = self.state.lock()?;
         state.add_active_transaction_lock_reference(
             mem,
             id,
@@ -482,7 +484,7 @@ impl TransactionTracker {
             &header,
         )?;
 
-        Ok(id)
+        Ok((id, root))
     }
 
     pub(crate) fn deallocate_read_transaction(&self, mem: &TransactionalMemory, id: TransactionId) {
