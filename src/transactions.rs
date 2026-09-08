@@ -2810,9 +2810,9 @@ impl ReadTransaction {
             } => Ok(ReadOnlyUntypedTable::new(
                 name,
                 table_root,
-                PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
+                self.tree.transaction_guard().clone(),
                 PageResolver::new(self.mem.clone()),
             )),
             InternalTableDefinition::Multimap { .. } => unreachable!(),
@@ -2869,9 +2869,9 @@ impl ReadTransaction {
                 name,
                 table_root,
                 table_length,
-                PageHint::Clean,
                 fixed_key_size,
                 fixed_value_size,
+                self.tree.transaction_guard().clone(),
                 PageResolver::new(self.mem.clone()),
             )),
         }
