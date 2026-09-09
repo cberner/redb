@@ -129,12 +129,15 @@ impl State {
     // other processes. Persistent savepoints are excluded
     #[cfg(feature = "experimental-multiprocess")]
     fn active_transaction_lock_references(&self, id: TransactionId) -> u64 {
-        self.live_read_transactions.get(&id).copied().unwrap_or(0)
-            - self
-                .persistent_savepoint_references
-                .get(&id)
-                .copied()
-                .unwrap_or(0)
+        let references = self.live_read_transactions.get(&id).copied().unwrap_or(0);
+        let savepoints = self
+            .persistent_savepoint_references
+            .get(&id)
+            .copied()
+            .unwrap_or(0);
+        references
+            .checked_sub(savepoints)
+            .expect("persistent savepoint references exceed the reads they are a subset of")
     }
 
     // Takes the "active transaction byte" as the first read of `id` appears, and releases it
