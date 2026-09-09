@@ -14,6 +14,8 @@ use core::mem;
 use core::mem::size_of;
 #[cfg(feature = "logging")]
 use log::debug;
+#[cfg(all(feature = "logging", feature = "experimental-multiprocess"))]
+use log::error;
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);
@@ -166,13 +168,26 @@ impl State {
         id: TransactionId,
     ) {
         self.decrement_reference_count(id);
-        // Failing to release only leaves a peer reclaiming less than it could
         #[cfg(feature = "experimental-multiprocess")]
         if self.active_transaction_lock_references(id) == 0 {
-            let _ = mem.unlock_mp_transaction(id);
+            Self::release_active_transaction_lock(mem, id);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
         let _ = mem;
+    }
+
+    #[cfg(feature = "experimental-multiprocess")]
+    fn release_active_transaction_lock(mem: &TransactionalMemory, id: TransactionId) {
+        if let Err(failure) = mem.unlock_mp_transaction(id) {
+            #[cfg(feature = "logging")]
+            error!(
+                "Failed to release a finished read transaction: {failure}. Until this database is \
+                 closed, no process sharing it can reclaim space from data overwritten or deleted \
+                 after this point, so the file may grow"
+            );
+            #[cfg(not(feature = "logging"))]
+            let _ = failure;
+        }
     }
 
     // A persistent savepoint's reference, which takes no byte. See `persistent_savepoint_references`
@@ -200,7 +215,7 @@ impl State {
         *self.persistent_savepoint_references.entry(id).or_insert(0) += 1;
         #[cfg(feature = "experimental-multiprocess")]
         if self.active_transaction_lock_references(id) == 0 {
-            let _ = mem.unlock_mp_transaction(id);
+            Self::release_active_transaction_lock(mem, id);
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
         let _ = mem;
