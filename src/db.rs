@@ -865,7 +865,12 @@ impl Database {
                 // clean only if neither the allocator nor the durable state below needed repair.
                 let durable_clean = self.durable_state_clean()?;
                 let mut txn = self
-                    .begin_write()
+                    .begin_write_with(
+                        #[cfg(feature = "experimental-multiprocess")]
+                        Some(writer_lock),
+                        #[cfg(feature = "experimental-multiprocess")]
+                        None,
+                    )
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
                 txn.disable_post_commit_free();
                 txn.commit()
