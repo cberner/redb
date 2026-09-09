@@ -600,6 +600,7 @@ impl PagedCachedFile {
     #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn write_direct(&self, offset: u64, data: &[u8]) -> Result<()> {
         self.invalidate_cache(offset, data.len());
+        self.cancel_pending_write(offset, data.len());
         self.file.write(offset, data)
     }
 
@@ -1141,6 +1142,25 @@ mod test {
         );
         cached_file.flush().unwrap();
         assert_eq!(writes.load(Ordering::SeqCst), 0);
+    }
+
+    // A direct write is the file's content from the moment it returns, so a buffered write of the
+    // same range must not reach the file after it.
+    #[test]
+    #[cfg(feature = "experimental-multiprocess")]
+    fn write_direct_supersedes_a_buffered_write() {
+        let (backend, _writes) = CountingBackend::new(1024);
+        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
+
+        let mut page = cached_file.write(0, 128, true).unwrap();
+        page.mem_mut().fill(0xAA);
+        drop(page);
+        cached_file.write_barrier();
+
+        cached_file.write_direct(0, &[0xBB; 128]).unwrap();
+        cached_file.flush().unwrap();
+
+        assert_eq!(cached_file.read_direct(0, 128).unwrap(), vec![0xBB; 128]);
     }
 
     // Pages retained by a non-durable commit must not hold the read cache below its share: they
