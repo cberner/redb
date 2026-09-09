@@ -3548,7 +3548,7 @@ mod active_transaction_test {
     }
 
     #[test]
-    fn read_only_snapshot_survives_reload_before_construction() {
+    fn read_only_snapshot_survives_new_read_before_construction() {
         use super::{ReadTransaction, TransactionGuard};
         use crate::ReadableTable;
 
@@ -3571,7 +3571,7 @@ mod active_transaction_test {
                 write.open_table(TABLE).unwrap().insert(0, value).unwrap();
                 write.commit().unwrap();
             }
-            // Another read reloads the shared header before the first read is constructed.
+            // Another read observes the peer's commit before the first read is constructed.
             let latest = db.begin_read().unwrap();
             assert_eq!(
                 latest
@@ -3585,6 +3585,85 @@ mod active_transaction_test {
             );
 
             let read = ReadTransaction::new(db.mem.clone(), guard, root).unwrap();
+            assert_eq!(
+                read.open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0
+            );
+        }
+    }
+
+    #[cfg(feature = "cache_metrics")]
+    #[test]
+    fn read_only_file_snapshots_preserve_memory_state_and_reuse_cache() {
+        use super::TransactionGuard;
+        use crate::ReadableTable;
+
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let writer = create(tmpfile.path(), mode);
+            let db = Database::builder()
+                .set_concurrency_mode(mode)
+                .open_read_only(tmpfile.path())
+                .unwrap();
+            let original_id = db.mem.get_last_committed_transaction_id().unwrap();
+            let original_root = db.mem.get_data_root();
+            let read = db.begin_read().unwrap();
+            assert_eq!(
+                read.open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0
+            );
+            let cached_bytes = db.cache_stats().used_bytes();
+            assert!(cached_bytes > 0);
+
+            let (same, _) =
+                TransactionGuard::allocate_read(db.transaction_tracker.clone(), &db.mem).unwrap();
+            assert_eq!(same.id(), original_id);
+            assert_eq!(db.cache_stats().used_bytes(), cached_bytes);
+
+            let write = writer.begin_write().unwrap();
+            write.open_table(TABLE).unwrap().insert(0, 1).unwrap();
+            write.commit().unwrap();
+
+            let (latest, _) =
+                TransactionGuard::allocate_read(db.transaction_tracker.clone(), &db.mem).unwrap();
+            assert!(latest.id() > original_id);
+            assert_eq!(db.cache_stats().used_bytes(), 0);
+            assert_eq!(
+                db.mem.get_last_committed_transaction_id().unwrap(),
+                original_id
+            );
+            assert_eq!(db.mem.get_data_root(), original_root);
+
+            let current = db.begin_read().unwrap();
+            assert_eq!(
+                current
+                    .open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                1
+            );
+            let cached_bytes = db.cache_stats().used_bytes();
+            assert!(cached_bytes > 0);
+            let (repeated, _) =
+                TransactionGuard::allocate_read(db.transaction_tracker.clone(), &db.mem).unwrap();
+            assert_eq!(repeated.id(), latest.id());
+            assert_eq!(db.cache_stats().used_bytes(), cached_bytes);
             assert_eq!(
                 read.open_table(TABLE)
                     .unwrap()

@@ -1,6 +1,8 @@
 use crate::db::InternalStorageBackend;
 use crate::io;
 use crate::sync::{Mutex, MutexGuard, RwLock};
+#[cfg(feature = "experimental-multiprocess")]
+use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, Result, StorageError};
@@ -289,6 +291,8 @@ pub(super) struct PagedCachedFile {
     // A third "total" counter would add contention on every insert/remove for
     // negligible accuracy gain.
     read_cache_bytes: AtomicUsize,
+    #[cfg(feature = "experimental-multiprocess")]
+    read_cache_transaction_id: Mutex<Option<TransactionId>>,
     write_buffer_bytes: AtomicUsize,
     // True when the write buffer holds committed, reader-visible pages, left there by a
     // non-durable commit (see write_barrier()) instead of being written to the file. While set,
@@ -337,6 +341,8 @@ impl PagedCachedFile {
             file: CheckedBackend::new(file),
             page_size,
             read_cache_bytes: AtomicUsize::new(0),
+            #[cfg(feature = "experimental-multiprocess")]
+            read_cache_transaction_id: Mutex::new(None),
             write_buffer_bytes: AtomicUsize::new(0),
             committed_pages_buffered: AtomicBool::new(false),
             max_cache_size,
@@ -755,6 +761,16 @@ impl PagedCachedFile {
             assert_eq!(len, removed.len());
             self.read_cache_bytes
                 .fetch_sub(removed.len(), Ordering::AcqRel);
+        }
+    }
+
+    // The caller holds the header lock across observing this id and updating the cache.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn update_transaction_id(&self, transaction_id: TransactionId) {
+        let mut current = self.read_cache_transaction_id.lock().unwrap();
+        if *current != Some(transaction_id) {
+            self.invalidate_cache_all();
+            *current = Some(transaction_id);
         }
     }
 
