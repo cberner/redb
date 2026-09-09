@@ -1,5 +1,4 @@
-use crate::db::InternalStorageBackend;
-use crate::io;
+use crate::db::StorageBackend;
 use crate::sync::{Mutex, MutexGuard, RwLock};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::transaction_tracker::TransactionId;
@@ -10,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::{Index, IndexMut, Range};
+use core::ops::{Index, IndexMut, RangeBounds};
 use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use core::sync::atomic::AtomicU64;
@@ -125,7 +124,7 @@ impl LRUWriteCache {
 
 #[derive(Debug)]
 struct CheckedBackend {
-    file: Box<dyn InternalStorageBackend>,
+    file: Box<dyn StorageBackend>,
     io_failed: AtomicBool,
     closed: AtomicBool,
 }
@@ -141,7 +140,7 @@ impl Drop for CheckedBackend {
 }
 
 impl CheckedBackend {
-    fn new(file: Box<dyn InternalStorageBackend>) -> Self {
+    fn new(file: Box<dyn StorageBackend>) -> Self {
         Self {
             file,
             io_failed: AtomicBool::new(false),
@@ -149,35 +148,52 @@ impl CheckedBackend {
         }
     }
 
-    fn locks_expected(&self) -> bool {
-        self.file.locks_expected()
+    fn try_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
+        self.check_failure()?;
+        self.file
+            .try_lock_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
     }
 
-    fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-        self.file.try_lock_range(range)
-    }
-
-    fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-        self.file.try_lock_shared_range(range)
-    }
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-        self.file.lock_range(range)
+    fn try_lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
+        self.check_failure()?;
+        self.file
+            .try_lock_shared_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-        self.file.lock_shared_range(range)
+    fn lock_range(&self, range: impl RangeBounds<u64>) -> Result {
+        self.check_failure()?;
+        self.file
+            .lock_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-        self.file.unlock_range(range)
+    fn lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result {
+        self.check_failure()?;
+        self.file
+            .lock_shared_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
     }
 
-    fn query_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-        self.file.query_lock_range(range)
+    #[cfg(feature = "experimental-multiprocess")]
+    fn unlock_range(&self, range: impl RangeBounds<u64>) -> Result {
+        // Allow unlocking even if there was an io failure, but not if the file is closed
+        if self.closed.load(Ordering::Acquire) {
+            return Err(StorageError::DatabaseClosed);
+        }
+        self.file
+            .unlock_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
+    }
+
+    fn query_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
+        self.check_failure()?;
+        self.file
+            .query_lock_range(range.start_bound().cloned(), range.end_bound().cloned())
+            .map_err(StorageError::from)
     }
 
     fn check_failure(&self) -> Result<()> {
@@ -326,7 +342,7 @@ pub(super) struct PagedCachedFile {
 
 impl PagedCachedFile {
     pub(super) fn new(
-        file: Box<dyn InternalStorageBackend>,
+        file: Box<dyn StorageBackend>,
         page_size: u64,
         max_cache_size: usize,
     ) -> Self {
@@ -362,35 +378,31 @@ impl PagedCachedFile {
         }
     }
 
-    pub(crate) fn locks_expected(&self) -> bool {
-        self.file.locks_expected()
-    }
-
-    pub(crate) fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+    pub(crate) fn try_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
         self.file.try_lock_range(range)
     }
 
-    pub(crate) fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+    pub(crate) fn try_lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
         self.file.try_lock_shared_range(range)
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    pub(crate) fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+    pub(crate) fn lock_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.file.lock_range(range)
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    pub(crate) fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+    pub(crate) fn lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.file.lock_shared_range(range)
     }
 
     #[cfg(feature = "experimental-multiprocess")]
-    pub(crate) fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
+    pub(crate) fn unlock_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.file.unlock_range(range)
     }
 
     /// Whether an exclusive lock over the range would conflict with one held elsewhere.
-    pub(crate) fn query_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
+    pub(crate) fn query_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
         self.file.query_lock_range(range)
     }
 
@@ -950,7 +962,6 @@ impl PagedCachedFile {
 mod test {
     use crate::StorageBackend;
     use crate::backends::InMemoryBackend;
-    use crate::tree_store::LocklessBackend;
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use alloc::sync::Arc;
@@ -1004,7 +1015,7 @@ mod test {
     fn cache_leak() {
         let backend = InMemoryBackend::new();
         backend.set_len(1024).unwrap();
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);
         let cached_file = Arc::new(cached_file);
 
         let t1 = {
@@ -1041,11 +1052,7 @@ mod test {
         let page_size: usize = 128;
         let max_cache_size = 1024;
         let budget = max_cache_size / 2;
-        let cached_file = PagedCachedFile::new(
-            LocklessBackend::boxed(backend),
-            page_size as u64,
-            max_cache_size,
-        );
+        let cached_file = PagedCachedFile::new(Box::new(backend), page_size as u64, max_cache_size);
 
         // Dirty twice as many pages as the write budget holds. Consecutive page offsets land in
         // different stripes, so each over-budget write finds its own stripe empty and must cover
@@ -1072,7 +1079,7 @@ mod test {
     fn resize_preserves_cached_pages() {
         let backend = InMemoryBackend::new();
         backend.set_len(1024).unwrap();
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 4096);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 4096);
 
         // Populate the read cache with two pages from opposite ends of the file.
         cached_file.read(0, 128, PageHint::None).unwrap();
@@ -1095,7 +1102,7 @@ mod test {
     #[test]
     fn write_barrier_issues_no_file_writes() {
         let (backend, writes) = CountingBackend::new(1024);
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0xAB);
@@ -1127,7 +1134,7 @@ mod test {
     #[test]
     fn discard_write_buffer_drops_buffered_pages() {
         let (backend, writes) = CountingBackend::new(1024);
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0xCD);
@@ -1150,7 +1157,7 @@ mod test {
     #[cfg(feature = "experimental-multiprocess")]
     fn write_direct_supersedes_a_buffered_write() {
         let (backend, _writes) = CountingBackend::new(1024);
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 1024);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0xAA);
@@ -1172,8 +1179,7 @@ mod test {
         const FILE_LEN: u64 = 16 * 1024;
 
         let (backend, _writes) = CountingBackend::new(FILE_LEN);
-        let cached_file =
-            PagedCachedFile::new(LocklessBackend::boxed(backend), PAGE as u64, MAX_CACHE);
+        let cached_file = PagedCachedFile::new(Box::new(backend), PAGE as u64, MAX_CACHE);
 
         // Fill the write buffer to its half-of-cache cap, then commit non-durably so the pages
         // stay buffered
@@ -1211,7 +1217,7 @@ mod test {
     #[test]
     fn zero_size_cache_stays_empty_after_reclaim() {
         let (backend, _writes) = CountingBackend::new(1024);
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 0);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 0);
 
         let mut page = cached_file.write(0, 128, true).unwrap();
         page.mem_mut().fill(0x22);
@@ -1230,7 +1236,7 @@ mod test {
     fn buffered_pages_spill_under_pressure() {
         let (backend, writes) = CountingBackend::new(1024);
         // A two page budget caps the buffer at one page, so each write() spills an earlier one
-        let cached_file = PagedCachedFile::new(LocklessBackend::boxed(backend), 128, 256);
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 256);
 
         for i in 0..4u8 {
             let offset = u64::from(i) * 128;

@@ -635,10 +635,71 @@ mod peer_commits {
     }
 }
 
-/// A caller-supplied backend has no locks to negotiate with, which is reported like a platform
-/// without them
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
-fn sharing_a_caller_supplied_backend_is_unsupported() {
+fn file_backend_custom_open_supports_shared_modes() {
+    use redb::backends::FileBackend;
+    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+    for mode in [
+        ConcurrencyMode::SingleWriterProcess,
+        ConcurrencyMode::MultiWriterProcess,
+    ] {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        let open =
+            || builder.create_with_backend(FileBackend::new(tmpfile.reopen().unwrap()).unwrap());
+        let db = open().unwrap();
+        let write = db.begin_write().unwrap();
+        write.open_table(TABLE).unwrap().insert(0, 0).unwrap();
+        write.commit().unwrap();
+
+        let reader = builder.open_read_only(tmpfile.path()).unwrap();
+        let snapshot = reader.begin_read().unwrap().open_table(TABLE).unwrap();
+        assert!(matches!(
+            Database::open(tmpfile.path()),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+
+        let peer = if mode == ConcurrencyMode::MultiWriterProcess {
+            Some(open().unwrap())
+        } else {
+            assert!(matches!(open(), Err(DatabaseError::DatabaseAlreadyOpen)));
+            None
+        };
+        for value in 1..4 {
+            let writer = peer.as_ref().unwrap_or(&db);
+            let write = writer.begin_write().unwrap();
+            write.open_table(TABLE).unwrap().insert(0, value).unwrap();
+            write.commit().unwrap();
+
+            assert_eq!(snapshot.get(0).unwrap().unwrap().value(), 0);
+            for current in [reader.begin_read().unwrap(), db.begin_read().unwrap()] {
+                assert_eq!(
+                    current
+                        .open_table(TABLE)
+                        .unwrap()
+                        .get(0)
+                        .unwrap()
+                        .unwrap()
+                        .value(),
+                    value
+                );
+            }
+        }
+        drop(snapshot);
+        drop(reader);
+        drop(peer);
+        drop(db);
+        Database::open(tmpfile.path()).unwrap();
+    }
+}
+
+/// A backend without locks can only be used in single-process mode.
+#[test]
+fn sharing_a_backend_without_locks_is_unsupported() {
     let mut builder = Database::builder();
     builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
     let err = builder
@@ -646,7 +707,7 @@ fn sharing_a_caller_supplied_backend_is_unsupported() {
         .unwrap_err();
     assert!(matches!(
         err,
-        DatabaseError::Storage(StorageError::Io(err)) if err.kind() == std::io::ErrorKind::Unsupported
+        DatabaseError::Storage(StorageError::Unsupported)
     ));
 
     // ... while the default mode opens on one as it always has

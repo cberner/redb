@@ -1831,9 +1831,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 #[cfg(all(test, feature = "experimental_cursor"))]
 mod tests {
     use super::*;
-    use crate::tree_store::{
-        AllocationPolicy, InMemoryBackend, LocklessBackend, TransactionalMemory,
-    };
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, TransactionalMemory};
 
     const MAX_KEYS: usize = u16::MAX as usize;
 
@@ -1843,7 +1841,7 @@ mod tests {
 
     fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             page_size,
             None,

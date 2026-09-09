@@ -1,9 +1,10 @@
-use crate::db::{FULL_RANGE, InternalStorageBackend};
+use crate::BackendError;
+use crate::db::FULL_RANGE;
 use crate::{DatabaseError, Result, StorageBackend};
 use std::fs::{File, TryLockError};
 use std::io;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::ops::Range;
+use std::ops::Bound;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -44,26 +45,30 @@ impl FileBackend {
 
 /// This backend has no byte-range locks. Only the whole storage can be locked, which a whole-file
 /// lock does, so that is the one range it supports.
-impl InternalStorageBackend for FileBackend {
-    fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-        if range == FULL_RANGE {
-            self.lock_whole_file(false)
+impl StorageBackend for FileBackend {
+    fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            self.lock_whole_file(false).map_err(BackendError::from)
         } else {
-            Err(unsupported())
+            Err(BackendError::Unsupported)
         }
     }
 
-    fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-        if range == FULL_RANGE {
-            self.lock_whole_file(true)
+    fn try_lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, BackendError> {
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            self.lock_whole_file(true).map_err(BackendError::from)
         } else {
-            Err(unsupported())
+            Err(BackendError::Unsupported)
         }
     }
 
-    fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-        if range != FULL_RANGE {
-            return Err(unsupported());
+    fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        if !matches!(start, Bound::Unbounded | Bound::Included(0)) || end != Bound::Unbounded {
+            return Err(BackendError::Unsupported);
         }
         if self.whole_file_locked.swap(false, Ordering::AcqRel) {
             self.file.lock().unwrap().unlock()?;
@@ -72,31 +77,21 @@ impl InternalStorageBackend for FileBackend {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
-        Err(unsupported())
+    fn lock_range(&self, _start: Bound<u64>, _end: Bound<u64>) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
-        Err(unsupported())
+    fn lock_shared_range(&self, _start: Bound<u64>, _end: Bound<u64>) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported)
     }
 
-    fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
-        Err(unsupported())
+    fn query_lock_range(&self, _start: Bound<u64>, _end: Bound<u64>) -> Result<bool, BackendError> {
+        Err(BackendError::Unsupported)
     }
-}
 
-fn unsupported() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "byte-range locks are not supported on this platform",
-    )
-}
-
-impl StorageBackend for FileBackend {
     fn close(&self) -> Result<(), io::Error> {
-        self.unlock_range(FULL_RANGE)
+        self.unlock_range(FULL_RANGE.0, FULL_RANGE.1)
+            .map_err(io::Error::from)
     }
 
     fn len(&self) -> Result<u64, io::Error> {

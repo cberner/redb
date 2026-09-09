@@ -1,13 +1,16 @@
+use crate::BackendError;
+#[cfg(any(feature = "experimental-api-5", test))]
+use crate::db::FULL_RANGE;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::db::NAMESPACE_PROBE_BYTE;
+use crate::db::SHARED_WRITER_BYTE;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::db::byte_range;
-use crate::db::{FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE};
 use crate::{DatabaseError, Result, StorageBackend};
 use std::collections::HashSet;
 use std::fs::{File, TryLockError};
 use std::io;
-use std::ops::Range;
+use std::ops::Bound;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -23,21 +26,29 @@ use std::os::windows::fs::FileExt;
 use super::range_lock::RangeLock;
 
 #[cfg(feature = "experimental-api-5")]
-fn protocol_ranges(shared: bool) -> &'static [Range<u64>] {
-    static EXCLUSIVE: [Range<u64>; 1] = [FULL_RANGE];
-    static SHARED: [Range<u64>; 2] = [0..SHARED_WRITER_BYTE, SHARED_WRITER_BYTE + 1..u64::MAX];
+fn protocol_ranges(shared: bool) -> &'static [(Bound<u64>, Bound<u64>)] {
+    static EXCLUSIVE: [(Bound<u64>, Bound<u64>); 1] = [FULL_RANGE];
+    static SHARED: [(Bound<u64>, Bound<u64>); 2] = [
+        (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
+        (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
+    ];
 
     if shared { &SHARED } else { &EXCLUSIVE }
 }
 
 #[cfg(not(feature = "experimental-api-5"))]
-fn protocol_ranges(shared: bool) -> &'static [Range<u64>] {
-    static EXCLUSIVE: [Range<u64>; 2] =
-        [0..NAMESPACE_PROBE_BYTE, NAMESPACE_PROBE_BYTE + 1..u64::MAX];
-    static SHARED: [Range<u64>; 3] = [
-        0..NAMESPACE_PROBE_BYTE,
-        NAMESPACE_PROBE_BYTE + 1..SHARED_WRITER_BYTE,
-        SHARED_WRITER_BYTE + 1..u64::MAX,
+fn protocol_ranges(shared: bool) -> &'static [(Bound<u64>, Bound<u64>)] {
+    static EXCLUSIVE: [(Bound<u64>, Bound<u64>); 2] = [
+        (Bound::Unbounded, Bound::Excluded(NAMESPACE_PROBE_BYTE)),
+        (Bound::Excluded(NAMESPACE_PROBE_BYTE), Bound::Unbounded),
+    ];
+    static SHARED: [(Bound<u64>, Bound<u64>); 3] = [
+        (Bound::Unbounded, Bound::Excluded(NAMESPACE_PROBE_BYTE)),
+        (
+            Bound::Excluded(NAMESPACE_PROBE_BYTE),
+            Bound::Excluded(SHARED_WRITER_BYTE),
+        ),
+        (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
     ];
 
     if shared { &SHARED } else { &EXCLUSIVE }
@@ -58,7 +69,7 @@ pub struct FileBackend {
     whole_file_locked: AtomicBool,
     // Every range this handle holds, so that close() can release exactly what was taken:
     // UnlockFile neither splits nor merges, so an unlock must cover the range it was locked over
-    locked_ranges: Mutex<HashSet<Range<u64>>>,
+    locked_ranges: Mutex<HashSet<(Bound<u64>, Bound<u64>)>>,
     file: File,
 }
 
@@ -129,18 +140,20 @@ impl FileBackend {
     fn lock_protocol_ranges(&self, shared: bool) -> io::Result<bool> {
         for (taken, range) in protocol_ranges(shared).iter().enumerate() {
             let acquired = if shared {
-                self.file.try_lock_shared_range(range.clone())
+                self.file.try_lock_shared_range(*range)
             } else {
-                self.file.try_lock_range(range.clone())
+                self.file.try_lock_range(*range)
             };
             // Another handle has the database open, holding either kind of lock
             if !matches!(acquired, Ok(true)) {
                 for range in protocol_ranges(shared).iter().take(taken) {
-                    report_failed_release(self.unlock_range(range.clone()));
+                    report_failed_release(
+                        self.unlock_range(range.0, range.1).map_err(io::Error::from),
+                    );
                 }
                 return acquired;
             }
-            self.locked_ranges.lock().unwrap().insert(range.clone());
+            self.locked_ranges.lock().unwrap().insert(*range);
         }
 
         Ok(true)
@@ -180,66 +193,76 @@ impl FileBackend {
 /// The whole storage is what a single-process open locks, and the whole-file lock an older redb
 /// takes covers exactly that, so both kinds are held for that one range. Any other range is a
 /// byte-range lock alone.
-impl InternalStorageBackend for FileBackend {
-    fn try_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
-        if range == FULL_RANGE {
-            return self.lock_whole_storage(false);
+impl StorageBackend for FileBackend {
+    fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        let range = (start, end);
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            return self.lock_whole_storage(false).map_err(BackendError::from);
         }
-        let acquired = self.file.try_lock_range(range.clone())?;
+        let acquired = self.file.try_lock_range(range)?;
         if acquired {
             self.locked_ranges.lock().unwrap().insert(range);
         }
         Ok(acquired)
     }
 
-    fn try_lock_shared_range(&self, range: Range<u64>) -> io::Result<bool> {
-        if range == FULL_RANGE {
-            return self.lock_whole_storage(true);
+    fn try_lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, BackendError> {
+        let range = (start, end);
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            return self.lock_whole_storage(true).map_err(BackendError::from);
         }
-        let acquired = self.file.try_lock_shared_range(range.clone())?;
+        let acquired = self.file.try_lock_shared_range(range)?;
         if acquired {
             self.locked_ranges.lock().unwrap().insert(range);
         }
         Ok(acquired)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, range: Range<u64>) -> io::Result<()> {
-        debug_assert!(range != FULL_RANGE);
-        self.file.lock_range(range.clone())?;
+    fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        let range = (start, end);
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            return Err(BackendError::Unsupported);
+        }
+        self.file.lock_range(range)?;
         self.locked_ranges.lock().unwrap().insert(range);
         Ok(())
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, range: Range<u64>) -> io::Result<()> {
-        debug_assert!(range != FULL_RANGE);
-        self.file.lock_shared_range(range.clone())?;
+    fn lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        let range = (start, end);
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            return Err(BackendError::Unsupported);
+        }
+        self.file.lock_shared_range(range)?;
         self.locked_ranges.lock().unwrap().insert(range);
         Ok(())
     }
 
-    fn unlock_range(&self, range: Range<u64>) -> io::Result<()> {
-        if range == FULL_RANGE {
-            return self.release_all_locks();
+    fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        let range = (start, end);
+        if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
+            return self.release_all_locks().map_err(BackendError::from);
         }
         // Forgotten only once it is really released, so that a failure leaves the range for
         // close() to retry rather than leaving it held with nothing left to release it
-        let released = self.file.unlock_range(range.clone());
+        let released = self.file.unlock_range(range);
         if released.is_ok() {
             self.locked_ranges.lock().unwrap().remove(&range);
         }
-        released
+        released.map_err(BackendError::from)
     }
 
-    fn query_lock_range(&self, range: Range<u64>) -> io::Result<bool> {
-        self.file.query_lock(range)
+    fn query_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        let range = (start, end);
+        self.file.query_lock(range).map_err(BackendError::from)
     }
-}
 
-impl StorageBackend for FileBackend {
     fn close(&self) -> Result<(), io::Error> {
-        self.unlock_range(FULL_RANGE)
+        self.release_all_locks()
     }
 
     fn len(&self) -> Result<u64, io::Error> {
@@ -390,7 +413,7 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 mod range_lock_tests {
     #[cfg(not(feature = "experimental-api-5"))]
     use super::NAMESPACE_PROBE_BYTE;
-    use super::{FULL_RANGE, FileBackend, InternalStorageBackend, RangeLock};
+    use super::{Bound, FULL_RANGE, FileBackend, RangeLock, StorageBackend};
     #[cfg(not(all(feature = "experimental-api-5", target_os = "linux")))]
     use std::fs::TryLockError;
     use std::fs::{File, OpenOptions};
@@ -413,9 +436,9 @@ mod range_lock_tests {
     fn open_file(file: File, read_only: bool) -> Result<FileBackend, crate::DatabaseError> {
         let backend = FileBackend::new(file).unwrap();
         let acquired = if read_only {
-            backend.try_lock_shared_range(FULL_RANGE)
+            backend.try_lock_shared_range(FULL_RANGE.0, FULL_RANGE.1)
         } else {
-            backend.try_lock_range(FULL_RANGE)
+            backend.try_lock_range(FULL_RANGE.0, FULL_RANGE.1)
         };
         match acquired {
             Ok(true) => Ok(backend),
@@ -473,15 +496,27 @@ mod range_lock_tests {
         let byte = BASE..BASE + 1;
 
         let observer = reopen(tmpfile.path());
-        assert!(backend.try_lock_range(byte.clone()).unwrap());
+        assert!(
+            backend
+                .try_lock_range(Bound::Included(byte.start), Bound::Excluded(byte.end))
+                .unwrap()
+        );
         assert!(!byte_is_free(&observer, BASE, false));
-        backend.unlock_range(byte.clone()).unwrap();
+        backend
+            .unlock_range(Bound::Included(byte.start), Bound::Excluded(byte.end))
+            .unwrap();
         assert!(byte_is_free(&observer, BASE, true));
 
-        assert!(backend.try_lock_shared_range(byte.clone()).unwrap());
+        assert!(
+            backend
+                .try_lock_shared_range(Bound::Included(byte.start), Bound::Excluded(byte.end))
+                .unwrap()
+        );
         assert!(byte_is_free(&observer, BASE, false));
         assert!(!byte_is_free(&observer, BASE, true));
-        backend.unlock_range(byte).unwrap();
+        backend
+            .unlock_range(Bound::Included(byte.start), Bound::Excluded(byte.end))
+            .unwrap();
     }
 
     #[test]
@@ -522,7 +557,7 @@ mod range_lock_tests {
     fn a_held_protocol_byte_reads_as_already_open() {
         let tmpfile = crate::create_tempfile();
         let holder = reopen(tmpfile.path());
-        assert!(holder.try_lock_range(BASE..BASE + 1).unwrap());
+        assert!(holder.try_lock_range(BASE..=BASE).unwrap());
 
         // A held byte anywhere in the range stands in for a multi-process handle having
         // the database open
@@ -535,7 +570,7 @@ mod range_lock_tests {
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
 
-        holder.unlock_range(BASE..BASE + 1).unwrap();
+        holder.unlock_range(BASE..=BASE).unwrap();
         let backend = open(tmpfile.path(), false).unwrap();
         close(&backend);
     }
@@ -547,7 +582,7 @@ mod range_lock_tests {
         let tmpfile = crate::create_tempfile();
         let holder = reopen(tmpfile.path());
         // In the second piece only, so that the first is taken before the conflict
-        assert!(holder.try_lock_range(BASE..BASE + 1).unwrap());
+        assert!(holder.try_lock_range(BASE..=BASE).unwrap());
 
         let file = reopen(tmpfile.path());
         let kept_by_the_caller = file.try_clone().unwrap();
@@ -556,7 +591,7 @@ mod range_lock_tests {
             Err(crate::DatabaseError::DatabaseAlreadyOpen)
         ));
 
-        holder.unlock_range(BASE..BASE + 1).unwrap();
+        holder.unlock_range(BASE..=BASE).unwrap();
         let observer = reopen(tmpfile.path());
         assert!(byte_is_free(&observer, 0, true));
         observer.try_lock().unwrap();
@@ -625,14 +660,13 @@ mod range_lock_tests {
             assert!(!observer.try_lock_range(last_byte.clone()).unwrap());
             assert!(observer.try_lock_shared_range(last_byte.clone()).unwrap());
             observer.unlock_range(last_byte.clone()).unwrap();
-            assert!(!observer.query_lock(range.end..range.end + 1).unwrap());
+            assert!(!observer.query_lock(range.end..=range.end).unwrap());
 
             holder.unlock_range(range).unwrap();
             assert!(!observer.query_lock(last_byte).unwrap());
         }
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn blocking_locks_use_large_offsets() {
         let tmpfile = crate::create_tempfile();

@@ -1,0 +1,14 @@
+[package]
+name = "redb-no-std-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Keep the std test runner from enabling redb's std feature through the main workspace.
+[workspace]
+
+[dependencies]
+redb = { path = "../..", default-features = false, features = ["experimental-api-5"] }
+
+[profile.dev]
+panic = "abort"

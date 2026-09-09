@@ -80,8 +80,8 @@ pub use db::{
     UntypedTableHandle,
 };
 pub use error::{
-    CommitError, CompactionError, DatabaseError, Error, SavepointError, SetDurabilityError,
-    StorageError, TableError, TransactionError,
+    BackendError, CommitError, CompactionError, DatabaseError, Error, SavepointError,
+    SetDurabilityError, StorageError, TableError, TransactionError,
 };
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
