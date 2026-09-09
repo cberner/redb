@@ -1,139 +1,60 @@
+#[cfg(not(redb_no_std))]
+use crate::BackendError;
 use crate::StorageBackend;
-use crate::db::InternalStorageBackend;
 use crate::io;
 #[cfg(not(redb_no_std))]
 use crate::io::Error;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+#[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
-use core::ops::Range;
-
-/// A backend supplied by a caller, which has only the public [`StorageBackend`], and no locks.
-#[derive(Debug)]
-pub(crate) struct LocklessBackend {
-    inner: Box<dyn StorageBackend>,
-}
-
-impl LocklessBackend {
-    pub(crate) fn boxed(inner: impl StorageBackend) -> Box<dyn InternalStorageBackend> {
-        Box::new(Self {
-            inner: Box::new(inner),
-        })
-    }
-}
-
-impl StorageBackend for LocklessBackend {
-    fn len(&self) -> Result<u64, io::Error> {
-        self.inner.len()
-    }
-
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
-        self.inner.read(offset, out)
-    }
-
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
-        self.inner.set_len(len)
-    }
-
-    fn sync_data(&self) -> Result<(), io::Error> {
-        self.inner.sync_data()
-    }
-
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        self.inner.write(offset, data)
-    }
-
-    fn close(&self) -> Result<(), io::Error> {
-        self.inner.close()
-    }
-}
-
-impl InternalStorageBackend for LocklessBackend {
-    fn locks_expected(&self) -> bool {
-        false
-    }
-
-    fn try_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
-        Err(unsupported())
-    }
-
-    fn try_lock_shared_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
-        Err(unsupported())
-    }
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
-        Err(unsupported())
-    }
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
-        Err(unsupported())
-    }
-
-    fn unlock_range(&self, _range: Range<u64>) -> Result<(), io::Error> {
-        Err(unsupported())
-    }
-
-    fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
-        Err(unsupported())
-    }
-}
-
-#[cfg_attr(redb_no_std, allow(dead_code))]
-fn unsupported() -> io::Error {
-    io::unsupported("this storage backend does not support file locks")
-}
+#[cfg(not(redb_no_std))]
+use core::ops::Bound;
 
 #[cfg(not(redb_no_std))]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
-    inner: Box<dyn InternalStorageBackend>,
+    inner: Box<dyn StorageBackend>,
 }
 
 #[cfg(not(redb_no_std))]
 impl ReadOnlyBackend {
-    pub fn new(inner: Box<dyn InternalStorageBackend>) -> Self {
+    pub fn new(inner: Box<dyn StorageBackend>) -> Self {
         Self { inner }
     }
 }
 
 #[cfg(not(redb_no_std))]
-impl InternalStorageBackend for ReadOnlyBackend {
-    fn locks_expected(&self) -> bool {
-        self.inner.locks_expected()
-    }
-
-    fn try_lock_range(&self, range: Range<u64>) -> Result<bool, Error> {
-        self.inner.try_lock_range(range)
-    }
-
-    fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, Error> {
-        self.inner.try_lock_shared_range(range)
-    }
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, range: Range<u64>) -> Result<(), Error> {
-        self.inner.lock_range(range)
-    }
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, range: Range<u64>) -> Result<(), Error> {
-        self.inner.lock_shared_range(range)
-    }
-
-    fn unlock_range(&self, range: Range<u64>) -> Result<(), Error> {
-        self.inner.unlock_range(range)
-    }
-
-    fn query_lock_range(&self, range: Range<u64>) -> Result<bool, Error> {
-        self.inner.query_lock_range(range)
-    }
-}
-
-#[cfg(not(redb_no_std))]
 impl StorageBackend for ReadOnlyBackend {
+    fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        self.inner.try_lock_range(start, end)
+    }
+
+    fn try_lock_shared_range(
+        &self,
+        start: Bound<u64>,
+        end: Bound<u64>,
+    ) -> Result<bool, BackendError> {
+        self.inner.try_lock_shared_range(start, end)
+    }
+
+    fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.lock_range(start, end)
+    }
+
+    fn lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.lock_shared_range(start, end)
+    }
+
+    fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        self.inner.unlock_range(start, end)
+    }
+
+    fn query_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        self.inner.query_lock_range(start, end)
+    }
+
     fn len(&self) -> Result<u64, Error> {
         self.inner.len()
     }
@@ -239,30 +160,27 @@ impl StorageBackend for InMemoryBackend {
 
 #[cfg(test)]
 mod test {
-    use super::{InMemoryBackend, LocklessBackend};
+    use super::InMemoryBackend;
     use crate::StorageBackend;
     use crate::db::FULL_RANGE;
 
-    /// A caller's backend has no locks to offer, so a database on one is a single process's
+    /// Existing backends remain usable without implementing the optional lock methods.
     #[test]
-    fn a_caller_supplied_backend_reports_the_locks_unsupported() {
-        let backend = LocklessBackend::boxed(InMemoryBackend::new());
+    fn default_locks_are_unsupported() {
+        let backend = InMemoryBackend::new();
         for result in [
-            backend.try_lock_range(FULL_RANGE).err(),
-            backend.try_lock_shared_range(FULL_RANGE).err(),
-            #[cfg(feature = "experimental-multiprocess")]
-            backend.lock_range(FULL_RANGE).err(),
-            #[cfg(feature = "experimental-multiprocess")]
-            backend.lock_shared_range(FULL_RANGE).err(),
-            backend.unlock_range(FULL_RANGE).err(),
-            backend.query_lock_range(FULL_RANGE).err(),
+            backend.try_lock_range(FULL_RANGE.0, FULL_RANGE.1).err(),
+            backend
+                .try_lock_shared_range(FULL_RANGE.0, FULL_RANGE.1)
+                .err(),
+            backend.lock_range(FULL_RANGE.0, FULL_RANGE.1).err(),
+            backend.lock_shared_range(FULL_RANGE.0, FULL_RANGE.1).err(),
+            backend.unlock_range(FULL_RANGE.0, FULL_RANGE.1).err(),
+            backend.query_lock_range(FULL_RANGE.0, FULL_RANGE.1).err(),
         ] {
             let err = result.expect("the locks are unsupported");
-            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+            assert!(matches!(err, crate::BackendError::Unsupported));
         }
-
-        // ... and it is not a platform limitation worth reporting
-        assert!(!backend.locks_expected());
 
         // ... and the storage underneath it still works
         backend.set_len(1024).unwrap();

@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-multiprocess")]
+use crate::StorageError;
 use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
@@ -182,6 +184,9 @@ impl State {
     #[cfg(feature = "experimental-multiprocess")]
     fn release_active_transaction_lock(mem: &TransactionalMemory, id: TransactionId) {
         if let Err(failure) = mem.unlock_mp_transaction(id) {
+            if matches!(failure, StorageError::DatabaseClosed) {
+                return;
+            }
             #[cfg(feature = "logging")]
             error!(
                 "Failed to release a finished read transaction: {failure}. Until this database is \
@@ -655,10 +660,10 @@ mod test {
     // The tracker takes the "active transaction byte" through this, so it needs somewhere to
     // take it. Opened SingleProcess, where that is a no-op
     fn memory() -> TransactionalMemory {
-        use crate::tree_store::{InMemoryBackend, LocklessBackend, PAGE_SIZE};
+        use crate::tree_store::{InMemoryBackend, PAGE_SIZE};
 
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             PAGE_SIZE,
             None,

@@ -311,6 +311,173 @@ fn read_past_eof_errors() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn file_backend_lock_bounds_preserve_endpoints() {
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    let tmpfile = create_tempfile();
+    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    for (start, end, first) in [
+        (Included(100), Excluded(103), 100),
+        (Excluded(99), Included(102), 100),
+        (Unbounded, Included(102), 0),
+    ] {
+        for shared in [false, true] {
+            let acquired = if shared {
+                backend.try_lock_shared_range(start, end)
+            } else {
+                backend.try_lock_range(start, end)
+            };
+            assert!(acquired.unwrap());
+            for offset in [first, 102] {
+                assert!(
+                    peer.query_lock_range(Included(offset), Included(offset))
+                        .unwrap()
+                );
+                assert!(
+                    !peer
+                        .try_lock_range(Included(offset), Included(offset))
+                        .unwrap()
+                );
+            }
+            assert!(peer.try_lock_range(Included(103), Included(103)).unwrap());
+            peer.unlock_range(Included(103), Included(103)).unwrap();
+            backend.unlock_range(start, end).unwrap();
+            assert!(!peer.query_lock_range(start, end).unwrap());
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn file_backend_unbounded_lock_covers_growth() {
+    use std::ops::Bound::{Included, Unbounded};
+
+    let tmpfile = create_tempfile();
+    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    assert!(backend.try_lock_range(Included(100), Unbounded).unwrap());
+    backend.set_len(4096).unwrap();
+    for offset in [100, 4095, i64::MAX as u64] {
+        assert!(
+            !peer
+                .try_lock_range(Included(offset), Included(offset))
+                .unwrap()
+        );
+    }
+    assert!(peer.try_lock_range(Included(99), Included(99)).unwrap());
+    peer.unlock_range(Included(99), Included(99)).unwrap();
+    backend.unlock_range(Included(100), Unbounded).unwrap();
+    assert!(peer.try_lock_range(Included(4095), Included(4095)).unwrap());
+    peer.unlock_range(Included(4095), Included(4095)).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn file_backend_invalid_lock_bounds_leave_existing_locks_held() {
+    use redb::BackendError;
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    let tmpfile = create_tempfile();
+    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    assert!(
+        backend
+            .try_lock_range(Included(500), Included(500))
+            .unwrap()
+    );
+    for (start, end) in [
+        (Included(100), Excluded(100)),
+        (Included(101), Included(100)),
+        (Excluded(u64::MAX), Unbounded),
+        (Unbounded, Included(u64::MAX)),
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        (Included(1 << 63), Included(1 << 63)),
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        (Included(0), Excluded(1 << 63)),
+    ] {
+        for result in [
+            backend.try_lock_range(start, end).map(|_| ()),
+            backend.try_lock_shared_range(start, end).map(|_| ()),
+            backend.lock_range(start, end),
+            backend.lock_shared_range(start, end),
+            backend.unlock_range(start, end),
+            backend.query_lock_range(start, end).map(|_| ()),
+        ] {
+            assert!(
+                matches!(result, Err(BackendError::Io(err)) if err.kind() == std::io::ErrorKind::InvalidInput)
+            );
+        }
+        assert!(!peer.try_lock_range(Included(500), Included(500)).unwrap());
+        assert!(peer.try_lock_range(Included(100), Included(100)).unwrap());
+        peer.unlock_range(Included(100), Included(100)).unwrap();
+    }
+    backend.close().unwrap();
+    assert!(peer.try_lock_range(Included(500), Included(500)).unwrap());
+    peer.close().unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn file_backend_custom_open_respects_file_locks() {
+    let tmpfile = create_tempfile();
+    let open = |custom| {
+        if custom {
+            Database::builder()
+                .create_with_backend(FileBackend::new(tmpfile.reopen().unwrap()).unwrap())
+        } else {
+            Database::create(tmpfile.path())
+        }
+    };
+
+    for custom in [false, true] {
+        let db = open(custom).unwrap();
+        for contender in [false, true] {
+            assert!(matches!(
+                open(contender),
+                Err(DatabaseError::DatabaseAlreadyOpen)
+            ));
+        }
+        assert!(matches!(
+            Database::builder().open_read_only(tmpfile.path()),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        drop(db);
+
+        let reader = Database::builder().open_read_only(tmpfile.path()).unwrap();
+        assert!(matches!(
+            open(true),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        drop(reader);
+        open(true).unwrap();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn file_backend_custom_open_releases_locks_with_a_retained_file_clone() {
+    for invalid in [false, true] {
+        let mut tmpfile = create_tempfile();
+        if invalid {
+            tmpfile.write_all(&[0xFF; 512]).unwrap();
+        }
+        let file = tmpfile.reopen().unwrap();
+        let retained = file.try_clone().unwrap();
+        let result = Database::builder().create_with_backend(FileBackend::new(file).unwrap());
+        assert_eq!(result.is_err(), invalid);
+        drop(result);
+
+        if invalid {
+            retained.set_len(0).unwrap();
+        }
+        Database::create(tmpfile.path()).unwrap();
+        drop(retained);
+    }
+}
+
 // After the extract iterator returns an error, later calls must keep
 // returning an error rather than None: the failure is not recoverable and
 // going quiet would look like successful exhaustion.

@@ -8,6 +8,62 @@ use alloc::string::String;
 use core::fmt::{Display, Formatter};
 use core::panic;
 
+/// Errors reported by a [`crate::StorageBackend`] locking operation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BackendError {
+    /// The underlying storage operation failed.
+    Io(io::Error),
+    /// The backend does not support the requested operation.
+    Unsupported,
+}
+
+impl From<io::Error> for BackendError {
+    /// Preserves unsupported-operation errors as [`Self::Unsupported`] when std is available.
+    fn from(err: io::Error) -> Self {
+        #[cfg(not(redb_no_std))]
+        if err.kind() == std::io::ErrorKind::Unsupported {
+            return Self::Unsupported;
+        }
+        Self::Io(err)
+    }
+}
+
+impl From<BackendError> for io::Error {
+    fn from(err: BackendError) -> Self {
+        match err {
+            BackendError::Io(err) => err,
+            BackendError::Unsupported => {
+                io::unsupported("the storage backend does not support this operation")
+            }
+        }
+    }
+}
+
+impl From<BackendError> for Error {
+    fn from(err: BackendError) -> Self {
+        StorageError::from(err).into()
+    }
+}
+
+impl Display for BackendError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Unsupported => f.write_str("The storage backend does not support this operation"),
+        }
+    }
+}
+
+impl core::error::Error for BackendError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Unsupported => None,
+        }
+    }
+}
+
 /// General errors directly from the storage layer
 #[derive(Debug)]
 #[non_exhaustive]
@@ -20,6 +76,8 @@ pub enum StorageError {
     #[cfg(feature = "experimental_cursor")]
     UnorderedKey,
     Io(io::Error),
+    /// The backend does not support a required storage operation.
+    Unsupported,
     PreviousIo,
     DatabaseClosed,
     LockPoisoned(&'static panic::Location<'static>),
@@ -37,6 +95,15 @@ impl From<io::Error> for StorageError {
     }
 }
 
+impl From<BackendError> for StorageError {
+    fn from(err: BackendError) -> Self {
+        match err {
+            BackendError::Io(err) => Self::Io(err),
+            BackendError::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
 impl From<StorageError> for Error {
     fn from(err: StorageError) -> Error {
         match err {
@@ -45,6 +112,7 @@ impl From<StorageError> for Error {
             #[cfg(feature = "experimental_cursor")]
             StorageError::UnorderedKey => Error::UnorderedKey,
             StorageError::Io(x) => Error::Io(x),
+            StorageError::Unsupported => Error::Unsupported,
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
             StorageError::LockPoisoned(location) => Error::LockPoisoned(location),
@@ -75,6 +143,7 @@ impl Display for StorageError {
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
+            StorageError::Unsupported => BackendError::Unsupported.fmt(f),
             StorageError::DatabaseClosed => {
                 write!(f, "Database has been closed")
             }
@@ -248,6 +317,12 @@ impl From<DatabaseError> for Error {
 impl From<io::Error> for DatabaseError {
     fn from(err: io::Error) -> DatabaseError {
         DatabaseError::Storage(StorageError::Io(err))
+    }
+}
+
+impl From<BackendError> for DatabaseError {
+    fn from(err: BackendError) -> Self {
+        Self::Storage(err.into())
     }
 }
 
@@ -621,6 +696,8 @@ pub enum Error {
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     Io(io::Error),
+    /// The backend does not support a required storage operation.
+    Unsupported,
     DatabaseClosed,
     /// A previous IO error occurred. The database must be closed and re-opened
     PreviousIo,
@@ -644,6 +721,7 @@ impl From<io::Error> for Error {
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            Error::Unsupported => BackendError::Unsupported.fmt(f),
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
             }

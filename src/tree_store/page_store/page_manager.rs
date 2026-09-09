@@ -3,9 +3,7 @@ use crate::CacheStats;
 use crate::db::{
     CONSISTENT_BYTE, IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE,
 };
-use crate::db::{
-    ConcurrencyMode, FULL_RANGE, InternalStorageBackend, SHARED_WRITER_BYTE, byte_range,
-};
+use crate::db::{ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, byte_range};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -24,7 +22,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
-use crate::{DatabaseError, Result, StorageError};
+use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -36,7 +34,7 @@ use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
 #[cfg(feature = "experimental-multiprocess")]
-use core::ops::{Deref, Range};
+use core::ops::{Bound, Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -582,14 +580,14 @@ impl<'a> Deref for HeaderHold<'a> {
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct WriterLock {
     storage: Arc<PagedCachedFile>,
-    range: Range<u64>,
+    range: (Bound<u64>, Bound<u64>),
 }
 
 #[cfg(feature = "experimental-multiprocess")]
 impl Drop for WriterLock {
     fn drop(&mut self) {
         // Errors where the backend has no locks, which the open found the same way
-        let _ = self.storage.unlock_range(self.range.clone());
+        let _ = self.storage.unlock_range(self.range);
     }
 }
 
@@ -712,11 +710,6 @@ impl TransactionalMemory {
     }
 
     fn lock_whole_storage(storage: &PagedCachedFile, read_only: bool) -> Result<(), DatabaseError> {
-        // A caller-supplied backend has no locks, which is not a platform limitation
-        if !storage.locks_expected() {
-            return Ok(());
-        }
-
         let result = if read_only {
             storage.try_lock_shared_range(FULL_RANGE)
         } else {
@@ -726,7 +719,7 @@ impl TransactionalMemory {
         match result {
             Ok(true) => {}
             Ok(false) => return Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(err) if io::is_unsupported(&err) => {
+            Err(StorageError::Unsupported) => {
                 #[cfg(feature = "logging")]
                 warn!(
                     "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
@@ -742,9 +735,8 @@ impl TransactionalMemory {
         if read_only {
             match Self::locked_for_multi_process_writing(storage) {
                 Ok(true) => return Err(DatabaseError::DatabaseAlreadyOpen),
-                Ok(false) => {}
                 // Without byte-range locks there is no multi-process handle to find
-                Err(ref err) if io::is_unsupported(err) => {}
+                Ok(false) | Err(StorageError::Unsupported) => {}
                 Err(err) => return Err(err.into()),
             }
         }
@@ -754,7 +746,7 @@ impl TransactionalMemory {
 
     /// Whether a multi-writer cohort has the database open. Not gated on the feature that forms
     /// one: the cohort is another process, which may have been built with it when this was not.
-    fn locked_for_multi_process_writing(storage: &PagedCachedFile) -> Result<bool, io::Error> {
+    fn locked_for_multi_process_writing(storage: &PagedCachedFile) -> Result<bool> {
         storage.query_lock_range(byte_range(SHARED_WRITER_BYTE))
     }
 
@@ -1058,7 +1050,7 @@ impl TransactionalMemory {
     /// Returns the memory and if opened for writing, the writer lock, which should be held if
     /// repair is needed to complete the opening process
     pub(crate) fn new(
-        file: Box<dyn InternalStorageBackend>,
+        file: Box<dyn StorageBackend>,
         // Allow initializing a new database in an empty file
         allow_initialize: bool,
         page_size: usize,
@@ -2522,10 +2514,10 @@ mod test {
     #[test]
     fn an_invalidated_allocator_state_is_not_merely_an_unloaded_one() {
         use super::TransactionalMemory;
-        use crate::tree_store::{InMemoryBackend, LocklessBackend};
+        use crate::tree_store::InMemoryBackend;
 
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             4096,
             None,
@@ -2559,10 +2551,10 @@ mod test {
     #[cfg(panic = "unwind")]
     fn invalidate_allocator_state_tolerates_poison() {
         use super::TransactionalMemory;
-        use crate::tree_store::{InMemoryBackend, LocklessBackend};
+        use crate::tree_store::InMemoryBackend;
 
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             4096,
             None,
@@ -2601,11 +2593,11 @@ mod test {
         use super::{MAX_PAGE_INDEX, TransactionalMemory};
         use crate::StorageError;
         use crate::tree_store::page_store::base::MAX_REGIONS;
-        use crate::tree_store::{InMemoryBackend, LocklessBackend, PageNumber};
+        use crate::tree_store::{InMemoryBackend, PageNumber};
 
         let page_size = 4096;
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             page_size,
             Some(64 * page_size as u64),
@@ -2650,11 +2642,11 @@ mod test {
         use super::TransactionalMemory;
         use crate::StorageError;
         use crate::tree_store::page_store::base::PageHint;
-        use crate::tree_store::{InMemoryBackend, LocklessBackend, Page, PageNumber, PageTracker};
+        use crate::tree_store::{InMemoryBackend, Page, PageNumber, PageTracker};
 
         let page_size = 4096;
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             page_size,
             Some(64 * page_size as u64),
@@ -2692,13 +2684,13 @@ mod test {
     #[test]
     fn free_merge_remarks_region_tracker() {
         use super::TransactionalMemory;
-        use crate::tree_store::{InMemoryBackend, LocklessBackend, Page, PageTracker};
+        use crate::tree_store::{InMemoryBackend, Page, PageTracker};
 
         // Small pages and regions keep the reproduction cheap to set up.
         let page_size = 128 * 1024;
         let region_size = 16 * page_size as u64;
         let (mem, _writer_lock) = TransactionalMemory::new(
-            LocklessBackend::boxed(InMemoryBackend::new()),
+            Box::new(InMemoryBackend::new()),
             true,
             page_size,
             Some(region_size),
@@ -3125,7 +3117,7 @@ mod lock_protocol_test {
 
         let observer = reopen(tmpfile.path());
         let byte = byte_range(SHARED_WRITER_BYTE);
-        assert!(observer.try_lock_range(byte.clone()).unwrap());
+        assert!(observer.try_lock_range(byte).unwrap());
         observer.unlock_range(byte).unwrap();
         drop(kept_by_the_caller);
 
@@ -3140,16 +3132,17 @@ mod lock_protocol_test {
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    use crate::db::{ConcurrencyMode, FULL_RANGE, InternalStorageBackend};
+    use crate::db::{ConcurrencyMode, FULL_RANGE};
     use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
-    use crate::{DatabaseError, StorageBackend, StorageError};
+    use crate::{BackendError, DatabaseError, StorageBackend, StorageError};
     use alloc::boxed::Box;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use core::ops::Range;
+    use core::ops::Bound;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Copy, Clone, Eq, PartialEq, Debug)]
     enum Answer {
@@ -3160,12 +3153,12 @@ mod lock_failure_test {
     }
 
     impl Answer {
-        fn result(self) -> Result<bool, io::Error> {
+        fn result(self) -> Result<bool, BackendError> {
             match self {
                 Answer::Acquired => Ok(true),
                 Answer::Refused => Ok(false),
-                Answer::Unsupported => Err(io::unsupported("no byte-range locks here")),
-                Answer::Failed => Err(io::invalid_input("the lock could not be taken")),
+                Answer::Unsupported => Err(BackendError::Unsupported),
+                Answer::Failed => Err(io::invalid_input("the lock could not be taken").into()),
             }
         }
     }
@@ -3175,12 +3168,13 @@ mod lock_failure_test {
         inner: InMemoryBackend,
         taking: Answer,
         querying: Answer,
-        held: Arc<Mutex<Vec<Range<u64>>>>,
-        released: Arc<Mutex<Vec<Range<u64>>>>,
+        held: LockRanges,
+        released: LockRanges,
+        closed: AtomicBool,
     }
 
     impl AnsweringBackend {
-        fn take(&self, range: Range<u64>) -> Result<bool, io::Error> {
+        fn take(&self, range: (Bound<u64>, Bound<u64>)) -> Result<bool, BackendError> {
             let acquired = self.taking.result();
             if matches!(acquired, Ok(true)) {
                 self.held.lock().unwrap().push(range);
@@ -3190,38 +3184,53 @@ mod lock_failure_test {
         }
     }
 
-    impl InternalStorageBackend for AnsweringBackend {
-        fn try_lock_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-            self.take(range)
+    impl StorageBackend for AnsweringBackend {
+        fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+            self.take((start, end))
         }
 
-        fn try_lock_shared_range(&self, range: Range<u64>) -> Result<bool, io::Error> {
-            self.take(range)
+        fn try_lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.take((start, end))
         }
 
         #[cfg(feature = "experimental-multiprocess")]
-        fn lock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-            self.take(range).map(|_| ())
+        fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.take((start, end)).map(|_| ())
         }
 
         #[cfg(feature = "experimental-multiprocess")]
-        fn lock_shared_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-            self.take(range).map(|_| ())
+        fn lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<(), BackendError> {
+            self.take((start, end)).map(|_| ())
         }
 
-        fn unlock_range(&self, range: Range<u64>) -> Result<(), io::Error> {
-            self.held.lock().unwrap().retain(|held| *held != range);
-            self.released.lock().unwrap().push(range);
+        fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            assert!(!self.closed.load(Ordering::Acquire), "unlock after close");
+            self.held
+                .lock()
+                .unwrap()
+                .retain(|held| *held != (start, end));
+            self.released.lock().unwrap().push((start, end));
             Ok(())
         }
 
-        fn query_lock_range(&self, _range: Range<u64>) -> Result<bool, io::Error> {
+        fn query_lock_range(
+            &self,
+            _start: Bound<u64>,
+            _end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
             self.querying.result()
         }
-    }
 
-    impl StorageBackend for AnsweringBackend {
         fn close(&self) -> Result<(), io::Error> {
+            assert!(!self.closed.swap(true, Ordering::AcqRel), "closed twice");
             for range in self.held.lock().unwrap().drain(..) {
                 self.released.lock().unwrap().push(range);
             }
@@ -3250,23 +3259,56 @@ mod lock_failure_test {
         }
     }
 
-    type Released = Arc<Mutex<Vec<Range<u64>>>>;
+    type LockRanges = Arc<Mutex<Vec<(Bound<u64>, Bound<u64>)>>>;
 
-    fn storage(taking: Answer, querying: Answer) -> (PagedCachedFile, Released) {
-        let released: Released = Arc::new(Mutex::new(Vec::new()));
-        let storage = PagedCachedFile::new(
-            Box::new(AnsweringBackend {
+    fn backend(taking: Answer, querying: Answer) -> (AnsweringBackend, LockRanges) {
+        let released: LockRanges = Arc::new(Mutex::new(Vec::new()));
+        (
+            AnsweringBackend {
                 inner: InMemoryBackend::new(),
                 taking,
                 querying,
                 held: Arc::new(Mutex::new(Vec::new())),
                 released: released.clone(),
-            }),
-            4096,
-            0,
-        );
+                closed: AtomicBool::new(false),
+            },
+            released,
+        )
+    }
 
-        (storage, released)
+    fn storage(taking: Answer, querying: Answer) -> (PagedCachedFile, LockRanges) {
+        let (backend, released) = backend(taking, querying);
+        (PagedCachedFile::new(Box::new(backend), 4096, 0), released)
+    }
+
+    #[test]
+    fn caller_supplied_lock_results_control_the_open() {
+        for taking in [
+            Answer::Acquired,
+            Answer::Refused,
+            Answer::Unsupported,
+            Answer::Failed,
+        ] {
+            let (backend, released) = backend(taking, Answer::Unsupported);
+            let result = crate::Database::builder().create_with_backend(backend);
+            match taking {
+                Answer::Acquired | Answer::Unsupported => drop(result.unwrap()),
+                Answer::Refused => {
+                    assert!(matches!(result, Err(DatabaseError::DatabaseAlreadyOpen)));
+                }
+                Answer::Failed => assert!(matches!(
+                    result,
+                    Err(DatabaseError::Storage(StorageError::Io(err)))
+                        if err.kind() == std::io::ErrorKind::InvalidInput
+                )),
+            }
+            let expected = if taking == Answer::Acquired {
+                vec![FULL_RANGE]
+            } else {
+                vec![]
+            };
+            assert_eq!(*released.lock().unwrap(), expected);
+        }
     }
 
     fn open_as(
@@ -3287,7 +3329,12 @@ mod lock_failure_test {
     }
 
     fn failed(result: Result<(), DatabaseError>) -> bool {
-        matches!(result, Err(DatabaseError::Storage(StorageError::Io(_))))
+        matches!(
+            result,
+            Err(DatabaseError::Storage(
+                StorageError::Io(_) | StorageError::Unsupported
+            ))
+        )
     }
 
     #[test]
@@ -3346,7 +3393,7 @@ mod lock_failure_test {
                 .unwrap();
             storage.close().unwrap();
 
-            let expected: Vec<Range<u64>> = if taking == Answer::Acquired {
+            let expected: Vec<(Bound<u64>, Bound<u64>)> = if taking == Answer::Acquired {
                 vec![FULL_RANGE]
             } else {
                 vec![]

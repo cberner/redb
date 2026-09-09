@@ -1,10 +1,10 @@
+use crate::BackendError;
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::transactions::AllocatorStateLatch;
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
-use crate::tree_store::LocklessBackend;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
 #[cfg(feature = "experimental-multiprocess")]
@@ -28,7 +28,7 @@ use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
-use core::ops::Range;
+use core::ops::Bound;
 #[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
 #[cfg(not(redb_no_std))]
@@ -49,7 +49,25 @@ use log::{debug, warn};
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
 ///
-/// Failures are reported as [`io::Error`], which is [`std::io::Error`] whenever std is available.
+/// I/O failures are reported as [`io::Error`], which is [`std::io::Error`] whenever std is
+/// available. Locking operations use [`BackendError`] to distinguish unsupported operations.
+///
+/// Locking is optional. Backends that implement it must override the lock methods. Locks belong to
+/// a backend instance and must conflict with locks held by independently opened instances,
+/// including those in the same process. All locks must be released by [`Self::close`].
+///
+/// Lock bounds refer to byte offsets and may extend beyond the current length of the storage.
+/// An unbounded start means offset zero; an unbounded end includes all future growth. Bounds
+/// must describe a nonempty range. Implementations may reject offsets or lengths that their
+/// underlying locking API cannot represent with [`BackendError::Io`].
+///
+/// Backends that support locking must support one of the following levels:
+/// 1) All representable ranges are supported. All concurrency modes will work.
+/// 2) Only whole-storage locks (`Unbounded, Unbounded` or `Included(0), Unbounded`) are
+///    supported. Other ranges return [`BackendError::Unsupported`]. Only single-process
+///    concurrency modes will work.
+/// 3) All inputs return [`BackendError::Unsupported`]. Only single-process concurrency modes
+///    will work, and redb will log a warning on open if logging is enabled.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, io::Error>;
@@ -72,16 +90,89 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 
     /// Release any resources held by the backend
     ///
+    /// Must release all locks acquired by one of the lock methods.
+    ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once: when the [`Database`] is dropped, or, if a [`WriteTransaction`] was live at that
     /// point, when that transaction completes, or if opening the database fails
     fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
+
+    /// Attempts to acquire an exclusive lock without waiting.
+    ///
+    /// Returns `Ok(true)` on acquisition, `Ok(false)` on a conflicting lock, or an error.
+    /// Defaults to [`BackendError::Unsupported`].
+    fn try_lock_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<bool, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Attempts to acquire a shared lock without waiting.
+    ///
+    /// Returns `Ok(true)` on acquisition, `Ok(false)` on a conflicting lock, or an error.
+    /// Defaults to [`BackendError::Unsupported`].
+    fn try_lock_shared_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<bool, BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Acquires an exclusive byte-range lock, waiting for conflicting locks to be released.
+    ///
+    /// Defaults to [`BackendError::Unsupported`].
+    fn lock_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Acquires a shared byte-range lock, waiting for conflicting locks to be released.
+    ///
+    /// Defaults to [`BackendError::Unsupported`].
+    fn lock_shared_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Releases the lock acquired over exactly this range.
+    ///
+    /// The range passed will exactly match a range successfully locked by one of the lock methods.
+    ///
+    /// Defaults to [`BackendError::Unsupported`].
+    fn unlock_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<(), BackendError> {
+        Err(BackendError::Unsupported)
+    }
+
+    /// Reports whether an exclusive lock over the range would conflict with a lock held elsewhere.
+    ///
+    /// The queried range will not overlap a range successfully locked by one of the lock methods.
+    /// Defaults to [`BackendError::Unsupported`].
+    fn query_lock_range(
+        &self,
+        _start: Bound<u64>,
+        _end: Bound<u64>,
+    ) -> core::result::Result<bool, BackendError> {
+        Err(BackendError::Unsupported)
+    }
 }
 
 #[cfg_attr(redb_no_std, allow(dead_code))]
-pub(crate) const FULL_RANGE: Range<u64> = 0..u64::MAX;
+pub(crate) const FULL_RANGE: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
 #[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 const LOCK_BASE: u64 = 1 << 62;
@@ -115,36 +206,8 @@ pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const TXN_BASE: u64 = LOCK_BASE + 1024;
 
-pub(crate) fn byte_range(offset: u64) -> Range<u64> {
-    offset..offset + 1
-}
-
-/// A range reaching [`u64::MAX`] covers the entire storage.
-#[cfg_attr(redb_no_std, allow(dead_code))]
-pub(crate) trait InternalStorageBackend: StorageBackend {
-    /// Whether this backend has locks to take at all -- custom backends do not.
-    fn locks_expected(&self) -> bool {
-        true
-    }
-
-    /// `Ok(false)` means a conflicting lock is held elsewhere.
-    fn try_lock_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
-
-    /// `Ok(false)` means a conflicting lock is held elsewhere.
-    fn try_lock_shared_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
-
-    /// Waits for the range rather than reporting a conflict. Only the multi-process header
-    /// lock waits: the ranges an open takes are refused rather than queued.
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
-
-    #[cfg(feature = "experimental-multiprocess")]
-    fn lock_shared_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
-
-    fn unlock_range(&self, range: Range<u64>) -> core::result::Result<(), io::Error>;
-
-    /// Whether an exclusive lock over the range would conflict with one held elsewhere.
-    fn query_lock_range(&self, range: Range<u64>) -> core::result::Result<bool, io::Error>;
+pub(crate) fn byte_range(offset: u64) -> (Bound<u64>, Bound<u64>) {
+    (Bound::Included(offset), Bound::Included(offset))
 }
 
 pub trait TableHandle: Sealed {
@@ -612,7 +675,7 @@ impl ReadOnlyDatabase {
     }
 
     fn new(
-        file: Box<dyn InternalStorageBackend>,
+        file: Box<dyn StorageBackend>,
         page_size: usize,
         region_size: Option<u64>,
         cache_size: usize,
@@ -1548,7 +1611,7 @@ impl Database {
     }
 
     fn new(
-        file: Box<dyn InternalStorageBackend>,
+        file: Box<dyn StorageBackend>,
         allow_initialize: bool,
         page_size: usize,
         region_size: Option<u64>,
@@ -2201,7 +2264,7 @@ impl Builder {
         backend: impl StorageBackend,
     ) -> Result<Database, DatabaseError> {
         Database::new(
-            LocklessBackend::boxed(backend),
+            Box::new(backend),
             true,
             self.page_size,
             self.region_size,

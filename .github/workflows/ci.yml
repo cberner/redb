@@ -160,6 +160,10 @@ jobs:
             cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5,logging,experimental_cursor
             rustup target remove thumbv7em-none-eabihf
 
+      - name: Run no_std backend regression
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --manifest-path crates/redb-no-std-test/Cargo.toml
+
       - name: Clippy (default features)
         run: cargo clippy --all --all-targets -- -Dwarnings
 
