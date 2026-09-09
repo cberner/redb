@@ -1348,7 +1348,7 @@ impl TransactionalMemory {
         Ok((was_clean, changed))
     }
 
-    /// Captures the committed id and data root together, reloading for a shared read-only handle.
+    /// Captures the committed id and data root together, reading the file for a shared read-only handle.
     /// The caller's `header` hold must also cover registering the returned id as active.
     pub(crate) fn latest_committed_snapshot(
         &self,
@@ -1356,7 +1356,7 @@ impl TransactionalMemory {
     ) -> Result<(TransactionId, Option<BtreeHeader>)> {
         #[cfg(feature = "experimental-multiprocess")]
         if self.read_only && self.concurrency_mode.is_multi_process_writable() {
-            self.reload_header(header)?;
+            return self.read_snapshot_from_file(header);
         }
         // Local commits can publish their in-memory state without holding the header lock.
         let state = self.state.lock()?;
@@ -1364,24 +1364,19 @@ impl TransactionalMemory {
         Ok((slot.transaction_id, slot.user_root))
     }
 
-    /// Adopts the header another process has written.
+    /// Reads a snapshot without changing the in-memory header or allocator state.
     #[cfg(feature = "experimental-multiprocess")]
-    fn reload_header(&self, header: &HeaderGuard<'_>) -> Result {
+    fn read_snapshot_from_file(
+        &self,
+        header: &HeaderGuard<'_>,
+    ) -> Result<(TransactionId, Option<BtreeHeader>)> {
         let unrepaired = Self::read_file_header(&self.storage, self.page_size, header)
             .map_err(DatabaseError::into_storage_error_or_corrupted)?;
-        let header = unrepaired.finalize_transaction_slots()?;
-        let (previous, current) = {
-            let mut state = self.state.lock()?;
-            let previous = state.header.primary_slot().transaction_id;
-            state.header = header;
-            (previous, state.header.primary_slot().transaction_id)
-        };
-        // The peer's commits may have freed and rewritten pages this handle cached
-        if current != previous {
-            self.clear_read_cache();
-        }
+        let file_header = unrepaired.finalize_transaction_slots()?;
+        let slot = file_header.primary_slot();
+        self.storage.update_transaction_id(slot.transaction_id);
 
-        Ok(())
+        Ok((slot.transaction_id, slot.user_root))
     }
 
     /// Brings this handle up to the file's latest commit, when it is not already on it, so that
