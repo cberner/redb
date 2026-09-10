@@ -178,7 +178,6 @@ impl CheckedBackend {
             .map_err(StorageError::from)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     fn unlock_range(&self, range: impl RangeBounds<u64>) -> Result {
         // Allow unlocking even if there was an io failure, but not if the file is closed
         if self.closed.load(Ordering::Acquire) {
@@ -396,7 +395,6 @@ impl PagedCachedFile {
         self.file.lock_shared_range(range)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn unlock_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.file.unlock_range(range)
     }

@@ -15,12 +15,6 @@ use libc::flock as Flock;
 use libc::flock64 as Flock;
 
 pub(crate) trait RangeLock {
-    /// Whether these locks and [`File::lock`]'s conflict.
-    /// `None` indicates that it can only be determined at runtime, e.g. because it is filesystem
-    /// dependent.
-    #[cfg_attr(feature = "experimental-api-5", allow(dead_code))]
-    const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = None;
-
     /// `Ok(false)` means a conflicting lock is held elsewhere. An unbounded end covers the
     /// file however it grows, past the last offset fcntl's signed arguments can express.
     fn try_lock_range(&self, _range: impl RangeBounds<u64>) -> io::Result<bool> {
@@ -260,9 +254,6 @@ mod windows_imp {
     }
 
     impl RangeLock for File {
-        // std's whole-file lock is itself a LockFileEx over every byte, so it is one of these
-        const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = Some(true);
-
         fn try_lock_range(&self, range: impl RangeBounds<u64>) -> io::Result<bool> {
             try_lock(self, true, range)
         }
@@ -424,14 +415,6 @@ fn set_lock_blocking(file: &File, exclusive: bool, range: impl RangeBounds<u64>)
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 impl RangeLock for File {
-    // The Apple platforms answer flock() with the same locks fcntl() takes; Linux keeps them
-    // apart, except where a network filesystem emulates one with the other
-    const CONFLICTS_WITH_STD_FILE_LOCK: Option<bool> = if cfg!(target_vendor = "apple") {
-        Some(true)
-    } else {
-        None
-    };
-
     fn try_lock_range(&self, range: impl RangeBounds<u64>) -> io::Result<bool> {
         set_lock(self, true, range)
     }
