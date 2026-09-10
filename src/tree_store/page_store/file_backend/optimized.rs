@@ -1,6 +1,10 @@
 use crate::BackendError;
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-use crate::db::{SHARED_WRITER_BYTE, byte_range};
+#[cfg(any(
+    windows,
+    all(test, any(target_os = "linux", target_vendor = "apple")),
+    all(target_os = "linux", not(feature = "experimental-api-5"))
+))]
+use crate::db::{BACKEND_LOCK_RANGE, byte_range};
 use crate::{DatabaseError, Result, StorageBackend};
 use std::collections::HashSet;
 use std::fs::{File, TryLockError};
@@ -23,7 +27,42 @@ fn is_whole_storage(range: (Bound<u64>, Bound<u64>)) -> bool {
 
 #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
 fn needs_legacy_lock(range: (Bound<u64>, Bound<u64>)) -> bool {
-    range == (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded)
+    range == (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded)
+}
+
+// Detects whether flock and byte-range locks share a namespace.
+#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
+const NAMESPACE_PROBE_BYTE: u64 = BACKEND_LOCK_RANGE.start;
+
+// Serializes Windows queries and lock retries to avoid conflicts with temporary query locks.
+#[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
+const QUERY_BYTE: u64 = BACKEND_LOCK_RANGE.start + 1;
+
+#[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
+fn validate_query_mutex_range(
+    range: (Bound<u64>, Bound<u64>),
+    whole_storage_allowed: bool,
+) -> io::Result<()> {
+    if whole_storage_allowed && is_whole_storage(range) {
+        return Ok(());
+    }
+    let starts_before_end = match range.0 {
+        Bound::Unbounded => true,
+        Bound::Included(start) => start < BACKEND_LOCK_RANGE.end,
+        Bound::Excluded(start) => start < BACKEND_LOCK_RANGE.end - 1,
+    };
+    let ends_after_start = match range.1 {
+        Bound::Unbounded => true,
+        Bound::Included(end) => end >= BACKEND_LOCK_RANGE.start,
+        Bound::Excluded(end) => end > BACKEND_LOCK_RANGE.start,
+    };
+    if starts_before_end && ends_after_start {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "lock range overlaps backend-reserved bytes",
+        ));
+    }
+    Ok(())
 }
 
 /// Stores a database as a file on-disk.
@@ -52,10 +91,8 @@ impl FileBackend {
         match self.lock_whole_file(shared) {
             Ok(false) => return Ok(false),
             Ok(true) => {
-                // Immutable opens leave this byte free, even when other immutable readers
-                // hold the rest of the file.
                 if !matches!(
-                    self.file.query_lock(byte_range(SHARED_WRITER_BYTE)),
+                    self.file.query_lock(byte_range(NAMESPACE_PROBE_BYTE)),
                     Ok(false)
                 ) {
                     self.unlock_whole_file()?;
@@ -72,13 +109,11 @@ impl FileBackend {
             return Ok(false);
         }
 
-        let acquired = if shared {
-            self.file.try_lock_shared_range(range)
-        } else {
-            self.file.try_lock_range(range)
-        };
+        #[cfg(windows)]
+        let acquired = self.try_lock_with_query_mutex(range, shared);
+        #[cfg(not(windows))]
+        let acquired = self.try_lock_native(range, shared);
         if matches!(acquired, Ok(true)) {
-            self.locked_ranges.lock().unwrap().insert(range);
             return acquired;
         }
 
@@ -92,6 +127,67 @@ impl FileBackend {
             }
             result => result,
         }
+    }
+
+    fn try_lock_native(&self, range: (Bound<u64>, Bound<u64>), shared: bool) -> io::Result<bool> {
+        let acquired = if shared {
+            self.file.try_lock_shared_range(range)?
+        } else {
+            self.file.try_lock_range(range)?
+        };
+        if acquired {
+            self.locked_ranges.lock().unwrap().insert(range);
+        }
+        Ok(acquired)
+    }
+
+    #[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
+    fn try_lock_with_query_mutex(
+        &self,
+        range: (Bound<u64>, Bound<u64>),
+        shared: bool,
+    ) -> io::Result<bool> {
+        validate_query_mutex_range(range, true)?;
+        let acquired = self.try_lock_native(range, shared);
+        if !matches!(acquired, Ok(false)) || is_whole_storage(range) {
+            return acquired;
+        }
+
+        // A query may hold the requested range temporarily. Retry while queries are excluded.
+        let query_byte = byte_range(QUERY_BYTE);
+        self.lock(query_byte, false)?;
+        let acquired = self.try_lock_native(range, shared);
+        if let Err(err) = self.unlock_native_range(query_byte) {
+            if matches!(acquired, Ok(true)) {
+                self.unlock_native_range(range)?;
+            }
+            return Err(err);
+        }
+        acquired
+    }
+
+    #[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
+    fn query_lock_with_mutex(&self, range: (Bound<u64>, Bound<u64>)) -> io::Result<bool> {
+        validate_query_mutex_range(range, false)?;
+        let query_byte = byte_range(QUERY_BYTE);
+        self.lock(query_byte, false)?;
+        let result = self.try_lock_native(range, false).and_then(|acquired| {
+            if acquired {
+                self.unlock_native_range(range)?;
+            }
+            Ok(!acquired)
+        });
+        let released = self.unlock_native_range(query_byte);
+        result.and_then(|conflict| released.map(|()| conflict))
+    }
+
+    fn unlock_native_range(&self, range: (Bound<u64>, Bound<u64>)) -> io::Result<()> {
+        // Update the record before another query can record its acquisition of the same byte.
+        // Retain failed unlocks for close() to retry.
+        let mut locked_ranges = self.locked_ranges.lock().unwrap();
+        self.file.unlock_range(range)?;
+        locked_ranges.remove(&range);
+        Ok(())
     }
 
     fn lock(&self, range: (Bound<u64>, Bound<u64>), shared: bool) -> io::Result<()> {
@@ -169,10 +265,14 @@ impl StorageBackend for FileBackend {
     }
 
     fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        #[cfg(windows)]
+        validate_query_mutex_range((start, end), true)?;
         self.lock((start, end), false).map_err(BackendError::from)
     }
 
     fn lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+        #[cfg(windows)]
+        validate_query_mutex_range((start, end), true)?;
         self.lock((start, end), true).map_err(BackendError::from)
     }
 
@@ -185,9 +285,7 @@ impl StorageBackend for FileBackend {
             return self.unlock_whole_file().map_err(BackendError::from);
         }
 
-        // Retain failed unlocks for close() to retry.
-        self.file.unlock_range(range)?;
-        self.locked_ranges.lock().unwrap().remove(&range);
+        self.unlock_native_range(range)?;
         #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
         if needs_legacy_lock(range) {
             self.unlock_whole_file()?;
@@ -196,6 +294,11 @@ impl StorageBackend for FileBackend {
     }
 
     fn query_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        return self
+            .query_lock_with_mutex((start, end))
+            .map_err(BackendError::from);
+        #[cfg(not(windows))]
         self.file
             .query_lock((start, end))
             .map_err(BackendError::from)
@@ -351,12 +454,16 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> io::Result<()> 
 
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod range_lock_tests {
-    use super::{Bound, FileBackend, RangeLock, StorageBackend};
-    use crate::db::FULL_RANGE;
+    use super::{Bound, FileBackend, QUERY_BYTE, RangeLock, StorageBackend};
+    use crate::db::{BACKEND_LOCK_RANGE, FULL_RANGE, byte_range};
     #[cfg(not(target_os = "linux"))]
     use std::fs::TryLockError;
     use std::fs::{File, OpenOptions};
+    use std::io;
     use std::path::Path;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     // Offsets docs/design.md assigns: the header lock, the coordination bytes at BASE, the
     // transaction range, and the last addressable byte
@@ -430,6 +537,212 @@ mod range_lock_tests {
             file.unlock_range(byte).unwrap();
         }
         acquired
+    }
+
+    #[test]
+    fn file_backend_locks_cover_growth_outside_reserved_bytes() {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let tmpfile = crate::create_tempfile();
+        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let peer = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let ranges = [
+            (Included(BACKEND_LOCK_RANGE.end), Unbounded),
+            (Included(100), Excluded(BACKEND_LOCK_RANGE.start)),
+        ];
+        for (start, end) in ranges {
+            assert!(backend.try_lock_range(start, end).unwrap());
+        }
+        backend.set_len(4096).unwrap();
+        for offset in [100, 4095, i64::MAX as u64] {
+            assert!(
+                !peer
+                    .try_lock_range(Included(offset), Included(offset))
+                    .unwrap()
+            );
+        }
+        assert!(peer.try_lock_range(Included(99), Included(99)).unwrap());
+        peer.unlock_range(Included(99), Included(99)).unwrap();
+        for (start, end) in ranges {
+            backend.unlock_range(start, end).unwrap();
+        }
+        assert!(peer.try_lock_range(Included(4095), Included(4095)).unwrap());
+        peer.unlock_range(Included(4095), Included(4095)).unwrap();
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum QueryMutexOperation {
+        Query,
+        Exclusive,
+        Shared,
+    }
+
+    impl QueryMutexOperation {
+        fn run(self, backend: &FileBackend, range: (Bound<u64>, Bound<u64>)) -> io::Result<bool> {
+            // Exercise the Windows coordination on native range locks on other platforms too.
+            #[cfg(not(windows))]
+            match self {
+                Self::Query => backend.query_lock_with_mutex(range),
+                Self::Exclusive => backend.try_lock_with_query_mutex(range, false),
+                Self::Shared => backend.try_lock_with_query_mutex(range, true),
+            }
+            #[cfg(windows)]
+            match self {
+                Self::Query => backend.query_lock_range(range.0, range.1),
+                Self::Exclusive => backend.try_lock_range(range.0, range.1),
+                Self::Shared => backend.try_lock_shared_range(range.0, range.1),
+            }
+            .map_err(|err| match err {
+                crate::BackendError::Io(err) => err,
+                crate::BackendError::Unsupported => io::ErrorKind::Unsupported.into(),
+            })
+        }
+    }
+
+    #[test]
+    fn query_mutex_hides_temporary_query_locks() {
+        for operation in [
+            QueryMutexOperation::Query,
+            QueryMutexOperation::Exclusive,
+            QueryMutexOperation::Shared,
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let holder = reopen(tmpfile.path());
+            let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+            let range = byte_range(100);
+            holder.lock_range(byte_range(QUERY_BYTE)).unwrap();
+            holder.lock_range(range).unwrap();
+
+            let (started_tx, started_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                result_tx.send(operation.run(&backend, range)).unwrap();
+                backend
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
+            holder.unlock_range(range).unwrap();
+            let while_query_finishes = result_rx.recv_timeout(Duration::from_millis(100));
+            holder.unlock_range(byte_range(QUERY_BYTE)).unwrap();
+            let result = result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            let backend = worker.join().unwrap();
+
+            assert!(
+                matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)),
+                "{operation:?}"
+            );
+            assert!(
+                matches!(while_query_finishes, Err(mpsc::RecvTimeoutError::Timeout)),
+                "{operation:?}"
+            );
+            assert_eq!(result, !matches!(operation, QueryMutexOperation::Query));
+            assert!(byte_is_free(&holder, QUERY_BYTE, true));
+            close(&backend);
+            assert!(byte_is_free(&holder, 100, true));
+        }
+    }
+
+    #[test]
+    fn query_mutex_keeps_successful_acquisitions_and_whole_storage_nonblocking() {
+        for whole_storage in [false, true] {
+            for operation in [QueryMutexOperation::Exclusive, QueryMutexOperation::Shared] {
+                let tmpfile = crate::create_tempfile();
+                let holder = reopen(tmpfile.path());
+                let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+                let range = if whole_storage {
+                    FULL_RANGE
+                } else {
+                    byte_range(100)
+                };
+                holder.lock_range(byte_range(QUERY_BYTE)).unwrap();
+                let (result_tx, result_rx) = mpsc::channel();
+                let worker = thread::spawn(move || {
+                    result_tx.send(operation.run(&backend, range)).unwrap();
+                    backend
+                });
+                let result = result_rx.recv_timeout(Duration::from_secs(5));
+                holder.unlock_range(byte_range(QUERY_BYTE)).unwrap();
+                let result = result.unwrap().unwrap();
+                let backend = worker.join().unwrap();
+
+                assert_eq!(result, !whole_storage, "{operation:?}");
+                close(&backend);
+                assert!(byte_is_free(&holder, 100, true));
+            }
+        }
+    }
+
+    #[test]
+    fn query_mutex_is_released_after_conflicts_and_errors() {
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let range = byte_range(100);
+        holder.lock_range(range).unwrap();
+        for operation in [
+            QueryMutexOperation::Query,
+            QueryMutexOperation::Exclusive,
+            QueryMutexOperation::Shared,
+        ] {
+            assert_eq!(
+                operation.run(&backend, range).unwrap(),
+                matches!(operation, QueryMutexOperation::Query)
+            );
+            assert!(byte_is_free(&holder, QUERY_BYTE, true));
+            assert!(!backend.file.try_lock_range(range).unwrap());
+            for invalid in [
+                (Bound::Included(200), Bound::Excluded(200)),
+                byte_range(BACKEND_LOCK_RANGE.start),
+                byte_range(BACKEND_LOCK_RANGE.end - 1),
+                (Bound::Included(100), Bound::Unbounded),
+            ] {
+                assert_eq!(
+                    operation.run(&backend, invalid).unwrap_err().kind(),
+                    io::ErrorKind::InvalidInput
+                );
+                assert!(byte_is_free(&holder, QUERY_BYTE, true));
+                assert!(byte_is_free(&holder, 200, true));
+            }
+        }
+        assert_eq!(
+            QueryMutexOperation::Query
+                .run(&backend, FULL_RANGE)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        holder.unlock_range(range).unwrap();
+        assert!(backend.locked_ranges.lock().unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn query_mutex_serializes_queries_on_the_same_backend() {
+        let tmpfile = crate::create_tempfile();
+        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let observer = reopen(tmpfile.path());
+        let barrier = std::sync::Barrier::new(4);
+        thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    for _ in 0..100 {
+                        assert!(
+                            !backend
+                                .query_lock_range(Bound::Included(100), Bound::Included(100))
+                                .unwrap()
+                        );
+                    }
+                });
+            }
+        });
+        assert!(backend.locked_ranges.lock().unwrap().is_empty());
+        assert!(byte_is_free(&observer, QUERY_BYTE, true));
+        assert!(byte_is_free(&observer, 100, true));
     }
 
     /// A bounded range takes only the native byte-range lock.
@@ -671,7 +984,7 @@ mod range_lock_tests {
         let backend = FileBackend::new(file).unwrap();
 
         for range in [
-            (Bound::Included(BASE + 1024), Bound::Unbounded),
+            (Bound::Included(BASE + 1025), Bound::Unbounded),
             (Bound::Included(100), Bound::Unbounded),
             (Bound::Included(0), Bound::Unbounded),
             FULL_RANGE,
@@ -692,7 +1005,7 @@ mod range_lock_tests {
                 assert!(try_lock().unwrap());
                 observer.try_lock().unwrap();
                 observer.unlock().unwrap();
-                assert!(!byte_is_free(&observer, BASE + 1024, true));
+                assert!(!byte_is_free(&observer, BASE + 1025, true));
                 backend.unlock_range(range.0, range.1).unwrap();
             }
         }

@@ -489,12 +489,12 @@ shared and exclusive whole file locks, respectively.
 ## Immutable
 
 In this mode, multiple processes may open the database. Each takes a shared lock on the "immutable byte"
-and the rest of the database file, except for the "shared writer byte".
+and the rest of the database file, except for the "shared writer byte" and the backend-reserved bytes.
 
 ## Single process
 
 In this mode, only a single process may open the database. The process takes an exclusive lock on
-the entire database file.
+the entire database file except for the backend-reserved bytes.
 
 ## Multi-process with a single writer process
 
@@ -533,18 +533,22 @@ handled by in-process locks:
 
 The multi-process concurrency modes rely on file range locks and define the following byte ranges:
 
-| byte range              | description                        |
-|-------------------------|------------------------------------|
-| `0..320`                | header lock                        |
-| `2^62`                  | multi-process lock base (BASE)     |
-| `BASE`                  | writer byte                        |
-| `BASE + 1`              | shared writer byte                 |
-| `BASE + 2`              | shared reader byte                 |
-| `BASE + 3`              | immutable byte                     |
-| `BASE + 4`              | consistent byte                    |
-| `BASE + 5..BASE + 1024` | reserved                           |
-| `BASE + 1024`           | active transaction base (TXN_BASE) |
-| `TXN_BASE..2^63`        | active transaction range           |
+| byte range                | description                       |
+|---------------------------|-----------------------------------|
+| `0..320`                  | header lock                       |
+| `2^62`                    | multi-process lock base (BASE)     |
+| `BASE`                    | writer byte                       |
+| `BASE + 1`                | shared writer byte                |
+| `BASE + 2`                | shared reader byte                |
+| `BASE + 3`                | immutable byte                    |
+| `BASE + 4`                | consistent byte                   |
+| `BASE + 5..BASE + 896`     | reserved for the core             |
+| `BASE + 896..BASE + 1024`  | reserved for backend locking      |
+| `BASE + 1024`             | active transaction base (TXN_BASE) |
+| `TXN_BASE..2^63`           | active transaction range          |
+
+The backend-reserved bytes are for backend-specific functionality. redb core leaves them
+unlocked except during whole-file fallback, and never queries them.
 
 ### "writer byte"
 

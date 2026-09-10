@@ -352,30 +352,6 @@ fn file_backend_lock_bounds_preserve_endpoints() {
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
-fn file_backend_unbounded_lock_covers_growth() {
-    use std::ops::Bound::{Included, Unbounded};
-
-    let tmpfile = create_tempfile();
-    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
-    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
-    assert!(backend.try_lock_range(Included(100), Unbounded).unwrap());
-    backend.set_len(4096).unwrap();
-    for offset in [100, 4095, i64::MAX as u64] {
-        assert!(
-            !peer
-                .try_lock_range(Included(offset), Included(offset))
-                .unwrap()
-        );
-    }
-    assert!(peer.try_lock_range(Included(99), Included(99)).unwrap());
-    peer.unlock_range(Included(99), Included(99)).unwrap();
-    backend.unlock_range(Included(100), Unbounded).unwrap();
-    assert!(peer.try_lock_range(Included(4095), Included(4095)).unwrap());
-    peer.unlock_range(Included(4095), Included(4095)).unwrap();
-}
-
-#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
-#[test]
 fn file_backend_invalid_lock_bounds_leave_existing_locks_held() {
     use redb::BackendError;
     use std::ops::Bound::{Excluded, Included, Unbounded};

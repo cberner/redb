@@ -28,7 +28,7 @@ use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
 use core::marker::PhantomData;
-use core::ops::Bound;
+use core::ops::{Bound, Range};
 #[cfg(not(redb_no_std))]
 use std::fs::{File, OpenOptions};
 #[cfg(not(redb_no_std))]
@@ -63,8 +63,11 @@ use log::{debug, warn};
 /// must describe a nonempty range. Implementations may reject offsets or lengths that their
 /// underlying locking API cannot represent with [`BackendError::Io`].
 ///
+/// redb never queries backend-reserved ranges and only locks them during whole-storage fallback.
+/// See the [design document](https://github.com/cberner/redb/blob/master/docs/design.md#lock-bytes).
+///
 /// Backends that support locking must support one of the following levels:
-/// 1) All representable ranges are supported. All concurrency modes will work.
+/// 1) All representable ranges requested by redb are supported. All concurrency modes will work.
 /// 2) Only whole-storage locks (`Unbounded, Unbounded` or `Included(0), Unbounded`) are
 ///    supported. Other ranges return [`BackendError::Unsupported`]. Only single-process
 ///    concurrency modes will work.
@@ -101,7 +104,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
         Ok(())
     }
 
-    /// Attempts to acquire an exclusive lock without waiting.
+    /// Attempts to acquire an exclusive byte-range lock.
     ///
     /// Returns `Ok(true)` on acquisition, `Ok(false)` on a conflicting lock, or an error.
     /// Defaults to [`BackendError::Unsupported`].
@@ -113,7 +116,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
         Err(BackendError::Unsupported)
     }
 
-    /// Attempts to acquire a shared lock without waiting.
+    /// Attempts to acquire a shared byte-range lock.
     ///
     /// Returns `Ok(true)` on acquisition, `Ok(false)` on a conflicting lock, or an error.
     /// Defaults to [`BackendError::Unsupported`].
@@ -178,6 +181,9 @@ pub(crate) const FULL_RANGE: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound
 
 #[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 const LOCK_BASE: u64 = 1 << 62;
+/// Reserved for backend locking. Core only covers these bytes with a whole-storage fallback lock.
+pub(crate) const BACKEND_LOCK_RANGE: Range<u64> = LOCK_BASE + 896..LOCK_BASE + 1024;
+
 /// Held exclusively by the writing process in single-writer mode.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
