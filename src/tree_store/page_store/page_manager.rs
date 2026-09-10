@@ -33,8 +33,9 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
+use core::ops::Bound;
 #[cfg(feature = "experimental-multiprocess")]
-use core::ops::{Bound, Deref, Range};
+use core::ops::{Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -574,20 +575,21 @@ impl<'a> Deref for HeaderHold<'a> {
     }
 }
 
-/// The lock admitting this process to write, released when the last holder drops it. Holds the
-/// storage rather than the `TransactionalMemory`, which an integrity check takes by
-/// `Arc::get_mut()` and would find shared
+/// The lock admitting this process to write. Writer-byte locks are released when the last
+/// holder drops; single-process locks are released by `close()`. Holds the storage rather than
+/// `TransactionalMemory`, so integrity checks can borrow the memory through `Arc::get_mut()`.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct WriterLock {
     storage: Arc<PagedCachedFile>,
-    range: (Bound<u64>, Bound<u64>),
+    range: Option<(Bound<u64>, Bound<u64>)>,
 }
 
 #[cfg(feature = "experimental-multiprocess")]
 impl Drop for WriterLock {
     fn drop(&mut self) {
-        // Errors where the backend has no locks, which the open found the same way
-        let _ = self.storage.unlock_range(self.range);
+        if let Some(range) = self.range {
+            let _ = self.storage.unlock_range(range);
+        }
     }
 }
 
@@ -604,8 +606,10 @@ fn database_writer_lock_for_mode(
         return None;
     }
     let range = match concurrency_mode {
-        ConcurrencyMode::SingleProcess => FULL_RANGE,
-        ConcurrencyMode::SingleWriterProcess => byte_range(WRITER_BYTE),
+        // Single-process locks belong to the backend until close(), including when locking
+        // fell back to a whole-storage lock or was unsupported altogether.
+        ConcurrencyMode::SingleProcess => None,
+        ConcurrencyMode::SingleWriterProcess => Some(byte_range(WRITER_BYTE)),
         ConcurrencyMode::MultiWriterProcess => return None,
     };
 
@@ -642,7 +646,7 @@ fn open_writer_lock_for_mode(
 
             Ok(Some(Arc::new(WriterLock {
                 storage: storage.clone(),
-                range: byte_range(WRITER_BYTE),
+                range: Some(byte_range(WRITER_BYTE)),
             })))
         }
     }
@@ -710,35 +714,52 @@ impl TransactionalMemory {
     }
 
     fn lock_whole_storage(storage: &PagedCachedFile, read_only: bool) -> Result<(), DatabaseError> {
-        let result = if read_only {
-            storage.try_lock_shared_range(FULL_RANGE)
-        } else {
-            storage.try_lock_range(FULL_RANGE)
-        };
-
-        match result {
-            Ok(true) => {}
-            Ok(false) => return Err(DatabaseError::DatabaseAlreadyOpen),
-            Err(StorageError::Unsupported) => {
-                #[cfg(feature = "logging")]
-                warn!(
-                    "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
-                );
-
-                return Ok(());
+        let try_lock = |range| {
+            if read_only {
+                storage.try_lock_shared_range(range)
+            } else {
+                storage.try_lock_range(range)
             }
-            Err(err) => return Err(err.into()),
+        };
+        let suffix_range = (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded);
+        let prefix_end = if read_only {
+            Bound::Excluded(SHARED_WRITER_BYTE)
+        } else {
+            Bound::Included(SHARED_WRITER_BYTE)
+        };
+        let prefix_range = (Bound::Unbounded, prefix_end);
+        let ranges = [suffix_range, prefix_range];
+        for (taken, range) in ranges.iter().enumerate() {
+            match try_lock(*range) {
+                Ok(true) => {}
+                Ok(false) => return Err(DatabaseError::DatabaseAlreadyOpen),
+                Err(StorageError::Unsupported) => {
+                    for held in &ranges[..taken] {
+                        storage.unlock_range(*held)?;
+                    }
+                    // A whole-storage lock also excludes multi-process writers, so no query
+                    // is needed (or permitted) inside that lock.
+                    return match try_lock(FULL_RANGE) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(DatabaseError::DatabaseAlreadyOpen),
+                        Err(StorageError::Unsupported) => {
+                            #[cfg(feature = "logging")]
+                            warn!(
+                                "File locks not supported on this platform. You must ensure that only a single process opens the database file, at a time"
+                            );
+                            Ok(())
+                        }
+                        Err(err) => Err(err.into()),
+                    };
+                }
+                Err(err) => return Err(err.into()),
+            }
         }
 
         // A multi-writer cohort holds nothing a read-only open's shared locks conflict with, so
         // the open probes for one, which its own ranges leave uncovered for the purpose
-        if read_only {
-            match Self::locked_for_multi_process_writing(storage) {
-                Ok(true) => return Err(DatabaseError::DatabaseAlreadyOpen),
-                // Without byte-range locks there is no multi-process handle to find
-                Ok(false) | Err(StorageError::Unsupported) => {}
-                Err(err) => return Err(err.into()),
-            }
+        if read_only && Self::locked_for_multi_process_writing(storage)? {
+            return Err(DatabaseError::DatabaseAlreadyOpen);
         }
 
         Ok(())
@@ -905,7 +926,7 @@ impl TransactionalMemory {
 
         Ok(Arc::new(WriterLock {
             storage: self.storage.clone(),
-            range: byte_range(WRITER_BYTE),
+            range: Some(byte_range(WRITER_BYTE)),
         }))
     }
 
@@ -3044,6 +3065,127 @@ mod lock_protocol_test {
         assert!(refused(single_process(tmpfile.path(), true)));
     }
 
+    #[test]
+    fn single_process_locks_cover_every_byte_except_the_read_only_probe() {
+        use crate::db::{SHARED_WRITER_BYTE, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let observer = reopen(tmpfile.path());
+        for read_only in [false, true] {
+            let storage = single_process(tmpfile.path(), read_only).unwrap();
+            for offset in [
+                0,
+                SHARED_WRITER_BYTE - 1,
+                SHARED_WRITER_BYTE + 1,
+                i64::MAX as u64,
+            ] {
+                assert!(observer.query_lock(byte_range(offset)).unwrap());
+            }
+            assert_eq!(
+                observer.query_lock(byte_range(SHARED_WRITER_BYTE)).unwrap(),
+                !read_only
+            );
+            storage.close().unwrap();
+            assert!(observer.try_lock_range(..).unwrap());
+            observer.unlock_range(..).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_refused_single_process_open_releases_ranges_on_a_retained_file() {
+        use crate::db::{SHARED_WRITER_BYTE, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let holder = reopen(tmpfile.path());
+        // The tail is acquired before the conflict on the prefix.
+        for read_only in [false, true] {
+            assert!(
+                holder
+                    .try_lock_range(byte_range(SHARED_WRITER_BYTE - 1))
+                    .unwrap()
+            );
+            let file = reopen(tmpfile.path());
+            let retained = file.try_clone().unwrap();
+            assert!(refused(open_file(
+                file,
+                read_only,
+                ConcurrencyMode::SingleProcess
+            )));
+            assert!(
+                holder
+                    .try_lock_range(byte_range(SHARED_WRITER_BYTE + 1))
+                    .unwrap()
+            );
+            holder
+                .unlock_range(byte_range(SHARED_WRITER_BYTE + 1))
+                .unwrap();
+            holder
+                .unlock_range(byte_range(SHARED_WRITER_BYTE - 1))
+                .unwrap();
+            holder.try_lock().unwrap();
+            holder.unlock().unwrap();
+            drop(retained);
+        }
+    }
+
+    #[cfg(not(feature = "experimental-api-5"))]
+    #[test]
+    fn single_process_opens_exclude_older_whole_file_writers() {
+        let tmpfile = crate::create_tempfile();
+        let older = reopen(tmpfile.path());
+        for read_only in [false, true] {
+            let storage = single_process(tmpfile.path(), read_only).unwrap();
+            assert!(matches!(
+                older.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+            storage.close().unwrap();
+
+            older.try_lock().unwrap();
+            assert!(refused(single_process(tmpfile.path(), read_only)));
+            older.unlock().unwrap();
+        }
+    }
+
+    #[cfg(not(feature = "experimental-api-5"))]
+    #[test]
+    fn each_immutable_reader_excludes_older_whole_file_writers() {
+        let tmpfile = crate::create_tempfile();
+        let older = reopen(tmpfile.path());
+        let first = single_process(tmpfile.path(), true).unwrap();
+        let second = single_process(tmpfile.path(), true).unwrap();
+        first.close().unwrap();
+        assert!(matches!(
+            older.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        second.close().unwrap();
+        older.try_lock().unwrap();
+    }
+
+    #[cfg(all(feature = "experimental-multiprocess", target_os = "linux"))]
+    #[test]
+    fn multi_process_opens_do_not_take_legacy_locks() {
+        let tmpfile = crate::create_tempfile();
+        let older = reopen(tmpfile.path());
+        older.try_lock().unwrap();
+        // On filesystems that emulate flock with range locks, exclusion is unavoidable.
+        if older.query_lock(0..=0).unwrap() {
+            return;
+        }
+        for mode in [
+            ConcurrencyMode::SingleWriterProcess,
+            ConcurrencyMode::MultiWriterProcess,
+        ] {
+            for read_only in [false, true] {
+                open(tmpfile.path(), read_only, mode)
+                    .unwrap()
+                    .close()
+                    .unwrap();
+            }
+        }
+    }
+
     /// Only a multi-writer cohort admits a second writer, and every mode byte is free again once
     /// its holder closes
     #[cfg(feature = "experimental-multiprocess")]
@@ -3132,16 +3274,17 @@ mod lock_protocol_test {
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    use crate::db::{ConcurrencyMode, FULL_RANGE};
+    use crate::db::{ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE};
     use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use crate::{BackendError, DatabaseError, StorageBackend, StorageError};
     use alloc::boxed::Box;
+    use alloc::collections::VecDeque;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use core::ops::Bound;
+    use core::ops::{Bound, RangeBounds};
     use core::sync::atomic::{AtomicBool, Ordering};
 
     #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -3167,6 +3310,9 @@ mod lock_failure_test {
     struct AnsweringBackend {
         inner: InMemoryBackend,
         taking: Answer,
+        partial_answers: Mutex<VecDeque<Answer>>,
+        expected_shared: Option<bool>,
+        fail_unlock: bool,
         querying: Answer,
         held: LockRanges,
         released: LockRanges,
@@ -3174,8 +3320,31 @@ mod lock_failure_test {
     }
 
     impl AnsweringBackend {
-        fn take(&self, range: (Bound<u64>, Bound<u64>)) -> Result<bool, BackendError> {
-            let acquired = self.taking.result();
+        fn take(
+            &self,
+            range: (Bound<u64>, Bound<u64>),
+            shared: bool,
+        ) -> Result<bool, BackendError> {
+            if let Some(expected) = self.expected_shared {
+                assert_eq!(shared, expected);
+            }
+            assert!(
+                self.held
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|held| !overlaps(*held, range))
+            );
+            let answer = if range == FULL_RANGE {
+                self.taking
+            } else {
+                self.partial_answers
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or(self.taking)
+            };
+            let acquired = answer.result();
             if matches!(acquired, Ok(true)) {
                 self.held.lock().unwrap().push(range);
             }
@@ -3186,7 +3355,7 @@ mod lock_failure_test {
 
     impl StorageBackend for AnsweringBackend {
         fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
-            self.take((start, end))
+            self.take((start, end), false)
         }
 
         fn try_lock_shared_range(
@@ -3194,12 +3363,12 @@ mod lock_failure_test {
             start: Bound<u64>,
             end: Bound<u64>,
         ) -> Result<bool, BackendError> {
-            self.take((start, end))
+            self.take((start, end), true)
         }
 
         #[cfg(feature = "experimental-multiprocess")]
         fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
-            self.take((start, end)).map(|_| ())
+            self.take((start, end), false).map(|_| ())
         }
 
         #[cfg(feature = "experimental-multiprocess")]
@@ -3208,24 +3377,36 @@ mod lock_failure_test {
             start: Bound<u64>,
             end: Bound<u64>,
         ) -> Result<(), BackendError> {
-            self.take((start, end)).map(|_| ())
+            self.take((start, end), true).map(|_| ())
         }
 
         fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
             assert!(!self.closed.load(Ordering::Acquire), "unlock after close");
-            self.held
-                .lock()
-                .unwrap()
-                .retain(|held| *held != (start, end));
+            if self.fail_unlock {
+                return Err(io::invalid_input("unlock failed").into());
+            }
+            let mut held = self.held.lock().unwrap();
+            let index = held
+                .iter()
+                .position(|range| *range == (start, end))
+                .expect("unlock must exactly match an acquired range");
+            held.remove(index);
             self.released.lock().unwrap().push((start, end));
             Ok(())
         }
 
         fn query_lock_range(
             &self,
-            _start: Bound<u64>,
-            _end: Bound<u64>,
+            start: Bound<u64>,
+            end: Bound<u64>,
         ) -> Result<bool, BackendError> {
+            assert!(
+                self.held
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|held| !overlaps(*held, (start, end)))
+            );
             self.querying.result()
         }
 
@@ -3259,6 +3440,15 @@ mod lock_failure_test {
         }
     }
 
+    fn overlaps(a: (Bound<u64>, Bound<u64>), b: (Bound<u64>, Bound<u64>)) -> bool {
+        let first = |range: (Bound<u64>, Bound<u64>)| match range.0 {
+            Bound::Unbounded => 0,
+            Bound::Included(start) => start,
+            Bound::Excluded(start) => start + 1,
+        };
+        a.contains(&first(b)) || b.contains(&first(a))
+    }
+
     type LockRanges = Arc<Mutex<Vec<(Bound<u64>, Bound<u64>)>>>;
 
     fn backend(taking: Answer, querying: Answer) -> (AnsweringBackend, LockRanges) {
@@ -3267,6 +3457,9 @@ mod lock_failure_test {
             AnsweringBackend {
                 inner: InMemoryBackend::new(),
                 taking,
+                partial_answers: Mutex::new(VecDeque::new()),
+                expected_shared: None,
+                fail_unlock: false,
                 querying,
                 held: Arc::new(Mutex::new(Vec::new())),
                 released: released.clone(),
@@ -3303,7 +3496,10 @@ mod lock_failure_test {
                 )),
             }
             let expected = if taking == Answer::Acquired {
-                vec![FULL_RANGE]
+                vec![
+                    (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
+                    (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
+                ]
             } else {
                 vec![]
             };
@@ -3342,8 +3538,8 @@ mod lock_failure_test {
         open(false, Answer::Unsupported, Answer::Unsupported).unwrap();
         open(true, Answer::Unsupported, Answer::Unsupported).unwrap();
 
-        // ... including one whose locks work but which cannot be asked about them
-        open(true, Answer::Acquired, Answer::Unsupported).unwrap();
+        // A granular backend must support queries to safely exclude idle multi-writers.
+        assert!(failed(open(true, Answer::Acquired, Answer::Unsupported)));
     }
 
     #[test]
@@ -3394,11 +3590,111 @@ mod lock_failure_test {
             storage.close().unwrap();
 
             let expected: Vec<(Bound<u64>, Bound<u64>)> = if taking == Answer::Acquired {
-                vec![FULL_RANGE]
+                vec![
+                    (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
+                    (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
+                ]
             } else {
                 vec![]
             };
             assert_eq!(*released.lock().unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn whole_storage_fallback_releases_partial_locks_and_skips_queries() {
+        for read_only in [false, true] {
+            for partial_count in 0..=1 {
+                for answer in [
+                    Answer::Acquired,
+                    Answer::Refused,
+                    Answer::Unsupported,
+                    Answer::Failed,
+                ] {
+                    let (mut backend, released) = backend(answer, Answer::Failed);
+                    backend.expected_shared = Some(read_only);
+                    backend.partial_answers = Mutex::new(
+                        core::iter::repeat_n(Answer::Acquired, partial_count)
+                            .chain([Answer::Unsupported])
+                            .collect(),
+                    );
+                    let held = backend.held.clone();
+                    let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+                    let result = TransactionalMemory::lock_for_open(
+                        &storage,
+                        read_only,
+                        ConcurrencyMode::SingleProcess,
+                    );
+                    match answer {
+                        Answer::Acquired => {
+                            result.unwrap();
+                            assert_eq!(*held.lock().unwrap(), [FULL_RANGE]);
+                        }
+                        Answer::Refused => {
+                            assert!(matches!(result, Err(DatabaseError::DatabaseAlreadyOpen)));
+                        }
+                        Answer::Unsupported => result.unwrap(),
+                        Answer::Failed => assert!(failed(result)),
+                    }
+                    assert_eq!(released.lock().unwrap().len(), partial_count);
+                    if answer != Answer::Acquired {
+                        assert!(held.lock().unwrap().is_empty());
+                    }
+                    storage.close().unwrap();
+                    assert!(held.lock().unwrap().is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_partial_conflict_or_io_error_does_not_fall_back() {
+        for read_only in [false, true] {
+            for answer in [Answer::Refused, Answer::Failed] {
+                let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+                backend.partial_answers = Mutex::new([Answer::Acquired, answer].into());
+                let held = backend.held.clone();
+                let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+                let result = TransactionalMemory::lock_for_open(
+                    &storage,
+                    read_only,
+                    ConcurrencyMode::SingleProcess,
+                );
+                if answer == Answer::Refused {
+                    assert!(matches!(result, Err(DatabaseError::DatabaseAlreadyOpen)));
+                } else {
+                    assert!(failed(result));
+                }
+                assert_ne!(*held.lock().unwrap(), [FULL_RANGE]);
+                storage.close().unwrap();
+                assert!(held.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_unlock_prevents_whole_storage_fallback() {
+        let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+        backend.partial_answers = Mutex::new([Answer::Acquired, Answer::Unsupported].into());
+        backend.fail_unlock = true;
+        let held = backend.held.clone();
+        let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+        assert!(failed(TransactionalMemory::lock_for_open(
+            &storage,
+            false,
+            ConcurrencyMode::SingleProcess
+        )));
+        assert_eq!(held.lock().unwrap().len(), 1);
+        storage.close().unwrap();
+        assert!(held.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn granular_read_only_open_queries_outside_its_locks() {
+        open(true, Answer::Acquired, Answer::Refused).unwrap();
+        assert!(matches!(
+            open(true, Answer::Acquired, Answer::Acquired),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
     }
 }

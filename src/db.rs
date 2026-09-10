@@ -55,6 +55,8 @@ use log::{debug, warn};
 /// Locking is optional. Backends that implement it must override the lock methods. Locks belong to
 /// a backend instance and must conflict with locks held by independently opened instances,
 /// including those in the same process. All locks must be released by [`Self::close`].
+/// redb never acquires overlapping locks on the same backend. Failed or refused acquisitions
+/// must not acquire any locks or change existing locks.
 ///
 /// Lock bounds refer to byte offsets and may extend beyond the current length of the storage.
 /// An unbounded start means offset zero; an unbounded end includes all future growth. Bounds
@@ -160,7 +162,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
 
     /// Reports whether an exclusive lock over the range would conflict with a lock held elsewhere.
     ///
-    /// The queried range will not overlap a range successfully locked by one of the lock methods.
+    /// The queried range will not overlap any lock currently held by this backend.
     /// Defaults to [`BackendError::Unsupported`].
     fn query_lock_range(
         &self,
@@ -176,12 +178,6 @@ pub(crate) const FULL_RANGE: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound
 
 #[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 const LOCK_BASE: u64 = 1 << 62;
-/// An offset that is not used in the multi-process locking protocol. Used to detect whether
-/// `flock()` and range locks share the same namespace, which only matters while a whole-file
-/// lock is taken alongside the ranges.
-#[cfg(not(feature = "experimental-api-5"))]
-#[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
-pub(crate) const NAMESPACE_PROBE_BYTE: u64 = LOCK_BASE - 2;
 /// Held exclusively by the writing process in single-writer mode.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
