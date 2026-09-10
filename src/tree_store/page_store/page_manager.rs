@@ -1,9 +1,9 @@
 use crate::CacheStats;
+use crate::db::{BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, byte_range};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::db::{
     CONSISTENT_BYTE, IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE,
 };
-use crate::db::{ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, byte_range};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -721,14 +721,18 @@ impl TransactionalMemory {
                 storage.try_lock_range(range)
             }
         };
-        let suffix_range = (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded);
+        let suffix_range = (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
+        let middle_range = (
+            Bound::Excluded(SHARED_WRITER_BYTE),
+            Bound::Excluded(BACKEND_LOCK_RANGE.start),
+        );
         let prefix_end = if read_only {
             Bound::Excluded(SHARED_WRITER_BYTE)
         } else {
             Bound::Included(SHARED_WRITER_BYTE)
         };
         let prefix_range = (Bound::Unbounded, prefix_end);
-        let ranges = [suffix_range, prefix_range];
+        let ranges = [suffix_range, middle_range, prefix_range];
         for (taken, range) in ranges.iter().enumerate() {
             match try_lock(*range) {
                 Ok(true) => {}
@@ -3066,8 +3070,8 @@ mod lock_protocol_test {
     }
 
     #[test]
-    fn single_process_locks_cover_every_byte_except_the_read_only_probe() {
-        use crate::db::{SHARED_WRITER_BYTE, byte_range};
+    fn single_process_locks_leave_backend_bytes_and_the_read_only_probe_free() {
+        use crate::db::{BACKEND_LOCK_RANGE, SHARED_WRITER_BYTE, byte_range};
 
         let tmpfile = crate::create_tempfile();
         let observer = reopen(tmpfile.path());
@@ -3077,6 +3081,8 @@ mod lock_protocol_test {
                 0,
                 SHARED_WRITER_BYTE - 1,
                 SHARED_WRITER_BYTE + 1,
+                BACKEND_LOCK_RANGE.start - 1,
+                BACKEND_LOCK_RANGE.end,
                 i64::MAX as u64,
             ] {
                 assert!(observer.query_lock(byte_range(offset)).unwrap());
@@ -3085,6 +3091,8 @@ mod lock_protocol_test {
                 observer.query_lock(byte_range(SHARED_WRITER_BYTE)).unwrap(),
                 !read_only
             );
+            assert!(observer.try_lock_range(BACKEND_LOCK_RANGE).unwrap());
+            observer.unlock_range(BACKEND_LOCK_RANGE).unwrap();
             storage.close().unwrap();
             assert!(observer.try_lock_range(..).unwrap());
             observer.unlock_range(..).unwrap();
@@ -3142,7 +3150,31 @@ mod lock_protocol_test {
             storage.close().unwrap();
 
             older.try_lock().unwrap();
+            #[cfg(not(windows))]
             assert!(refused(single_process(tmpfile.path(), read_only)));
+            #[cfg(windows)]
+            {
+                // Older whole-file locks cover the query mutex, so retrying waits for them.
+                use std::sync::mpsc;
+                use std::time::Duration;
+
+                let path = tmpfile.path().to_owned();
+                let (result_tx, result_rx) = mpsc::channel();
+                let worker = std::thread::spawn(move || {
+                    result_tx.send(single_process(&path, read_only)).unwrap();
+                });
+                let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
+                older.unlock().unwrap();
+                assert!(matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)));
+                result_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap()
+                    .close()
+                    .unwrap();
+                worker.join().unwrap();
+            }
+            #[cfg(not(windows))]
             older.unlock().unwrap();
         }
     }
@@ -3274,7 +3306,7 @@ mod lock_protocol_test {
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    use crate::db::{ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE};
+    use crate::db::{BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE};
     use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
@@ -3338,6 +3370,13 @@ mod lock_failure_test {
             let answer = if range == FULL_RANGE {
                 self.taking
             } else {
+                assert!(!overlaps(
+                    range,
+                    (
+                        Bound::Included(BACKEND_LOCK_RANGE.start),
+                        Bound::Excluded(BACKEND_LOCK_RANGE.end),
+                    ),
+                ));
                 self.partial_answers
                     .lock()
                     .unwrap()
@@ -3400,6 +3439,13 @@ mod lock_failure_test {
             start: Bound<u64>,
             end: Bound<u64>,
         ) -> Result<bool, BackendError> {
+            assert!(!overlaps(
+                (start, end),
+                (
+                    Bound::Included(BACKEND_LOCK_RANGE.start),
+                    Bound::Excluded(BACKEND_LOCK_RANGE.end),
+                ),
+            ));
             assert!(
                 self.held
                     .lock()
@@ -3497,7 +3543,11 @@ mod lock_failure_test {
             }
             let expected = if taking == Answer::Acquired {
                 vec![
-                    (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
+                    (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded),
+                    (
+                        Bound::Excluded(SHARED_WRITER_BYTE),
+                        Bound::Excluded(BACKEND_LOCK_RANGE.start),
+                    ),
                     (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
                 ]
             } else {
@@ -3591,7 +3641,11 @@ mod lock_failure_test {
 
             let expected: Vec<(Bound<u64>, Bound<u64>)> = if taking == Answer::Acquired {
                 vec![
-                    (Bound::Excluded(SHARED_WRITER_BYTE), Bound::Unbounded),
+                    (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded),
+                    (
+                        Bound::Excluded(SHARED_WRITER_BYTE),
+                        Bound::Excluded(BACKEND_LOCK_RANGE.start),
+                    ),
                     (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
                 ]
             } else {
@@ -3604,7 +3658,7 @@ mod lock_failure_test {
     #[test]
     fn whole_storage_fallback_releases_partial_locks_and_skips_queries() {
         for read_only in [false, true] {
-            for partial_count in 0..=1 {
+            for partial_count in 0..=2 {
                 for answer in [
                     Answer::Acquired,
                     Answer::Refused,

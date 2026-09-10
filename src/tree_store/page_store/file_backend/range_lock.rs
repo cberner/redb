@@ -40,7 +40,7 @@ pub(crate) trait RangeLock {
 
     /// Whether an exclusive lock over the range would conflict with one already held.
     /// [`File::lock`] is included wherever it would in fact block a range lock
-    #[cfg_attr(feature = "experimental-api-5", allow(dead_code))]
+    #[cfg(any(not(windows), test))]
     fn query_lock(&self, _range: impl RangeBounds<u64>) -> io::Result<bool> {
         Err(unsupported())
     }
@@ -292,7 +292,8 @@ mod windows_imp {
             }
         }
 
-        // There is no query operation, so the range is acquired and released again to answer
+        // Test observers bypass FileBackend's query mutex to inspect its locks.
+        #[cfg(test)]
         fn query_lock(&self, range: impl RangeBounds<u64>) -> io::Result<bool> {
             let range = (range.start_bound().cloned(), range.end_bound().cloned());
             if try_lock(self, true, range)? {
