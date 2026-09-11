@@ -6,7 +6,9 @@ use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
 use crate::table::ReadOnlyUntypedTable;
-use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
+use crate::transaction_tracker::{
+    LocalSavepointId, SavepointId, TransactionId, TransactionTracker,
+};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
 #[cfg(all(debug_assertions, not(redb_no_std)))]
@@ -1147,6 +1149,9 @@ impl WriteTransaction {
     /// This savepoint will exist until it is deleted with
     /// [`delete_persistent_savepoint()`](Self::delete_persistent_savepoint).
     ///
+    /// If this transaction is aborted, the savepoint and any handles obtained for it become
+    /// invalid.
+    ///
     /// Note that while a savepoint exists, pages that become unused after it was created are not freed.
     /// Therefore, the lifetime of a savepoint should be minimized.
     ///
@@ -1207,6 +1212,22 @@ impl WriteTransaction {
         Ok(value)
     }
 
+    // Read registrations without creating handles: the tracker may not have synced them yet.
+    pub(crate) fn persistent_savepoint_transactions(
+        &self,
+    ) -> Result<BTreeMap<SavepointId, TransactionId>> {
+        Ok(self
+            .read_existing_system_table(SAVEPOINT_TABLE, |table| {
+                let mut savepoints = BTreeMap::new();
+                for entry in table.range::<RangeFull, SavepointId>(&..)? {
+                    let (id, transaction_id) = entry?.value().get_ids()?;
+                    savepoints.insert(id, transaction_id);
+                }
+                Ok(savepoints)
+            })?
+            .unwrap_or_default())
+    }
+
     /// Get a persistent savepoint given its id
     pub fn get_persistent_savepoint(&self, id: u64) -> Result<Savepoint, SavepointError> {
         let Some(value) = self.read_existing_system_table(SAVEPOINT_TABLE, |table| {
@@ -1241,10 +1262,8 @@ impl WriteTransaction {
         }
         let mut table = system_tables.open_system_table(SAVEPOINT_TABLE)?;
         // Parse before removing, so that a corrupted record errors out without staging any change
-        let savepoint = if let Some(serialized) = table.get(SavepointId(id))? {
-            serialized
-                .value()
-                .to_savepoint(self.transaction_tracker.clone())?
+        let (savepoint_id, transaction_id) = if let Some(serialized) = table.get(SavepointId(id))? {
+            serialized.value().get_ids()?
         } else {
             return Ok(false);
         };
@@ -1252,7 +1271,7 @@ impl WriteTransaction {
         self.savepoint_state
             .lock()
             .unwrap()
-            .record_deleted(savepoint.get_id(), savepoint.get_transaction_id());
+            .record_deleted(savepoint_id, transaction_id);
         Ok(true)
     }
 
@@ -1271,14 +1290,14 @@ impl WriteTransaction {
         Ok(savepoints.into_iter())
     }
 
-    fn allocate_savepoint(&self) -> Result<(SavepointId, TransactionGuard)> {
+    fn allocate_savepoint(&self) -> Result<(SavepointId, LocalSavepointId, TransactionGuard)> {
         // Through the guard, so the savepoint's snapshot is held active like any other reader's
         let (transaction, _) =
             TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
-        let id = self
+        let (id, local_id) = self
             .transaction_tracker
             .allocate_savepoint(transaction.id());
-        Ok((id, transaction))
+        Ok((id, local_id, transaction))
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database
@@ -1309,7 +1328,7 @@ impl WriteTransaction {
         // allocation tracking -- leaving a live savepoint with tracking `Ignore`d. A later
         // `restore_savepoint()` would then fail to free this transaction's pages, leaking them
         // (reclaimed only by a full repair).
-        let (id, transaction) = {
+        let (id, local_id, transaction) = {
             let _tables = self.tables.lock().unwrap();
             if self.dirty.load(Ordering::Acquire) {
                 return Err(SavepointError::InvalidSavepoint);
@@ -1323,7 +1342,7 @@ impl WriteTransaction {
         );
 
         let root = self.mem.get_data_root();
-        let savepoint = Savepoint::new_ephemeral(&self.mem, id, transaction, root);
+        let savepoint = Savepoint::new_ephemeral(&self.mem, id, local_id, transaction, root);
 
         Ok(savepoint)
     }
@@ -1342,15 +1361,15 @@ impl WriteTransaction {
             return Err(SavepointError::InvalidSavepoint);
         }
 
-        if !self
+        let local_id = self
             .transaction_tracker
-            .is_valid_savepoint(savepoint.get_id())
-            || self
-                .savepoint_state
-                .lock()
-                .unwrap()
-                .is_invalidated(savepoint.get_id())
-        {
+            .savepoint_local_id(savepoint.get_id());
+        let invalidated = self
+            .savepoint_state
+            .lock()
+            .unwrap()
+            .is_invalidated(savepoint.get_id());
+        if local_id != Some(savepoint.get_local_id()) || invalidated {
             return Err(SavepointError::InvalidSavepoint);
         }
 
@@ -2742,6 +2761,12 @@ impl Drop for WriteTransaction {
             assert!(crate::panicking());
             self.mem.mark_needs_repair();
         }
+        // A failed commit or panic may skip abort_inner(). Retire any remaining registrations
+        // before releasing the writer lock, since peers can reuse their persistent IDs.
+        self.savepoint_state
+            .lock()
+            .unwrap()
+            .apply_on_abort(&self.transaction_tracker);
     }
 }
 
