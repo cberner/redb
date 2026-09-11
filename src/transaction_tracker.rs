@@ -45,6 +45,15 @@ impl TransactionId {
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct SavepointId(pub u64);
 
+// Unique within one tracker, including across aborted transactions and peer ID reuse.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) struct LocalSavepointId(u64);
+
+struct SavepointRegistration {
+    local_id: LocalSavepointId,
+    transaction_id: TransactionId,
+}
+
 impl SavepointId {
     pub(crate) fn next(self) -> SavepointId {
         SavepointId(self.0 + 1)
@@ -103,13 +112,14 @@ enum WriteSlotState {
 
 struct State {
     next_savepoint_id: SavepointId,
+    next_local_savepoint_id: LocalSavepointId,
     // reference count of read transactions per transaction id
     live_read_transactions: BTreeMap<TransactionId, u64>,
     // Subset of live_read_transactions which are persistent savepoints
     persistent_savepoint_references: BTreeMap<TransactionId, u64>,
     next_transaction_id: TransactionId,
     write_slot: WriteSlotState,
-    valid_savepoints: BTreeMap<SavepointId, TransactionId>,
+    valid_savepoints: BTreeMap<SavepointId, SavepointRegistration>,
     // Subset of valid_savepoints that are persistent
     persistent_savepoints: BTreeSet<SavepointId>,
     // Non-durable commits that are still in-memory, and waiting for a durable commit to get flushed
@@ -127,6 +137,21 @@ struct State {
 }
 
 impl State {
+    fn register_savepoint(
+        &mut self,
+        id: SavepointId,
+        transaction_id: TransactionId,
+    ) -> LocalSavepointId {
+        let local_id = self.next_local_savepoint_id;
+        self.next_local_savepoint_id = LocalSavepointId(local_id.0.checked_add(1).unwrap());
+        let registration = SavepointRegistration {
+            local_id,
+            transaction_id,
+        };
+        assert!(self.valid_savepoints.insert(id, registration).is_none());
+        local_id
+    }
+
     // The references to `id` that are reads, which the "active transaction byte" announces to the
     // other processes. Persistent savepoints are excluded
     #[cfg(feature = "experimental-multiprocess")]
@@ -248,6 +273,7 @@ impl TransactionTracker {
         Self {
             state: Mutex::new(State {
                 next_savepoint_id: SavepointId(0),
+                next_local_savepoint_id: LocalSavepointId(0),
                 live_read_transactions: BTreeMap::default(),
                 persistent_savepoint_references: BTreeMap::default(),
                 next_transaction_id,
@@ -454,20 +480,20 @@ impl TransactionTracker {
         let gone: Vec<SavepointId> = state
             .persistent_savepoints
             .iter()
-            .filter(|id| !current.contains_key(id))
+            .filter(|id| current.get(id) != Some(&state.valid_savepoints[id].transaction_id))
             .copied()
             .collect();
         for id in gone {
             state.persistent_savepoints.remove(&id);
-            let transaction = state.valid_savepoints.remove(&id).unwrap();
-            state.dereference_persistent_savepoint(transaction);
+            let registration = state.valid_savepoints.remove(&id).unwrap();
+            state.dereference_persistent_savepoint(registration.transaction_id);
         }
         for (&id, &transaction) in current {
             if state.valid_savepoints.contains_key(&id) {
                 continue;
             }
             state.reference_persistent_savepoint(transaction);
-            assert!(state.valid_savepoints.insert(id, transaction).is_none());
+            state.register_savepoint(id, transaction);
             state.persistent_savepoints.insert(id);
         }
 
@@ -482,7 +508,7 @@ impl TransactionTracker {
         id: SavepointId,
     ) {
         let mut state = self.state.lock().unwrap();
-        let transaction = *state.valid_savepoints.get(&id).unwrap();
+        let transaction = state.valid_savepoints.get(&id).unwrap().transaction_id;
         state.persistent_savepoints.insert(id);
         state.convert_reference_to_persistent_savepoint(mem, transaction);
     }
@@ -550,12 +576,15 @@ impl TransactionTracker {
         false
     }
 
-    pub(crate) fn allocate_savepoint(&self, transaction_id: TransactionId) -> SavepointId {
+    pub(crate) fn allocate_savepoint(
+        &self,
+        transaction_id: TransactionId,
+    ) -> (SavepointId, LocalSavepointId) {
         let mut state = self.state.lock().unwrap();
         let id = state.next_savepoint_id.next();
         state.next_savepoint_id = id;
-        state.valid_savepoints.insert(id, transaction_id);
-        id
+        let local_id = state.register_savepoint(id, transaction_id);
+        (id, local_id)
     }
 
     // Forgets the savepoint, leaving the transaction's reference to whoever owns it
@@ -578,12 +607,13 @@ impl TransactionTracker {
             .dereference_persistent_savepoint(transaction);
     }
 
-    pub(crate) fn is_valid_savepoint(&self, id: SavepointId) -> bool {
+    pub(crate) fn savepoint_local_id(&self, id: SavepointId) -> Option<LocalSavepointId> {
         self.state
             .lock()
             .unwrap()
             .valid_savepoints
-            .contains_key(&id)
+            .get(&id)
+            .map(|registration| registration.local_id)
     }
 
     pub(crate) fn list_savepoints_after(&self, id: SavepointId) -> Vec<SavepointId> {
@@ -627,7 +657,7 @@ impl TransactionTracker {
             .valid_savepoints
             .iter()
             .find(|(id, _)| !exclude.contains(id))
-            .map(|(id, txn_id)| (*id, *txn_id))
+            .map(|(id, registration)| (*id, registration.transaction_id))
     }
 
     pub(crate) fn oldest_local_referenced_transaction(&self) -> Option<TransactionId> {
@@ -693,5 +723,37 @@ mod test {
             Some(TransactionId::new(2)),
             tracker.oldest_unprocessed_non_durable_commit()
         );
+    }
+
+    #[test]
+    fn syncing_a_reused_savepoint_id_replaces_its_identity_and_reference() {
+        let tracker = TransactionTracker::new(TransactionId::new(3));
+        let id = SavepointId(1);
+        let old_transaction = TransactionId::new(1);
+        let new_transaction = TransactionId::new(2);
+        tracker
+            .sync_persistent_savepoints(&[(id, old_transaction)].into())
+            .unwrap();
+        let old_local_id = tracker.savepoint_local_id(id).unwrap();
+
+        tracker
+            .sync_persistent_savepoints(&[(id, new_transaction)].into())
+            .unwrap();
+        let new_local_id = tracker.savepoint_local_id(id).unwrap();
+        assert_ne!(old_local_id, new_local_id);
+        assert_eq!(
+            tracker.oldest_local_referenced_transaction(),
+            Some(new_transaction)
+        );
+
+        tracker
+            .sync_persistent_savepoints(&[(id, new_transaction)].into())
+            .unwrap();
+        assert_eq!(tracker.savepoint_local_id(id), Some(new_local_id));
+        tracker
+            .sync_persistent_savepoints(&BTreeMap::new())
+            .unwrap();
+        assert_eq!(tracker.oldest_local_referenced_transaction(), None);
+        assert_eq!(tracker.savepoint_local_id(id), None);
     }
 }

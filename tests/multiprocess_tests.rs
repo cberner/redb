@@ -548,6 +548,85 @@ mod peer_commits {
         db.compact().unwrap();
     }
 
+    #[test]
+    fn an_aborted_savepoint_is_not_revived_by_a_peer() {
+        check_abandoned_savepoint(|txn| txn.abort().unwrap());
+    }
+
+    #[test]
+    fn a_dropped_transactions_savepoint_is_not_revived_by_a_peer() {
+        check_abandoned_savepoint(drop);
+    }
+
+    #[test]
+    fn a_panicked_transactions_savepoint_is_not_revived_by_a_peer() {
+        check_abandoned_savepoint(|txn| {
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _txn = txn;
+                panic!("unwinding through the transaction");
+            }));
+            assert!(unwound.is_err());
+        });
+    }
+
+    fn check_abandoned_savepoint(abandon: impl Fn(redb::WriteTransaction)) {
+        for advance_snapshot in [false, true] {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let (mut db, peer) = two_handles(tmpfile.path());
+            insert(&db, 0);
+
+            let txn = db.begin_write().unwrap();
+            let id = txn.persistent_savepoint().unwrap();
+            let stale = txn.get_persistent_savepoint(id).unwrap();
+            abandon(txn);
+
+            if advance_snapshot {
+                insert(&peer, 1);
+            }
+            let txn = peer.begin_write().unwrap();
+            assert_eq!(txn.persistent_savepoint().unwrap(), id);
+            txn.commit().unwrap();
+
+            let mut txn = db.begin_write().unwrap();
+            assert!(matches!(
+                txn.restore_savepoint(&stale),
+                Err(redb::SavepointError::InvalidSavepoint)
+            ));
+            let replacement = txn.get_persistent_savepoint(id).unwrap();
+            let another_handle = txn.get_persistent_savepoint(id).unwrap();
+            txn.abort().unwrap();
+            drop(stale);
+
+            // Unchanged registrations retain their identity across peer commits and lookups.
+            insert(&peer, 2);
+            let mut txn = db.begin_write().unwrap();
+            txn.restore_savepoint(&replacement).unwrap();
+            txn.restore_savepoint(&another_handle).unwrap();
+            txn.commit().unwrap();
+            {
+                let read = peer.begin_read().unwrap();
+                let table = read.open_table(TABLE).unwrap();
+                assert_eq!(table.get(0).unwrap().unwrap().value(), 0);
+                assert_eq!(table.get(1).unwrap().is_some(), advance_snapshot);
+                assert!(table.get(2).unwrap().is_none());
+            }
+
+            let txn = peer.begin_write().unwrap();
+            assert!(txn.delete_persistent_savepoint(id).unwrap());
+            txn.commit().unwrap();
+            let mut txn = db.begin_write().unwrap();
+            assert!(matches!(
+                txn.restore_savepoint(&replacement),
+                Err(redb::SavepointError::InvalidSavepoint)
+            ));
+            txn.abort().unwrap();
+            drop(replacement);
+            drop(another_handle);
+            db.compact().unwrap();
+            assert!(db.check_integrity().unwrap());
+        }
+    }
+
     /// When the close's commit cannot sync to the file's latest commit, the close writes no
     /// shutdown header. Writing one would put this handle's stale header, marked clean, over
     /// that commit.

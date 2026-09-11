@@ -640,6 +640,12 @@ write transaction, the writer reads the persistent savepoints out of the databas
 the highest savepoint id stored -- advancing its counter if needed -- and to discover the oldest
 transaction that must be kept for the persistent savepoints.
 
+The persistent savepoint counter is transactional, so another writer may reuse an id allocated
+by an aborted transaction. Each database handle assigns a monotonically increasing local id to
+each savepoint registration. A `Savepoint` handle retains that local id, which must match the
+current registration when it is restored. An aborted handle therefore stays invalid even if a
+replacement has the same persistent id and snapshot. These local ids are never stored in the file.
+
 ## Crashes
 
 The OS automatically releases file locks when a process crashes. No further recovery is required

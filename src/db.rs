@@ -15,12 +15,10 @@ use crate::tree_store::{
 };
 use crate::types::{Key, Value};
 use crate::{
-    CompactionError, DatabaseError, ReadOnlyTable, ReadableTable, SavepointError, StorageError,
-    TableError,
+    CompactionError, DatabaseError, ReadOnlyTable, ReadableTable, StorageError, TableError,
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -1796,24 +1794,12 @@ fn sync_persistent_savepoints(
     if let Some(next_id) = txn.next_persistent_savepoint_id()? {
         transaction_tracker.restore_savepoint_counter_state(next_id);
     }
-    let mut current = BTreeMap::new();
-    for id in txn.list_persistent_savepoints()? {
-        let savepoint = match txn.get_persistent_savepoint(id) {
-            Ok(savepoint) => savepoint,
-            Err(err) => match err {
-                SavepointError::InvalidSavepoint
-                | SavepointError::ImmediateDurabilityRequired
-                | SavepointError::EphemeralSavepointUnsupported => unreachable!(),
-                SavepointError::Storage(storage) => {
-                    return Err(storage);
-                }
-            },
-        };
+    let current = txn.persistent_savepoint_transactions()?;
+    #[cfg(feature = "experimental-multiprocess")]
+    for &transaction_id in current.values() {
         // The file names its persistent savepoints, so the transaction each points at is
         // untrusted: one outside the lock range would be tracked as a read this process holds
-        #[cfg(feature = "experimental-multiprocess")]
-        mem.check_active_transaction_id(savepoint.get_transaction_id())?;
-        current.insert(savepoint.get_id(), savepoint.get_transaction_id());
+        mem.check_active_transaction_id(transaction_id)?;
     }
     transaction_tracker.sync_persistent_savepoints(&current)
 }
