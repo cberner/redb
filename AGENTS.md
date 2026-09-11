@@ -45,7 +45,9 @@ If you are touching workspace crates beyond the main `redb` crate, run
 ## Release notes
 
 Changes that are significant to users should be documented in `CHANGELOG.md`. Entries should be
-brief and focus on the user-facing impact of the change, not on implementation details.
+brief and focus on the user-facing impact of the change, not on implementation details. For bugs
+which are not present in a released version (i.e. they are only a regression on master), do not add
+a changelog entry.
 
 ## Fuzzing
 
