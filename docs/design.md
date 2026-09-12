@@ -478,25 +478,26 @@ b) it is not referenced, in which case it is in the pending free state and is co
 # Multi-process concurrency
 
 The following concurrency modes are supported, and their locking protocol is described below:
-* Immutable
-* Single process
-* Multi-process with a single writer process
-* Multi-process with multiple writer processes
+* Exclusive writer
+* Single writer
+* Multi-writer
 
-Platforms that do not have file range locks only support Immutable and Single process modes, via
-shared and exclusive whole file locks, respectively.
+The mode names the regime a writer operates under; whether a given handle writes is chosen when it
+is opened, not by the mode. Platforms that do not have file range locks only support the exclusive
+writer mode, via a whole file lock: exclusive for a writer, shared for read-only handles.
 
-## Immutable
+## Exclusive writer
 
-In this mode, multiple processes may open the database. Each takes a shared lock on the "immutable byte"
-and the rest of the database file, except for the "shared writer byte" and the backend-reserved bytes.
+A writer takes an exclusive lock on the entire database file except for the backend-reserved bytes,
+so no other process may open the database while it is open.
 
-## Single process
+A read-only handle takes a shared lock on the same range, except for the "shared writer byte", which
+is left free so that the check described below can find a multi-writer process holding it. Any number
+of read-only handles may share the file, and each excludes a writer in any mode. Since nothing may
+write the file while they hold it, they perform none of the header synchronization, cache
+invalidation or active transaction bookkeeping the other modes require.
 
-In this mode, only a single process may open the database. The process takes an exclusive lock on
-the entire database file except for the backend-reserved bytes.
-
-## Multi-process with a single writer process
+## Single writer
 
 A single process may open the database for writing, and multiple other processes may open the database
 read-only.
@@ -508,7 +509,7 @@ and synchronization protocols described below.
 Reading processes must participate in the cache invalidation and synchronization protocols described below,
 and must hold a shared lock on the "shared reader byte" while the database is open.
 
-## Multi-process with multiple writer processes
+## Multi-writer
 
 Multiple processes may open the database read-write.
 
@@ -540,7 +541,7 @@ The multi-process concurrency modes rely on file range locks and define the foll
 | `BASE`                    | writer byte                       |
 | `BASE + 1`                | shared writer byte                |
 | `BASE + 2`                | shared reader byte                |
-| `BASE + 3`                | immutable byte                    |
+| `BASE + 3`                | whole-file reader byte            |
 | `BASE + 4`                | consistent byte                   |
 | `BASE + 5..BASE + 896`     | reserved for the core             |
 | `BASE + 896..BASE + 1024`  | reserved for backend locking      |
@@ -559,18 +560,20 @@ multi-writer mode -- holds an exclusive lock on this byte until it is done writi
 
 The lock status of this byte is used to determine whether the database is open for a single writer
 or multiple writers.
-After locking this byte, the "immutable byte" must be checked, since that mode is incompatible.
+After locking this byte shared, a multi-writer open must check the "whole-file reader byte", since
+read-only exclusive-writer handles leave this byte free. A single-writer open needs no such check:
+its exclusive lock on the "writer byte" already fails under such a handle.
 
 ### "shared reader byte"
 
 Read-only multi-process databases must hold a shared lock on this byte while they are open. This
 prevents a non-multi-process writer from opening the database.
 
-### "immutable byte"
+### "whole-file reader byte"
 
-Processes hold a shared lock on this byte when the database is open in Immutable mode.
-After locking this byte, they must check if the "shared writer byte" is locked -- which would
-indicate an idle writer (if the "writer byte" is unlocked).
+Read-only handles in exclusive-writer mode hold a shared lock on this byte, as part of their
+whole-file lock. After taking it, they must check whether the "shared writer byte" is locked --
+which would indicate a multi-writer process, idle if the "writer byte" is unlocked.
 
 ### "consistent byte"
 

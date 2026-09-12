@@ -688,7 +688,7 @@ mod test {
     use super::*;
 
     // The tracker takes the "active transaction byte" through this, so it needs somewhere to
-    // take it. Opened SingleProcess, where that is a no-op
+    // take it. Opened ExclusiveWriter, where that is a no-op
     fn memory() -> TransactionalMemory {
         use crate::tree_store::{InMemoryBackend, PAGE_SIZE};
 
@@ -699,7 +699,7 @@ mod test {
             None,
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
 

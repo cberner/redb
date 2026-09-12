@@ -15,7 +15,7 @@ mod shared_reader {
 
     fn shared() -> redb::Builder {
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         builder
     }
 
@@ -206,8 +206,8 @@ mod writer_byte {
     #[test]
     fn a_write_transaction_excludes_another_process() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
-        let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
+        let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         let held = db.begin_write().unwrap();
 
@@ -232,8 +232,8 @@ mod writer_byte {
     #[test]
     fn an_aborted_transaction_releases_the_byte() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
-        let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
+        let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         db.begin_write().unwrap().abort().unwrap();
         // Dropped rather than aborted, which aborts through Drop
@@ -245,9 +245,9 @@ mod writer_byte {
 
     /// It locks the whole file, which covers the writer byte
     #[test]
-    fn a_single_process_transaction_does_not_puncture_the_whole_file_lock() {
+    fn an_exclusive_writer_transaction_does_not_puncture_the_whole_file_lock() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleProcess).unwrap();
+        let db = create(tmpfile.path(), ConcurrencyMode::ExclusiveWriter).unwrap();
 
         let write = db.begin_write().unwrap();
         {
@@ -273,11 +273,11 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     }
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
-    let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+    let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
-    let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+    let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
     assert!(matches!(
-        create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess),
+        create(tmpfile.path(), ConcurrencyMode::SingleWriter),
         Err(DatabaseError::DatabaseAlreadyOpen)
     ));
     assert!(matches!(
@@ -300,11 +300,11 @@ fn an_integrity_check_syncs_to_a_peers_commits() {
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
     let mut db = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .create(tmpfile.path())
         .unwrap();
     let peer = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .open(tmpfile.path())
         .unwrap();
     let txn = peer.begin_write().unwrap();
@@ -328,7 +328,7 @@ fn an_integrity_check_syncs_to_a_peers_commits() {
     drop(db);
 
     let db = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .open(tmpfile.path())
         .unwrap();
     let read = db.begin_read().unwrap();
@@ -351,7 +351,7 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
     let mut db = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .create(tmpfile.path())
         .unwrap();
     for key in [1, 2] {
@@ -360,7 +360,7 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
         txn.commit().unwrap();
     }
     let peer = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .open_read_only(tmpfile.path())
         .unwrap();
     let read = peer.begin_read().unwrap();
@@ -406,11 +406,11 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
     let mut db = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .create(tmpfile.path())
         .unwrap();
     let peer = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .open(tmpfile.path())
         .unwrap();
     let txn = peer.begin_write().unwrap();
@@ -444,7 +444,7 @@ mod peer_commits {
 
     fn open(path: &Path) -> Database {
         Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .open(path)
             .unwrap()
     }
@@ -453,7 +453,7 @@ mod peer_commits {
     /// repair it and commit.
     fn two_handles(path: &Path) -> (Database, Database) {
         Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .create(path)
             .unwrap();
         (open(path), open(path))
@@ -721,10 +721,7 @@ fn file_backend_custom_open_supports_shared_modes() {
     use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
-    for mode in [
-        ConcurrencyMode::SingleWriterProcess,
-        ConcurrencyMode::MultiWriterProcess,
-    ] {
+    for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
         let mut builder = Database::builder();
         builder.set_concurrency_mode(mode);
@@ -742,7 +739,7 @@ fn file_backend_custom_open_supports_shared_modes() {
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
 
-        let peer = if mode == ConcurrencyMode::MultiWriterProcess {
+        let peer = if mode == ConcurrencyMode::MultiWriter {
             Some(open().unwrap())
         } else {
             assert!(matches!(open(), Err(DatabaseError::DatabaseAlreadyOpen)));
@@ -776,11 +773,11 @@ fn file_backend_custom_open_supports_shared_modes() {
     }
 }
 
-/// A backend without locks can only be used in single-process mode.
+/// A backend without locks can only be used in exclusive-writer mode.
 #[test]
 fn sharing_a_backend_without_locks_is_unsupported() {
     let mut builder = Database::builder();
-    builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+    builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
     let err = builder
         .create_with_backend(InMemoryBackend::new())
         .unwrap_err();
@@ -808,7 +805,7 @@ mod reclamation {
     fn a_readers_pin_survives_heavy_reclamation() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
         let writer = Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::SingleWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::SingleWriter)
             .create(tmpfile.path())
             .unwrap();
 
@@ -823,7 +820,7 @@ mod reclamation {
         txn.commit().unwrap();
 
         let reader = Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::SingleWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::SingleWriter)
             .open_read_only(tmpfile.path())
             .unwrap();
         let pinned = reader.begin_read().unwrap();
@@ -901,10 +898,7 @@ mod compaction {
     /// A read transaction in another process is a transaction in progress, as a local one is
     #[test]
     fn compaction_refuses_a_peers_read_transaction() {
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
             let mut writer = create(tmpfile.path(), mode);
             insert(&writer, 0..1, &[1u8; 512]);
@@ -930,10 +924,7 @@ mod compaction {
     #[test]
     fn untyped_tables_pin_a_peers_snapshot_until_dropped() {
         const MULTIMAP: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("multi");
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for multimap in [false, true] {
                 let tmpfile = tempfile::NamedTempFile::new().unwrap();
                 let mut writer = create(tmpfile.path(), mode);
@@ -997,10 +988,7 @@ mod compaction {
     /// that moved
     #[test]
     fn compaction_shrinks_a_file_a_peer_has_open() {
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
             let mut writer = create(tmpfile.path(), mode);
             let value = vec![7u8; 1024];

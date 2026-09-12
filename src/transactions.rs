@@ -984,7 +984,7 @@ impl WriteTransaction {
             // A multi-writer commit records the allocator state, which `set_quick_repair()`
             // keeps on there
             #[cfg(feature = "experimental-multiprocess")]
-            quick_repair: mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess,
+            quick_repair: mem.concurrency_mode() == ConcurrencyMode::MultiWriter,
             #[cfg(not(feature = "experimental-multiprocess"))]
             quick_repair: false,
             post_commit_free: PostCommitFree::Enabled,
@@ -1309,11 +1309,11 @@ impl WriteTransaction {
     #[cfg_attr(
         feature = "experimental-multiprocess",
         doc = "",
-        doc = "Refused, with [`SavepointError::EphemeralSavepointUnsupported`], in [`ConcurrencyMode::MultiWriterProcess`](crate::ConcurrencyMode::MultiWriterProcess): the savepoint would be known to this process alone, and a persistent savepoint another process creates could take its id. Persistent savepoints are supported. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+        doc = "Refused, with [`SavepointError::EphemeralSavepointUnsupported`], in [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter): the savepoint would be known to this process alone, and a persistent savepoint another process creates could take its id. Persistent savepoints are supported. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
     )]
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
         #[cfg(feature = "experimental-multiprocess")]
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             return Err(SavepointError::EphemeralSavepointUnsupported);
         }
         self.create_savepoint()
@@ -1591,13 +1591,13 @@ impl WriteTransaction {
     #[cfg_attr(
         feature = "experimental-multiprocess",
         doc = "",
-        doc = "Disabling it has no effect in [`ConcurrencyMode::MultiWriterProcess`](crate::ConcurrencyMode::MultiWriterProcess), where every commit saves the allocator state, for the next write transaction, in any process, to load rather than reconstruct. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+        doc = "Disabling it has no effect in [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter), where every commit saves the allocator state, for the next write transaction, in any process, to load rather than reconstruct. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
     )]
     pub fn set_quick_repair(&mut self, enabled: bool) {
         // A multi-writer commit records the allocator state, for the next writer, in any
         // process, to load rather than rebuild from the trees
         #[cfg(feature = "experimental-multiprocess")]
-        if !enabled && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+        if !enabled && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             return;
         }
         self.quick_repair = enabled;
@@ -2964,7 +2964,7 @@ mod test {
 
         let tmpfile = crate::create_tempfile();
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let db = builder.create(tmpfile.path()).unwrap();
         let txn = db.begin_write().unwrap();
         let id = txn.persistent_savepoint().unwrap();
@@ -3012,7 +3012,7 @@ mod test {
 
         let tmpfile = crate::create_tempfile();
         let db = Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .create(tmpfile.path())
             .unwrap();
         let txn = db.begin_write().unwrap();
@@ -3041,7 +3041,7 @@ mod test {
         let (completed, completion) = mpsc::channel();
         let opening = thread::spawn(move || {
             let result = Database::builder()
-                .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+                .set_concurrency_mode(ConcurrencyMode::MultiWriter)
                 .set_repair_callback(|_| panic!("the allocator snapshot should be valid"))
                 .create_file(file);
             completed.send(result).unwrap();
@@ -3070,7 +3070,7 @@ mod test {
             None,
             0,
             false,
-            ConcurrencyMode::MultiWriterProcess,
+            ConcurrencyMode::MultiWriter,
         )
         .unwrap();
         assert_eq!(
