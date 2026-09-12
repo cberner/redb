@@ -1847,6 +1847,11 @@ impl TransactionalMemory {
                 #[cfg(feature = "experimental-multiprocess")]
                 &hold,
             )?;
+            #[cfg(feature = "experimental-multiprocess")]
+            if self.concurrency_mode == ConcurrencyMode::MultiWriter {
+                // Writes invalidate the pages they replace, so retained pages remain valid.
+                self.storage.record_local_transaction_id(transaction_id);
+            }
         }
         self.storage.flush()?;
 

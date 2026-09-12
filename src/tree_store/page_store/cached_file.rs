@@ -785,6 +785,12 @@ impl PagedCachedFile {
         }
     }
 
+    // The caller holds the header lock across publishing this local commit and updating the tag.
+    #[cfg(feature = "experimental-multiprocess")]
+    pub(super) fn record_local_transaction_id(&self, transaction_id: TransactionId) {
+        *self.read_cache_transaction_id.lock().unwrap() = Some(transaction_id);
+    }
+
     pub(super) fn invalidate_cache_all(&self) {
         for cache_slot in 0..self.read_cache.len() {
             let mut lock = self.read_cache[cache_slot].write().unwrap();

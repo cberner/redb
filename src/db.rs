@@ -3725,6 +3725,36 @@ mod active_transaction_test {
         }
     }
 
+    #[cfg(feature = "cache_metrics")]
+    #[test]
+    fn a_multi_writer_commit_keeps_its_read_cache() {
+        use crate::ReadableTable;
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        {
+            let read = db.begin_read().unwrap();
+            assert_eq!(
+                read.open_table(TABLE)
+                    .unwrap()
+                    .get(0)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                0
+            );
+        }
+
+        let write = db.begin_write().unwrap();
+        write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        write.commit().unwrap();
+        let cached_bytes = db.cache_stats().used_bytes();
+        assert!(cached_bytes > 0);
+
+        let _read = db.begin_read().unwrap();
+        assert_eq!(db.cache_stats().used_bytes(), cached_bytes);
+    }
+
     /// A savepoint holds a read transaction live, so its snapshot stays active for as long as
     /// the savepoint does. In the shared mode that supports an ephemeral one
     #[test]
