@@ -63,26 +63,24 @@
   all built-in types are unaffected.
 
 ## 4.3.0 - 2026-XX-XX
+### New features
 * Add optional locking methods to `StorageBackend`. Backends may implement these methods to support
   locking. Custom backends that wrap `FileBackend` should delegate these methods to the `FileBackend`
   otherwise file locking functionality will be lost.
-* Add `Key::separator()`, which returns a short byte string that separates two keys, as a
-  `Cow` so it can also be synthesized rather than borrowed from the inputs. Internal btree
-  nodes store the result instead of a whole key, so more children fit in each node and lookups
-  touch fewer pages. The default implementation returns a whole key, leaving existing `Key`
-  implementations unchanged; `&[u8]`, `&str`, and `String` keys now store minimal prefixes.
-  `Option` keys shorten their payload, when the wrapped type is variable width.
+* Add an optional `Key::separator()`, which returns a short byte string that separates two keys.
+  `&[u8]`, `&str`, `String` keys now store minimal prefixes. `Option`, array keys, and tuple keys
+  also store optimized separators when their element type is variable length. Tables with these
+  key types will use slightly less space, and lookups will be faster.
 * Add `Key::min_encoded_key()`, the encoding of a key type's smallest value. Implementing it is
   optional, and lets container types holding that key store shorter separators.
-* Shorten separators for array keys, when the element type is variable width. Tables with such
-  keys use slightly less space, and lookups are faster.
-* Shorten separators for tuple keys, when at least one element type is variable width. Tables
-  with such keys use slightly less space, and lookups are faster.
+* Add experimental support for multi-process read-write access to a single database file, behind
+  the `experimental-multiprocess` feature flag.
+
+### Bug fixes
 * Fix a crash shortly after a commit being able to silently roll that commit back during
   recovery, if `check_integrity()` had previously repaired the database.
-* Fix `ReadOnlyUntypedTable` and `ReadOnlyUntypedMultimapTable` losing their read snapshot when
-  the originating transaction is dropped. Their pages now remain protected from reclamation
-  and compaction until the tables are dropped.
+* Fix `ReadOnlyUntypedTable` and `ReadOnlyUntypedMultimapTable` potentially returning incorrect results
+  if the originating transaction is dropped.
 * Fix iterators silently omitting data when iteration continues after an error. An iterator
   that yielded `Err(Corrupted)` could yield the rest of the table on later calls, skipping the
   unreadable entries with no further error. Iterators and read-only cursors now keep returning
@@ -103,12 +101,6 @@
   ineligible for further savepoints, so a second savepoint in the same transaction failed with
   `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
   savepoint, makes a transaction savepoint-ineligible now.
-
-### Minor improvements
-* Lock the database file on platforms other than Unix, Windows, and WASI too: a second open of
-  the same file now fails with `DatabaseAlreadyOpen` where the platform supports file locks,
-  and warns via the `logging` feature where it does not, instead of the lock always being
-  silently skipped.
 
 ## 4.2.0 - 2026-08-17
 
