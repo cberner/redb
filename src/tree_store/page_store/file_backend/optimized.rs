@@ -84,7 +84,7 @@ impl FileBackend {
         })
     }
 
-    // Best-effort 4.x compatibility: when a single-process open takes its suffix range,
+    // Best-effort 4.x compatibility: when a exclusive-writer open takes its suffix range,
     // also take the flock used by older redb, unless it shares the range-lock namespace.
     #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
     fn lock_legacy_file(&self, shared: bool) -> io::Result<bool> {

@@ -33,17 +33,17 @@
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
   takes a `ConcurrencyMode` configuring how processes may share the database.
-  When `SingleWriterProcess` or `MultiWriterProcess` is configured, commits are always 2-phase,
+  When `SingleWriter` or `MultiWriter` is configured, commits are always 2-phase,
   `Durability::None` is refused, and the database may be opened read-only while another process has
   it open for writing; each new read transaction then sees that process's durable commits, and
   `Database::compact()` treats a read transaction in another process as a transaction in progress.
-  In `MultiWriterProcess`, every commit records the allocator state, for the next writer to load;
+  In `MultiWriter`, every commit records the allocator state, for the next writer to load;
   compaction's own commits are the exception, and `Database::compact()` ends with one that does.
   Ephemeral savepoints are refused there, with `SavepointError::EphemeralSavepointUnsupported`,
   and a write transaction begins from the file as another process last committed it, as do the
   close and `Database::check_integrity()`, which waits for a write transaction in another process
   to end.
-* In `MultiWriterProcess`, existing handles recover automatically after another process exits
+* In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
 
 ### redb-derive (unreleased)

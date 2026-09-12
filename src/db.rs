@@ -67,10 +67,10 @@ use log::{debug, warn};
 /// Backends that support locking must support one of the following levels:
 /// 1) All representable ranges requested by redb are supported. All concurrency modes will work.
 /// 2) Only whole-storage locks (`Unbounded, Unbounded` or `Included(0), Unbounded`) are
-///    supported. Other ranges return [`BackendError::Unsupported`]. Only single-process
-///    concurrency modes will work.
-/// 3) All inputs return [`BackendError::Unsupported`]. Only single-process concurrency modes
-///    will work, and redb will log a warning on open if logging is enabled.
+///    supported. Other ranges return [`BackendError::Unsupported`]. Only the `ExclusiveWriter`
+///    concurrency mode will work.
+/// 3) All inputs return [`BackendError::Unsupported`]. Only the `ExclusiveWriter` concurrency
+///    mode will work, and redb will log a warning on open if logging is enabled.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, io::Error>;
@@ -190,11 +190,14 @@ pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
 #[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
 pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
 /// Held shared by every read-only multi-process handle while the database is open, so that a
-/// single-process open conflicts with a live reader no matter what the reader is doing.
+/// exclusive-writer open conflicts with a live reader no matter what the reader is doing.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
+/// Held shared by a read-only exclusive-writer handle as part of its whole-file lock. Such a
+/// handle leaves `SHARED_WRITER_BYTE` free, so a multi-writer open, which takes only that byte,
+/// must probe this one to find it.
 #[cfg(feature = "experimental-multiprocess")]
-pub(crate) const IMMUTABLE_READER_BYTE: u64 = LOCK_BASE + 3;
+pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 /// Held shared by a writing process from the moment its open is complete -- past recovery and
 /// the allocator load -- until it closes: the file is consistent, and the recovery flag, set from
 /// here on, means only that a writer is live. `SHARED_WRITER_BYTE` is taken before recovery, so
@@ -605,7 +608,7 @@ pub trait ReadableDatabase: SealedInApi5 {
 #[cfg_attr(
     feature = "experimental-multiprocess",
     doc = "",
-    doc = "The multi-process concurrency modes are the exception: a reader shares the file with the writer and follows its commits. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
+    doc = "`SingleWriter` and `MultiWriter` are the exception: a reader shares the file with the writer and follows its commits. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
 )]
 ///
 /// # Examples
@@ -972,7 +975,7 @@ impl Database {
         #[cfg(feature = "experimental-multiprocess")]
         if peer_committed
             && allocator_hash.is_none()
-            && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess
+            && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
         {
             was_clean = false;
         }
@@ -1026,7 +1029,7 @@ impl Database {
         // In multi-writer mode a repair ends with a commit recording the allocator state, as the
         // open's does; after the savepoints are held, since a commit frees what nothing pins
         #[cfg(feature = "experimental-multiprocess")]
-        if !was_clean && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+        if !was_clean && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
@@ -1133,7 +1136,7 @@ impl Database {
         // them again. Refresh before reporting one as a blocker, unless this process already has
         // a write transaction live, since beginning another would block on it.
         #[cfg(feature = "experimental-multiprocess")]
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
             && self.transaction_tracker.any_persistent_savepoint_exists()
             && !self.transaction_tracker.write_transaction_live()
         {
@@ -1258,7 +1261,7 @@ impl Database {
         // file one record larger, the pages of the one it replaces being freed only by the next
         // commit
         #[cfg(feature = "experimental-multiprocess")]
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriterProcess {
+        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
@@ -1684,7 +1687,7 @@ impl Database {
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction and the integrity check do, so that the next open, in any process, loads it
         #[cfg(feature = "experimental-multiprocess")]
-        if repaired && concurrency_mode == ConcurrencyMode::MultiWriterProcess {
+        if repaired && concurrency_mode == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &transaction_tracker,
                 &mem,
@@ -1821,7 +1824,7 @@ fn sync_to_latest_commit(
     writer_lock: &WriterLock,
     header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result<Option<AllocatorStateLatch>> {
-    if mem.concurrency_mode() != ConcurrencyMode::MultiWriterProcess {
+    if mem.concurrency_mode() != ConcurrencyMode::MultiWriter {
         return Ok(None);
     }
     let synced = {
@@ -2053,28 +2056,30 @@ impl RepairSession {
     }
 }
 
-/// The sharing mode between processes accessing the database
+/// How processes share a database: the regime a writer operates under. Whether a given handle
+/// writes is chosen by `open()` against `open_read_only()`, not by the mode.
 ///
 /// Every process opening one database concurrently must use a compatible mode: one
-/// `SingleWriterProcess` writer or any number of `MultiWriterProcess` writers, plus read-only
-/// handles in either case. The multi-process modes need byte-range file locks, so they are
-/// supported on Linux, the Apple platforms and Windows; elsewhere, opening a database in one of
-/// them fails.
+/// `SingleWriter` writer or any number of `MultiWriter` writers, plus read-only handles in either
+/// case. Those two modes need byte-range file locks, so they are supported on Linux, the Apple
+/// platforms and Windows; elsewhere, opening a database in one of them fails. `ExclusiveWriter`
+/// locks the whole file and works everywhere.
 #[cfg_attr(
     not(feature = "experimental-multiprocess"),
     allow(dead_code, unreachable_pub, clippy::enum_variant_names)
 )]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 pub enum ConcurrencyMode {
-    /// The database is not shared: one process may open it for writing, or several read-only.
-    /// Enforced by locking the whole file. The default.
+    /// A writer excludes every other process; read-only handles share the file with each other
+    /// and exclude any writer. Enforced by locking the whole file. The default.
     #[default]
-    SingleProcess,
-    /// One process writes; any number of processes may, concurrently, open the database read-only.
-    SingleWriterProcess,
-    /// Any number of processes may, concurrently open the database for reading and writing.
+    ExclusiveWriter,
+    /// One process writes; any number of processes may, concurrently, open the database read-only
+    /// and follow its commits.
+    SingleWriter,
+    /// Any number of processes may, concurrently, open the database for reading and writing.
     /// Only one write transaction may be open at a time.
-    MultiWriterProcess,
+    MultiWriter,
 }
 
 #[cfg(feature = "experimental-multiprocess")]
@@ -2082,7 +2087,7 @@ impl ConcurrencyMode {
     /// Whether another process may have the database open, concurrently, and one process
     /// (possibly this one) is a writer
     pub(crate) fn is_multi_process_writable(self) -> bool {
-        !matches!(self, ConcurrencyMode::SingleProcess)
+        !matches!(self, ConcurrencyMode::ExclusiveWriter)
     }
 }
 
@@ -2109,7 +2114,7 @@ impl Builder {
             // It is part of the file format, so can be enabled in the future.
             page_size: PAGE_SIZE,
             region_size: None,
-            concurrency_mode: ConcurrencyMode::SingleProcess,
+            concurrency_mode: ConcurrencyMode::ExclusiveWriter,
             cache_size: 1024 * 1024 * 1024,
             repair_callback: Box::new(|_| {}),
         }
@@ -2150,7 +2155,7 @@ impl Builder {
         self
     }
 
-    /// Set how processes may share this database. Defaults to [`ConcurrencyMode::SingleProcess`].
+    /// Set how processes may share this database. Defaults to [`ConcurrencyMode::ExclusiveWriter`].
     #[cfg(feature = "experimental-multiprocess")]
     pub fn set_concurrency_mode(&mut self, mode: ConcurrencyMode) -> &mut Self {
         self.concurrency_mode = mode;
@@ -2212,7 +2217,7 @@ impl Builder {
     #[cfg_attr(
         feature = "experimental-multiprocess",
         doc = "",
-        doc = "Only a single-process writer is refused: in the multi-process concurrency modes a reader opened in the same mode as the writer shares the file with it and picks up its commits. See [`Self::set_concurrency_mode`]."
+        doc = "Only an `ExclusiveWriter` writer is refused: in `SingleWriter` and `MultiWriter` a reader opened in the same mode as the writer shares the file with it and picks up its commits. See [`Self::set_concurrency_mode`]."
     )]
     #[cfg(not(redb_no_std))]
     pub fn open_read_only(
@@ -2790,7 +2795,7 @@ mod writer_byte_test {
     /// no live writer holds
     fn left_unclean(path: &Path) -> bool {
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         match builder.open_read_only(path) {
             Err(super::DatabaseError::RepairAborted) => true,
             Err(err) => panic!("{err}"),
@@ -2804,7 +2809,7 @@ mod writer_byte_test {
     fn the_shutdown_header_is_written_under_the_writer_byte_or_not_at_all() {
         // The memory's close alone, without the database's, which would write the header itself
         fn close(path: &Path, under_the_byte: bool) {
-            let db = create(path, ConcurrencyMode::MultiWriterProcess);
+            let db = create(path, ConcurrencyMode::MultiWriter);
             commit_one(&db);
             let mem = db.mem.clone();
             std::mem::forget(db);
@@ -2835,7 +2840,7 @@ mod writer_byte_test {
     #[test]
     fn a_close_leaves_a_clean_file() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         commit_one(&db);
         drop(db);
         assert!(
@@ -2849,7 +2854,7 @@ mod writer_byte_test {
     #[test]
     fn a_multi_writer_repair_records_the_allocator_state() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         assert!(
             Database::get_allocator_state_table(&db.mem)
                 .unwrap()
@@ -2866,7 +2871,7 @@ mod writer_byte_test {
         let tmpfile = crate::create_tempfile();
         let mut builder = Database::builder();
         builder
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .set_cache_size(0);
         let db = builder.create(tmpfile.path()).unwrap();
         commit_one(&db);
@@ -2922,7 +2927,7 @@ mod writer_byte_test {
         const CHILD_PATH: &str = "REDB_TEST_INTERRUPTED_COMPACTION_PATH";
         let mut builder = Database::builder();
         builder
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .set_cache_size(0);
         if let Some(path) = std::env::var_os(CHILD_PATH) {
             let db = builder.open(path).unwrap();
@@ -2991,8 +2996,8 @@ mod writer_byte_test {
 
         for corrupt_checksum in [true, false] {
             let tmpfile = crate::create_tempfile();
-            let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
-            let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+            let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+            let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
             commit_one(&peer);
             let writer = peer.mem.lock_writer().unwrap();
             let mut root = peer.mem.get_data_root().unwrap();
@@ -3032,9 +3037,9 @@ mod writer_byte_test {
     #[test]
     fn syncing_to_a_peers_commit_releases_the_repair_a_panic_latched() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let peer = builder.open(tmpfile.path()).unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let write = db.begin_write().unwrap();
@@ -3059,9 +3064,9 @@ mod writer_byte_test {
     #[test]
     fn a_transaction_releases_the_repair_a_panic_latched_without_a_peers_commit() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let peer = builder.open(tmpfile.path()).unwrap();
         let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let write = db.begin_write().unwrap();
@@ -3092,10 +3097,7 @@ mod writer_byte_test {
 
         // What the create will have produced by the time it releases the lock
         let initialized = crate::create_tempfile();
-        drop(create(
-            initialized.path(),
-            ConcurrencyMode::MultiWriterProcess,
-        ));
+        drop(create(initialized.path(), ConcurrencyMode::MultiWriter));
         let mut bytes = Vec::new();
         File::open(initialized.path())
             .unwrap()
@@ -3111,7 +3113,7 @@ mod writer_byte_test {
         let (opened, opens) = mpsc::channel();
         let opening = thread::spawn(move || {
             let mut builder = Database::builder();
-            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
             let result = builder.open(&path);
             opened.send(()).unwrap();
             result
@@ -3148,7 +3150,7 @@ mod writer_byte_test {
         use std::time::Duration;
 
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         // A commit recording nothing leaves the file for the next open to repair. The handle
         // stays open, since its close would record
         let mut write = db.begin_write().unwrap();
@@ -3162,7 +3164,7 @@ mod writer_byte_test {
         let (repairing, repairs) = mpsc::channel();
         let opening = thread::spawn(move || {
             let mut builder = Database::builder();
-            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
             builder.set_repair_callback(move |_| {
                 let _ = repairing.send(());
             });
@@ -3189,7 +3191,7 @@ mod writer_byte_test {
         use std::time::Duration;
 
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let mut write = db.begin_write().unwrap();
         write.skip_allocator_state_record();
         write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
@@ -3203,7 +3205,7 @@ mod writer_byte_test {
         let (opened, opens) = mpsc::channel();
         let opening = thread::spawn(move || {
             let mut builder = Database::builder();
-            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
             builder.set_repair_callback(move |_| {
                 let _ = repairing.send(());
             });
@@ -3242,7 +3244,7 @@ mod writer_byte_test {
     #[test]
     fn a_multi_writer_compaction_records_the_allocator_state() {
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         commit_one(&db);
 
         db.compact().unwrap();
@@ -3257,7 +3259,7 @@ mod writer_byte_test {
     #[test]
     fn a_multi_writer_transaction_holds_the_byte_and_gives_it_back() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         let write = db.begin_write().unwrap();
@@ -3280,7 +3282,7 @@ mod writer_byte_test {
     #[test]
     fn a_single_writer_open_holds_the_byte_for_its_lifetime() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriter);
         let probe = probe(tmpfile.path());
 
         assert!(
@@ -3306,7 +3308,7 @@ mod writer_byte_test {
     #[test]
     fn a_transaction_outliving_the_database_keeps_the_writer_lock() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriter);
         let probe = probe(tmpfile.path());
 
         let write = db.begin_write().unwrap();
@@ -3432,10 +3434,7 @@ mod consistent_byte_test {
 
     #[test]
     fn a_shared_writable_open_asserts_consistency_until_it_closes() {
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = crate::create_tempfile();
             let db = builder(mode).create(tmpfile.path()).unwrap();
             let probe = probe(tmpfile.path());
@@ -3460,7 +3459,7 @@ mod consistent_byte_test {
         let db = {
             let probe = probe.clone();
             let during = during.clone();
-            let mut builder = builder(ConcurrencyMode::MultiWriterProcess);
+            let mut builder = builder(ConcurrencyMode::MultiWriter);
             builder.set_repair_callback(move |_| {
                 let mut during = during.lock().unwrap();
                 if during.is_none() {
@@ -3523,8 +3522,8 @@ mod active_transaction_test {
     }
 
     /// Probed exclusively, since the byte is held shared and another process may hold the same
-    /// one. Reports the whole-file lock a single-process open holds as well, which is what
-    /// `a_single_process_read_does_not_puncture_the_whole_file_lock` relies on
+    /// one. Reports the whole-file lock a exclusive-writer open holds as well, which is what
+    /// `an_exclusive_writer_read_does_not_puncture_the_whole_file_lock` relies on
     fn is_held(probe: &File, id: u64) -> bool {
         let free = probe.try_lock_range(byte_range(TXN_BASE + id)).unwrap();
         if free {
@@ -3540,7 +3539,7 @@ mod active_transaction_test {
     #[test]
     fn a_read_transaction_locks_the_id_it_reads_until_it_ends() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
         assert!(held_ids(&probe).is_empty());
 
@@ -3564,7 +3563,7 @@ mod active_transaction_test {
     #[test]
     fn concurrent_readers_of_one_snapshot_share_the_lock() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         let first = db.begin_read().unwrap();
@@ -3585,11 +3584,11 @@ mod active_transaction_test {
         let tmpfile = crate::create_tempfile();
         // Dropped, so the read-only open is the only handle: it takes SHARED_READER_BYTE, and
         // the writer that created the file would otherwise hold the whole storage
-        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess));
+        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriter));
         let probe = probe(tmpfile.path());
 
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let db = builder.open_read_only(tmpfile.path()).unwrap();
         let read = db.begin_read().unwrap();
         assert_eq!(
@@ -3608,10 +3607,7 @@ mod active_transaction_test {
         use super::{ReadTransaction, TransactionGuard};
         use crate::ReadableTable;
 
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = crate::create_tempfile();
             let writer = create(tmpfile.path(), mode);
             let db = Database::builder()
@@ -3659,10 +3655,7 @@ mod active_transaction_test {
         use super::TransactionGuard;
         use crate::ReadableTable;
 
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = crate::create_tempfile();
             let writer = create(tmpfile.path(), mode);
             let db = Database::builder()
@@ -3737,7 +3730,7 @@ mod active_transaction_test {
     #[test]
     fn an_ephemeral_savepoint_locks_the_snapshot_it_references() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriter);
         let probe = probe(tmpfile.path());
         assert!(held_ids(&probe).is_empty());
 
@@ -3764,7 +3757,7 @@ mod active_transaction_test {
     #[test]
     fn a_persistent_savepoint_takes_no_active_transaction_byte() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         // Nothing else references the savepoint's transaction, so the byte is the savepoint's to
@@ -3805,7 +3798,7 @@ mod active_transaction_test {
     #[test]
     fn a_synced_persistent_savepoint_takes_no_active_transaction_byte() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let write = db.begin_write().unwrap();
         write.persistent_savepoint().unwrap();
         write.commit().unwrap();
@@ -3817,7 +3810,7 @@ mod active_transaction_test {
             "the closed database left a lock"
         );
 
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         assert!(
             held_ids(&probe).is_empty(),
             "the open locked {:?} for the file's savepoint",
@@ -3839,7 +3832,7 @@ mod active_transaction_test {
     #[test]
     fn a_shared_mode_refuses_durability_none() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::SingleWriter);
 
         let mut write = db.begin_write().unwrap();
         assert!(matches!(
@@ -3853,7 +3846,7 @@ mod active_transaction_test {
     #[test]
     fn a_multi_writer_commit_records_the_allocator_state_regardless() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
 
         let mut write = db.begin_write().unwrap();
         write.set_quick_repair(false);
@@ -3871,7 +3864,7 @@ mod active_transaction_test {
     #[test]
     fn a_multi_writer_mode_refuses_an_ephemeral_savepoint() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
 
         let write = db.begin_write().unwrap();
         assert!(matches!(
@@ -3887,9 +3880,9 @@ mod active_transaction_test {
     #[test]
     fn an_integrity_check_records_a_peers_unrecorded_commit() {
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let peer = Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .open(tmpfile.path())
             .unwrap();
         // A commit recording no allocator state, as a repair's does. The peer stays open, since
@@ -3911,7 +3904,7 @@ mod active_transaction_test {
     #[test]
     fn a_write_transaction_releases_the_writer_byte_and_slot() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         let txn = db.begin_write().unwrap();
@@ -3933,9 +3926,9 @@ mod active_transaction_test {
         use crate::tree_store::{AllocationPolicy, PageAllocator, PageTracker};
 
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let peer = Database::builder()
-            .set_concurrency_mode(ConcurrencyMode::MultiWriterProcess)
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .open(tmpfile.path())
             .unwrap();
         // A page the peer allocates and neither frees nor references: a leak its close's snapshot
@@ -3959,10 +3952,10 @@ mod active_transaction_test {
     #[test]
     fn a_read_only_participant_picks_up_a_peers_commit() {
         let tmpfile = crate::create_tempfile();
-        let writer = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let writer = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
 
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let reader = builder.open_read_only(tmpfile.path()).unwrap();
         let probe = probe(tmpfile.path());
 
@@ -4003,10 +3996,10 @@ mod active_transaction_test {
         use std::io::{Read, Write};
 
         let tmpfile = crate::create_tempfile();
-        drop(create(tmpfile.path(), ConcurrencyMode::SingleProcess));
+        drop(create(tmpfile.path(), ConcurrencyMode::ExclusiveWriter));
 
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         let reader = builder.open_read_only(tmpfile.path()).unwrap();
 
         // A newer commit whose pages this file never received: made in a copy, then its slot
@@ -4064,7 +4057,7 @@ mod active_transaction_test {
     #[test]
     fn a_shared_commit_is_two_phase() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
 
         let mut write = db.begin_write().unwrap();
         write.set_two_phase_commit(false);
@@ -4086,7 +4079,7 @@ mod active_transaction_test {
         use std::io::{Read, Seek, SeekFrom, Write};
 
         let tmpfile = crate::create_tempfile();
-        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess));
+        drop(create(tmpfile.path(), ConcurrencyMode::MultiWriter));
 
         // The god byte's recovery-required bit, which a clean shutdown clears
         {
@@ -4104,19 +4097,19 @@ mod active_transaction_test {
         }
 
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         assert!(matches!(
             builder.open_read_only(tmpfile.path()),
             Err(crate::DatabaseError::RepairAborted)
         ));
     }
 
-    /// A single-process open holds the whole file, which covers these bytes. Locking one and
+    /// A exclusive-writer open holds the whole file, which covers these bytes. Locking one and
     /// releasing it would punch a hole in that lock, so this mode locks nothing
     #[test]
-    fn a_single_process_read_does_not_puncture_the_whole_file_lock() {
+    fn an_exclusive_writer_read_does_not_puncture_the_whole_file_lock() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::SingleProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::ExclusiveWriter);
         let probe = probe(tmpfile.path());
 
         drop(db.begin_read().unwrap());
@@ -4132,10 +4125,7 @@ mod active_transaction_test {
     /// only matters below the former, which is where the scan looks
     #[test]
     fn the_oldest_active_transaction_is_the_lower_of_ours_and_a_peers() {
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             let tmpfile = crate::create_tempfile();
             let db = create(tmpfile.path(), mode);
             let scan = |local| {
@@ -4180,12 +4170,12 @@ mod active_transaction_test {
 
         fn open(path: &Path) -> Database {
             let mut builder = Database::builder();
-            builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+            builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
             builder.open(path).unwrap()
         }
 
         let tmpfile = crate::create_tempfile();
-        create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let peer = open(tmpfile.path());
         // The handle syncs to the commit under holds it took itself, as compaction does, in a
         // thread, so that taking the header lock again fails rather than hangs
@@ -4229,7 +4219,7 @@ mod active_transaction_test {
     #[test]
     fn a_lent_header_hold_outlives_the_commit() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         let header_lock = db.mem.lock_header_exclusive().unwrap();
@@ -4247,7 +4237,7 @@ mod active_transaction_test {
     #[test]
     fn a_lent_writer_byte_outlives_the_transaction() {
         let tmpfile = crate::create_tempfile();
-        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriterProcess);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let probe = probe(tmpfile.path());
 
         let writer_lock = db.mem.lock_writer().unwrap();

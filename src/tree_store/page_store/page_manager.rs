@@ -2,7 +2,7 @@ use crate::CacheStats;
 use crate::db::{BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, byte_range};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::db::{
-    CONSISTENT_BYTE, IMMUTABLE_READER_BYTE, SHARED_READER_BYTE, TXN_BASE, WRITER_BYTE,
+    CONSISTENT_BYTE, SHARED_READER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE,
 };
 use crate::io;
 use crate::sync::Mutex;
@@ -576,7 +576,7 @@ impl<'a> Deref for HeaderHold<'a> {
 }
 
 /// The lock admitting this process to write. Writer-byte locks are released when the last
-/// holder drops; single-process locks are released by `close()`. Holds the storage rather than
+/// holder drops; exclusive-writer locks are released by `close()`. Holds the storage rather than
 /// `TransactionalMemory`, so integrity checks can borrow the memory through `Arc::get_mut()`.
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct WriterLock {
@@ -606,11 +606,11 @@ fn database_writer_lock_for_mode(
         return None;
     }
     let range = match concurrency_mode {
-        // Single-process locks belong to the backend until close(), including when locking
+        // Exclusive-writer locks belong to the backend until close(), including when locking
         // fell back to a whole-storage lock or was unsupported altogether.
-        ConcurrencyMode::SingleProcess => None,
-        ConcurrencyMode::SingleWriterProcess => Some(byte_range(WRITER_BYTE)),
-        ConcurrencyMode::MultiWriterProcess => return None,
+        ConcurrencyMode::ExclusiveWriter => None,
+        ConcurrencyMode::SingleWriter => Some(byte_range(WRITER_BYTE)),
+        ConcurrencyMode::MultiWriter => return None,
     };
 
     Some(Arc::new(WriterLock {
@@ -638,10 +638,10 @@ fn open_writer_lock_for_mode(
         return Ok(None);
     }
     match concurrency_mode {
-        ConcurrencyMode::SingleProcess | ConcurrencyMode::SingleWriterProcess => {
+        ConcurrencyMode::ExclusiveWriter | ConcurrencyMode::SingleWriter => {
             Ok(database_writer_lock)
         }
-        ConcurrencyMode::MultiWriterProcess => {
+        ConcurrencyMode::MultiWriter => {
             storage.lock_range(byte_range(WRITER_BYTE))?;
 
             Ok(Some(Arc::new(WriterLock {
@@ -704,7 +704,7 @@ impl TransactionalMemory {
         concurrency_mode: ConcurrencyMode,
     ) -> Result<(), DatabaseError> {
         match concurrency_mode {
-            ConcurrencyMode::SingleProcess => Self::lock_whole_storage(storage, read_only),
+            ConcurrencyMode::ExclusiveWriter => Self::lock_whole_storage(storage, read_only),
             #[cfg(feature = "experimental-multiprocess")]
             mode => Self::lock_mode_bytes(storage, read_only, mode),
             // The shared modes are only reachable through the feature-gated setter
@@ -785,15 +785,16 @@ impl TransactionalMemory {
             storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
         } else {
             match concurrency_mode {
-                ConcurrencyMode::SingleProcess => unreachable!(),
-                ConcurrencyMode::SingleWriterProcess => {
+                ConcurrencyMode::ExclusiveWriter => unreachable!(),
+                ConcurrencyMode::SingleWriter => {
                     storage.try_lock_range(byte_range(SHARED_WRITER_BYTE))?
                         && storage.try_lock_range(byte_range(WRITER_BYTE))?
                 }
-                ConcurrencyMode::MultiWriterProcess => {
+                ConcurrencyMode::MultiWriter => {
                     storage.try_lock_shared_range(byte_range(SHARED_WRITER_BYTE))?
-                        // Ensure we didn't race with an Immutable open of the database
-                        && !storage.query_lock_range(byte_range(IMMUTABLE_READER_BYTE))?
+                        // A read-only exclusive-writer handle leaves the shared writer byte free,
+                        // so only this byte reveals one
+                        && !storage.query_lock_range(byte_range(WHOLE_FILE_READER_BYTE))?
                 }
             }
         };
@@ -1044,7 +1045,7 @@ impl TransactionalMemory {
         id: TransactionId,
         _header: &HeaderGuard<'_>,
     ) -> Result {
-        // Nothing to publish to: a single-process writers lock the whole file
+        // Nothing to publish to: an exclusive writer locks the whole file
         if !self.concurrency_mode.is_multi_process_writable() {
             return Ok(());
         }
@@ -1385,9 +1386,9 @@ impl TransactionalMemory {
     #[cfg(feature = "experimental-multiprocess")]
     fn externally_writable(&self) -> bool {
         match self.concurrency_mode {
-            ConcurrencyMode::SingleProcess => false,
-            ConcurrencyMode::SingleWriterProcess => self.read_only,
-            ConcurrencyMode::MultiWriterProcess => true,
+            ConcurrencyMode::ExclusiveWriter => false,
+            ConcurrencyMode::SingleWriter => self.read_only,
+            ConcurrencyMode::MultiWriter => true,
         }
     }
 
@@ -2548,7 +2549,7 @@ mod test {
             None,
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
 
@@ -2585,7 +2586,7 @@ mod test {
             None,
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -2628,7 +2629,7 @@ mod test {
             Some(64 * page_size as u64),
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -2677,7 +2678,7 @@ mod test {
             Some(64 * page_size as u64),
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -2721,7 +2722,7 @@ mod test {
             Some(region_size),
             0,
             false,
-            crate::db::ConcurrencyMode::SingleProcess,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
         )
         .unwrap();
         mem.reset_allocator_state().unwrap();
@@ -2839,12 +2840,12 @@ mod header_lock_test {
     #[test]
     fn a_read_only_handle_takes_shared_holds() {
         let tmpfile = crate::create_tempfile();
-        open(tmpfile.path(), ConcurrencyMode::SingleProcess).unwrap();
+        open(tmpfile.path(), ConcurrencyMode::ExclusiveWriter).unwrap();
 
-        let reader = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let reader = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
         let held = hold(&reader, false).unwrap();
 
-        let peer = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let peer = open_read_only(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
         drop(hold(&peer, false).unwrap());
         drop(held);
     }
@@ -2871,7 +2872,7 @@ mod header_lock_test {
 
         let tmpfile = crate::create_tempfile();
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriterProcess);
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
         builder.create(tmpfile.path()).unwrap();
         let db = builder.open(tmpfile.path()).unwrap();
         let peer = builder.open(tmpfile.path()).unwrap();
@@ -2896,7 +2897,7 @@ mod header_lock_test {
         use super::DB_HEADER_SIZE;
 
         let tmpfile = crate::create_tempfile();
-        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         let mut header = writer.state.lock().unwrap().header.clone();
         header.recovery_required = !header.recovery_required;
@@ -2915,8 +2916,8 @@ mod header_lock_test {
     #[test]
     fn the_hold_covers_the_write_reaching_the_file() {
         let tmpfile = crate::create_tempfile();
-        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
-        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
+        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         // Taken before the hold: another one in this process would wait on it
         let header = writer.state.lock().unwrap().header.clone();
@@ -2943,8 +2944,8 @@ mod header_lock_test {
     #[test]
     fn an_exclusive_hold_excludes_a_shared_one() {
         let tmpfile = crate::create_tempfile();
-        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
-        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let writer = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
+        let reader = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         let guard = hold(&writer, true).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -2967,8 +2968,8 @@ mod header_lock_test {
     #[test]
     fn shared_holds_admit_each_other() {
         let tmpfile = crate::create_tempfile();
-        let first = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
-        let second = open(tmpfile.path(), ConcurrencyMode::MultiWriterProcess).unwrap();
+        let first = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
+        let second = open(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
 
         let held = hold(&first, false).unwrap();
         let (tx, rx) = mpsc::channel();
@@ -2988,7 +2989,7 @@ mod header_lock_test {
     #[test]
     fn a_hold_does_not_puncture_the_whole_storage_lock() {
         let tmpfile = crate::create_tempfile();
-        let held = open(tmpfile.path(), ConcurrencyMode::SingleProcess).unwrap();
+        let held = open(tmpfile.path(), ConcurrencyMode::ExclusiveWriter).unwrap();
 
         for exclusive in [false, true] {
             let guard = hold(&held, exclusive).unwrap();
@@ -2996,7 +2997,7 @@ mod header_lock_test {
         }
 
         assert!(matches!(
-            open(tmpfile.path(), ConcurrencyMode::SingleProcess),
+            open(tmpfile.path(), ConcurrencyMode::ExclusiveWriter),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
     }
@@ -3044,8 +3045,8 @@ mod lock_protocol_test {
         open_file(reopen(path), read_only, concurrency_mode)
     }
 
-    fn single_process(path: &Path, read_only: bool) -> Result<PagedCachedFile, DatabaseError> {
-        open(path, read_only, ConcurrencyMode::SingleProcess)
+    fn exclusive_writer(path: &Path, read_only: bool) -> Result<PagedCachedFile, DatabaseError> {
+        open(path, read_only, ConcurrencyMode::ExclusiveWriter)
     }
 
     fn refused(result: Result<PagedCachedFile, DatabaseError>) -> bool {
@@ -3066,17 +3067,17 @@ mod lock_protocol_test {
                 .unwrap()
         );
 
-        assert!(refused(single_process(tmpfile.path(), true)));
+        assert!(refused(exclusive_writer(tmpfile.path(), true)));
     }
 
     #[test]
-    fn single_process_locks_leave_backend_bytes_and_the_read_only_probe_free() {
+    fn exclusive_writer_locks_leave_backend_bytes_and_the_read_only_probe_free() {
         use crate::db::{BACKEND_LOCK_RANGE, SHARED_WRITER_BYTE, byte_range};
 
         let tmpfile = crate::create_tempfile();
         let observer = reopen(tmpfile.path());
         for read_only in [false, true] {
-            let storage = single_process(tmpfile.path(), read_only).unwrap();
+            let storage = exclusive_writer(tmpfile.path(), read_only).unwrap();
             for offset in [
                 0,
                 SHARED_WRITER_BYTE - 1,
@@ -3117,7 +3118,7 @@ mod lock_protocol_test {
             assert!(refused(open_file(
                 file,
                 read_only,
-                ConcurrencyMode::SingleProcess
+                ConcurrencyMode::ExclusiveWriter
             )));
             assert!(
                 holder
@@ -3138,11 +3139,11 @@ mod lock_protocol_test {
 
     #[cfg(not(feature = "experimental-api-5"))]
     #[test]
-    fn single_process_opens_exclude_older_whole_file_writers() {
+    fn exclusive_writer_opens_exclude_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();
         let older = reopen(tmpfile.path());
         for read_only in [false, true] {
-            let storage = single_process(tmpfile.path(), read_only).unwrap();
+            let storage = exclusive_writer(tmpfile.path(), read_only).unwrap();
             assert!(matches!(
                 older.try_lock(),
                 Err(std::fs::TryLockError::WouldBlock)
@@ -3151,7 +3152,7 @@ mod lock_protocol_test {
 
             older.try_lock().unwrap();
             #[cfg(not(windows))]
-            assert!(refused(single_process(tmpfile.path(), read_only)));
+            assert!(refused(exclusive_writer(tmpfile.path(), read_only)));
             #[cfg(windows)]
             {
                 // Older whole-file locks cover the query mutex, so retrying waits for them.
@@ -3161,7 +3162,7 @@ mod lock_protocol_test {
                 let path = tmpfile.path().to_owned();
                 let (result_tx, result_rx) = mpsc::channel();
                 let worker = std::thread::spawn(move || {
-                    result_tx.send(single_process(&path, read_only)).unwrap();
+                    result_tx.send(exclusive_writer(&path, read_only)).unwrap();
                 });
                 let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
                 older.unlock().unwrap();
@@ -3181,11 +3182,11 @@ mod lock_protocol_test {
 
     #[cfg(not(feature = "experimental-api-5"))]
     #[test]
-    fn each_immutable_reader_excludes_older_whole_file_writers() {
+    fn each_whole_file_reader_excludes_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();
         let older = reopen(tmpfile.path());
-        let first = single_process(tmpfile.path(), true).unwrap();
-        let second = single_process(tmpfile.path(), true).unwrap();
+        let first = exclusive_writer(tmpfile.path(), true).unwrap();
+        let second = exclusive_writer(tmpfile.path(), true).unwrap();
         first.close().unwrap();
         assert!(matches!(
             older.try_lock(),
@@ -3205,10 +3206,7 @@ mod lock_protocol_test {
         if older.query_lock(0..=0).unwrap() {
             return;
         }
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for read_only in [false, true] {
                 open(tmpfile.path(), read_only, mode)
                     .unwrap()
@@ -3223,20 +3221,20 @@ mod lock_protocol_test {
     #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn the_modes_exclude_each_other() {
-        use ConcurrencyMode::{MultiWriterProcess, SingleWriterProcess};
+        use ConcurrencyMode::{MultiWriter, SingleWriter};
 
         let tmpfile = crate::create_tempfile();
         for (held, joining, admitted) in [
-            (SingleWriterProcess, SingleWriterProcess, false),
-            (SingleWriterProcess, MultiWriterProcess, false),
-            (MultiWriterProcess, SingleWriterProcess, false),
-            (MultiWriterProcess, MultiWriterProcess, true),
+            (SingleWriter, SingleWriter, false),
+            (SingleWriter, MultiWriter, false),
+            (MultiWriter, SingleWriter, false),
+            (MultiWriter, MultiWriter, true),
         ] {
             let first = open(tmpfile.path(), false, held).unwrap();
             let second = open(tmpfile.path(), false, joining);
             assert_eq!(second.is_ok(), admitted, "{held:?} then {joining:?}");
 
-            let reader = open(tmpfile.path(), true, MultiWriterProcess).unwrap();
+            let reader = open(tmpfile.path(), true, MultiWriter).unwrap();
             reader.close().unwrap();
             if let Ok(second) = second {
                 second.close().unwrap();
@@ -3245,25 +3243,22 @@ mod lock_protocol_test {
         }
     }
 
-    /// A single-process handle joins nothing, so it and a multi-process one refuse each other --
+    /// A exclusive-writer handle joins nothing, so it and a multi-process one refuse each other --
     /// unless both are read-only, since neither holds a byte the other could find
     #[cfg(feature = "experimental-multiprocess")]
     #[test]
-    fn a_single_process_handle_and_a_multi_process_one_refuse_each_other() {
+    fn an_exclusive_writer_handle_and_a_multi_process_one_refuse_each_other() {
         let tmpfile = crate::create_tempfile();
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for read_only in [false, true] {
-                let plain = single_process(tmpfile.path(), read_only).unwrap();
+                let plain = exclusive_writer(tmpfile.path(), read_only).unwrap();
                 assert!(refused(open(tmpfile.path(), false, mode)));
                 assert_eq!(refused(open(tmpfile.path(), true, mode)), !read_only);
                 plain.close().unwrap();
 
                 let held = open(tmpfile.path(), read_only, mode).unwrap();
-                assert!(refused(single_process(tmpfile.path(), false)));
-                assert_eq!(refused(single_process(tmpfile.path(), true)), !read_only);
+                assert!(refused(exclusive_writer(tmpfile.path(), false)));
+                assert_eq!(refused(exclusive_writer(tmpfile.path(), true)), !read_only);
                 held.close().unwrap();
             }
         }
@@ -3286,7 +3281,7 @@ mod lock_protocol_test {
         assert!(refused(open_file(
             file,
             false,
-            ConcurrencyMode::SingleWriterProcess
+            ConcurrencyMode::SingleWriter
         )));
 
         let observer = reopen(tmpfile.path());
@@ -3296,7 +3291,7 @@ mod lock_protocol_test {
         drop(kept_by_the_caller);
 
         holder.unlock_range(byte_range(WRITER_BYTE)).unwrap();
-        open(tmpfile.path(), false, ConcurrencyMode::SingleWriterProcess)
+        open(tmpfile.path(), false, ConcurrencyMode::SingleWriter)
             .unwrap()
             .close()
             .unwrap();
@@ -3571,7 +3566,12 @@ mod lock_failure_test {
     }
 
     fn open(read_only: bool, taking: Answer, querying: Answer) -> Result<(), DatabaseError> {
-        open_as(ConcurrencyMode::SingleProcess, read_only, taking, querying)
+        open_as(
+            ConcurrencyMode::ExclusiveWriter,
+            read_only,
+            taking,
+            querying,
+        )
     }
 
     fn failed(result: Result<(), DatabaseError>) -> bool {
@@ -3616,10 +3616,7 @@ mod lock_failure_test {
     #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn a_shared_mode_without_locks_fails_the_open() {
-        for mode in [
-            ConcurrencyMode::SingleWriterProcess,
-            ConcurrencyMode::MultiWriterProcess,
-        ] {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for read_only in [false, true] {
                 assert!(failed(open_as(
                     mode,
@@ -3635,7 +3632,7 @@ mod lock_failure_test {
     fn the_lock_is_released_at_close() {
         for taking in [Answer::Acquired, Answer::Unsupported] {
             let (storage, released) = storage(taking, Answer::Unsupported);
-            TransactionalMemory::lock_for_open(&storage, false, ConcurrencyMode::SingleProcess)
+            TransactionalMemory::lock_for_open(&storage, false, ConcurrencyMode::ExclusiveWriter)
                 .unwrap();
             storage.close().unwrap();
 
@@ -3677,7 +3674,7 @@ mod lock_failure_test {
                     let result = TransactionalMemory::lock_for_open(
                         &storage,
                         read_only,
-                        ConcurrencyMode::SingleProcess,
+                        ConcurrencyMode::ExclusiveWriter,
                     );
                     match answer {
                         Answer::Acquired => {
@@ -3712,7 +3709,7 @@ mod lock_failure_test {
                 let result = TransactionalMemory::lock_for_open(
                     &storage,
                     read_only,
-                    ConcurrencyMode::SingleProcess,
+                    ConcurrencyMode::ExclusiveWriter,
                 );
                 if answer == Answer::Refused {
                     assert!(matches!(result, Err(DatabaseError::DatabaseAlreadyOpen)));
@@ -3736,7 +3733,7 @@ mod lock_failure_test {
         assert!(failed(TransactionalMemory::lock_for_open(
             &storage,
             false,
-            ConcurrencyMode::SingleProcess
+            ConcurrencyMode::ExclusiveWriter
         )));
         assert_eq!(held.lock().unwrap().len(), 1);
         storage.close().unwrap();
