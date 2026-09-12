@@ -64,9 +64,8 @@
 
 ## 4.3.0 - 2026-XX-XX
 * Add optional locking methods to `StorageBackend`. Backends may implement these methods to support
-  locking. These methods return `BackendError` to distinguish unsupported operations from I/O failures,
-  including in `no_std` builds.
-  Lock methods accept explicit `Bound<u64>` endpoints, including unbounded ranges.
+  locking. Custom backends that wrap `FileBackend` should delegate these methods to the `FileBackend`
+  otherwise file locking functionality will be lost.
 * Add `Key::separator()`, which returns a short byte string that separates two keys, as a
   `Cow` so it can also be synthesized rather than borrowed from the inputs. Internal btree
   nodes store the result instead of a whole key, so more children fit in each node and lookups
