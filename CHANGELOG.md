@@ -62,6 +62,10 @@
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
 
+## 4.4.0 - 2026-XX-XX
+* Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
+  that grew the file size was aborted.
+
 ## 4.3.0 - 2026-09-14
 ### New features
 * Add optional locking methods to `StorageBackend`. Backends may implement these methods to support

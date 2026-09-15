@@ -2662,6 +2662,50 @@ mod test {
     }
 
     #[test]
+    fn abort_shrinks_multiple_regions() {
+        use crate::ReadableDatabase;
+
+        const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+        let value = vec![0xAB; 2000];
+        for quick_repair in [false, true] {
+            let tmpfile = crate::create_tempfile();
+            let mut db = Database::builder()
+                .set_region_size(256 * 1024)
+                .create(tmpfile.path())
+                .unwrap();
+            let mut txn = db.begin_write().unwrap();
+            txn.set_quick_repair(quick_repair);
+            txn.open_table(TABLE)
+                .unwrap()
+                .insert(0, b"committed".as_slice())
+                .unwrap();
+            txn.commit().unwrap();
+
+            let original_len = tmpfile.as_file().metadata().unwrap().len();
+            for _ in 0..2 {
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut table = txn.open_table(TABLE).unwrap();
+                    for key in 0..1800 {
+                        table.insert(key, value.as_slice()).unwrap();
+                    }
+                }
+                assert!(tmpfile.as_file().metadata().unwrap().len() > original_len + 1024 * 1024);
+                txn.abort().unwrap();
+                assert_eq!(tmpfile.as_file().metadata().unwrap().len(), original_len);
+            }
+            assert!(db.check_integrity().unwrap());
+            drop(db);
+            let mut db = Database::open(tmpfile.path()).unwrap();
+            assert!(db.check_integrity().unwrap());
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(TABLE).unwrap();
+            assert_eq!(table.get(0).unwrap().unwrap().value(), b"committed");
+            assert!(table.get(1).unwrap().is_none());
+        }
+    }
+
+    #[test]
     fn dynamic_shrink() {
         let tmpfile = crate::create_tempfile();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");

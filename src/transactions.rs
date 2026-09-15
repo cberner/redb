@@ -14,10 +14,10 @@ use crate::tree_store::HeaderGuard;
 #[cfg(all(debug_assertions, not(redb_no_std)))]
 use crate::tree_store::PageNumberHashSet;
 use crate::tree_store::{
-    AllocationPolicy, Btree, BtreeHeader, BtreeMut, InternalTableDefinition, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber, PageNumberHashMap,
-    PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree, TableTreeMut,
-    TableType, TransactionalMemory,
+    AllocationPolicy, Btree, BtreeHeader, BtreeMut, DatabaseLayout, InternalTableDefinition,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageListMut, PageNumber,
+    PageNumberHashMap, PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy, TableTree,
+    TableTreeMut, TableType, TransactionalMemory,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -932,6 +932,7 @@ impl Drop for AllocatorStateLatch {
 pub struct WriteTransaction {
     transaction_tracker: Arc<TransactionTracker>,
     mem: Arc<TransactionalMemory>,
+    initial_layout: DatabaseLayout,
     transaction_guard: Arc<TransactionGuard>,
     transaction_id: TransactionId,
     tables: Mutex<TableNamespace>,
@@ -965,6 +966,7 @@ impl WriteTransaction {
         let root_page = mem.get_data_root();
         let system_page = mem.get_system_root();
 
+        let initial_layout = mem.get_layout();
         let page_allocator = PageAllocator::new(mem.clone(), allocation_policy);
         let tables = TableNamespace::new(root_page, guard.clone(), page_allocator.clone());
         let system_tables = SystemNamespace::new(system_page, guard.clone(), page_allocator);
@@ -972,6 +974,7 @@ impl WriteTransaction {
         Ok(Self {
             transaction_tracker,
             mem: mem.clone(),
+            initial_layout,
             transaction_guard: guard.clone(),
             transaction_id,
             tables: Mutex::new(tables),
@@ -2075,6 +2078,7 @@ impl WriteTransaction {
             .apply_on_abort(&self.transaction_tracker);
         self.mem.check_io_errors()?;
         self.page_allocator().rollback_all();
+        self.mem.rollback_growth(self.initial_layout)?;
         #[cfg(feature = "logging")]
         debug!("Finished abort of transaction id={:?}", self.transaction_id);
         Ok(())

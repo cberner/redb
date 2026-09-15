@@ -2302,6 +2302,24 @@ impl TransactionalMemory {
         }
     }
 
+    pub(crate) fn get_layout(&self) -> DatabaseLayout {
+        self.state.lock().unwrap().header.layout()
+    }
+
+    // Free all pages allocated by the aborted transaction before rolling back growth. Freeing pages
+    // also cancels their buffered writes so a later flush cannot re-extend the file.
+    pub(crate) fn rollback_growth(&self, initial_layout: DatabaseLayout) -> Result {
+        let mut state = self.state.lock().unwrap();
+        if state.header.layout().len() > initial_layout.len() {
+            // Growth is not published in the header until commit. Restoring the starting layout
+            // preserves all earlier commits, including non-durable ones, without a header write.
+            self.storage.resize(initial_layout.len())?;
+            state.allocators_mut().resize_to(initial_layout);
+            state.header.set_layout(initial_layout);
+        }
+        Ok(())
+    }
+
     fn try_shrink(state: &mut InMemoryState, force: bool) -> Result<bool> {
         let layout = state.header.layout();
         let last_region_index = layout.num_regions() - 1;
