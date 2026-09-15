@@ -23,6 +23,7 @@ pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTracker};
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
+pub(crate) use layout::DatabaseLayout;
 #[cfg(all(test, feature = "experimental-multiprocess"))]
 pub(crate) use page_manager::HEADER_LOCK;
 #[cfg(feature = "experimental-multiprocess")]
