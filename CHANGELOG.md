@@ -62,7 +62,7 @@
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
 
-## 4.3.0 - 2026-XX-XX
+## 4.3.0 - 2026-09-14
 ### New features
 * Add optional locking methods to `StorageBackend`. Backends may implement these methods to support
   locking. Custom backends that wrap `FileBackend` should delegate these methods to the `FileBackend`
