@@ -462,6 +462,9 @@ impl<T: Value> Value for (T,) {
     where
         Self: 'a;
 
+    // Encoded exactly as `T`, so `T`'s niche is its niche too
+    const NICHE: Option<&'static [u8]> = T::NICHE;
+
     fn fixed_width() -> Option<usize> {
         T::fixed_width()
     }
@@ -663,6 +666,54 @@ mod test {
     fn single_element_tuple_separator() {
         // Encoded exactly as the element, so it separates the same way
         check_separator::<(&str,)>(&("abc0suffix",), &("abc1suffix",), &("abc1",));
+    }
+
+    // A type with a niche, so that forwarding it can be observed. Encoded as its bytes, which
+    // are never `0xff` alone.
+    #[derive(Debug)]
+    struct Niched;
+
+    impl Value for Niched {
+        type SelfType<'a> = &'a [u8];
+        type AsBytes<'a>
+            = &'a [u8]
+        where
+            Self: 'a;
+
+        const NICHE: Option<&'static [u8]> = Some(&[0xff]);
+
+        fn fixed_width() -> Option<usize> {
+            None
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> &'a [u8]
+        where
+            Self: 'a,
+        {
+            data
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a &'b [u8]) -> &'a [u8]
+        where
+            Self: 'b,
+        {
+            value
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("test::Niched")
+        }
+    }
+
+    #[test]
+    fn single_element_tuple_forwards_niche() {
+        // Encoded exactly as its element, so its element's niche is its niche too, however
+        // deeply it is nested
+        assert_eq!(<(Niched,) as Value>::NICHE, Some([0xff].as_slice()));
+        assert_eq!(<((Niched,),) as Value>::NICHE, Some([0xff].as_slice()));
+        assert_eq!(<(&str,) as Value>::NICHE, None);
+        // Longer tuples are encoded differently, so they declare none
+        assert_eq!(<(Niched, Niched) as Value>::NICHE, None);
     }
 
     #[test]
