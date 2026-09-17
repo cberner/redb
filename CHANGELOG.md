@@ -64,6 +64,9 @@
 
 ## 4.4.0 - 2026-XX-XX
 ### New features
+* Implement `Value` and `Key` for the `NonZero` integer types, `NonZeroU8` to `NonZeroU128` and
+  `NonZeroI8` to `NonZeroI128`. They are encoded as the primitives they wrap, and an `Option` of
+  one is the same width as the bare type, with zero encoding `None`.
 * Add `Value::NICHE`, an optional byte string that a type never encodes to. When a type declares
   one, `Option` of that type encodes `None` as it, in place of a tag byte. Adding a niche to a type
   whose `Option` is already stored in a table changes that encoding without changing the table's
