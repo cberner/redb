@@ -64,7 +64,10 @@
 
 ## 4.4.0 - 2026-XX-XX
 ### New features
-* Add `Value::NICHE`, an optional byte string that a type never encodes to.
+* Add `Value::NICHE`, an optional byte string that a type never encodes to. When a type declares
+  one, `Option` of that type encodes `None` as it, in place of a tag byte. Adding a niche to a type
+  whose `Option` is already stored in a table changes that encoding without changing the table's
+  type name, so the stored data would be misread.
 
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
