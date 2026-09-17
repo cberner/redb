@@ -8,6 +8,10 @@ use core::cmp::Ordering;
 use core::convert::TryInto;
 use core::fmt::Debug;
 use core::mem::size_of;
+use core::num::{
+    NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroU8, NonZeroU16, NonZeroU32,
+    NonZeroU64, NonZeroU128,
+};
 #[cfg(feature = "chrono_v0_4")]
 mod chrono_v0_4;
 #[cfg(feature = "uuid")]
@@ -978,6 +982,63 @@ le_impl!(i128);
 le_value!(f32);
 le_value!(f64);
 
+// `NonZero*` is encoded and ordered as the primitive it wraps. Zero is the one encoding of that
+// primitive it never produces, which `Option<NonZero*>` uses for `None`. `NonZeroUsize` and
+// `NonZeroIsize` are left out, as `usize` and `isize` are: their width varies between platforms.
+macro_rules! nonzero_impl {
+    ($t:ident, $prim:ty) => {
+        impl Value for $t {
+            type SelfType<'a> = $t;
+            type AsBytes<'a>
+                = <$prim as Value>::AsBytes<'a>
+            where
+                Self: 'a;
+
+            const NICHE: Option<&'static [u8]> = Some(&[0; size_of::<$prim>()]);
+
+            fn fixed_width() -> Option<usize> {
+                <$prim as Value>::fixed_width()
+            }
+
+            fn from_bytes<'a>(data: &'a [u8]) -> $t
+            where
+                Self: 'a,
+            {
+                // Only `as_bytes()` output is decoded, and that is never zero
+                <$t>::new(<$prim as Value>::from_bytes(data)).unwrap()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            where
+                Self: 'b,
+            {
+                <$prim as Value>::as_bytes(&value.get())
+            }
+
+            fn type_name() -> TypeName {
+                TypeName::internal(stringify!($t))
+            }
+        }
+
+        impl Key for $t {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                <$prim as Key>::compare(data1, data2)
+            }
+        }
+    };
+}
+
+nonzero_impl!(NonZeroU8, u8);
+nonzero_impl!(NonZeroU16, u16);
+nonzero_impl!(NonZeroU32, u32);
+nonzero_impl!(NonZeroU64, u64);
+nonzero_impl!(NonZeroU128, u128);
+nonzero_impl!(NonZeroI8, i8);
+nonzero_impl!(NonZeroI16, i16);
+nonzero_impl!(NonZeroI32, i32);
+nonzero_impl!(NonZeroI64, i64);
+nonzero_impl!(NonZeroI128, i128);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1437,99 @@ mod tests {
         check::<3>();
     }
 
+    // Each `NonZero*` encodes as the primitive it wraps, and `Option` of it at the same width,
+    // with zero as `None`
+    macro_rules! nonzero_encoding_test {
+        ($name:ident, $t:ty, $prim:ty, [$($value:expr),+]) => {
+            #[test]
+            fn $name() {
+                let zero = [0; size_of::<$prim>()];
+                assert_eq!(<$t as Value>::NICHE, Some(zero.as_slice()));
+                assert_eq!(<$t as Value>::fixed_width(), <$prim as Value>::fixed_width());
+                assert_eq!(
+                    <Option<$t> as Value>::fixed_width(),
+                    <$prim as Value>::fixed_width()
+                );
+                assert_eq!(<Option<$t> as Value>::as_bytes(&None), zero);
+                assert_eq!(<Option<$t> as Value>::from_bytes(&zero), None);
+                assert_eq!(
+                    <Option<$t> as Key>::min_encoded_key().as_deref(),
+                    Some(zero.as_slice())
+                );
+                // A table of the primitive may hold zeros, so it must not open as this type
+                assert_ne!(<$t as Value>::type_name(), <$prim as Value>::type_name());
+
+                let mut options = vec![None];
+                for primitive in [$($value),+] {
+                    let value = <$t>::new(primitive).unwrap();
+                    let encoded = <$prim as Value>::as_bytes(&primitive);
+                    assert_eq!(<$t as Value>::as_bytes(&value), encoded);
+                    assert_eq!(<$t as Value>::from_bytes(&encoded), value);
+                    assert_eq!(<Option<$t> as Value>::as_bytes(&Some(value)), encoded);
+                    assert_eq!(<Option<$t> as Value>::from_bytes(&encoded), Some(value));
+                    options.push(Some(value));
+                }
+                // Both order as the primitive does, with `None` first, which is how they order
+                // in memory. A fixed width `Option` is compared at that width, so `left` is the
+                // separator.
+                for &left in &options {
+                    for &right in &options {
+                        let a = <Option<$t> as Value>::as_bytes(&left);
+                        let b = <Option<$t> as Value>::as_bytes(&right);
+                        assert_eq!(<Option<$t> as Key>::compare(&a, &b), left.cmp(&right));
+                        if let (Some(left), Some(right)) = (left, right) {
+                            assert_eq!(<$t as Key>::compare(&a, &b), left.cmp(&right));
+                        }
+                        if left < right {
+                            assert_eq!(<Option<$t> as Key>::separator(&a, &b), a);
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    nonzero_encoding_test!(nonzero_u8_encoding, NonZeroU8, u8, [1, 128, u8::MAX]);
+    nonzero_encoding_test!(nonzero_u16_encoding, NonZeroU16, u16, [1, 256, u16::MAX]);
+    nonzero_encoding_test!(nonzero_u32_encoding, NonZeroU32, u32, [1, 256, u32::MAX]);
+    nonzero_encoding_test!(nonzero_u64_encoding, NonZeroU64, u64, [1, 256, u64::MAX]);
+    nonzero_encoding_test!(
+        nonzero_u128_encoding,
+        NonZeroU128,
+        u128,
+        [1, 256, u128::MAX]
+    );
+    nonzero_encoding_test!(
+        nonzero_i8_encoding,
+        NonZeroI8,
+        i8,
+        [i8::MIN, -1, 1, i8::MAX]
+    );
+    nonzero_encoding_test!(
+        nonzero_i16_encoding,
+        NonZeroI16,
+        i16,
+        [i16::MIN, -256, -1, 1, 256, i16::MAX]
+    );
+    nonzero_encoding_test!(
+        nonzero_i32_encoding,
+        NonZeroI32,
+        i32,
+        [i32::MIN, -256, -1, 1, 256, i32::MAX]
+    );
+    nonzero_encoding_test!(
+        nonzero_i64_encoding,
+        NonZeroI64,
+        i64,
+        [i64::MIN, -256, -1, 1, 256, i64::MAX]
+    );
+    nonzero_encoding_test!(
+        nonzero_i128_encoding,
+        NonZeroI128,
+        i128,
+        [i128::MIN, -256, -1, 1, 256, i128::MAX]
+    );
+
     #[test]
     fn array_separator() {
         // (left, right, the shortest separator)
@@ -1588,6 +1742,8 @@ mod tests {
         assert_least::<Option<NonMaxU16>>(&None);
         assert_least::<Option<NicheBytes<1>>>(&Some(NicheBytes(b"")));
         assert_least::<Option<NicheBytes<1>>>(&None);
+        assert_least::<Option<NonZeroI32>>(&NonZeroI32::new(i32::MIN));
+        assert_least::<Option<NonZeroI32>>(&None);
     }
 
     #[test]
@@ -1643,6 +1799,7 @@ mod tests {
         }
 
         assert_internal3(<Option<u32> as Value>::type_name());
+        assert_internal3(<Option<NonZeroU32> as Value>::type_name());
         assert_internal3(<Vec<u32> as Value>::type_name());
         assert_internal3(<[u32; 3] as Value>::type_name());
         assert_internal3(<&[u8; 3] as Value>::type_name());

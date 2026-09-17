@@ -10,6 +10,7 @@ use redb::{
     TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
+use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
 #[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
@@ -3782,6 +3783,11 @@ fn separators_are_encodings() {
     check::<[&str; 2]>(&["abc0suffix", "tail"], &["abc1suffix", "other"]);
     check::<[&str; 3]>(&["abc0suffix", "a", "b"], &["abc1suffix", "c", "d"]);
     check::<[Option<&str>; 2]>(&[Some("aaaa"), Some("zzzz")], &[Some("bbbb"), Some("yyyy")]);
+    // A tail discarded down to a `None` encoded as a niche has to come out that wide
+    check::<(&str, Option<NonZeroU64>)>(
+        &("abc0suffix", NonZeroU64::new(7)),
+        &("abc1suffix", NonZeroU64::new(9)),
+    );
 }
 
 #[test]
@@ -4084,6 +4090,171 @@ fn char_type() {
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
     assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroI32, NonZeroU64> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        // Inserted out of order, and on both sides of zero
+        for key in [7, -1, i32::MAX, i32::MIN, -300] {
+            let key = NonZeroI32::new(key).unwrap();
+            table
+                .insert(key, NonZeroU64::from(key.unsigned_abs()))
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let key = NonZeroI32::new(-300).unwrap();
+    assert_eq!(table.get(key).unwrap().unwrap().value().get(), 300);
+    // Keys order numerically, as the primitive they wrap does
+    let keys: Vec<i32> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().get())
+        .collect();
+    assert_eq!(keys, [i32::MIN, -300, -1, 7, i32::MAX]);
+}
+
+#[test]
+fn option_nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Signed, so that `None` has negative values to sort below
+    let definition: TableDefinition<Option<NonZeroI32>, Option<NonZeroU32>> =
+        TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(NonZeroI32::new(3), None).unwrap();
+        table.insert(None, NonZeroU32::new(u32::MAX)).unwrap();
+        table
+            .insert(NonZeroI32::new(i32::MIN), NonZeroU32::new(1))
+            .unwrap();
+        table.insert(NonZeroI32::new(-9), None).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        table.get(None).unwrap().unwrap().value(),
+        NonZeroU32::new(u32::MAX)
+    );
+    assert_eq!(
+        table.get(NonZeroI32::new(3)).unwrap().unwrap().value(),
+        None
+    );
+    // `None` sorts below every `Some`, including the negative ones
+    let keys: Vec<Option<i32>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().map(NonZeroI32::get))
+        .collect();
+    assert_eq!(keys, [None, Some(i32::MIN), Some(-9), Some(3)]);
+}
+
+// `Option<NonZero*>` is stored at the width of the bare type, and a table of it reads back after
+// a reopen: the niche decodes as `None`, and the tree's separators are valid encodings
+#[test]
+fn option_nonzero_table_reopens() {
+    const TABLE: TableDefinition<Option<NonZeroI32>, Option<(NonZeroU64,)>> =
+        TableDefinition::new("x");
+
+    fn value_of(key: Option<NonZeroI32>) -> Option<(NonZeroU64,)> {
+        key.map(|key| (NonZeroU64::from(key.unsigned_abs()),))
+    }
+
+    let tmpfile = create_tempfile();
+    // `None` for zero, among the values on either side of it
+    let keys: Vec<Option<NonZeroI32>> = (-1024..=1024).map(NonZeroI32::new).collect();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for &key in keys.iter().rev() {
+                table.insert(key, value_of(key)).unwrap();
+            }
+            // Enough entries for branch pages, so that separators are exercised too
+            assert!(table.stats().unwrap().tree_height() > 1);
+            // Every entry is a 4 byte key and an 8 byte value, `None`s included
+            assert_eq!(
+                table.stats().unwrap().stored_bytes(),
+                12 * u64::try_from(keys.len()).unwrap()
+            );
+        }
+        write_txn.commit().unwrap();
+    }
+
+    let mut db = Database::open(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for &key in &keys {
+        assert_eq!(table.get(key).unwrap().unwrap().value(), value_of(key));
+    }
+    // Stored in the order the `Option` has in memory: `None` first, then the negative values
+    let stored: Vec<Option<NonZeroI32>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value())
+        .collect();
+    let mut expected = keys;
+    expected.sort_unstable();
+    assert_eq!(stored, expected);
+}
+
+#[test]
+fn nonzero_type_does_not_alias_its_primitive() {
+    // A `u32` table may hold zeros, which `NonZeroU32` cannot, so it must not open as one, in
+    // either position
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+    let nonzero_key: TableDefinition<NonZeroU32, u32> = TableDefinition::new("x");
+    let nonzero_value: TableDefinition<u32, NonZeroU32> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(definition)
+        .unwrap()
+        .insert(0, 0)
+        .unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        write_txn.open_table(nonzero_key),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    assert!(matches!(
+        write_txn.open_table(nonzero_value),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    write_txn.abort().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(nonzero_key),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    assert!(matches!(
+        read_txn.open_table(nonzero_value),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
 }
 
 // Opening a multimap table via open_table() returns TableIsMultimap for both
