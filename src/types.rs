@@ -8,6 +8,10 @@ use core::cmp::Ordering;
 use core::convert::TryInto;
 use core::fmt::Debug;
 use core::mem::size_of;
+use core::num::{
+    NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroU8, NonZeroU16, NonZeroU32,
+    NonZeroU64, NonZeroU128,
+};
 #[cfg(feature = "chrono_v0_4")]
 mod chrono_v0_4;
 #[cfg(feature = "uuid")]
@@ -151,6 +155,17 @@ impl TypeName {
 
 /// Types that implement this trait can be used as values in a redb table
 pub trait Value: Debug {
+    /// An unused byte encoding that `Option<Self>` can use to represent `None` without a tag.
+    ///
+    /// If this is `Some(bytes)`, [`as_bytes()`](Self::as_bytes) must never return those bytes.
+    /// If [`fixed_width()`](Self::fixed_width) is `Some(width)`, `bytes.len()` must equal `width`.
+    /// Variable width types may use a niche of any length, including zero.
+    ///
+    /// The default is `None`, which keeps the tag byte in `Option<Self>`'s encoding.
+    /// Changing this constant changes the encoding of `Option<Self>` and may require migrating
+    /// existing tables containing that type.
+    const NICHE: Option<&'static [u8]> = None;
+
     /// `SelfType<'a>` must be the same type as Self with all lifetimes replaced with 'a
     type SelfType<'a>: Debug + 'a
     where
@@ -346,13 +361,24 @@ impl<T: Value> Value for Option<T> {
         Self: 'a;
 
     fn fixed_width() -> Option<usize> {
-        T::fixed_width().map(|x| x + 1)
+        if T::NICHE.is_some() {
+            T::fixed_width()
+        } else {
+            T::fixed_width().map(|x| x + 1)
+        }
     }
 
     fn from_bytes<'a>(data: &'a [u8]) -> Option<T::SelfType<'a>>
     where
         Self: 'a,
     {
+        if let Some(niche) = T::NICHE {
+            return if data == niche {
+                None
+            } else {
+                Some(T::from_bytes(data))
+            };
+        }
         match data[0] {
             0 => None,
             1 => Some(T::from_bytes(&data[1..])),
@@ -364,6 +390,12 @@ impl<T: Value> Value for Option<T> {
     where
         Self: 'b,
     {
+        if let Some(niche) = T::NICHE {
+            return match value {
+                Some(value) => T::as_bytes(value).as_ref().to_vec(),
+                None => niche.to_vec(),
+            };
+        }
         let mut result = vec![0];
         if let Some(x) = value {
             result[0] = 1;
@@ -384,6 +416,14 @@ impl<T: Value> Value for Option<T> {
 impl<T: Key> Key for Option<T> {
     #[allow(clippy::collapsible_else_if)]
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        if let Some(niche) = T::NICHE {
+            return match (data1 == niche, data2 == niche) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => T::compare(data1, data2),
+            };
+        }
         if data1[0] == 0 {
             if data2[0] == 0 {
                 Ordering::Equal
@@ -405,6 +445,14 @@ impl<T: Key> Key for Option<T> {
         if T::fixed_width().is_some() {
             return Cow::Borrowed(left);
         }
+        if let Some(niche) = T::NICHE {
+            // `None` is the smallest key; otherwise both inputs are untagged `Some` values.
+            return if left == niche {
+                Cow::Borrowed(left)
+            } else {
+                T::separator(left, right)
+            };
+        }
         // `None` sorts below every `Some` and encodes as the tag alone, so nothing is shorter
         if left[0] == 0 {
             return Cow::Borrowed(left);
@@ -424,6 +472,9 @@ impl<T: Key> Key for Option<T> {
 
     // `None` sorts below every `Some`
     fn min_encoded_key() -> Option<Cow<'static, [u8]>> {
+        if let Some(niche) = T::NICHE {
+            return Some(Cow::Borrowed(niche));
+        }
         Some(match T::fixed_width() {
             // A fixed width `T` pads the tag out to the width of a `Some`
             Some(width) => Cow::Owned(vec![0; width + 1]),
@@ -915,6 +966,56 @@ le_impl!(i64);
 le_impl!(i128);
 le_value!(f32);
 le_value!(f64);
+
+macro_rules! nonzero_impl {
+    ($t:ty, $primitive:ty) => {
+        impl Value for $t {
+            const NICHE: Option<&'static [u8]> = Some(&[0; size_of::<$primitive>()]);
+
+            type SelfType<'a> = $t;
+            type AsBytes<'a> = [u8; size_of::<$primitive>()];
+
+            fn fixed_width() -> Option<usize> {
+                <$primitive>::fixed_width()
+            }
+
+            fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
+            where
+                Self: 'a,
+            {
+                Self::new(<$primitive>::from_bytes(data)).unwrap()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
+            where
+                Self: 'b,
+            {
+                value.get().to_le_bytes()
+            }
+
+            fn type_name() -> TypeName {
+                TypeName::internal(stringify!($t))
+            }
+        }
+
+        impl Key for $t {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+            }
+        }
+    };
+}
+
+nonzero_impl!(NonZeroU8, u8);
+nonzero_impl!(NonZeroU16, u16);
+nonzero_impl!(NonZeroU32, u32);
+nonzero_impl!(NonZeroU64, u64);
+nonzero_impl!(NonZeroU128, u128);
+nonzero_impl!(NonZeroI8, i8);
+nonzero_impl!(NonZeroI16, i16);
+nonzero_impl!(NonZeroI32, i32);
+nonzero_impl!(NonZeroI64, i64);
+nonzero_impl!(NonZeroI128, i128);
 
 #[cfg(test)]
 mod tests {

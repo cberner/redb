@@ -63,6 +63,10 @@
   all built-in types are unaffected.
 
 ## 4.4.0 - 2026-XX-XX
+* Add `Value` and `Key` support for the fixed-width `NonZero*` integer types. Their `Option`
+  encodings use zero for `None`, so `Option<NonZeroU32>`, for example, takes only four bytes.
+  Custom types can opt into this encoding through `Value::NICHE`, and single-element tuples
+  forward their element's niche. Existing built-in types retain their encodings.
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
 

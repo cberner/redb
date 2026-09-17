@@ -453,6 +453,8 @@ macro_rules! tuple_impl {
 }
 
 impl<T: Value> Value for (T,) {
+    const NICHE: Option<&'static [u8]> = T::NICHE;
+
     type SelfType<'a>
         = (T::SelfType<'a>,)
     where
