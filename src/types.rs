@@ -160,6 +160,17 @@ pub trait Value: Debug {
     where
         Self: 'a;
 
+    /// A byte string that [`as_bytes()`](Self::as_bytes) never returns, if the type declares one.
+    ///
+    /// Implementations must ensure that `as_bytes()` never returns it, for any value. A fixed
+    /// width type's niche must be exactly [`fixed_width()`](Self::fixed_width) bytes long; a
+    /// variable width type's may be any length, including empty. The default, `None`, declares
+    /// no niche.
+    ///
+    /// Container types may use it as an encoding that no value of `Self` occupies: `Option<Self>`,
+    /// for example, encodes `None` as it, in place of a tag byte.
+    const NICHE: Option<&'static [u8]> = None;
+
     /// Width of a fixed type, or None for variable width
     fn fixed_width() -> Option<usize>;
 

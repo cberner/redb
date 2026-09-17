@@ -63,6 +63,10 @@
   all built-in types are unaffected.
 
 ## 4.4.0 - 2026-XX-XX
+### New features
+* Add `Value::NICHE`, an optional byte string that a type never encodes to.
+
+### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
 
