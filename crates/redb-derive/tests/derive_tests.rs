@@ -3,6 +3,7 @@ use redb::ReadableTable;
 use redb::{Database, Key, ReadableDatabase, TableDefinition, TableError, TypeName, Value};
 use redb_derive::{Key, Value};
 use std::fmt::Debug;
+use std::num::{NonZeroU32, NonZeroU64};
 use tempfile::NamedTempFile;
 
 fn create_tempfile() -> NamedTempFile {
@@ -212,6 +213,77 @@ fn test_single_field() {
     assert_eq!(value, original.value);
     test_key_helper::<SingleField>(&original);
     test_value_helper::<SingleField>(original, "SingleField {value: i32}");
+}
+
+#[derive(Key, Value, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NonZeroId(NonZeroU32);
+
+#[derive(Key, Value, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NamedNonZero {
+    id: NonZeroU64,
+}
+
+#[derive(Key, Value, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct NestedNonZeroId(NonZeroId);
+
+#[derive(Key, Value, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct TwoNonZero(NonZeroU32, NonZeroU32);
+
+// A struct with one field is encoded exactly as that field, like `(T,)`, so it has the field's
+// niche, however deeply nested, and `Option` of it is encoded with that niche. Other structs
+// declare none.
+#[test]
+fn test_single_field_forwards_niche() {
+    assert_eq!(<NonZeroId as Value>::NICHE, <NonZeroU32 as Value>::NICHE);
+    assert_eq!(<NamedNonZero as Value>::NICHE, <NonZeroU64 as Value>::NICHE);
+    assert_eq!(
+        <NestedNonZeroId as Value>::NICHE,
+        <NonZeroU32 as Value>::NICHE
+    );
+    assert_eq!(<TupleStruct1 as Value>::NICHE, None);
+    assert_eq!(<SingleField as Value>::NICHE, None);
+    assert_eq!(<TwoNonZero as Value>::NICHE, None);
+    assert_eq!(<UnitStruct as Value>::NICHE, None);
+
+    let one = NonZeroId(NonZeroU32::new(1).unwrap());
+    assert_eq!(<Option<NonZeroId> as Value>::fixed_width(), Some(4));
+    assert_eq!(<Option<NonZeroId> as Value>::as_bytes(&None), [0; 4]);
+    assert_eq!(
+        <Option<NonZeroId> as Value>::as_bytes(&Some(one)),
+        [1, 0, 0, 0]
+    );
+    assert_eq!(<Option<NonZeroId> as Value>::from_bytes(&[0; 4]), None);
+    assert_eq!(
+        <Option<NonZeroId> as Value>::from_bytes(&[1, 0, 0, 0]),
+        Some(one)
+    );
+    assert_eq!(<Option<TwoNonZero> as Value>::fixed_width(), Some(9));
+
+    // A table of it stores `None` as the niche, sorting below every `Some`
+    let seven = NamedNonZero {
+        id: NonZeroU64::new(7).unwrap(),
+    };
+    let file = create_tempfile();
+    let db = Database::create(file.path()).unwrap();
+    let table_def: TableDefinition<Option<NonZeroId>, Option<NamedNonZero>> =
+        TableDefinition::new("test");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(Some(one), None).unwrap();
+        table.insert(None, Some(seven)).unwrap();
+    }
+    write_txn.commit().unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(None).unwrap().unwrap().value(), Some(seven));
+    assert_eq!(table.get(Some(one)).unwrap().unwrap().value(), None);
+    let keys: Vec<Option<NonZeroId>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value())
+        .collect();
+    assert_eq!(keys, [None, Some(one)]);
 }
 
 // A field type whose inherent methods share names with the `Value` trait methods but lie.
@@ -466,6 +538,10 @@ mod hostile {
         pub b: ::std::string::String,
         pub c: ::std::vec::Vec<::std::primitive::u8>,
     }
+
+    // One field, so the forwarded niche is generated too
+    #[derive(Key, Value, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct SneakyOne(pub ::std::primitive::u16);
 }
 
 #[test]
@@ -488,6 +564,9 @@ fn test_shadowed_names_at_derive_site() {
         c: vec![4, 5],
     };
     test_key_helper::<hostile::Sneaky>(&original);
+
+    assert_eq!(<hostile::SneakyOne as Value>::NICHE, None);
+    test_key_helper::<hostile::SneakyOne>(&hostile::SneakyOne(3));
 }
 
 // Shadowing cannot catch a reliance on trait methods the prelude brings into scope -- shadowing
@@ -512,6 +591,18 @@ mod no_prelude {
         pub b: ::std::string::String,
         pub c: ::std::vec::Vec<::std::primitive::u8>,
     }
+
+    // One field, so the forwarded niche is generated too
+    #[derive(
+        Key,
+        Value,
+        ::std::fmt::Debug,
+        ::std::cmp::PartialEq,
+        ::std::cmp::Eq,
+        ::std::cmp::PartialOrd,
+        ::std::cmp::Ord,
+    )]
+    pub struct BareOne(pub ::std::primitive::u16);
 }
 
 #[test]
@@ -534,6 +625,9 @@ fn test_no_prelude_at_derive_site() {
         c: vec![4, 5],
     };
     test_key_helper::<no_prelude::Bare>(&original);
+
+    assert_eq!(<no_prelude::BareOne as Value>::NICHE, None);
+    test_key_helper::<no_prelude::BareOne>(&no_prelude::BareOne(3));
 }
 
 mod name_collision {

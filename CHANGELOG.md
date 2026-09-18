@@ -61,6 +61,10 @@
   tagged in the derived `TypeName`, so structs containing them change type identity: their
   existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
   all built-in types are unaffected.
+* `#[derive(Value)]` on a struct with exactly one field now forwards the field's `Value::NICHE`,
+  so `Option` of such a struct is encoded as `Option` of the field is. The generated code refers
+  to `Value::NICHE`, so such a struct can only be derived against a redb that has it; other
+  structs are unaffected.
 
 ## 4.4.0 - 2026-XX-XX
 ### New features

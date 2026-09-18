@@ -5,7 +5,8 @@
 //! The composed type name of a struct with fields reads the field types' `TypeName`s only
 //! through `TypeName::new`, `name()`, and `PartialEq`, so that it compiles against every redb
 //! version exposing those -- redb 3.0 on. redb 2.6 keeps `name()` private, so the 2.6 struct
-//! here is a unit struct, the most that version can derive.
+//! here is a unit struct, the most that version can derive. A struct with one field forwards
+//! `Value::NICHE`, which redb 3.0 lacks, so the 3.0 structs here have two fields or more.
 
 mod old {
     use redb_derive::{Key, Value};
@@ -24,6 +25,7 @@ mod old3 {
     #[redb(crate = "redb3_0")]
     pub struct Old3Inner {
         pub tag: u16,
+        pub flag: bool,
     }
 
     #[derive(Value, Key, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -86,14 +88,17 @@ fn derives_for_both_redb_versions() {
 
     let old3_value = Old3Value {
         id: 7,
-        inner: Old3Inner { tag: 3 },
-        maybe: Some(Old3Inner { tag: 5 }),
+        inner: Old3Inner { tag: 3, flag: true },
+        maybe: Some(Old3Inner {
+            tag: 5,
+            flag: false,
+        }),
         name: "old3".to_string(),
     };
     assert_eq!(
         <Old3Value as redb3_0::Value>::type_name().name(),
-        "Old3Value {id: u32, inner: Old3Inner {tag: u16}#user, \
-         maybe: Option<Old3Inner {tag: u16}>, name: String}"
+        "Old3Value {id: u32, inner: Old3Inner {tag: u16, flag: bool}#user, \
+         maybe: Option<Old3Inner {tag: u16, flag: bool}>, name: String}"
     );
     let old3_file = create_tempfile();
     let old3_db = redb3_0::Database::create(old3_file.path()).unwrap();

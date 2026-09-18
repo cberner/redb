@@ -47,7 +47,9 @@ fn redb_crate_path_for(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
 /// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
 /// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
 /// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
-/// versions as well. The tagging of user-defined field types in the composed type name follows
+/// versions as well. For a struct with exactly one field, the derived `Value` implementation
+/// forwards the field's `Value::NICHE`, so such a struct needs a version that has that
+/// constant. The tagging of user-defined field types in the composed type name follows
 /// the named version's classification: redb 4.1 and older classify composites (`Option`,
 /// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
 /// untagged there, and their names collide exactly where that version's own type names do.
@@ -90,12 +92,18 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 
 /// Derives `redb::Value` for a struct whose fields all implement `Value`.
 ///
+/// A struct with exactly one field is encoded exactly as that field, like `(T,)`, so it
+/// forwards the field's `Value::NICHE`, and `Option` of it is encoded as `Option` of the field
+/// is. Other structs declare no niche.
+///
 /// The generated implementation refers to the redb crate as `::redb`. When it should be
 /// generated for a crate under another name -- a renamed dependency
 /// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
 /// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
 /// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
-/// versions as well. The tagging of user-defined field types in the composed type name follows
+/// versions as well. For a struct with exactly one field, the derived `Value` implementation
+/// forwards the field's `Value::NICHE`, so such a struct needs a version that has that
+/// constant. The tagging of user-defined field types in the composed type name follows
 /// the named version's classification: redb 4.1 and older classify composites (`Option`,
 /// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
 /// untagged there, and their names collide exactly where that version's own type names do.
@@ -128,6 +136,7 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let as_bytes_impl = generate_as_bytes(&data_struct.fields, &redb);
     let from_bytes_impl = generate_from_bytes(name, &data_struct.fields, &redb);
     let fixed_width_impl = generate_fixed_width(&data_struct.fields, &redb);
+    let niche_impl = generate_niche(&data_struct.fields, &redb);
 
     Ok(quote! {
         impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
@@ -137,6 +146,8 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
             type AsBytes<'__redb_a> = ::std::vec::Vec<::std::primitive::u8>
             where
                 Self: '__redb_a;
+
+            #niche_impl
 
             fn fixed_width() -> ::std::option::Option<::std::primitive::usize> {
                 #fixed_width_impl
@@ -310,6 +321,21 @@ fn get_field_types(fields: &Fields) -> Vec<syn::Type> {
             .cloned()
             .collect(),
         Fields::Unit => vec![],
+    }
+}
+
+// A struct with one field is encoded exactly as that field, like `(T,)`, so the field's niche
+// is its niche too. Any other struct keeps the trait's default, by declaring nothing. The
+// generated code refers to `Value::NICHE`, so a one-field struct can only be derived against a
+// redb that has it.
+fn generate_niche(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let field_types = get_field_types(fields);
+    let [field_type] = field_types.as_slice() else {
+        return quote! {};
+    };
+    quote! {
+        const NICHE: ::std::option::Option<&'static [::std::primitive::u8]> =
+            <#field_type as #redb::Value>::NICHE;
     }
 }
 
