@@ -73,8 +73,10 @@
   one is the same width as the bare type, with zero encoding `None`.
 * Add `Value::NICHE`, an optional byte string that a type never encodes to. When a type declares
   one, `Option` of that type encodes `None` as it, in place of a tag byte. Adding a niche to a type
-  whose `Option` is already stored in a table changes that encoding without changing the table's
-  type name, so the stored data would be misread.
+  changes the encoding of `Option` of it, and its type name with it, so the two are not equivalent
+  types: a table that stores `Option` of the type from before it declared the niche fails to open
+  with `TableTypeMismatch` instead of being misread, and can be read through a copy of the type
+  that declares no niche.
 
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction

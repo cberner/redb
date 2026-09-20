@@ -172,7 +172,8 @@ pub trait Value: Debug {
     /// no niche.
     ///
     /// Container types may use it as an encoding that no value of `Self` occupies: `Option<Self>`,
-    /// for example, encodes `None` as it, in place of a tag byte.
+    /// for example, encodes `None` as it, in place of a tag byte. Declaring a niche changes the
+    /// type name of `Option<Self>`, so it is not equivalent to `Option` of the type without one.
     const NICHE: Option<&'static [u8]> = None;
 
     /// Width of a fixed type, or None for variable width
@@ -418,8 +419,12 @@ impl<T: Value> Value for Option<T> {
 
     fn type_name() -> TypeName {
         let inner = T::type_name();
-        TypeName::internal(&format!("Option<{}>", inner.name()))
-            .into_composite(inner.is_user_defined())
+        let name = if T::NICHE.is_some() {
+            format!("niche::Option<{}>", inner.name())
+        } else {
+            format!("Option<{}>", inner.name())
+        };
+        TypeName::internal(&name).into_composite(inner.is_user_defined())
     }
 }
 
@@ -1204,6 +1209,36 @@ mod tests {
         assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [1, b'a']);
         assert_eq!(<Option<()> as Value>::as_bytes(&None), [0]);
         assert_eq!(<Option<()> as Value>::as_bytes(&Some(())), [1]);
+    }
+
+    // `Option` of a type with a niche has a name of its own, so a table written with the tag
+    // encoding, before the type declared the niche, keeps its identity
+    #[test]
+    fn option_type_name_records_the_niche() {
+        assert_eq!(<Option<u32> as Value>::type_name().name(), "Option<u32>");
+        assert_eq!(<Option<&str> as Value>::type_name().name(), "Option<&str>");
+        assert_eq!(
+            <Option<NonZeroU32> as Value>::type_name().name(),
+            "niche::Option<NonZeroU32>"
+        );
+        assert!(!<Option<NonZeroU32> as Value>::type_name().is_user_defined());
+        // Through the types that forward a niche, and into the composites that embed the name
+        assert_eq!(
+            <Option<(NonZeroU32,)> as Value>::type_name().name(),
+            "niche::Option<(NonZeroU32,)>"
+        );
+        assert_eq!(
+            <Vec<Option<NonZeroU32>> as Value>::type_name().name(),
+            "Vec<niche::Option<NonZeroU32>>"
+        );
+        // `Option` itself declares none, so the outer one keeps the plain name
+        assert_eq!(
+            <Option<Option<NonZeroU32>> as Value>::type_name().name(),
+            "Option<niche::Option<NonZeroU32>>"
+        );
+        let user = <Option<NonMaxU16> as Value>::type_name();
+        assert_eq!(user.name(), "niche::Option<test::NonMaxU16>");
+        assert!(user.is_user_defined());
     }
 
     // A fixed width key type with a niche: a `u16` that is never `u16::MAX`, which frees that
