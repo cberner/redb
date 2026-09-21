@@ -313,6 +313,10 @@ impl Value for bool {
     where
         Self: 'a;
 
+    // `false` and `true` encode to 0 and 1, so nothing encodes to 0xff
+    #[cfg(feature = "experimental-niches")]
+    const NICHE: Option<&'static [u8]> = Some(&[0xff]);
+
     fn fixed_width() -> Option<usize> {
         Some(1)
     }
@@ -1214,15 +1218,42 @@ mod tests {
     #[test]
     fn option_of_type_without_niche_keeps_the_tag() {
         assert_eq!(<u32 as Value>::NICHE, None);
-        assert_eq!(<bool as Value>::NICHE, None);
         assert_eq!(<() as Value>::NICHE, None);
         assert_eq!(<Option<u32> as Value>::fixed_width(), Some(5));
         assert_eq!(<Option<u32> as Value>::as_bytes(&None), [0; 5]);
         assert_eq!(<Option<u32> as Value>::as_bytes(&Some(1)), [1, 1, 0, 0, 0]);
-        assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0, 0]);
-        assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [1, 0]);
         assert_eq!(<Option<()> as Value>::as_bytes(&None), [0]);
         assert_eq!(<Option<()> as Value>::as_bytes(&Some(())), [1]);
+    }
+
+    // `bool` keeps the tag without the feature, and drops it with the feature for the 0xff
+    // niche, which neither of its values encodes to
+    #[test]
+    fn option_bool_encoding() {
+        #[cfg(not(feature = "experimental-niches"))]
+        {
+            assert_eq!(<bool as Value>::NICHE, None);
+            assert_eq!(<Option<bool> as Value>::fixed_width(), Some(2));
+            assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0, 0]);
+            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [1, 0]);
+            assert_eq!(<Option<bool> as Value>::type_name().name(), "Option<bool>");
+        }
+        #[cfg(feature = "experimental-niches")]
+        {
+            assert_eq!(<bool as Value>::NICHE, Some([0xff].as_slice()));
+            assert_eq!(<Option<bool> as Value>::fixed_width(), Some(1));
+            assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0xff]);
+            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [0]);
+            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(true)), [1]);
+            for value in [None, Some(false), Some(true)] {
+                let encoded = <Option<bool> as Value>::as_bytes(&value);
+                assert_eq!(<Option<bool> as Value>::from_bytes(&encoded), value);
+            }
+            assert_eq!(
+                <Option<bool> as Value>::type_name().name(),
+                "niche::Option<bool>"
+            );
+        }
     }
 
     // `&str` and `String` keep the tag without the feature, and drop it with the feature for the
