@@ -771,7 +771,7 @@ fn array_end_offset(data: &[u8], index: usize) -> usize {
     u32::from_le_bytes(data[range].try_into().unwrap()) as usize
 }
 
-// The niche of `&str`: no UTF-8 string contains the byte 0xff
+// The niche of `&str` and `String`: no UTF-8 string contains the byte 0xff
 #[cfg(feature = "experimental-niches")]
 const STR_NICHE: &[u8] = &[0xff];
 
@@ -854,6 +854,9 @@ impl Value for String {
         = &'a str
     where
         Self: 'a;
+
+    #[cfg(feature = "experimental-niches")]
+    const NICHE: Option<&'static [u8]> = Some(STR_NICHE);
 
     fn fixed_width() -> Option<usize> {
         None
@@ -1222,32 +1225,42 @@ mod tests {
         assert_eq!(<Option<()> as Value>::as_bytes(&Some(())), [1]);
     }
 
-    // `&str` keeps the tag without the feature, and drops it with the feature for the 0xff
-    // niche, which no UTF-8 string contains. `String` keeps the tag either way
+    // `&str` and `String` keep the tag without the feature, and drop it with the feature for the
+    // 0xff niche, which no UTF-8 string contains
     #[test]
     fn option_str_encoding() {
         assert_eq!(<Option<&str> as Value>::fixed_width(), None);
-        assert_eq!(<String as Value>::NICHE, None);
-        assert_eq!(<Option<String> as Value>::as_bytes(&None), [0]);
-        assert_eq!(
-            <Option<String> as Value>::as_bytes(&Some("a".to_string())),
-            [1, b'a']
-        );
+        assert_eq!(<Option<String> as Value>::fixed_width(), None);
         #[cfg(not(feature = "experimental-niches"))]
         {
             assert_eq!(<&str as Value>::NICHE, None);
+            assert_eq!(<String as Value>::NICHE, None);
             assert_eq!(<Option<&str> as Value>::as_bytes(&None), [0]);
             assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [1, b'a']);
+            assert_eq!(<Option<String> as Value>::as_bytes(&None), [0]);
+            assert_eq!(
+                <Option<String> as Value>::as_bytes(&Some("a".to_string())),
+                [1, b'a']
+            );
         }
         #[cfg(feature = "experimental-niches")]
         {
             assert_eq!(<&str as Value>::NICHE, Some([0xff].as_slice()));
+            assert_eq!(<String as Value>::NICHE, Some([0xff].as_slice()));
             assert_eq!(<Option<&str> as Value>::as_bytes(&None), [0xff]);
             assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [b'a']);
             assert!(<Option<&str> as Value>::as_bytes(&Some("")).is_empty());
+            assert_eq!(<Option<String> as Value>::as_bytes(&None), [0xff]);
+            assert_eq!(
+                <Option<String> as Value>::as_bytes(&Some("a".to_string())),
+                [b'a']
+            );
             for value in [None, Some(""), Some("a"), Some("\u{ff}\u{10ffff}")] {
                 let encoded = <Option<&str> as Value>::as_bytes(&value);
                 assert_eq!(<Option<&str> as Value>::from_bytes(&encoded), value);
+                let owned = value.map(str::to_string);
+                assert_eq!(<Option<String> as Value>::as_bytes(&owned), encoded);
+                assert_eq!(<Option<String> as Value>::from_bytes(&encoded), owned);
             }
         }
     }
@@ -1280,15 +1293,15 @@ mod tests {
         assert_eq!(user.name(), "niche::Option<test::NonMaxU16>");
         assert!(user.is_user_defined());
 
-        assert_eq!(
-            <Option<String> as Value>::type_name().name(),
-            "Option<String>"
-        );
         #[cfg(feature = "experimental-niches")]
         {
             assert_eq!(
                 <Option<&str> as Value>::type_name().name(),
                 "niche::Option<&str>"
+            );
+            assert_eq!(
+                <Option<String> as Value>::type_name().name(),
+                "niche::Option<String>"
             );
             // The legacy type has the name and the encoding `&str` had without the niche
             assert_eq!(
@@ -1306,7 +1319,13 @@ mod tests {
             );
         }
         #[cfg(not(feature = "experimental-niches"))]
-        assert_eq!(<Option<&str> as Value>::type_name().name(), "Option<&str>");
+        {
+            assert_eq!(<Option<&str> as Value>::type_name().name(), "Option<&str>");
+            assert_eq!(
+                <Option<String> as Value>::type_name().name(),
+                "Option<String>"
+            );
+        }
     }
 
     // A fixed width key type with a niche: a `u16` that is never `u16::MAX`, which frees that

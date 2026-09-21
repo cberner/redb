@@ -53,6 +53,10 @@
   `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
   longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
   it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `String` declares the same `NICHE` as `&str`, so `Option<String>`
+  is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
+  A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
+  migrated by copying it into a new table. The file format is unchanged.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
