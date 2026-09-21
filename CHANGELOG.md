@@ -45,6 +45,9 @@
   to end.
 * In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
+* Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
+  `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
+  the niche opens as `Option<Legacy<T>>`, however deeply nested.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
