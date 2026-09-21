@@ -193,9 +193,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
     #[cfg(feature = "experimental-api-5")]
-    pub fn extract_from_if<'a, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub fn extract_from_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        range: impl KeyRange<'a, K>,
+        range: impl KeyRange<K>,
         predicate: F,
     ) -> Result<ExtractIf<'_, K, V, F>> {
         let (lower, upper) = range.key_bounds();
@@ -270,9 +270,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// [`crate::CommitError::TransactionPoisoned`].
     ///
     #[cfg(feature = "experimental-api-5")]
-    pub fn retain_in<'a, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub fn retain_in<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
-        range: impl KeyRange<'a, K>,
+        range: impl KeyRange<K>,
         predicate: F,
     ) -> Result {
         let (lower, upper) = range.key_bounds();
@@ -505,7 +505,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<Range<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
         self.range_in_bounds(lower, upper)
     }
@@ -664,7 +664,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// # }
     /// ```
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<Range<'_, K, V>>;
+    fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>>;
 
     /// Returns a double-ended iterator over a range of elements in the table
     ///
@@ -940,7 +940,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     /// counted and keeps the transaction alive until it is dropped, as do the
     /// [`OwnedAccessGuard`]s it yields.
     #[cfg(feature = "experimental-api-5")]
-    pub fn range_owned<'a>(&self, range: impl KeyRange<'a, K>) -> Result<OwnedRange<K, V>> {
+    pub fn range_owned(&self, range: impl KeyRange<K>) -> Result<OwnedRange<K, V>> {
         let (lower, upper) = range.key_bounds();
         Ok(OwnedRange::new(
             self.range_in_bounds(lower, upper)?,
@@ -989,7 +989,7 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<Range<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
         self.range_in_bounds(lower, upper)
     }

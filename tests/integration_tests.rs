@@ -4268,7 +4268,7 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> redb::Result<Range<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> redb::Result<Range<'_, K, V>> {
         self.inner.range(range)
     }
 
@@ -4331,7 +4331,7 @@ impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> Readabl
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> redb::Result<MultimapRange<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> redb::Result<MultimapRange<'_, K, V>> {
         self.inner.range(range)
     }
 

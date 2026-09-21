@@ -966,7 +966,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<MultimapRange<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
         self.range_in_bounds(lower, upper)
     }
@@ -1039,7 +1039,7 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
 
     /// Returns a double-ended iterator over a range of elements in the table
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<MultimapRange<'_, K, V>>;
+    fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>>;
 
     /// Returns a double-ended iterator over a range of elements in the table
     #[cfg(not(feature = "experimental-api-5"))]
@@ -1285,7 +1285,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     /// reference counted and keeps the transaction alive until it is dropped, as do the entries
     /// it yields.
     #[cfg(feature = "experimental-api-5")]
-    pub fn range_owned<'a>(&self, range: impl KeyRange<'a, K>) -> Result<OwnedMultimapRange<K, V>> {
+    pub fn range_owned(&self, range: impl KeyRange<K>) -> Result<OwnedMultimapRange<K, V>> {
         let (lower, upper) = range.key_bounds();
         Ok(OwnedMultimapRange::new(
             self.range_in_bounds(lower, upper)?,
@@ -1365,7 +1365,7 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
     }
 
     #[cfg(feature = "experimental-api-5")]
-    fn range<'a>(&self, range: impl KeyRange<'a, K>) -> Result<MultimapRange<'_, K, V>> {
+    fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
         self.range_in_bounds(lower, upper)
     }
