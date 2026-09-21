@@ -11,6 +11,39 @@ use core::marker::PhantomData;
 /// before version 5.0 no longer open as `Option<T>` in version 5.0. It opens as
 /// `Option<Legacy<T>>`, at any depth of nesting, and yields plain `Option<T>` values; migrate it by
 /// copying it into a table of `Option<T>`.
+///
+/// From redb 5.0 on, `&str` declares a niche, so a table of `Option<&str>` written by an earlier
+/// version opens as `Option<Legacy<&str>>`:
+///
+/// ```rust
+/// use redb::{Database, Legacy, ReadableTable, TableDefinition};
+/// # use tempfile::NamedTempFile;
+/// const OLD: TableDefinition<u64, Option<Legacy<&str>>> = TableDefinition::new("names");
+/// const NEW: TableDefinition<u64, Option<&str>> = TableDefinition::new("names_v2");
+///
+/// # fn main() -> Result<(), redb::Error> {
+/// # #[cfg(not(target_os = "wasi"))]
+/// # let tmpfile = NamedTempFile::new().unwrap();
+/// # #[cfg(target_os = "wasi")]
+/// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
+/// # let db = Database::create(tmpfile.path())?;
+/// # let txn = db.begin_write()?;
+/// # txn.open_table(OLD)?.insert(1, Some("one"))?;
+/// # txn.commit()?;
+/// let txn = db.begin_write()?;
+/// {
+///     let old = txn.open_table(OLD)?;
+///     let mut new = txn.open_table(NEW)?;
+///     for entry in old.iter()? {
+///         let (key, value) = entry?;
+///         new.insert(key.value(), value.value())?;
+///     }
+/// }
+/// txn.delete_table(OLD)?;
+/// txn.commit()?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Legacy<T>(PhantomData<T>);
 

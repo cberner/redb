@@ -714,7 +714,7 @@ mod test {
         // deeply it is nested
         assert_eq!(<(Niched,) as Value>::NICHE, Some([0xff].as_slice()));
         assert_eq!(<((Niched,),) as Value>::NICHE, Some([0xff].as_slice()));
-        assert_eq!(<(&str,) as Value>::NICHE, None);
+        assert_eq!(<(u32,) as Value>::NICHE, None);
         // Longer tuples are encoded differently, so they declare none
         assert_eq!(<(Niched, Niched) as Value>::NICHE, None);
 

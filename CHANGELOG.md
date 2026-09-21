@@ -48,6 +48,11 @@
 * Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
   `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
   the niche opens as `Option<Legacy<T>>`, however deeply nested.
+* Under `experimental-niches`, `&str` declares a `NICHE`, so `Option<&str>` is stored without a
+  tag byte, and is no longer equivalent to `Option<&str>` without the flag. A table of
+  `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
+  longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
+  it into a new table. The file format is unchanged.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
