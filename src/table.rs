@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental_cursor")]
+use crate::CursorError;
 #[cfg(feature = "experimental-api-5")]
 use crate::KeyRange;
 use crate::db::TransactionGuard;
@@ -1683,7 +1685,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     ///
     /// If the key does not sort strictly greater than the entry before the
     /// gap and strictly smaller than the entry after it,
-    /// [`StorageError::UnorderedKey`] is returned and nothing is changed.
+    /// [`CursorError::UnorderedKey`] is returned and nothing is changed.
     /// Unlike [`Table::insert`], an existing key is never overwritten:
     /// inserting a key equal to either neighbor is unordered.
     ///
@@ -1697,7 +1699,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
-    ) -> Result<()> {
+    ) -> Result<(), CursorError> {
         self.check_usable()?;
         let key_bytes = K::as_bytes(key.borrow());
         let value_bytes = V::as_bytes(value.borrow());
@@ -1707,8 +1709,8 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
             .insert_before(key_bytes.as_ref(), value_bytes.as_ref())
         {
             Ok(true) => Ok(()),
-            Ok(false) => Err(StorageError::UnorderedKey),
-            Err(err) => Err(self.latch_error(err)),
+            Ok(false) => Err(CursorError::UnorderedKey),
+            Err(err) => Err(self.latch_error(err).into()),
         }
     }
 
@@ -1718,7 +1720,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     ///
     /// If the key does not sort strictly greater than the entry before the
     /// gap and strictly smaller than the entry after it,
-    /// [`StorageError::UnorderedKey`] is returned and nothing is changed.
+    /// [`CursorError::UnorderedKey`] is returned and nothing is changed.
     /// Unlike [`Table::insert`], an existing key is never overwritten:
     /// inserting a key equal to either neighbor is unordered.
     ///
@@ -1732,7 +1734,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
-    ) -> Result<()> {
+    ) -> Result<(), CursorError> {
         self.check_usable()?;
         let key_bytes = K::as_bytes(key.borrow());
         let value_bytes = V::as_bytes(value.borrow());
@@ -1742,8 +1744,8 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
             .insert_after(key_bytes.as_ref(), value_bytes.as_ref())
         {
             Ok(true) => Ok(()),
-            Ok(false) => Err(StorageError::UnorderedKey),
-            Err(err) => Err(self.latch_error(err)),
+            Ok(false) => Err(CursorError::UnorderedKey),
+            Err(err) => Err(self.latch_error(err).into()),
         }
     }
 
