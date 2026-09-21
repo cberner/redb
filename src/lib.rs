@@ -85,6 +85,8 @@ pub use error::{
 };
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
+#[cfg(feature = "experimental-niches")]
+pub use legacy_types::Legacy;
 #[cfg(feature = "experimental-api-5")]
 pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
@@ -117,6 +119,8 @@ pub mod io;
 mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
+#[cfg(feature = "experimental-niches")]
+mod legacy_types;
 mod multimap_table;
 mod sealed;
 mod sync;
