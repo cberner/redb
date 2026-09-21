@@ -909,6 +909,10 @@ impl Value for char {
     where
         Self: 'a;
 
+    // A code point is at most 0x10ffff, so nothing encodes to 0xffffff
+    #[cfg(feature = "experimental-niches")]
+    const NICHE: Option<&'static [u8]> = Some(&[0xff; 3]);
+
     fn fixed_width() -> Option<usize> {
         Some(3)
     }
@@ -1252,6 +1256,38 @@ mod tests {
             assert_eq!(
                 <Option<bool> as Value>::type_name().name(),
                 "niche::Option<bool>"
+            );
+        }
+    }
+
+    // `char` keeps the tag without the feature, and drops it with the feature for the 0xffffff
+    // niche, which lies beyond the last code point
+    #[test]
+    fn option_char_encoding() {
+        #[cfg(not(feature = "experimental-niches"))]
+        {
+            assert_eq!(<char as Value>::NICHE, None);
+            assert_eq!(<Option<char> as Value>::fixed_width(), Some(4));
+            assert_eq!(<Option<char> as Value>::as_bytes(&None), [0; 4]);
+            assert_eq!(
+                <Option<char> as Value>::as_bytes(&Some('a')),
+                [1, b'a', 0, 0]
+            );
+            assert_eq!(<Option<char> as Value>::type_name().name(), "Option<char>");
+        }
+        #[cfg(feature = "experimental-niches")]
+        {
+            assert_eq!(<char as Value>::NICHE, Some([0xff; 3].as_slice()));
+            assert_eq!(<Option<char> as Value>::fixed_width(), Some(3));
+            assert_eq!(<Option<char> as Value>::as_bytes(&None), [0xff; 3]);
+            assert_eq!(<Option<char> as Value>::as_bytes(&Some('a')), [b'a', 0, 0]);
+            for value in [None, Some('\0'), Some('a'), Some(char::MAX)] {
+                let encoded = <Option<char> as Value>::as_bytes(&value);
+                assert_eq!(<Option<char> as Value>::from_bytes(&encoded), value);
+            }
+            assert_eq!(
+                <Option<char> as Value>::type_name().name(),
+                "niche::Option<char>"
             );
         }
     }

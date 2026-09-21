@@ -1,5 +1,5 @@
-// Tables of `Option<&str>`, `Option<String>`, and `Option<bool>` written by redb 2.6, before the
-// types declared a niche, are opened through the legacy type
+// Tables of `Option<&str>`, `Option<String>`, `Option<bool>`, and `Option<char>` written by
+// redb 2.6, before the types declared a niche, are opened through the legacy type
 #![cfg(feature = "experimental-niches")]
 
 use redb::{Database, Legacy, ReadableDatabase, ReadableTable, TableDefinition, TableError};
@@ -18,6 +18,10 @@ const V26_BOOL_VALUES: redb2_6::TableDefinition<u64, Option<bool>> =
     redb2_6::TableDefinition::new("bool_values");
 const V26_BOOL_KEYS: redb2_6::TableDefinition<Option<bool>, u64> =
     redb2_6::TableDefinition::new("bool_keys");
+const V26_CHAR_VALUES: redb2_6::TableDefinition<u64, Option<char>> =
+    redb2_6::TableDefinition::new("char_values");
+const V26_CHAR_KEYS: redb2_6::TableDefinition<Option<char>, u64> =
+    redb2_6::TableDefinition::new("char_keys");
 
 // The same tables under the type the niche gives, which does not open them
 const VALUES: TableDefinition<u64, Option<&str>> = TableDefinition::new("values");
@@ -26,6 +30,8 @@ const STRING_VALUES: TableDefinition<u64, Option<String>> = TableDefinition::new
 const STRING_KEYS: TableDefinition<Option<String>, u64> = TableDefinition::new("string_keys");
 const BOOL_VALUES: TableDefinition<u64, Option<bool>> = TableDefinition::new("bool_values");
 const BOOL_KEYS: TableDefinition<Option<bool>, u64> = TableDefinition::new("bool_keys");
+const CHAR_VALUES: TableDefinition<u64, Option<char>> = TableDefinition::new("char_values");
+const CHAR_KEYS: TableDefinition<Option<char>, u64> = TableDefinition::new("char_keys");
 
 // And under the legacy type, which does
 const LEGACY_VALUES: TableDefinition<u64, Option<Legacy<&str>>> = TableDefinition::new("values");
@@ -38,6 +44,10 @@ const LEGACY_BOOL_VALUES: TableDefinition<u64, Option<Legacy<bool>>> =
     TableDefinition::new("bool_values");
 const LEGACY_BOOL_KEYS: TableDefinition<Option<Legacy<bool>>, u64> =
     TableDefinition::new("bool_keys");
+const LEGACY_CHAR_VALUES: TableDefinition<u64, Option<Legacy<char>>> =
+    TableDefinition::new("char_values");
+const LEGACY_CHAR_KEYS: TableDefinition<Option<Legacy<char>>, u64> =
+    TableDefinition::new("char_keys");
 
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
@@ -66,6 +76,16 @@ fn boolean(i: u64) -> Option<bool> {
     }
 }
 
+// `None`, the first and the last code point, and unique characters below the surrogates
+fn character(i: u64) -> Option<char> {
+    match i {
+        0 => None,
+        1 => Some('\0'),
+        2 => Some(char::MAX),
+        _ => char::from_u32(0x100 + u32::try_from(i).unwrap()),
+    }
+}
+
 #[test]
 fn tables_written_without_the_niche_open_through_the_legacy_type() {
     let tmpfile = create_tempfile();
@@ -82,6 +102,8 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
             let mut string_keys = txn.open_table(V26_STRING_KEYS).unwrap();
             let mut bool_values = txn.open_table(V26_BOOL_VALUES).unwrap();
             let mut bool_keys = txn.open_table(V26_BOOL_KEYS).unwrap();
+            let mut char_values = txn.open_table(V26_CHAR_VALUES).unwrap();
+            let mut char_keys = txn.open_table(V26_CHAR_KEYS).unwrap();
             for i in 0..NUM_ENTRIES {
                 values.insert(i, string(i).as_deref()).unwrap();
                 keys.insert(string(i).as_deref(), i).unwrap();
@@ -89,6 +111,8 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
                 string_keys.insert(string(i), i).unwrap();
                 bool_values.insert(i, boolean(i)).unwrap();
                 bool_keys.insert(boolean(i), i % 3).unwrap();
+                char_values.insert(i, character(i)).unwrap();
+                char_keys.insert(character(i), i).unwrap();
             }
         }
         txn.commit().unwrap();
@@ -121,6 +145,14 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
         txn.open_table(BOOL_KEYS),
         Err(TableError::TableTypeMismatch { .. })
     ));
+    assert!(matches!(
+        txn.open_table(CHAR_VALUES),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    assert!(matches!(
+        txn.open_table(CHAR_KEYS),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
 
     let values = txn.open_table(LEGACY_VALUES).unwrap();
     let keys = txn.open_table(LEGACY_KEYS).unwrap();
@@ -128,6 +160,8 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
     let string_keys = txn.open_table(LEGACY_STRING_KEYS).unwrap();
     let bool_values = txn.open_table(LEGACY_BOOL_VALUES).unwrap();
     let bool_keys = txn.open_table(LEGACY_BOOL_KEYS).unwrap();
+    let char_values = txn.open_table(LEGACY_CHAR_VALUES).unwrap();
+    let char_keys = txn.open_table(LEGACY_CHAR_KEYS).unwrap();
     for i in 0..NUM_ENTRIES {
         let expected = string(i);
         assert_eq!(
@@ -139,5 +173,7 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
         assert_eq!(string_keys.get(&expected).unwrap().unwrap().value(), i);
         assert_eq!(bool_values.get(&i).unwrap().unwrap().value(), boolean(i));
         assert_eq!(bool_keys.get(&boolean(i)).unwrap().unwrap().value(), i % 3);
+        assert_eq!(char_values.get(&i).unwrap().unwrap().value(), character(i));
+        assert_eq!(char_keys.get(&character(i)).unwrap().unwrap().value(), i);
     }
 }
