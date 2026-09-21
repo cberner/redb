@@ -57,6 +57,10 @@
   is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
   A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
   migrated by copying it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `bool` declares a `NICHE`, so `Option<bool>` is stored in one byte
+  rather than two, and is no longer equivalent to `Option<bool>` without the flag. A table of
+  `Option<bool>` written without the flag opens as `Option<Legacy<bool>>`, and is migrated by
+  copying it into a new table. The file format is unchanged.
 
 ### redb-derive (unreleased)
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
