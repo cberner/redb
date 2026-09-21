@@ -79,6 +79,8 @@ pub use db::{
     RepairSession, StorageBackend, TableDefinition, TableHandle, UntypedMultimapTableHandle,
     UntypedTableHandle,
 };
+#[cfg(feature = "experimental_cursor")]
+pub use error::CursorError;
 pub use error::{
     BackendError, CommitError, CompactionError, DatabaseError, Error, SavepointError,
     SetDurabilityError, StorageError, TableError, TransactionError,

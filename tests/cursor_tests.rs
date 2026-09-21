@@ -1,8 +1,8 @@
 #![cfg(feature = "experimental_cursor")]
 
 use redb::{
-    Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError,
-    TableDefinition, TransactionError,
+    CursorError, Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+    TransactionError,
 };
 use std::ops::Bound;
 
@@ -239,7 +239,7 @@ fn unordered_keys_rejected() {
         for bad in [10u64, 15, 20, 30, 35] {
             assert!(matches!(
                 cursor.insert_before(bad, &bad),
-                Err(StorageError::UnorderedKey)
+                Err(CursorError::UnorderedKey)
             ));
         }
         // The cursor remains usable after rejections
@@ -247,11 +247,11 @@ fn unordered_keys_rejected() {
         // Later inserts must also stay above the pending insert
         assert!(matches!(
             cursor.insert_before(25, &25),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         assert!(matches!(
             cursor.insert_before(24, &24),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         cursor.insert_before(26, &26).unwrap();
         cursor.close().unwrap();
@@ -387,7 +387,7 @@ fn empty_and_rejected_only_cursors() {
         let mut cursor = table.upper_bound_mut(Bound::<u64>::Unbounded).unwrap();
         assert!(matches!(
             cursor.insert_before(10, &10),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         cursor.close().unwrap();
         assert_eq!(table.len().unwrap(), 1);
@@ -818,25 +818,25 @@ fn insert_after_unordered_keys_rejected() {
         // The gap is between 10 and 30.
         assert!(matches!(
             cursor.insert_after(10, &10),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         assert!(matches!(
             cursor.insert_after(30, &30),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         cursor.insert_after(25, &25).unwrap();
         // Later inserts must stay strictly below the pending one.
         assert!(matches!(
             cursor.insert_after(25, &25),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         assert!(matches!(
             cursor.insert_after(27, &27),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         assert!(matches!(
             cursor.insert_before(26, &26),
-            Err(StorageError::UnorderedKey)
+            Err(CursorError::UnorderedKey)
         ));
         cursor.insert_after(20, &20).unwrap();
         cursor.close().unwrap();

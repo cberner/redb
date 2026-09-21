@@ -98,6 +98,11 @@
   with `TableTypeMismatch` instead of being misread, and can be read through a copy of the type
   that declares no niche.
 
+### Minor improvements
+* Under the `experimental_cursor` feature flag, `CursorMut::insert_before()` and
+  `CursorMut::insert_after()` now return `CursorError`, whose `UnorderedKey` variant replaces
+  `StorageError::UnorderedKey`. `Error::UnorderedKey` is unchanged.
+
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
