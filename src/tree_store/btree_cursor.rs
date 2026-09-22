@@ -604,7 +604,6 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
 
     // The entry after the gap, without moving the gap. The position may still
     // settle onto an adjacent leaf sharing the gap.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn peek_next(&mut self) -> Result<Option<EntryGuard<K, V>>> {
         if !self.ensure_has_entry(Direction::Next)? {
             return Ok(None);
@@ -615,7 +614,6 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
     }
 
     // The entry before the gap, without moving the gap.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn peek_prev(&mut self) -> Result<Option<EntryGuard<K, V>>> {
         if !self.ensure_has_entry(Direction::Previous)? {
             return Ok(None);
@@ -1695,12 +1693,10 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorTree<'a, K, V> {
 // The tree-level cursor behind the public read-only `Cursor`. The caller
 // positions it with its seek methods before use; over an empty tree there is
 // no position and every operation reports no entry.
-#[cfg(feature = "experimental-api-5")]
 pub(crate) struct BtreeCursor<K: Key + 'static, V: Value + 'static> {
     inner: Option<Cursor<K, V>>,
 }
 
-#[cfg(feature = "experimental-api-5")]
 impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
     pub(crate) fn new(root: Option<BtreeHeader>, resolver: PageResolver, hint: PageHint) -> Self {
         Self {
@@ -1725,7 +1721,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
     /// The entry after the gap, without moving the gap.
     #[allow(clippy::type_complexity)]
@@ -1772,7 +1767,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursor<K, V> {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 fn entry_guards<K: Key + 'static, V: Value + 'static>(
     entry: EntryGuard<K, V>,
 ) -> (AccessGuard<'static, K>, AccessGuard<'static, V>) {

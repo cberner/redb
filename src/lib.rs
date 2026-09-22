@@ -95,12 +95,10 @@ pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
-#[cfg(feature = "experimental-api-5")]
-pub use table::Cursor;
 #[cfg(feature = "experimental_cursor")]
 pub use table::CursorMut;
 pub use table::{
-    Entry, ExtractIf, OccupiedEntry, OwnedAccessGuard, OwnedRange, Range, ReadOnlyTable,
+    Cursor, Entry, ExtractIf, OccupiedEntry, OwnedAccessGuard, OwnedRange, Range, ReadOnlyTable,
     ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats, VacantEntry,
 };
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};

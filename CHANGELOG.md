@@ -29,6 +29,9 @@
   the `experimental-api-5` feature flag, returning a `MultimapCursor` pointing at a gap between
   entries. The type reserves the constructors' signatures in the trait; navigation methods will
   be added behind the `experimental_cursor` feature flag, like the table cursors' were.
+* Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
+  `ReadableTable::upper_bound()` have no default implementation, so implementations of
+  `ReadableTable` must provide them.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
@@ -97,6 +100,8 @@
   types: a table that stores `Option` of the type from before it declared the niche fails to open
   with `TableTypeMismatch` instead of being misread, and can be read through a copy of the type
   that declares no niche.
+* Add `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()`, which return a read-only
+  `Cursor`, modeled on the standard library's `BTreeMap` cursors.
 
 ### Minor improvements
 * Under the `experimental_cursor` feature flag, `CursorMut::insert_before()` and

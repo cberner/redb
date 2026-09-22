@@ -4288,7 +4288,6 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
         self.inner.last()
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn lower_bound<'a>(
         &self,
         bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
@@ -4296,7 +4295,6 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
         self.inner.lower_bound(bound)
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn upper_bound<'a>(
         &self,
         bound: std::ops::Bound<impl Borrow<K::SelfType<'a>>>,
@@ -4399,6 +4397,8 @@ fn custom_table_type() {
         _value: Default::default(),
     };
     assert_eq!("hello", table.get(0).unwrap().unwrap().value());
+    let mut cursor = table.lower_bound(std::ops::Bound::Included(&0)).unwrap();
+    assert_eq!("hello", cursor.peek_next().unwrap().unwrap().1.value());
     let table = DelegatingMultimapTable {
         inner: txn.open_multimap_table(definition_multimap).unwrap(),
         _key: Default::default(),
