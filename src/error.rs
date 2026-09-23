@@ -628,7 +628,6 @@ impl Display for CommitError {
 impl core::error::Error for CommitError {}
 
 /// Errors related to cursors
-#[cfg(feature = "experimental_cursor")]
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum CursorError {
@@ -638,7 +637,6 @@ pub enum CursorError {
     Storage(StorageError),
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl From<CursorError> for Error {
     fn from(err: CursorError) -> Error {
         match err {
@@ -648,14 +646,12 @@ impl From<CursorError> for Error {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl From<StorageError> for CursorError {
     fn from(err: StorageError) -> CursorError {
         CursorError::Storage(err)
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl Display for CursorError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -670,7 +666,6 @@ impl Display for CursorError {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl core::error::Error for CursorError {}
 
 /// Superset of all other errors that can occur. Convenience enum so that users can convert all errors into a single type
@@ -713,7 +708,6 @@ pub enum Error {
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     /// The key does not sort strictly between the entries adjacent to the cursor
-    #[cfg(feature = "experimental_cursor")]
     UnorderedKey,
     /// Table types didn't match.
     TableTypeMismatch {
@@ -794,7 +788,6 @@ impl Display for Error {
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
                 )
             }
-            #[cfg(feature = "experimental_cursor")]
             Error::UnorderedKey => {
                 write!(
                     f,

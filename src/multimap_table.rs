@@ -1411,9 +1411,7 @@ impl<K: Key, V: Key> Sealed for ReadOnlyMultimapTable<K, V> {}
 /// [`ReadableMultimapTable::upper_bound`]. For now the type only reserves the
 /// constructors' signatures in the trait: methods for navigating the table,
 /// mirroring the table cursors ([`Cursor`](crate::Cursor)) with
-/// multimap-aware movement, will be added behind the `experimental_cursor`
-/// feature flag, separately from the constructors, so that the constructors'
-/// signatures can stabilize first.
+/// multimap-aware movement, will be added later.
 #[cfg(feature = "experimental-api-5")]
 pub struct MultimapCursor<'a, K: Key + 'static, V: Key + 'static> {
     // Only the cursor's future methods will read the position; until they

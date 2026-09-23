@@ -13,7 +13,7 @@ authors.workspace = true
 # this crate alone, so building redb-bench's benchmarks never compiles them.
 [dev-dependencies]
 redb-bench = { path = "../redb-bench" }
-redb = { path = "../..", features = ["experimental_cursor"] }
+redb = { path = "../..", features = ["experimental-api-5"] }
 rand = "0.10.1"
 tempfile = "3.5.0"
 heed = { version = "0.22", default-features = false }

@@ -1,9 +1,8 @@
-#[cfg(feature = "experimental_cursor")]
-use crate::tree_store::btree_base::RawBranchBuilder;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
-    LeafBuilder, LeafMutator, OwnedEntryBuffer, branch_separator, is_single_large_value,
-    leaf_below_merge_threshold, leaf_split_required, retained_after_removals,
+    LeafBuilder, LeafMutator, OwnedEntryBuffer, RawBranchBuilder, branch_separator,
+    is_single_large_value, leaf_below_merge_threshold, leaf_split_required,
+    retained_after_removals,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
@@ -67,7 +66,6 @@ impl DeletedPairs {
 // its subtree: a separator no less than the subtree's greatest key. The bound
 // is None when the parent's stored separator still covers the subtree, which
 // includes the node holding the tree's original last entry.
-#[cfg(feature = "experimental_cursor")]
 type SplicedNode = (PageNumber, Checksum, Option<Vec<u8>>);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -483,7 +481,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // greatest key. Ancestors above the level where the replacements collapse
     // back to a single node take the deletion path's child-pointer swap
     // instead of a rebuild.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn splice_insert_run(
         &mut self,
         replaced: Option<(Vec<(PageImpl, usize)>, PageNumber)>,
@@ -561,7 +558,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // Rebuilds one branch of the path, with `replacement` in place of
     // `child_index`. Returns the built pages, more than one if the level had
     // to split.
-    #[cfg(feature = "experimental_cursor")]
     fn rebuild_branch_level(
         &mut self,
         parent: &PageImpl,
@@ -601,7 +597,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     // Mirrors `build_replacement_leaves`: cut a page whenever the next child
     // would not fit, except that a page must keep at least two children, so
     // the tail is merged into its neighbor instead of rebalanced.
-    #[cfg(feature = "experimental_cursor")]
     fn build_branch_nodes(&mut self, children: &[SplicedNode]) -> Result<Vec<SplicedNode>> {
         fn separator(node: &SplicedNode) -> &[u8] {
             node.2
@@ -1828,7 +1823,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     }
 }
 
-#[cfg(all(test, feature = "experimental_cursor"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tree_store::{AllocationPolicy, InMemoryBackend, TransactionalMemory};

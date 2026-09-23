@@ -28,7 +28,7 @@
 * Add `ReadableMultimapTable::lower_bound()` and `ReadableMultimapTable::upper_bound()`, behind
   the `experimental-api-5` feature flag, returning a `MultimapCursor` pointing at a gap between
   entries. The type reserves the constructors' signatures in the trait; navigation methods will
-  be added behind the `experimental_cursor` feature flag, like the table cursors' were.
+  be added later.
 * Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
   `ReadableTable::upper_bound()` have no default implementation, so implementations of
   `ReadableTable` must provide them.
@@ -100,13 +100,16 @@
   types: a table that stores `Option` of the type from before it declared the niche fails to open
   with `TableTypeMismatch` instead of being misread, and can be read through a copy of the type
   that declares no niche.
-* Add `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()`, which return a read-only
+* Stabilize `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()`, which return a read-only
   `Cursor`, modeled on the standard library's `BTreeMap` cursors.
+* Stabilize `Table::lower_bound_mut()` and `Table::upper_bound_mut()`, which return a `CursorMut`
+  modeled on the standard library's `BTreeMap` cursors. Inserting sorted data through
+  `insert_before()` can be around 3x faster than `insert()`.
 
 ### Minor improvements
-* Under the `experimental_cursor` feature flag, `CursorMut::insert_before()` and
-  `CursorMut::insert_after()` now return `CursorError`, whose `UnorderedKey` variant replaces
-  `StorageError::UnorderedKey`. `Error::UnorderedKey` is unchanged.
+* `CursorMut::insert_before()` and `CursorMut::insert_after()` now return `CursorError`, whose
+  `UnorderedKey` variant replaces `StorageError::UnorderedKey`. `Error::UnorderedKey` is
+  unchanged.
 
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
