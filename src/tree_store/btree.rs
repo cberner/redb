@@ -4,9 +4,7 @@ use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
     LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, branch_checksum, leaf_checksum,
 };
-#[cfg(feature = "experimental_cursor")]
-use crate::tree_store::btree_cursor::BtreeCursorMut;
-use crate::tree_store::btree_cursor::{BtreeCursor, CursorMut, Position};
+use crate::tree_store::btree_cursor::{BtreeCursor, BtreeCursorMut, CursorMut, Position};
 use crate::tree_store::btree_iters::{bounds_are_empty, encode_bounds};
 use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{Page, PageImpl, PageMut};
@@ -762,7 +760,6 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
 
     // The tree-level cursor behind the public `CursorMut`. The caller
     // positions it with its seek methods before use.
-    #[cfg(feature = "experimental_cursor")]
     pub(crate) fn cursor_mut(&mut self) -> BtreeCursorMut<'_, K, V> {
         BtreeCursorMut::new(
             &mut self.root,

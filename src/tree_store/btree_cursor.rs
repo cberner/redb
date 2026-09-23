@@ -10,7 +10,6 @@ use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTracker};
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
-#[cfg(feature = "experimental_cursor")]
 use alloc::boxed::Box;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -351,14 +350,12 @@ impl LeafRunRewrite {
 // The threshold at which a cursor's pending inserts are spliced into the
 // tree. The splice cost is dominated by rebuilding the ancestor path, so what
 // matters is the flush count; measurements flatten out around 1MiB.
-#[cfg(feature = "experimental_cursor")]
 const INSERT_FLUSH_BYTES: usize = 1024 * 1024;
 
 // Which side of the gap a run's pending inserts fall on: `insert_before`
 // buffers ascending arrivals behind the gap, `insert_after` descending
 // arrivals in front of it. The two cannot share the ends-only buffer, so
 // switching direction splices the pending run first.
-#[cfg(feature = "experimental_cursor")]
 #[derive(Copy, Clone, PartialEq)]
 enum RunDirection {
     Ascending,
@@ -375,7 +372,6 @@ enum RunDirection {
 //
 // While a run is open the tree is never mutated and the cursor position never
 // moves, so the position's path stays valid until the splice.
-#[cfg(feature = "experimental_cursor")]
 struct InsertRun {
     direction: RunDirection,
     // Key of the entry after the gap when the run opened; None when the gap
@@ -391,7 +387,6 @@ struct InsertRun {
     inserted_pairs: u64,
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl InsertRun {
     // The buffered entry nearest the gap on the entry-before side, if any:
     // a pending insert or an entry copied from the leaf's head. A descending
@@ -453,7 +448,6 @@ impl<K: Key + 'static, V: Value + 'static> EntryRef<'_, K, V> {
     // Guards over the entry that outlive this borrow of the cursor. They stay
     // valid as long as the tree is not mutated, which the compiler enforces
     // once the caller ties them to a borrow of the cursor's owner.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn to_guards<'g>(&self) -> (AccessGuard<'g, K>, AccessGuard<'g, V>) {
         (
             AccessGuard::with_page(self.page.clone(), self.key_range.clone()),
@@ -689,7 +683,6 @@ pub(super) struct CursorState {
     // Pending inserts at the gap, spliced when the buffer fills or the cursor
     // moves on. Never set by the removal-oriented cursor users. Boxed to keep
     // the state small for those users.
-    #[cfg(feature = "experimental_cursor")]
     insert_run: Option<Box<InsertRun>>,
 }
 
@@ -790,7 +783,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.check_not_poisoned()?;
         assert!(self.state.leaf_run_rewrite.is_none());
         assert!(self.state.removed_indexes.is_empty());
-        #[cfg(feature = "experimental_cursor")]
         assert!(self.state.insert_run.is_none());
         self.state.position = None;
         let Some(header) = *self.root else {
@@ -835,7 +827,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.check_not_poisoned()?;
         // Moving across a leaf edge here would invalidate an open insert
         // run's captured position; its owner peeks the buffer instead.
-        #[cfg(feature = "experimental_cursor")]
         assert!(self.state.insert_run.is_none());
         self.check_pending_removals(direction);
         loop {
@@ -960,7 +951,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 
     // Steps the gap before the entry preceding it without reading the entry.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn move_prev(&mut self) -> Result<bool> {
         if !self.ensure_has_entry(Direction::Previous)? {
             return Ok(false);
@@ -973,7 +963,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         Ok(true)
     }
 
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn next(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
         if !self.move_next()? {
             return Ok(None);
@@ -989,7 +978,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         )))
     }
 
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn prev(&mut self) -> Result<Option<EntryRef<'_, K, V>>> {
         if !self.move_prev()? {
             return Ok(None);
@@ -1088,7 +1076,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     /// between the removed entry's old neighbors.
     ///
     /// The returned guards must be dropped before mutating the tree again.
-    #[cfg(feature = "experimental_cursor")]
     #[allow(clippy::type_complexity)]
     pub(super) fn remove_next_taking_key(
         &mut self,
@@ -1098,7 +1085,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
 
     /// Removes the entry before the gap; see
     /// [`remove_next_taking_key`](Self::remove_next_taking_key).
-    #[cfg(feature = "experimental_cursor")]
     #[allow(clippy::type_complexity)]
     pub(super) fn remove_prev_taking_key(
         &mut self,
@@ -1106,7 +1092,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.remove_taking_key(Direction::Previous)
     }
 
-    #[cfg(feature = "experimental_cursor")]
     #[allow(clippy::type_complexity)]
     fn remove_taking_key(
         &mut self,
@@ -1216,10 +1201,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         self.state.position = None;
         self.state.removed_indexes.clear();
         self.state.leaf_run_rewrite = None;
-        #[cfg(feature = "experimental_cursor")]
-        {
-            self.state.insert_run = None;
-        }
+        self.state.insert_run = None;
     }
 
     fn check_not_poisoned(&self) -> Result {
@@ -1432,7 +1414,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     // violation would later splice through a stale path.
     fn mutate_helper<'c>(&'c mut self) -> MutateHelper<'a, 'c, K, V> {
         assert!(self.state.leaf_run_rewrite.is_none());
-        #[cfg(feature = "experimental_cursor")]
         assert!(self.state.insert_run.is_none());
         MutateHelper::new(
             &mut *self.root,
@@ -1455,7 +1436,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
     /// Buffers `key`/`value` for insertion into the gap, leaving the gap
     /// after the new entry. Returns false, leaving the tree and any pending
@@ -1780,7 +1760,6 @@ fn entry_guards<K: Key + 'static, V: Value + 'static>(
 // The tree-level cursor behind the public `CursorMut`: one gap cursor that
 // owns its state across calls, in the style of `RangeMut` but with a single
 // end and buffered insertion instead of removal batching.
-#[cfg(feature = "experimental_cursor")]
 pub(crate) struct BtreeCursorMut<'a, K: Key + 'static, V: Value + 'static> {
     tree: CursorTree<'a, K, V>,
     state: CursorState,
@@ -1791,7 +1770,6 @@ pub(crate) struct BtreeCursorMut<'a, K: Key + 'static, V: Value + 'static> {
     pending_reseek: Option<Vec<u8>>,
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl<'a, K: Key + 'static, V: Value + 'static> BtreeCursorMut<'a, K, V> {
     pub(crate) fn new(
         root: &'a mut Option<BtreeHeader>,
@@ -2567,7 +2545,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "experimental_cursor")]
     mod insert_tests {
         use super::*;
         use crate::tree_store::RawBtree;

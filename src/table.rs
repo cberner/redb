@@ -1,21 +1,17 @@
-#[cfg(feature = "experimental_cursor")]
-use crate::CursorError;
 #[cfg(feature = "experimental-api-5")]
 use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
-#[cfg(feature = "experimental_cursor")]
-use crate::tree_store::BtreeCursorMut;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::tree_store::encode_bounds;
 use crate::tree_store::{
-    AccessGuardMutInPlace, Btree, BtreeCursor, BtreeCursorRange, BtreeExtractIf, BtreeHeader,
-    BtreeMut, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber, PageResolver,
-    PageTracker, RawBtree,
+    AccessGuardMutInPlace, Btree, BtreeCursor, BtreeCursorMut, BtreeCursorRange, BtreeExtractIf,
+    BtreeHeader, BtreeMut, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber,
+    PageResolver, PageTracker, RawBtree,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
-use crate::{AccessGuard, AccessGuardMut, StorageError, WriteTransaction};
+use crate::{AccessGuard, AccessGuardMut, CursorError, StorageError, WriteTransaction};
 use crate::{Result, TableHandle};
 use alloc::string::String;
 use alloc::string::ToString;
@@ -362,7 +358,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// before the smallest key in the table.
     ///
     /// This is analogous to [`std::collections::BTreeMap::lower_bound_mut`].
-    #[cfg(feature = "experimental_cursor")]
     pub fn lower_bound_mut<'a>(
         &mut self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
@@ -419,7 +414,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "experimental_cursor")]
     pub fn upper_bound_mut<'a>(
         &mut self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
@@ -1547,7 +1541,6 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
 ///
 /// The cursor mutably borrows the [`Table`]: the table cannot be used while
 /// a cursor into it exists.
-#[cfg(feature = "experimental_cursor")]
 pub struct CursorMut<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursorMut<'a, K, V>,
     transaction: &'a WriteTransaction,
@@ -1559,7 +1552,6 @@ pub struct CursorMut<'a, K: Key + 'static, V: Value + 'static> {
     closed: bool,
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     pub(crate) fn new(inner: BtreeCursorMut<'a, K, V>, transaction: &'a WriteTransaction) -> Self {
         Self {
@@ -1837,7 +1829,6 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     }
 }
 
-#[cfg(feature = "experimental_cursor")]
 impl<K: Key + 'static, V: Value + 'static> Drop for CursorMut<'_, K, V> {
     fn drop(&mut self) {
         if self.closed {

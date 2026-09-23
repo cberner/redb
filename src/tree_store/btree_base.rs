@@ -750,14 +750,12 @@ impl OwnedEntryBuffer {
     }
 
     // Appends one pair, which must be greater than every buffered entry.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn push_back(&mut self, key: &[u8], value: &[u8]) {
         let pair = self.store(key, value);
         self.pairs.push_back(pair);
     }
 
     // Prepends one pair, which must be smaller than every buffered entry.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn push_front(&mut self, key: &[u8], value: &[u8]) {
         let pair = self.store(key, value);
         self.pairs.push_front(pair);
@@ -766,7 +764,6 @@ impl OwnedEntryBuffer {
     // Copies `range` of the leaf's pairs to one end of the buffer. The pairs
     // must all be greater than the buffered entries when `back` is true, and
     // entirely smaller otherwise.
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn extend_from_leaf_range(
         &mut self,
         accessor: &LeafAccessor<'_>,
@@ -801,14 +798,12 @@ impl OwnedEntryBuffer {
         self.data.len()
     }
 
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn back(&self) -> Option<(&[u8], &[u8])> {
         self.pairs
             .back()
             .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
     }
 
-    #[cfg(feature = "experimental_cursor")]
     pub(super) fn front(&self) -> Option<(&[u8], &[u8])> {
         self.pairs
             .front()

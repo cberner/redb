@@ -1,5 +1,3 @@
-#![cfg(feature = "experimental_cursor")]
-
 use redb::{
     CursorError, Database, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
     TransactionError,
