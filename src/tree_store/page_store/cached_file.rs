@@ -6,6 +6,7 @@ use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
 use crate::{CacheStats, Result, StorageError};
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -318,6 +319,9 @@ pub(super) struct PagedCachedFile {
     // cannot observe them: pages are copy-on-write, and a freed offset is only reallocated once
     // no live read transaction can reference it.
     committed_pages_buffered: AtomicBool,
+    // The file's length in whole pages, as last observed. It may lag the file, so a read that
+    // ends within it proceeds, and one past it is checked against the file's current length.
+    len_hint_pages: AtomicUsize,
     max_cache_size: usize,
     // Rotates the starting stripe for read-cache eviction
     next_eviction_stripe: AtomicUsize,
@@ -360,6 +364,7 @@ impl PagedCachedFile {
             read_cache_transaction_id: Mutex::new(None),
             write_buffer_bytes: AtomicUsize::new(0),
             committed_pages_buffered: AtomicBool::new(false),
+            len_hint_pages: AtomicUsize::new(0),
             max_cache_size,
             next_eviction_stripe: AtomicUsize::new(0),
             #[cfg(feature = "cache_metrics")]
@@ -556,7 +561,36 @@ impl PagedCachedFile {
             self.invalidate_cache_above(len);
         }
 
-        self.file.set_len(len)
+        self.file.set_len(len)?;
+        self.update_len_hint(len);
+        Ok(())
+    }
+
+    fn update_len_hint(&self, file_len: u64) {
+        // Saturating is safe: the hint only has to be at most the file's length
+        let pages = usize::try_from(file_len / self.page_size).unwrap_or(usize::MAX);
+        self.len_hint_pages.store(pages, Ordering::Relaxed);
+    }
+
+    // A corrupt page number can name a page far past the end of the file -- up to 4GiB -- so a
+    // read of one is refused before a buffer is allocated for it.
+    fn check_read_bounds(&self, offset: u64, len: usize) -> Result {
+        let Some(end) = offset.checked_add(len as u64) else {
+            return Err(StorageError::Corrupted(format!(
+                "Read of {len} bytes at offset {offset} extends past the end of the address space"
+            )));
+        };
+        if end.div_ceil(self.page_size) <= self.len_hint_pages.load(Ordering::Relaxed) as u64 {
+            return Ok(());
+        }
+        let file_len = self.file.len()?;
+        self.update_len_hint(file_len);
+        if end > file_len {
+            return Err(StorageError::Corrupted(format!(
+                "Read of {len} bytes at offset {offset} extends past the end of the file ({file_len} bytes)"
+            )));
+        }
+        Ok(())
     }
 
     // Cancel writes before truncating so a concurrent reader's writeback cannot re-extend the
@@ -648,6 +682,7 @@ impl PagedCachedFile {
     // `Vec<u8>` that is then copied into an `Arc`. The buffer is zero-filled
     // because `StorageBackend::read` takes `&mut [u8]`.
     fn read_direct_into_arc(&self, offset: u64, len: usize) -> Result<Arc<[u8]>> {
+        self.check_read_bounds(offset, len)?;
         let mut arc = zero_filled_arc(len);
         self.file.read(offset, Arc::get_mut(&mut arc).unwrap())?;
         Ok(arc)
@@ -970,7 +1005,13 @@ impl PagedCachedFile {
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
                 zero_filled_arc(len)
             } else {
-                self.read_direct_into_arc(offset, len)?
+                match self.read_direct_into_arc(offset, len) {
+                    Ok(data) => data,
+                    Err(err) => {
+                        self.write_buffer_bytes.fetch_sub(len, Ordering::AcqRel);
+                        return Err(err);
+                    }
+                }
             };
             lock.insert(offset, result);
             lock.take_value(offset).unwrap()
@@ -987,10 +1028,10 @@ impl PagedCachedFile {
 
 #[cfg(test)]
 mod test {
-    use crate::StorageBackend;
     use crate::backends::InMemoryBackend;
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
+    use crate::{StorageBackend, StorageError};
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -1105,6 +1146,38 @@ mod test {
                 .unwrap();
             assert!(data.iter().all(|&b| b == 0xab));
         }
+    }
+
+    // A read past the end of the file is refused without failing the backend, both before the
+    // length is first observed and after the file has been resized
+    #[test]
+    fn read_past_eof_is_corruption() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 4096);
+
+        let near_max = u64::MAX - 127;
+        for (offset, len) in [(1024, 128), (896, 256), (0, 1 << 20), (near_max, 256)] {
+            assert!(matches!(
+                cached_file.read(offset, len, PageHint::None),
+                Err(StorageError::Corrupted(_))
+            ));
+            assert!(matches!(
+                cached_file.write(offset, len, false),
+                Err(StorageError::Corrupted(_))
+            ));
+        }
+        assert_eq!(cached_file.write_buffer_bytes.load(Ordering::Acquire), 0);
+        cached_file.read(896, 128, PageHint::None).unwrap();
+
+        cached_file.resize(2048).unwrap();
+        cached_file.read(1024, 1024, PageHint::None).unwrap();
+        cached_file.resize(512).unwrap();
+        assert!(matches!(
+            cached_file.read(512, 128, PageHint::None),
+            Err(StorageError::Corrupted(_))
+        ));
+        cached_file.read(384, 128, PageHint::None).unwrap();
     }
 
     #[test]
