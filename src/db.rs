@@ -2057,7 +2057,7 @@ impl RepairSession {
 }
 
 /// How processes share a database: the regime a writer operates under. Whether a given handle
-/// writes is chosen by `open()` against `open_read_only()`, not by the mode.
+/// writes is chosen by `open()` or `open_read_only()`, not by the mode.
 ///
 /// Every process opening one database concurrently must use a compatible mode: one
 /// `SingleWriter` writer or any number of `MultiWriter` writers, plus read-only handles in either
