@@ -7,11 +7,9 @@ use crate::transactions::AllocatorStateLatch;
 use crate::tree_store::HeaderGuard;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
-#[cfg(feature = "experimental-multiprocess")]
-use crate::tree_store::WriterLock;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, InternalTableDefinition, PAGE_SIZE, PageHint, PageNumber,
-    PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory,
+    PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory, WriterLock,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -183,7 +181,6 @@ const LOCK_BASE: u64 = 1 << 62;
 pub(crate) const BACKEND_LOCK_RANGE: Range<u64> = LOCK_BASE + 896..LOCK_BASE + 1024;
 
 /// Held exclusively by the writing process in single-writer mode.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
 /// Whether the database is open for a single writer (held exclusively by it) or for many (held
 /// shared by each writing process while the database is open).
@@ -460,7 +457,6 @@ pub(crate) enum TransactionGuard {
         transaction_id: TransactionId,
         // Dropped ahead of the slot, in this order: a thread waiting on the slot would take the
         // same byte on this file description, and this release would free theirs
-        #[cfg(feature = "experimental-multiprocess")]
         _writer_lock: Arc<WriterLock>,
         slot: WriteSlot,
     },
@@ -529,11 +525,10 @@ impl TransactionGuard {
     pub(crate) fn new_write(
         transaction_id: TransactionId,
         slot: WriteSlot,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Arc<WriterLock>,
+        writer_lock: Arc<WriterLock>,
     ) -> Self {
         Self::Write {
             transaction_id,
-            #[cfg(feature = "experimental-multiprocess")]
             _writer_lock: writer_lock,
             slot,
         }
@@ -699,11 +694,7 @@ impl ReadOnlyDatabase {
         )?;
         let mem = Arc::new(mem);
         // A reader beside a multi-process writer never allocates, so it loads no allocator state
-        #[cfg(feature = "experimental-multiprocess")]
-        let multiprocess_writer = concurrency_mode.is_multi_process_writable();
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let multiprocess_writer = false;
-        if !multiprocess_writer {
+        if !concurrency_mode.is_multi_process_writable() {
             // If the last transaction used 2-phase commit and updated the allocator state table, then
             // we can just load the allocator state from there. Otherwise, we need a full repair
             if let Some(tree) = Database::get_allocator_state_table(&mem)? {
@@ -894,15 +885,11 @@ impl Database {
         }
 
         // Held until the check returns, so the file it reloads is the file it repairs
-        #[cfg(feature = "experimental-multiprocess")]
         let writer_lock = self.mem.lock_writer()?;
         // Repairing rebuilds the allocator state, so a failure part way through leaves one that
         // describes neither the file nor anything else. Holding an allocator state must continue
         // to mean it describes the file.
-        let result = self.check_integrity_inner(
-            #[cfg(feature = "experimental-multiprocess")]
-            &writer_lock,
-        );
+        let result = self.check_integrity_inner(&writer_lock);
         if result.is_err() {
             self.mem.invalidate_allocator_state();
         }
@@ -911,7 +898,7 @@ impl Database {
 
     fn check_integrity_inner(
         &mut self,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: &Arc<WriterLock>,
+        writer_lock: &Arc<WriterLock>,
     ) -> Result<bool, DatabaseError> {
         // A pending Durability::None commit is acknowledged, live data that the reload below would
         // discard. If the live state verifies, promote it to durable rather than losing it -- even
@@ -932,7 +919,6 @@ impl Database {
                 let durable_clean = self.durable_state_clean()?;
                 let mut txn = self
                     .begin_write_with(
-                        #[cfg(feature = "experimental-multiprocess")]
                         Some(writer_lock),
                         #[cfg(feature = "experimental-multiprocess")]
                         None,
@@ -1022,7 +1008,6 @@ impl Database {
             Self::sync_persistent_savepoints(
                 &self.transaction_tracker,
                 &self.mem,
-                #[cfg(feature = "experimental-multiprocess")]
                 Some(writer_lock),
             )?;
         }
@@ -1046,12 +1031,11 @@ impl Database {
     fn sync_persistent_savepoints(
         transaction_tracker: &Arc<TransactionTracker>,
         mem: &Arc<TransactionalMemory>,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+        writer_lock: Option<&Arc<WriterLock>>,
     ) -> Result<(), DatabaseError> {
         let txn = begin_write_with_allocation_policy(
             transaction_tracker,
             mem,
-            #[cfg(feature = "experimental-multiprocess")]
             writer_lock,
             #[cfg(feature = "experimental-multiprocess")]
             None,
@@ -1158,25 +1142,25 @@ impl Database {
         // already has is a transaction in progress. Taken once a write transaction begun before
         // this call has ended: its commit would wait on the holds, and in multi-writer mode its
         // end would release the writer byte from under a hold taken meanwhile
-        #[cfg(feature = "experimental-multiprocess")]
-        let (writer_lock, header_lock) = if self.mem.concurrency_mode().is_multi_process_writable()
-        {
+        let writer_lock = if self.mem.concurrency_mode().is_multi_process_writable() {
             self.begin_write()
                 .map_err(|e| e.into_storage_error())?
                 .abort()?;
-            (
-                Some(self.mem.lock_writer()?),
-                Some(self.mem.lock_header_exclusive()?),
-            )
+            Some(self.mem.lock_writer()?)
         } else {
-            (None, None)
+            None
+        };
+        #[cfg(feature = "experimental-multiprocess")]
+        let header_lock = if writer_lock.is_some() {
+            Some(self.mem.lock_header_exclusive()?)
+        } else {
+            None
         };
         // Use 2-phase commit to avoid any possible security issues. Plus this compaction is going to be so slow that it doesn't matter.
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
         let txn = self
             .begin_write_with(
-                #[cfg(feature = "experimental-multiprocess")]
                 writer_lock.as_ref(),
                 #[cfg(feature = "experimental-multiprocess")]
                 header_lock.as_ref(),
@@ -1207,7 +1191,6 @@ impl Database {
         // Commit to free up any pending free pages
         self.drain_pending_free_pages(
             ShrinkPolicy::Maximum,
-            #[cfg(feature = "experimental-multiprocess")]
             writer_lock.as_ref(),
             #[cfg(feature = "experimental-multiprocess")]
             header_lock.as_ref(),
@@ -1220,7 +1203,6 @@ impl Database {
 
             let mut txn = self
                 .begin_write_with(
-                    #[cfg(feature = "experimental-multiprocess")]
                     writer_lock.as_ref(),
                     #[cfg(feature = "experimental-multiprocess")]
                     header_lock.as_ref(),
@@ -1242,7 +1224,6 @@ impl Database {
             // post-commit cleanup root updates.
             self.drain_pending_free_pages(
                 ShrinkPolicy::Maximum,
-                #[cfg(feature = "experimental-multiprocess")]
                 writer_lock.as_ref(),
                 #[cfg(feature = "experimental-multiprocess")]
                 header_lock.as_ref(),
@@ -1276,7 +1257,7 @@ impl Database {
     fn drain_pending_free_pages(
         &self,
         shrink_policy: ShrinkPolicy,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+        writer_lock: Option<&Arc<WriterLock>>,
         #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result {
         // Preserve compact()'s empty durable commit, which also publishes pending
@@ -1285,7 +1266,6 @@ impl Database {
         loop {
             let mut txn = self
                 .begin_write_with(
-                    #[cfg(feature = "experimental-multiprocess")]
                     writer_lock,
                     #[cfg(feature = "experimental-multiprocess")]
                     header_lock,
@@ -1678,12 +1658,7 @@ impl Database {
         let transaction_tracker = Arc::new(TransactionTracker::new(next_transaction_id));
 
         // Restore the tracker state for any persistent savepoints
-        Self::sync_persistent_savepoints(
-            &transaction_tracker,
-            &mem,
-            #[cfg(feature = "experimental-multiprocess")]
-            writer_lock.as_ref(),
-        )?;
+        Self::sync_persistent_savepoints(&transaction_tracker, &mem, writer_lock.as_ref())?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction and the integrity check do, so that the next open, in any process, loads it
         #[cfg(feature = "experimental-multiprocess")]
@@ -1696,7 +1671,7 @@ impl Database {
             )?;
         }
         #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = (repaired, writer_lock);
+        let _ = repaired;
         // Construct only after initialization succeeds: Database::drop takes the writer lock,
         // which the open still holds, and assumes the savepoint tracker is complete.
         Ok(Database {
@@ -1763,7 +1738,6 @@ impl Database {
     /// transaction remains usable and the database closes when the transaction completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
         self.begin_write_with(
-            #[cfg(feature = "experimental-multiprocess")]
             None,
             #[cfg(feature = "experimental-multiprocess")]
             None,
@@ -1772,13 +1746,12 @@ impl Database {
 
     fn begin_write_with(
         &self,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+        writer_lock: Option<&Arc<WriterLock>>,
         #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
             &self.transaction_tracker,
             &self.mem,
-            #[cfg(feature = "experimental-multiprocess")]
             writer_lock,
             #[cfg(feature = "experimental-multiprocess")]
             header_lock,
@@ -1859,7 +1832,7 @@ fn sync_to_latest_commit(
 fn begin_write_with_allocation_policy(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
-    #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    writer_lock: Option<&Arc<WriterLock>>,
     #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
     allocation_policy: AllocationPolicy,
 ) -> Result<WriteTransaction, TransactionError> {
@@ -1868,7 +1841,6 @@ fn begin_write_with_allocation_policy(
     // The slot ahead of the byte: locks on the byte from one file description are one lock, so
     // the slot is what orders this process's writers. An error return drops both
     let slot = WriteSlot::take(transaction_tracker.clone());
-    #[cfg(feature = "experimental-multiprocess")]
     let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
     #[cfg(feature = "experimental-multiprocess")]
     let latch = sync_to_latest_commit(mem, &writer_lock, header_lock)?;
@@ -1883,17 +1855,9 @@ fn begin_write_with_allocation_policy(
         .into());
     }
     // Issued once the sync is done, so that the id follows the file's latest commit
-    let transaction_id = transaction_tracker.issue_write_transaction_id(
-        mem.get_last_committed_transaction_id()?,
-        #[cfg(feature = "experimental-multiprocess")]
-        &writer_lock,
-    );
-    let guard = TransactionGuard::new_write(
-        transaction_id,
-        slot,
-        #[cfg(feature = "experimental-multiprocess")]
-        writer_lock,
-    );
+    let transaction_id = transaction_tracker
+        .issue_write_transaction_id(mem.get_last_committed_transaction_id()?, &writer_lock);
+    let guard = TransactionGuard::new_write(transaction_id, slot, writer_lock);
     let transaction = WriteTransaction::new(
         guard,
         transaction_tracker.clone(),
@@ -1922,7 +1886,7 @@ fn begin_write_with_allocation_policy(
 fn ensure_allocator_state_table_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
-    #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
+    writer_lock: Option<&Arc<WriterLock>>,
     #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result {
     // Make a new quick-repair commit to update the allocator state table
@@ -1935,7 +1899,6 @@ fn ensure_allocator_state_table_and_trim(
     let mut tx = begin_write_with_allocation_policy(
         transaction_tracker,
         mem,
-        #[cfg(feature = "experimental-multiprocess")]
         writer_lock,
         #[cfg(feature = "experimental-multiprocess")]
         header_lock,
@@ -1969,19 +1932,16 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // process made between them would be overwritten by the header. Without the hold, neither
     // is written: the commit would take one of its own and release it, and the header would
     // then overwrite a commit made between them
-    #[cfg(feature = "experimental-multiprocess")]
     let writer_lock = if writing {
         mem.lock_writer().ok()
     } else {
         None
     };
-    #[cfg(feature = "experimental-multiprocess")]
     let writing = writing && writer_lock.is_some();
     let recorded = writing
         && ensure_allocator_state_table_and_trim(
             transaction_tracker,
             mem,
-            #[cfg(feature = "experimental-multiprocess")]
             writer_lock.as_ref(),
             #[cfg(feature = "experimental-multiprocess")]
             None,
@@ -1994,16 +1954,9 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // The shutdown header describes this handle, which matches the file only once the commit
     // above has synced to the file's latest commit. Without that commit, write no header, and
     // leave the file for the next open to recover.
-    #[cfg(feature = "experimental-multiprocess")]
     let writer_lock = writer_lock.filter(|_| recorded);
 
-    if mem
-        .close(
-            #[cfg(feature = "experimental-multiprocess")]
-            writer_lock.as_ref(),
-        )
-        .is_err()
-    {
+    if mem.close(writer_lock.as_ref()).is_err() {
         #[cfg(feature = "logging")]
         warn!("Failed to flush database file. Repair may be required at restart.");
     }
@@ -2082,7 +2035,6 @@ pub enum ConcurrencyMode {
     MultiWriter,
 }
 
-#[cfg(feature = "experimental-multiprocess")]
 impl ConcurrencyMode {
     /// Whether another process may have the database open, concurrently, and one process
     /// (possibly this one) is a writer

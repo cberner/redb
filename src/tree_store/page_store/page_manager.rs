@@ -1,9 +1,9 @@
 use crate::CacheStats;
-use crate::db::{BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, byte_range};
-#[cfg(feature = "experimental-multiprocess")]
 use crate::db::{
-    CONSISTENT_BYTE, SHARED_READER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE,
+    BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, WRITER_BYTE, byte_range,
 };
+#[cfg(feature = "experimental-multiprocess")]
+use crate::db::{CONSISTENT_BYTE, SHARED_READER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -578,13 +578,11 @@ impl<'a> Deref for HeaderHold<'a> {
 /// The lock admitting this process to write. Writer-byte locks are released when the last
 /// holder drops; exclusive-writer locks are released by `close()`. Holds the storage rather than
 /// `TransactionalMemory`, so integrity checks can borrow the memory through `Arc::get_mut()`.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct WriterLock {
     storage: Arc<PagedCachedFile>,
     range: Option<(Bound<u64>, Bound<u64>)>,
 }
 
-#[cfg(feature = "experimental-multiprocess")]
 impl Drop for WriterLock {
     fn drop(&mut self) {
         if let Some(range) = self.range {
@@ -596,7 +594,6 @@ impl Drop for WriterLock {
 /// The writer lock a handle holds for the life of the database: the whole file where the
 /// database is not shared, and the writer byte where one process writes. Nothing in multi-writer
 /// mode, where a write transaction takes that byte itself, or for a read-only handle
-#[cfg(feature = "experimental-multiprocess")]
 fn database_writer_lock_for_mode(
     storage: &Arc<PagedCachedFile>,
     read_only: bool,
@@ -619,15 +616,7 @@ fn database_writer_lock_for_mode(
     }))
 }
 
-// Typename used here so that with the feature off it can be an empty type
-#[cfg(feature = "experimental-multiprocess")]
-pub(crate) type OpenWriterLock = Arc<WriterLock>;
-/// Without the feature there are no writer locks to hand an open
-#[cfg(not(feature = "experimental-multiprocess"))]
-pub(crate) type OpenWriterLock = ();
-
 // Acquire the writer byte lock that open() should use for repair
-#[cfg(feature = "experimental-multiprocess")]
 fn open_writer_lock_for_mode(
     storage: &Arc<PagedCachedFile>,
     read_only: bool,
@@ -669,7 +658,6 @@ pub(crate) struct TransactionalMemory {
     // While set, no allocator state is persisted and shutdowns are not recorded as clean,
     // forcing the next open to rebuild the state from the committed trees
     needs_repair: AtomicBool,
-    #[cfg(feature = "experimental-multiprocess")]
     concurrency_mode: ConcurrencyMode,
     #[cfg(feature = "experimental-multiprocess")]
     read_only: bool,
@@ -686,7 +674,6 @@ pub(crate) struct TransactionalMemory {
     // The lock the open took, which every write transaction holds while it runs. `None` in
     // multi-writer mode, where a write transaction takes the writer byte itself, and for a
     // read-only handle
-    #[cfg(feature = "experimental-multiprocess")]
     writer_lock: Option<Arc<WriterLock>>,
     page_size: u32,
     // We store these separately from the layout because they're static, and accessed on the get_page()
@@ -922,7 +909,6 @@ impl TransactionalMemory {
     /// The one the open took, or the writer byte a write transaction takes in multi-writer
     /// mode, waiting on the peer that holds it. Taken after the in-process write slot: locks on
     /// that byte from this file description are one lock, so the slot is what orders them
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_writer(&self) -> Result<Arc<WriterLock>> {
         if let Some(from_open) = &self.writer_lock {
             return Ok(from_open.clone());
@@ -1084,7 +1070,7 @@ impl TransactionalMemory {
         cache_size: usize,
         read_only: bool,
         concurrency_mode: ConcurrencyMode,
-    ) -> Result<(Self, Option<OpenWriterLock>), DatabaseError> {
+    ) -> Result<(Self, Option<Arc<WriterLock>>), DatabaseError> {
         assert!(page_size.is_power_of_two() && page_size >= DB_HEADER_SIZE);
 
         let region_size = requested_region_size.unwrap_or(MAX_USABLE_REGION_SPACE);
@@ -1097,16 +1083,12 @@ impl TransactionalMemory {
         let storage = Arc::new(PagedCachedFile::new(file, page_size as u64, cache_size));
         // Dropping the storage releases whatever this took, so an open that fails below does too
         Self::lock_for_open(&storage, read_only, concurrency_mode)?;
-        #[cfg(feature = "experimental-multiprocess")]
         let writer_lock = database_writer_lock_for_mode(&storage, read_only, concurrency_mode);
         // The lock the open() runs under: its own where it took one, and the handle's otherwise
         // Taken before anything is read, so that the header the open reads is the header it
         // repairs and commits over
-        #[cfg(feature = "experimental-multiprocess")]
         let open_writer_lock =
             open_writer_lock_for_mode(&storage, read_only, concurrency_mode, writer_lock.clone())?;
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let open_writer_lock = None;
         #[cfg(feature = "experimental-multiprocess")]
         let in_process_header_lock = Mutex::new(());
 
@@ -1230,7 +1212,6 @@ impl TransactionalMemory {
             #[cfg(debug_assertions)]
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             needs_repair: AtomicBool::new(false),
-            #[cfg(feature = "experimental-multiprocess")]
             concurrency_mode,
             #[cfg(feature = "experimental-multiprocess")]
             read_only,
@@ -1238,7 +1219,6 @@ impl TransactionalMemory {
             in_process_header_lock,
             #[cfg(feature = "experimental-multiprocess")]
             scan_from: Mutex::new(0),
-            #[cfg(feature = "experimental-multiprocess")]
             writer_lock,
             page_size: page_size.try_into().unwrap(),
             region_size,
@@ -1470,7 +1450,6 @@ impl TransactionalMemory {
     }
 
     /// Whether another process may have this database open while one process writes.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn concurrency_mode(&self) -> ConcurrencyMode {
         self.concurrency_mode
     }
@@ -2464,17 +2443,11 @@ impl TransactionalMemory {
     // Writes the shutdown header, under `writer_lock` where the database is shared, and closes
     // the storage. Without the lock the header is not written: it would overwrite a commit
     // another process makes meanwhile
-    pub(crate) fn close(
-        &self,
-        #[cfg(feature = "experimental-multiprocess")] writer_lock: Option<&Arc<WriterLock>>,
-    ) -> Result {
-        #[cfg(feature = "experimental-multiprocess")]
+    pub(crate) fn close(&self, writer_lock: Option<&Arc<WriterLock>>) -> Result {
         let shutdown_result = match writer_lock {
             Some(_held) => self.flush_shutdown_header(),
             None => Ok(()),
         };
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let shutdown_result = self.flush_shutdown_header();
         // The backend's close() contract guarantees it is called exactly once, so it must be
         // called even if the shutdown writes above failed
         let close_result = self.storage.close();

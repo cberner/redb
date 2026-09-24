@@ -1,6 +1,4 @@
-#[cfg(feature = "experimental-multiprocess")]
-use crate::db::ConcurrencyMode;
-use crate::db::TransactionGuard;
+use crate::db::{ConcurrencyMode, TransactionGuard};
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
@@ -986,10 +984,7 @@ impl WriteTransaction {
             two_phase_commit: false,
             // A multi-writer commit records the allocator state, which `set_quick_repair()`
             // keeps on there
-            #[cfg(feature = "experimental-multiprocess")]
             quick_repair: mem.concurrency_mode() == ConcurrencyMode::MultiWriter,
-            #[cfg(not(feature = "experimental-multiprocess"))]
-            quick_repair: false,
             post_commit_free: PostCommitFree::Enabled,
             restored_transaction: None,
             shrink_policy: ShrinkPolicy::Default,
@@ -2193,11 +2188,9 @@ impl WriteTransaction {
         // The post-commit pass runs after publication, where a peer's pin on the transaction just
         // superseded lands below any floor the scan above produced, so a multi-process writer's
         // pages wait for the next durable commit
-        #[cfg(feature = "experimental-multiprocess")]
-        let multiprocess_writer = self.mem.concurrency_mode().is_multi_process_writable();
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let multiprocess_writer = false;
-        if self.post_commit_free == PostCommitFree::Enabled && !multiprocess_writer {
+        if self.post_commit_free == PostCommitFree::Enabled
+            && !self.mem.concurrency_mode().is_multi_process_writable()
+        {
             self.process_data_freed_pages_after_commit(
                 user_root,
                 &page_allocator,
