@@ -3,9 +3,7 @@ use crate::StorageError;
 use crate::sync::{Condvar, Mutex};
 #[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::HeaderGuard;
-#[cfg(feature = "experimental-multiprocess")]
-use crate::tree_store::WriterLock;
-use crate::tree_store::{BtreeHeader, TransactionalMemory};
+use crate::tree_store::{BtreeHeader, TransactionalMemory, WriterLock};
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -305,7 +303,7 @@ impl TransactionTracker {
     pub(crate) fn issue_write_transaction_id(
         &self,
         last_committed: TransactionId,
-        #[cfg(feature = "experimental-multiprocess")] _writer_lock: &WriterLock,
+        _writer_lock: &WriterLock,
     ) -> TransactionId {
         let mut state = self.state.lock().unwrap();
         assert_eq!(state.write_slot, WriteSlotState::Initializing);

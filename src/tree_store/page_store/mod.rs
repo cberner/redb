@@ -28,11 +28,9 @@ pub(crate) use layout::DatabaseLayout;
 pub(crate) use page_manager::HEADER_LOCK;
 #[cfg(feature = "experimental-multiprocess")]
 pub(crate) use page_manager::HeaderGuard;
-#[cfg(feature = "experimental-multiprocess")]
-pub(crate) use page_manager::WriterLock;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
-    TransactionalMemory, xxh3_checksum,
+    TransactionalMemory, WriterLock, xxh3_checksum,
 };
 pub use savepoint::Savepoint;
 pub(crate) use savepoint::SerializedSavepoint;
