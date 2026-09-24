@@ -110,6 +110,9 @@
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
+* Fix reading a database file containing a corrupted page number that extends past the end of the
+  file allocating up to 4GiB before failing, which could get the process killed under a memory
+  limit. `StorageError::Corrupted` is now returned instead.
 
 ## 4.3.0 - 2026-09-14
 ### New features

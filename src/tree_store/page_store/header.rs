@@ -1156,6 +1156,51 @@ mod test {
         );
     }
 
+    // An order within the maximum can still name a page, of up to 4GiB, that ends past the end of
+    // the file. It must be refused before its read buffer is allocated.
+    // See https://github.com/cberner/redb/issues/1503
+    const PAST_EOF_PAGE_ORDER: u8 = 12;
+
+    #[test]
+    fn root_page_past_eof_is_reported_as_corruption() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        let file_len = std::fs::metadata(tmpfile.path()).unwrap().len();
+        assert!(file_len < 4096 << PAST_EOF_PAGE_ORDER);
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, PAST_EOF_PAGE_ORDER);
+
+        // Debug builds walk the data tree while opening; release builds reach it via the check
+        let err = match Database::create(tmpfile.path()) {
+            Ok(mut db) => db.check_integrity().unwrap_err(),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn system_root_page_past_eof_is_reported_as_corruption_read_only() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        let file_len = std::fs::metadata(tmpfile.path()).unwrap().len();
+        assert!(file_len < 4096 << PAST_EOF_PAGE_ORDER);
+        overwrite_root_page_order(
+            tmpfile.path(),
+            super::SYSTEM_ROOT_OFFSET,
+            PAST_EOF_PAGE_ORDER,
+        );
+
+        let Err(err) = crate::ReadOnlyDatabase::open(tmpfile.path()) else {
+            panic!("expected the open to fail");
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
     // A backend that can report a `len()` larger than the data it actually holds, without
     // allocating it -- used to simulate an externally created (e.g. sparse) file.
     #[derive(Clone, Debug, Default)]
