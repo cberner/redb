@@ -584,8 +584,6 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "experimental-api-5")]
-    use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::TableDefinition;
     use crate::tree_store::page_store::base::MAX_REGIONS;
@@ -597,6 +595,8 @@ mod test {
     };
     use crate::{Database, DatabaseError, StorageBackend};
     use crate::{ReadableDatabase, StorageError};
+    #[cfg(feature = "experimental-api-5")]
+    use crate::{ReadableTable, ReadableTableMetadata};
     use alloc::sync::Arc;
     use core::mem::size_of;
     use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -1154,6 +1154,134 @@ mod test {
             matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
             "expected Corrupted, got {err:?}"
         );
+    }
+
+    // A small wrong order reads a page inside the file that is not the root the slot names. See
+    // https://github.com/cberner/redb/issues/1505
+    #[test]
+    fn wrong_system_root_page_order_is_reported_as_corruption() {
+        for order in 1..=3 {
+            let tmpfile = crate::create_tempfile();
+            {
+                let db = Database::create(tmpfile.path()).unwrap();
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut table = txn.open_table(X).unwrap();
+                    for i in 0..500 {
+                        table.insert(format!("key-{i}").as_str(), "value").unwrap();
+                    }
+                }
+                txn.commit().unwrap();
+            }
+            overwrite_root_page_order(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, order);
+
+            let Err(err) = crate::ReadOnlyDatabase::open(tmpfile.path()) else {
+                panic!("expected the read-only open to fail with order {order}");
+            };
+            assert!(
+                matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+                "expected Corrupted with order {order}, got {err:?}"
+            );
+            let Err(err) = Database::open(tmpfile.path()) else {
+                panic!("expected the open to fail with order {order}");
+            };
+            assert!(
+                matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+                "expected Corrupted with order {order}, got {err:?}"
+            );
+        }
+    }
+
+    // Every system root redb commits must pass the open's root checksum check
+    #[test]
+    fn valid_system_roots_pass_the_open_check() {
+        fn insert(db: &Database, durability: crate::Durability, range: core::ops::Range<u32>) {
+            let mut txn = db.begin_write().unwrap();
+            txn.set_durability(durability).unwrap();
+            {
+                let mut table = txn.open_table(X).unwrap();
+                for i in range {
+                    table.insert(format!("key-{i}").as_str(), "value").unwrap();
+                }
+            }
+            txn.commit().unwrap();
+        }
+        fn assert_opens(bytes: &[u8], expected_len: u64) {
+            let tmpfile = crate::create_tempfile();
+            std::fs::write(tmpfile.path(), bytes).unwrap();
+            {
+                let db = crate::ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+                let txn = db.begin_read().unwrap();
+                assert_eq!(txn.open_table(X).unwrap().len().unwrap(), expected_len);
+            }
+            let mut db = Database::open(tmpfile.path()).unwrap();
+            assert!(db.check_integrity().unwrap());
+        }
+
+        let tmpfile = crate::create_tempfile();
+        {
+            let mut db = Database::create(tmpfile.path()).unwrap();
+            insert(&db, crate::Durability::Immediate, 0..500);
+            insert(&db, crate::Durability::None, 500..600);
+            let savepoint_id = {
+                let mut txn = db.begin_write().unwrap();
+                txn.set_two_phase_commit(true);
+                let id = txn.persistent_savepoint().unwrap();
+                txn.commit().unwrap();
+                id
+            };
+            insert(&db, crate::Durability::None, 600..1000);
+            {
+                let mut txn = db.begin_write().unwrap();
+                let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();
+                txn.restore_savepoint(&savepoint).unwrap();
+                txn.commit().unwrap();
+            }
+            {
+                let mut txn = db.begin_write().unwrap();
+                txn.set_quick_repair(true);
+                assert!(txn.delete_persistent_savepoint(savepoint_id).unwrap());
+                {
+                    let mut table = txn.open_table(X).unwrap();
+                    for i in 0..300 {
+                        table.remove(format!("key-{i}").as_str()).unwrap();
+                    }
+                }
+                txn.commit().unwrap();
+            }
+            db.compact().unwrap();
+            insert(&db, crate::Durability::None, 1000..1100);
+        }
+        assert_opens(&std::fs::read(tmpfile.path()).unwrap(), 400);
+
+        // Reopen after a crash that loses a non-durable commit
+        let backend = LenOverrideBackend::default();
+        {
+            let db = Database::builder()
+                .create_with_backend(backend.clone())
+                .unwrap();
+            {
+                let mut txn = db.begin_write().unwrap();
+                txn.set_two_phase_commit(true);
+                {
+                    let mut table = txn.open_table(X).unwrap();
+                    for i in 0..500 {
+                        table.insert(format!("key-{i}").as_str(), "value").unwrap();
+                    }
+                }
+                txn.commit().unwrap();
+            }
+            insert(&db, crate::Durability::None, 500..600);
+            core::mem::forget(db);
+        }
+        {
+            let db = Database::builder()
+                .create_with_backend(backend.clone())
+                .unwrap();
+            let txn = db.begin_read().unwrap();
+            assert_eq!(txn.open_table(X).unwrap().len().unwrap(), 500);
+        }
+        assert_opens(&backend.data.lock().unwrap(), 500);
     }
 
     // A backend that can report a `len()` larger than the data it actually holds, without

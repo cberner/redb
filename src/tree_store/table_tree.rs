@@ -92,6 +92,10 @@ impl TableTree {
         self.tree.transaction_guard()
     }
 
+    pub(crate) fn verify_root_checksum(&self) -> Result<bool> {
+        self.tree.verify_root_checksum()
+    }
+
     pub(crate) fn verify_checksums(&self) -> Result<bool> {
         if !self.tree.verify_checksum()? {
             return Ok(false);

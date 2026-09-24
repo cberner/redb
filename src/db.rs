@@ -1721,6 +1721,12 @@ impl Database {
             Arc::new(TransactionGuard::untracked()),
             resolver.clone(),
         )?;
+        // The slot's checksum covers the root's page number, but not the page read there
+        if !system_table_tree.verify_root_checksum()? {
+            return Err(StorageError::Corrupted(
+                "System root page does not match its checksum".to_string(),
+            ));
+        }
         let Some(allocator_state_table) = system_table_tree
             .get_table::<AllocatorStateKey, &[u8]>(ALLOCATOR_STATE_TABLE_NAME, TableType::Normal)
             .map_err(|e| e.into_storage_error_or_corrupted("Unexpected TableError"))?

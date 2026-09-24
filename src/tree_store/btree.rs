@@ -1062,6 +1062,19 @@ impl<K: Key, V: Value> Btree<K, V> {
         .verify_checksum()
     }
 
+    // Checks only the root page, not the pages below it
+    pub(crate) fn verify_root_checksum(&self) -> Result<bool> {
+        let (Some(header), Some(page)) = (self.root, self.cached_root.as_ref()) else {
+            return Ok(true);
+        };
+        let computed = match page.memory()[0] {
+            LEAF => leaf_checksum(page, K::fixed_width(), V::fixed_width()),
+            BRANCH => branch_checksum(page, K::fixed_width()),
+            _ => return Ok(false),
+        };
+        Ok(computed.is_ok_and(|checksum| checksum == header.checksum))
+    }
+
     pub(crate) fn visit_all_pages<F>(&self, visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,

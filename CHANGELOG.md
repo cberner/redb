@@ -110,6 +110,8 @@
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
+* Fix a panic when opening a database whose system root page does not match its checksum. It now
+  returns `StorageError::Corrupted`.
 
 ## 4.3.0 - 2026-09-14
 ### New features
