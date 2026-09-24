@@ -25,10 +25,6 @@
   and iterators likewise do not keep the transaction alive, are also removed under the
   `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
   `get_owned()` variants when the guard must outlive the table.
-* Add `ReadableMultimapTable::lower_bound()` and `ReadableMultimapTable::upper_bound()`, behind
-  the `experimental-api-5` feature flag, returning a `MultimapCursor` pointing at a gap between
-  entries. The type reserves the constructors' signatures in the trait; navigation methods will
-  be added later.
 * Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
   `ReadableTable::upper_bound()` have no default implementation, so implementations of
   `ReadableTable` must provide them.

@@ -87,8 +87,6 @@ pub use error::{
 pub use key_range::KeyRange;
 #[cfg(feature = "experimental-niches")]
 pub use legacy_types::Legacy;
-#[cfg(feature = "experimental-api-5")]
-pub use multimap_table::MultimapCursor;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
