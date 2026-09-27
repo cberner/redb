@@ -84,7 +84,7 @@ redb has similar performance to other top embedded key-value stores such as lmdb
 | uncompacted size          | 4.00 GiB  | 2.61 GiB   | **893.18 MiB** | 1000.95 MiB | 1.09 GiB   |
 | compacted size            | 1.69 GiB  | 1.26 GiB   | **454.71 MiB** | 1000.95 MiB | 556.85 MiB |
 
-Source code for benchmark [here](./crates/redb-bench/benches/lmdb_benchmark.rs). Results collected on a Ryzen 9950X3D with Samsung 9100 PRO NVMe.
+Source code for benchmark [here](./crates/redb-bench-compare/benches/lmdb_benchmark.rs). Results collected on a Ryzen 9950X3D with Samsung 9100 PRO NVMe.
 
 ## License
 
