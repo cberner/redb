@@ -1,10 +1,8 @@
 use crate::CacheStats;
 use crate::db::{
-    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, TXN_BASE,
-    WRITER_BYTE, byte_range,
+    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, SHARED_READER_BYTE,
+    SHARED_WRITER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
 };
-#[cfg(feature = "experimental-multiprocess")]
-use crate::db::{SHARED_READER_BYTE, WHOLE_FILE_READER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -683,11 +681,7 @@ impl TransactionalMemory {
     ) -> Result<(), DatabaseError> {
         match concurrency_mode {
             ConcurrencyMode::ExclusiveWriter => Self::lock_whole_storage(storage, read_only),
-            #[cfg(feature = "experimental-multiprocess")]
             mode => Self::lock_mode_bytes(storage, read_only, mode),
-            // The shared modes are only reachable through the feature-gated setter
-            #[cfg(not(feature = "experimental-multiprocess"))]
-            _ => unreachable!(),
         }
     }
 
@@ -753,7 +747,6 @@ impl TransactionalMemory {
         storage.query_lock_range(byte_range(SHARED_WRITER_BYTE))
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     fn lock_mode_bytes(
         storage: &PagedCachedFile,
         read_only: bool,
@@ -2339,7 +2332,6 @@ impl TransactionalMemory {
     /// Asserts that the file is consistent and this handle a live writer: see `CONSISTENT_BYTE`.
     /// Shared, since a multi-writer cohort has several, and released with every other range by
     /// `close()`.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn mark_consistent(&self) -> Result {
         if self.concurrency_mode.is_multi_process_writable() {
             self.storage
@@ -2669,11 +2661,7 @@ mod test {
 }
 
 /// The header lock, against real files.
-#[cfg(all(
-    test,
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod header_lock_test {
     use super::{HeaderGuard, TransactionalMemory};
     use crate::db::ConcurrencyMode;
@@ -2752,6 +2740,7 @@ mod header_lock_test {
     /// A peer's close clears the recovery flag in the file while this handle is still writing.
     /// The commit that syncs to that close sets the flag again, so that a crash of this handle
     /// is still recovered from.
+    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn syncing_to_a_peers_close_keeps_the_recovery_flag() {
         use super::DB_HEADER_SIZE;
@@ -3095,7 +3084,7 @@ mod lock_protocol_test {
         older.try_lock().unwrap();
     }
 
-    #[cfg(all(feature = "experimental-multiprocess", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn multi_process_opens_do_not_take_legacy_locks() {
         let tmpfile = crate::create_tempfile();
@@ -3117,7 +3106,6 @@ mod lock_protocol_test {
 
     /// Only a multi-writer cohort admits a second writer, and every mode byte is free again once
     /// its holder closes
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn the_modes_exclude_each_other() {
         use ConcurrencyMode::{MultiWriter, SingleWriter};
@@ -3144,7 +3132,6 @@ mod lock_protocol_test {
 
     /// A exclusive-writer handle joins nothing, so it and a multi-process one refuse each other --
     /// unless both are read-only, since neither holds a byte the other could find
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn an_exclusive_writer_handle_and_a_multi_process_one_refuse_each_other() {
         let tmpfile = crate::create_tempfile();
@@ -3165,7 +3152,6 @@ mod lock_protocol_test {
 
     /// Dropping the file does not suffice: a caller holding a `try_clone()` of the file it
     /// handed over keeps the open file description, and so the locks, alive
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn a_refused_open_releases_the_bytes_it_took() {
         use crate::db::{SHARED_WRITER_BYTE, WRITER_BYTE, byte_range};
@@ -3299,12 +3285,10 @@ mod lock_failure_test {
             self.take((start, end), true)
         }
 
-        #[cfg(feature = "experimental-multiprocess")]
         fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
             self.take((start, end), false).map(|_| ())
         }
 
-        #[cfg(feature = "experimental-multiprocess")]
         fn lock_shared_range(
             &self,
             start: Bound<u64>,
@@ -3512,7 +3496,6 @@ mod lock_failure_test {
     }
 
     // A read-only open included: its mode still declares writers that need the locks
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn a_shared_mode_without_locks_fails_the_open() {
         for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
