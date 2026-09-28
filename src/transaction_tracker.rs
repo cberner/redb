@@ -315,7 +315,6 @@ impl TransactionTracker {
     }
 
     // Whether a write transaction holds the write slot in this process
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn write_transaction_live(&self) -> bool {
         self.state.lock().unwrap().write_slot != WriteSlotState::Free
     }
@@ -492,10 +491,7 @@ impl TransactionTracker {
         // Hold the tracker across snapshot capture and registration so reclamation cannot
         // miss this reader. The header lock also excludes peer commits and local reloads.
         let mut state = self.state.lock()?;
-        let (id, root) = mem.latest_committed_snapshot(
-            #[cfg(feature = "experimental-multiprocess")]
-            &header,
-        )?;
+        let (id, root) = mem.latest_committed_snapshot(&header)?;
         state.add_active_transaction_lock_reference(mem, id, &header)?;
 
         Ok((id, root))

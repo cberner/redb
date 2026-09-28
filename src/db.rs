@@ -1,7 +1,6 @@
 use crate::BackendError;
 use crate::io;
 use crate::transaction_tracker::{TransactionId, TransactionTracker};
-#[cfg(feature = "experimental-multiprocess")]
 use crate::transactions::AllocatorStateLatch;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
@@ -197,7 +196,6 @@ pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 /// the allocator load -- until it closes: the file is consistent, and the recovery flag, set from
 /// here on, means only that a writer is live. `SHARED_WRITER_BYTE` is taken before recovery, so
 /// it cannot say that; this byte can.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
 /// shared for as long as it is reading it
@@ -946,7 +944,6 @@ impl Database {
         };
         // An interrupted compaction or repair may leave no allocator snapshot. Record one so
         // the next writer can load it without rebuilding again.
-        #[cfg(feature = "experimental-multiprocess")]
         if peer_committed
             && allocator_hash.is_none()
             && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
@@ -1000,7 +997,6 @@ impl Database {
         }
         // In multi-writer mode a repair ends with a commit recording the allocator state, as the
         // open's does; after the savepoints are held, since a commit frees what nothing pins
-        #[cfg(feature = "experimental-multiprocess")]
         if !was_clean && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
@@ -1100,7 +1096,6 @@ impl Database {
         // since this handle last synced, and only a write transaction of this handle's own syncs
         // them again. Refresh before reporting one as a blocker, unless this process already has
         // a write transaction live, since beginning another would block on it.
-        #[cfg(feature = "experimental-multiprocess")]
         if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
             && self.transaction_tracker.any_persistent_savepoint_exists()
             && !self.transaction_tracker.write_transaction_live()
@@ -1206,7 +1201,6 @@ impl Database {
         // Not in the other modes, where the close records and a second record would leave the
         // file one record larger, the pages of the one it replaces being freed only by the next
         // commit
-        #[cfg(feature = "experimental-multiprocess")]
         if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
@@ -1519,7 +1513,6 @@ impl Database {
 
     /// Loads the latest allocator snapshot, or rebuilds it if compaction or repair stopped before
     /// recording one. The caller holds the write slot and writer byte throughout.
-    #[cfg(feature = "experimental-multiprocess")]
     fn load_synced_allocator_state(
         mem: &Arc<TransactionalMemory>,
         _writer_lock: &WriterLock,
@@ -1618,7 +1611,6 @@ impl Database {
         Self::sync_persistent_savepoints(&transaction_tracker, &mem, writer_lock.as_ref())?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction and the integrity check do, so that the next open, in any process, loads it
-        #[cfg(feature = "experimental-multiprocess")]
         if repaired && concurrency_mode == ConcurrencyMode::MultiWriter {
             ensure_allocator_state_table_and_trim(
                 &transaction_tracker,
@@ -1627,8 +1619,6 @@ impl Database {
                 None,
             )?;
         }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = repaired;
         // Construct only after initialization succeeds: Database::drop takes the writer lock,
         // which the open still holds, and assumes the savepoint tracker is complete.
         Ok(Database {
@@ -1742,7 +1732,6 @@ fn sync_persistent_savepoints(
 ///
 /// Returns `None` when the handle was already on the file's latest commit. Otherwise returns a
 /// latch that discards the allocator state unless the caller finishes the sync.
-#[cfg(feature = "experimental-multiprocess")]
 fn sync_to_latest_commit(
     mem: &Arc<TransactionalMemory>,
     writer_lock: &WriterLock,
@@ -1793,10 +1782,7 @@ fn begin_write_with_allocation_policy(
     // the slot is what orders this process's writers. An error return drops both
     let slot = WriteSlot::take(transaction_tracker.clone());
     let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
-    #[cfg(feature = "experimental-multiprocess")]
     let latch = sync_to_latest_commit(mem, &writer_lock, header_lock)?;
-    #[cfg(not(feature = "experimental-multiprocess"))]
-    let _ = header_lock;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes
     // first so a backend failure is not misreported as corruption
@@ -1820,11 +1806,9 @@ fn begin_write_with_allocation_policy(
     // The file's persistent savepoints are synced here, before this transaction frees anything,
     // so that the transactions they point at stay pinned. If the sync fails, the transaction is
     // aborted and the latch then discards the allocator state.
-    #[cfg(feature = "experimental-multiprocess")]
     if latch.is_some() {
         sync_persistent_savepoints(transaction_tracker, mem, &transaction)?;
     }
-    #[cfg(feature = "experimental-multiprocess")]
     if let Some(latch) = latch {
         latch.disarm();
     }

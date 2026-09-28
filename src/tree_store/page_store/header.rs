@@ -214,7 +214,6 @@ impl UnrepairedDatabaseHeader {
     }
 
     // The last writer did not shut down cleanly
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn unclean(&self) -> bool {
         self.inner.recovery_required
     }
@@ -344,7 +343,6 @@ impl UnrepairedDatabaseHeader {
     // Keeps the primary as recorded. Choosing between the slots is a repairing writer's job: a
     // newer secondary is a commit whose pages may not be in the file yet, or one a repair has
     // rolled back.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn finalize_transaction_slots(self) -> Result<DatabaseHeader> {
         if self.primary_corrupted {
             return Err(StorageError::Corrupted(

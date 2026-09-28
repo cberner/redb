@@ -1,10 +1,10 @@
 use crate::CacheStats;
 use crate::db::{
-    BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, TXN_BASE, WRITER_BYTE,
-    byte_range,
+    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, TXN_BASE,
+    WRITER_BYTE, byte_range,
 };
 #[cfg(feature = "experimental-multiprocess")]
-use crate::db::{CONSISTENT_BYTE, SHARED_READER_BYTE, WHOLE_FILE_READER_BYTE};
+use crate::db::{SHARED_READER_BYTE, WHOLE_FILE_READER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
@@ -653,7 +653,6 @@ pub(crate) struct TransactionalMemory {
     // forcing the next open to rebuild the state from the committed trees
     needs_repair: AtomicBool,
     concurrency_mode: ConcurrencyMode,
-    #[cfg(feature = "experimental-multiprocess")]
     read_only: bool,
     // Held for the duration of every header file lock. Ensures in-process threads do not overlap
     // acquiring the lock. Because it's an OFD lock on a single FD, only one may take it at a time.
@@ -830,7 +829,6 @@ impl TransactionalMemory {
         page_size: usize,
         read_only: bool,
     ) -> Result<DatabaseHeader, DatabaseError> {
-        #[cfg(feature = "experimental-multiprocess")]
         if read_only && concurrency_mode.is_multi_process_writable() {
             return Self::read_shared_header(
                 storage,
@@ -868,7 +866,6 @@ impl TransactionalMemory {
     /// it never allocates, and reads pages by the immutable geometry alone. A writer publishes the
     /// recovery flag under its exclusive hold, and holds `CONSISTENT_BYTE` only while that flag
     /// means a live writer.
-    #[cfg(feature = "experimental-multiprocess")]
     fn read_shared_header(
         storage: &PagedCachedFile,
         in_process_header_lock: &Mutex<()>,
@@ -1175,7 +1172,6 @@ impl TransactionalMemory {
             allocated_pages: Arc::new(Mutex::new(PageNumberHashSet::default())),
             needs_repair: AtomicBool::new(false),
             concurrency_mode,
-            #[cfg(feature = "experimental-multiprocess")]
             read_only,
             in_process_header_lock,
             scan_from: Mutex::new(0),
@@ -1299,9 +1295,8 @@ impl TransactionalMemory {
     /// committed. The caller's `header` hold must also cover registering the returned id as active.
     pub(crate) fn latest_committed_snapshot(
         &self,
-        #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
+        header: &HeaderGuard<'_>,
     ) -> Result<(TransactionId, Option<BtreeHeader>)> {
-        #[cfg(feature = "experimental-multiprocess")]
         if self.externally_writable() {
             return self.read_snapshot_from_file(header);
         }
@@ -1312,7 +1307,6 @@ impl TransactionalMemory {
     }
 
     /// Whether another process may commit to this file
-    #[cfg(feature = "experimental-multiprocess")]
     fn externally_writable(&self) -> bool {
         match self.concurrency_mode {
             ConcurrencyMode::ExclusiveWriter => false,
@@ -1322,7 +1316,6 @@ impl TransactionalMemory {
     }
 
     /// Reads a snapshot without changing the in-memory header or allocator state.
-    #[cfg(feature = "experimental-multiprocess")]
     fn read_snapshot_from_file(
         &self,
         header: &HeaderGuard<'_>,
@@ -1344,7 +1337,6 @@ impl TransactionalMemory {
     ///
     /// `writer_lock` and `header_lock` prove that the caller holds the writer byte and the
     /// header lock, so that no other process commits while this reads the file.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn reload_for_write(
         &self,
         _writer_lock: &WriterLock,
@@ -1513,7 +1505,6 @@ impl TransactionalMemory {
     /// Writes the header under the caller's exclusive header hold, which is what keeps another
     /// process from reading it torn where the file is shared.
     fn write_header(&self, header: &DatabaseHeader, _header_lock: &HeaderGuard<'_>) -> Result {
-        #[cfg(feature = "experimental-multiprocess")]
         if self.concurrency_mode.is_multi_process_writable() {
             // Written directly rather than through the write buffer, so that the hold covers the
             // bytes reaching the file
@@ -1529,7 +1520,6 @@ impl TransactionalMemory {
 
     // Sets the recovery flag that a live writer keeps in its header. Loading the allocator
     // state clears that flag, so a handle that has just synced must set it again.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn mark_recovery_required(&self) {
         self.state.lock().unwrap().header.recovery_required = true;
     }
@@ -1751,7 +1741,6 @@ impl TransactionalMemory {
         {
             let hold = self.header_hold(header_lock)?;
             self.write_header(&header, &hold)?;
-            #[cfg(feature = "experimental-multiprocess")]
             if self.concurrency_mode == ConcurrencyMode::MultiWriter {
                 // Writes invalidate the pages they replace, so retained pages remain valid.
                 self.storage.record_local_transaction_id(transaction_id);
