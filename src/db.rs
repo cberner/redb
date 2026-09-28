@@ -185,12 +185,10 @@ pub(crate) const WRITER_BYTE: u64 = LOCK_BASE;
 pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
 /// Held shared by every read-only multi-process handle while the database is open, so that a
 /// exclusive-writer open conflicts with a live reader no matter what the reader is doing.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
 /// Held shared by a read-only exclusive-writer handle as part of its whole-file lock. Such a
 /// handle leaves `SHARED_WRITER_BYTE` free, so a multi-writer open, which takes only that byte,
 /// must probe this one to find it.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 /// Held shared by a writing process from the moment its open is complete -- past recovery and
 /// the allocator load -- until it closes: the file is consistent, and the recovery flag, set from
@@ -1601,7 +1599,6 @@ impl Database {
 
         mem.begin_writable()?;
         // Past recovery, so a reader finding this byte held knows the flag means a live writer
-        #[cfg(feature = "experimental-multiprocess")]
         mem.mark_consistent()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
