@@ -26,10 +26,8 @@ pub(crate) use header::PAGE_SIZE;
 pub(crate) use layout::DatabaseLayout;
 #[cfg(all(test, feature = "experimental-multiprocess"))]
 pub(crate) use page_manager::HEADER_LOCK;
-#[cfg(feature = "experimental-multiprocess")]
-pub(crate) use page_manager::HeaderGuard;
 pub(crate) use page_manager::{
-    AllocationPolicy, FILE_FORMAT_VERSION3, PageAllocator, PageResolver, ShrinkPolicy,
+    AllocationPolicy, FILE_FORMAT_VERSION3, HeaderGuard, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, WriterLock, xxh3_checksum,
 };
 pub use savepoint::Savepoint;

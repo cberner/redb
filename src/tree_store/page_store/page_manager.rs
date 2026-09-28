@@ -33,9 +33,7 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::marker::PhantomData;
 use core::mem;
-use core::ops::Bound;
-#[cfg(feature = "experimental-multiprocess")]
-use core::ops::{Deref, Range};
+use core::ops::{Bound, Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
 use log::warn;
@@ -534,20 +532,17 @@ impl UnpersistedState {
 
 /// The header bytes themselves rather than a byte standing for them, so that Windows' mandatory
 /// locks hold back another process's read of them.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const HEADER_LOCK: Range<u64> = 0..DB_HEADER_SIZE as u64;
 
 /// A hold on the header lock, released when it drops. Taken ahead of the memory's and the
 /// tracker's state locks, which a reader's registration and the reclamation scan take under it.
 /// Lent to the work under it rather than taken again: the in-process half is a mutex, which its
 /// holder cannot take twice.
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) struct HeaderGuard<'a> {
     storage: Option<&'a PagedCachedFile>,
     _in_process: crate::sync::MutexGuard<'a, ()>,
 }
 
-#[cfg(feature = "experimental-multiprocess")]
 impl Drop for HeaderGuard<'_> {
     fn drop(&mut self) {
         if let Some(storage) = self.storage {
@@ -557,13 +552,11 @@ impl Drop for HeaderGuard<'_> {
 }
 
 /// One operation's exclusive header hold, released after it unless it was the caller's
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) enum HeaderHold<'a> {
     Lent(&'a HeaderGuard<'a>),
     Own(HeaderGuard<'a>),
 }
 
-#[cfg(feature = "experimental-multiprocess")]
 impl<'a> Deref for HeaderHold<'a> {
     type Target = HeaderGuard<'a>;
 
@@ -665,7 +658,6 @@ pub(crate) struct TransactionalMemory {
     // acquiring the lock. Because it's an OFD lock on a single FD, only one may take it at a time.
     // TODO: This could probably be optimized, so that multiple threads can read at once, by making
     // this a counter or RwLock
-    #[cfg(feature = "experimental-multiprocess")]
     in_process_header_lock: Mutex<()>,
     // Where the next scan of the active transaction range starts: a pin lands only at or above
     // the ceiling of the scan before it, since every handle reads the id it pins from the file
@@ -795,7 +787,6 @@ impl TransactionalMemory {
 
     /// Takes the storage and the mutex rather than `&self`, so that the open path can hold the
     /// header before there is a `TransactionalMemory` to hold it from.
-    #[cfg(feature = "experimental-multiprocess")]
     fn lock_header<'a>(
         storage: &'a PagedCachedFile,
         in_process: &'a Mutex<()>,
@@ -824,7 +815,7 @@ impl TransactionalMemory {
     fn read_file_header(
         storage: &PagedCachedFile,
         page_size: u32,
-        #[cfg(feature = "experimental-multiprocess")] _header_lock: &HeaderGuard<'_>,
+        _header_lock: &HeaderGuard<'_>,
     ) -> Result<UnrepairedDatabaseHeader, DatabaseError> {
         let header_bytes = storage.read_direct(0, DB_HEADER_SIZE)?;
         UnrepairedDatabaseHeader::from_bytes(&header_bytes, page_size)
@@ -834,8 +825,8 @@ impl TransactionalMemory {
     /// repair if one was needed. A shared reader does neither: see `read_shared_header()`.
     fn read_header(
         storage: &PagedCachedFile,
-        #[cfg(feature = "experimental-multiprocess")] in_process_header_lock: &Mutex<()>,
-        #[cfg(feature = "experimental-multiprocess")] concurrency_mode: ConcurrencyMode,
+        in_process_header_lock: &Mutex<()>,
+        concurrency_mode: ConcurrencyMode,
         page_size: usize,
         read_only: bool,
     ) -> Result<DatabaseHeader, DatabaseError> {
@@ -849,15 +840,9 @@ impl TransactionalMemory {
             );
         }
         let unrepaired = {
-            #[cfg(feature = "experimental-multiprocess")]
             let header_lock =
                 Self::lock_header(storage, in_process_header_lock, concurrency_mode, false)?;
-            Self::read_file_header(
-                storage,
-                page_size.try_into().unwrap(),
-                #[cfg(feature = "experimental-multiprocess")]
-                &header_lock,
-            )?
+            Self::read_file_header(storage, page_size.try_into().unwrap(), &header_lock)?
         };
         let file_len = storage.raw_file_len()?;
         let needs_recovery = unrepaired.recovery_required(file_len);
@@ -866,7 +851,6 @@ impl TransactionalMemory {
         }
         let (header, _) = unrepaired.finalize(file_len)?;
         if needs_recovery {
-            #[cfg(feature = "experimental-multiprocess")]
             let _guard =
                 Self::lock_header(storage, in_process_header_lock, concurrency_mode, true)?;
             storage
@@ -942,7 +926,6 @@ impl TransactionalMemory {
         Ok(())
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_header_shared(&self) -> Result<HeaderGuard<'_>> {
         Self::lock_header(
             &self.storage,
@@ -952,7 +935,6 @@ impl TransactionalMemory {
         )
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_header_exclusive(&self) -> Result<HeaderGuard<'_>> {
         Self::lock_header(
             &self.storage,
@@ -964,7 +946,6 @@ impl TransactionalMemory {
 
     /// The exclusive header hold for one operation: `lent` where the caller holds it already, and
     /// a hold of its own otherwise
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn header_hold<'a>(
         &'a self,
         lent: Option<&'a HeaderGuard<'a>>,
@@ -1013,6 +994,7 @@ impl TransactionalMemory {
     pub(crate) fn oldest_active_transaction(
         &self,
         local: Option<TransactionId>,
+        _header_lock: &HeaderGuard<'_>,
     ) -> Result<Option<TransactionId>> {
         Ok(local)
     }
@@ -1089,11 +1071,9 @@ impl TransactionalMemory {
         // repairs and commits over
         let open_writer_lock =
             open_writer_lock_for_mode(&storage, read_only, concurrency_mode, writer_lock.clone())?;
-        #[cfg(feature = "experimental-multiprocess")]
         let in_process_header_lock = Mutex::new(());
 
         // Ensure that we have a consistent view across reading the file length and metadata
-        #[cfg(feature = "experimental-multiprocess")]
         let init_guard = Self::lock_header(
             &storage,
             &in_process_header_lock,
@@ -1182,13 +1162,10 @@ impl TransactionalMemory {
             storage.flush()?;
         }
         // Given up before the read below takes it again: neither hold nests
-        #[cfg(feature = "experimental-multiprocess")]
         drop(init_guard);
         let header = Self::read_header(
             &storage,
-            #[cfg(feature = "experimental-multiprocess")]
             &in_process_header_lock,
-            #[cfg(feature = "experimental-multiprocess")]
             concurrency_mode,
             page_size,
             read_only,
@@ -1215,7 +1192,6 @@ impl TransactionalMemory {
             concurrency_mode,
             #[cfg(feature = "experimental-multiprocess")]
             read_only,
-            #[cfg(feature = "experimental-multiprocess")]
             in_process_header_lock,
             #[cfg(feature = "experimental-multiprocess")]
             scan_from: Mutex::new(0),
@@ -1306,24 +1282,13 @@ impl TransactionalMemory {
         self.storage.sync_file()?;
 
         let unrepaired = {
-            #[cfg(feature = "experimental-multiprocess")]
             let header_lock = self.lock_header_shared()?;
-            Self::read_file_header(
-                &self.storage,
-                self.page_size,
-                #[cfg(feature = "experimental-multiprocess")]
-                &header_lock,
-            )?
+            Self::read_file_header(&self.storage, self.page_size, &header_lock)?
         };
         let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         if !was_clean {
-            #[cfg(feature = "experimental-multiprocess")]
             let header_lock = self.lock_header_exclusive()?;
-            self.write_header(
-                &header,
-                #[cfg(feature = "experimental-multiprocess")]
-                &header_lock,
-            )?;
+            self.write_header(&header, &header_lock)?;
             self.storage.flush()?;
         }
 
@@ -1436,16 +1401,11 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn begin_writable(&self) -> Result {
-        #[cfg(feature = "experimental-multiprocess")]
         let header_lock = self.lock_header_exclusive()?;
         let mut state = self.state.lock().unwrap();
         assert!(!state.header.recovery_required);
         state.header.recovery_required = true;
-        self.write_header(
-            &state.header,
-            #[cfg(feature = "experimental-multiprocess")]
-            &header_lock,
-        )?;
+        self.write_header(&state.header, &header_lock)?;
         self.storage.flush()
     }
 
@@ -1568,11 +1528,7 @@ impl TransactionalMemory {
 
     /// Writes the header under the caller's exclusive header hold, which is what keeps another
     /// process from reading it torn where the file is shared.
-    fn write_header(
-        &self,
-        header: &DatabaseHeader,
-        #[cfg(feature = "experimental-multiprocess")] _header_lock: &HeaderGuard<'_>,
-    ) -> Result {
+    fn write_header(&self, header: &DatabaseHeader, _header_lock: &HeaderGuard<'_>) -> Result {
         #[cfg(feature = "experimental-multiprocess")]
         if self.concurrency_mode.is_multi_process_writable() {
             // Written directly rather than through the write buffer, so that the hold covers the
@@ -1596,15 +1552,10 @@ impl TransactionalMemory {
 
     // Durably clears the recovery flag, marking the repair as complete.
     pub(crate) fn clear_recovery_required(&self) -> Result<()> {
-        #[cfg(feature = "experimental-multiprocess")]
         let header_lock = self.lock_header_exclusive()?;
         let mut state = self.state.lock().unwrap();
         state.header.recovery_required = false;
-        self.write_header(
-            &state.header,
-            #[cfg(feature = "experimental-multiprocess")]
-            &header_lock,
-        )?;
+        self.write_header(&state.header, &header_lock)?;
         self.storage.flush()?;
         Ok(())
     }
@@ -1766,7 +1717,7 @@ impl TransactionalMemory {
         transaction_id: TransactionId,
         two_phase: bool,
         shrink_policy: ShrinkPolicy,
-        #[cfg(feature = "experimental-multiprocess")] header_lock: Option<&HeaderGuard<'_>>,
+        header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result {
         // All mutable pages must be dropped, this ensures that when a transaction completes
         // no more writes can happen to the pages it allocated. Thus it is safe to make them visible
@@ -1798,13 +1749,8 @@ impl TransactionalMemory {
         // A hold of its own covers one write and not the flush between them, where the caller
         // lends none
         {
-            #[cfg(feature = "experimental-multiprocess")]
             let hold = self.header_hold(header_lock)?;
-            self.write_header(
-                &header,
-                #[cfg(feature = "experimental-multiprocess")]
-                &hold,
-            )?;
+            self.write_header(&header, &hold)?;
         }
 
         // Use 2-phase commit, if checksums are disabled
@@ -1819,13 +1765,8 @@ impl TransactionalMemory {
 
         // Write the new header to disk
         {
-            #[cfg(feature = "experimental-multiprocess")]
             let hold = self.header_hold(header_lock)?;
-            self.write_header(
-                &header,
-                #[cfg(feature = "experimental-multiprocess")]
-                &hold,
-            )?;
+            self.write_header(&header, &hold)?;
             #[cfg(feature = "experimental-multiprocess")]
             if self.concurrency_mode == ConcurrencyMode::MultiWriter {
                 // Writes invalidate the pages they replace, so retained pages remain valid.
@@ -1999,14 +1940,8 @@ impl TransactionalMemory {
     // in-memory copy of an originally-clean slot wouldn't show external/failed-commit corruption.
     pub(crate) fn durable_primary_slot_corrupt(&self) -> Result<bool, DatabaseError> {
         let disk_header = {
-            #[cfg(feature = "experimental-multiprocess")]
             let header_lock = self.lock_header_shared()?;
-            Self::read_file_header(
-                &self.storage,
-                self.page_size,
-                #[cfg(feature = "experimental-multiprocess")]
-                &header_lock,
-            )?
+            Self::read_file_header(&self.storage, self.page_size, &header_lock)?
         };
         Ok(disk_header.primary_corrupted())
     }
@@ -2456,7 +2391,6 @@ impl TransactionalMemory {
 
     fn flush_shutdown_header(&self) -> Result {
         if self.storage.check_io_errors().is_ok() && !crate::panicking() {
-            #[cfg(feature = "experimental-multiprocess")]
             let header_lock = self.lock_header_exclusive()?;
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
@@ -2464,11 +2398,7 @@ impl TransactionalMemory {
             if state.allocators.is_loaded() && !self.needs_repair() && self.storage.flush().is_ok()
             {
                 state.header.recovery_required = false;
-                self.write_header(
-                    &state.header,
-                    #[cfg(feature = "experimental-multiprocess")]
-                    &header_lock,
-                )?;
+                self.write_header(&state.header, &header_lock)?;
                 self.storage.flush()?;
             }
         }
