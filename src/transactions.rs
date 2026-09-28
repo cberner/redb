@@ -1592,7 +1592,6 @@ impl WriteTransaction {
     pub fn set_quick_repair(&mut self, enabled: bool) {
         // A multi-writer commit records the allocator state, for the next writer, in any
         // process, to load rather than rebuild from the trees
-        #[cfg(feature = "experimental-multiprocess")]
         if !enabled && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
             return;
         }
@@ -1792,7 +1791,6 @@ impl WriteTransaction {
         // Multi-process modes with a writer require 2-phase commit: a 1-phase commit publishes the
         // secondary slot before flushing the pages it names, which a reader in another process
         // would then follow
-        #[cfg(feature = "experimental-multiprocess")]
         if self.mem.concurrency_mode().is_multi_process_writable() {
             self.two_phase_commit = true;
         }

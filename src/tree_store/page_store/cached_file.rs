@@ -1,6 +1,5 @@
 use crate::db::StorageBackend;
 use crate::sync::{Mutex, MutexGuard, RwLock};
-#[cfg(feature = "experimental-multiprocess")]
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
@@ -304,7 +303,6 @@ pub(super) struct PagedCachedFile {
     // A third "total" counter would add contention on every insert/remove for
     // negligible accuracy gain.
     read_cache_bytes: AtomicUsize,
-    #[cfg(feature = "experimental-multiprocess")]
     read_cache_transaction_id: Mutex<Option<TransactionId>>,
     write_buffer_bytes: AtomicUsize,
     // True when the write buffer holds committed, reader-visible pages, left there by a
@@ -354,7 +352,6 @@ impl PagedCachedFile {
             file: CheckedBackend::new(file),
             page_size,
             read_cache_bytes: AtomicUsize::new(0),
-            #[cfg(feature = "experimental-multiprocess")]
             read_cache_transaction_id: Mutex::new(None),
             write_buffer_bytes: AtomicUsize::new(0),
             committed_pages_buffered: AtomicBool::new(false),
@@ -619,14 +616,12 @@ impl PagedCachedFile {
     // Whether a commit has left pages in the write buffer instead of writing them to the file.
     // Only a non-durable commit does that, so this is always false in the multi-process modes,
     // which refuse `Durability::None`.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn has_committed_pages_buffered(&self) -> bool {
         self.committed_pages_buffered.load(Ordering::Acquire)
     }
 
     // Write directly to the file, bypassing the write buffer, so the bytes are on the file when
     // this returns rather than whenever the buffer is next flushed
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn write_direct(&self, offset: u64, data: &[u8]) -> Result<()> {
         self.invalidate_cache(offset, data.len());
         self.cancel_pending_write(offset, data.len());
@@ -795,7 +790,6 @@ impl PagedCachedFile {
     }
 
     // The caller holds the header lock across observing this id and updating the cache.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn update_transaction_id(&self, transaction_id: TransactionId) {
         let mut current = self.read_cache_transaction_id.lock().unwrap();
         if *current != Some(transaction_id) {
@@ -805,7 +799,6 @@ impl PagedCachedFile {
     }
 
     // The caller holds the header lock across publishing this local commit and updating the tag.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(super) fn record_local_transaction_id(&self, transaction_id: TransactionId) {
         *self.read_cache_transaction_id.lock().unwrap() = Some(transaction_id);
     }
@@ -1287,7 +1280,6 @@ mod test {
     // A direct write is the file's content from the moment it returns, so a buffered write of the
     // same range must not reach the file after it.
     #[test]
-    #[cfg(feature = "experimental-multiprocess")]
     fn write_direct_supersedes_a_buffered_write() {
         let (backend, _writes) = CountingBackend::new(1024);
         let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);

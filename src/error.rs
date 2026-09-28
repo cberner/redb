@@ -4,7 +4,7 @@ use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
 use alloc::boxed::Box;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use core::fmt::{Display, Formatter};
 use core::panic;
 
@@ -315,7 +315,6 @@ impl From<BackendError> for DatabaseError {
 }
 
 impl DatabaseError {
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn into_storage_error_or_corrupted(self) -> StorageError {
         match self {
             DatabaseError::Storage(storage) => storage,
