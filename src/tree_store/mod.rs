@@ -21,16 +21,15 @@ pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 #[cfg(all(test, feature = "experimental-multiprocess"))]
 pub(crate) use page_store::HEADER_LOCK;
-#[cfg(feature = "experimental-multiprocess")]
-pub(crate) use page_store::HeaderGuard;
 #[cfg(not(redb_no_std))]
 pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
 pub(crate) use page_store::{
-    AllocationPolicy, DatabaseLayout, FILE_FORMAT_VERSION3, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH,
-    PAGE_SIZE, Page, PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageNumberHashSet,
-    PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy, TransactionalMemory, WriterLock,
+    AllocationPolicy, DatabaseLayout, FILE_FORMAT_VERSION3, HeaderGuard, MAX_PAIR_LENGTH,
+    MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageAllocator, PageHint, PageNumber, PageNumberHashMap,
+    PageNumberHashSet, PageResolver, PageTracker, SerializedSavepoint, ShrinkPolicy,
+    TransactionalMemory, WriterLock,
 };
 pub use page_store::{InMemoryBackend, Savepoint};
 pub(crate) use table_tree::{PageListMut, TableTree, TableTreeMut};

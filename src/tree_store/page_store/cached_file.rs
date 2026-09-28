@@ -169,7 +169,6 @@ impl CheckedBackend {
             .map_err(StorageError::from)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     fn lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.check_failure()?;
         self.file
@@ -388,7 +387,6 @@ impl PagedCachedFile {
         self.file.lock_range(range)
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.file.lock_shared_range(range)
     }
