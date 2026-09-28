@@ -201,7 +201,6 @@ pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
 /// shared for as long as it is reading it
-#[cfg(feature = "experimental-multiprocess")]
 pub(crate) const TXN_BASE: u64 = LOCK_BASE + 1024;
 
 pub(crate) fn byte_range(offset: u64) -> (Bound<u64>, Bound<u64>) {
@@ -560,13 +559,8 @@ impl Drop for TransactionGuard {
                     tracker.deallocate_read_transaction(mem, *transaction_id);
                 }
             }
-            Self::Write {
-                #[cfg(feature = "experimental-multiprocess")]
-                slot,
-                ..
-            } => {
+            Self::Write { slot, .. } => {
                 // Leave `Live` before the fields drop the writer lock and then the slot.
-                #[cfg(feature = "experimental-multiprocess")]
                 slot.tracker.begin_finalizing();
             }
             Self::Untracked => {}
@@ -1034,12 +1028,7 @@ impl Database {
             AllocationPolicy::Default,
         )
         .map_err(|e| e.into_storage_error())?;
-        sync_persistent_savepoints(
-            transaction_tracker,
-            #[cfg(feature = "experimental-multiprocess")]
-            mem,
-            &txn,
-        )?;
+        sync_persistent_savepoints(transaction_tracker, mem, &txn)?;
         txn.abort()?;
 
         Ok(())
@@ -1727,14 +1716,13 @@ impl Database {
 // deleted since the tracker last saw the file, and continues savepoint ids past the file's.
 fn sync_persistent_savepoints(
     transaction_tracker: &TransactionTracker,
-    #[cfg(feature = "experimental-multiprocess")] mem: &TransactionalMemory,
+    mem: &TransactionalMemory,
     txn: &WriteTransaction,
 ) -> Result {
     if let Some(next_id) = txn.next_persistent_savepoint_id()? {
         transaction_tracker.restore_savepoint_counter_state(next_id);
     }
     let current = txn.persistent_savepoint_transactions()?;
-    #[cfg(feature = "experimental-multiprocess")]
     for &transaction_id in current.values() {
         // The file names its persistent savepoints, so the transaction each points at is
         // untrusted: one outside the lock range would be tracked as a read this process holds

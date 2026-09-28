@@ -1,9 +1,6 @@
-#[cfg(feature = "experimental-multiprocess")]
 use crate::StorageError;
 use crate::sync::{Condvar, Mutex};
-#[cfg(feature = "experimental-multiprocess")]
-use crate::tree_store::HeaderGuard;
-use crate::tree_store::{BtreeHeader, TransactionalMemory, WriterLock};
+use crate::tree_store::{BtreeHeader, HeaderGuard, TransactionalMemory, WriterLock};
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
 use alloc::collections::btree_map::BTreeMap;
@@ -13,9 +10,7 @@ use core::cmp::Ordering;
 use core::mem;
 use core::mem::size_of;
 #[cfg(feature = "logging")]
-use log::debug;
-#[cfg(all(feature = "logging", feature = "experimental-multiprocess"))]
-use log::error;
+use log::{debug, error};
 
 #[derive(Copy, Clone, Hash, Ord, PartialOrd, Eq, PartialEq, Debug)]
 pub(crate) struct TransactionId(u64);
@@ -104,7 +99,6 @@ enum WriteSlotState {
     Live(TransactionId),
     // The transaction is releasing its writer-lock reference while still holding the slot.
     // Another owner of the lock may keep the writer byte held after the transaction ends.
-    #[cfg(feature = "experimental-multiprocess")]
     Finalizing,
 }
 
@@ -152,7 +146,6 @@ impl State {
 
     // The references to `id` that are reads, which the "active transaction byte" announces to the
     // other processes. Persistent savepoints are excluded
-    #[cfg(feature = "experimental-multiprocess")]
     fn active_transaction_lock_references(&self, id: TransactionId) -> u64 {
         let references = self.live_read_transactions.get(&id).copied().unwrap_or(0);
         let savepoints = self
@@ -174,18 +167,15 @@ impl State {
         &mut self,
         mem: &TransactionalMemory,
         id: TransactionId,
-        #[cfg(feature = "experimental-multiprocess")] header: &HeaderGuard<'_>,
+        header: &HeaderGuard<'_>,
     ) -> Result {
         *self.live_read_transactions.entry(id).or_insert(0) += 1;
-        #[cfg(feature = "experimental-multiprocess")]
         if self.active_transaction_lock_references(id) == 1
             && let Err(err) = mem.lock_mp_transaction(id, header)
         {
             self.decrement_reference_count(id);
             return Err(err);
         }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = mem;
 
         Ok(())
     }
@@ -196,15 +186,11 @@ impl State {
         id: TransactionId,
     ) {
         self.decrement_reference_count(id);
-        #[cfg(feature = "experimental-multiprocess")]
         if self.active_transaction_lock_references(id) == 0 {
             Self::release_active_transaction_lock(mem, id);
         }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = mem;
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     fn release_active_transaction_lock(mem: &TransactionalMemory, id: TransactionId) {
         if let Err(failure) = mem.unlock_mp_transaction(id) {
             if matches!(failure, StorageError::DatabaseClosed) {
@@ -244,12 +230,9 @@ impl State {
         id: TransactionId,
     ) {
         *self.persistent_savepoint_references.entry(id).or_insert(0) += 1;
-        #[cfg(feature = "experimental-multiprocess")]
         if self.active_transaction_lock_references(id) == 0 {
             Self::release_active_transaction_lock(mem, id);
         }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        let _ = mem;
     }
 
     fn decrement_reference_count(&mut self, id: TransactionId) {
@@ -317,7 +300,6 @@ impl TransactionTracker {
     }
 
     // Leave `Live` before releasing the transaction's writer-lock reference
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn begin_finalizing(&self) {
         let mut state = self.state.lock().unwrap();
         assert!(matches!(state.write_slot, WriteSlotState::Live(_)));
@@ -344,13 +326,10 @@ impl TransactionTracker {
         let mut state = self.state.lock().unwrap();
         // A transaction that reached `Live` must finalize before releasing the slot.
         // Initialization failures release the slot directly from `Initializing`.
-        #[cfg(feature = "experimental-multiprocess")]
         assert!(matches!(
             state.write_slot,
             WriteSlotState::Initializing | WriteSlotState::Finalizing
         ));
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        assert_ne!(state.write_slot, WriteSlotState::Free);
         state.write_slot = WriteSlotState::Free;
         self.live_write_transaction_available.notify_one();
 
@@ -416,15 +395,9 @@ impl TransactionTracker {
         durable_ancestor: TransactionId,
         has_unprocessed_freed_pages: bool,
     ) -> Result {
-        #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
         let mut state = self.state.lock().unwrap();
-        state.add_active_transaction_lock_reference(
-            mem,
-            durable_ancestor,
-            #[cfg(feature = "experimental-multiprocess")]
-            &header,
-        )?;
+        state.add_active_transaction_lock_reference(mem, durable_ancestor, &header)?;
         assert!(
             state
                 .pending_non_durable_commits
@@ -515,7 +488,6 @@ impl TransactionTracker {
         &self,
         mem: &TransactionalMemory,
     ) -> Result<(TransactionId, Option<BtreeHeader>)> {
-        #[cfg(feature = "experimental-multiprocess")]
         let header = mem.lock_header_shared()?;
         // Hold the tracker across snapshot capture and registration so reclamation cannot
         // miss this reader. The header lock also excludes peer commits and local reloads.
@@ -524,12 +496,7 @@ impl TransactionTracker {
             #[cfg(feature = "experimental-multiprocess")]
             &header,
         )?;
-        state.add_active_transaction_lock_reference(
-            mem,
-            id,
-            #[cfg(feature = "experimental-multiprocess")]
-            &header,
-        )?;
+        state.add_active_transaction_lock_reference(mem, id, &header)?;
 
         Ok((id, root))
     }

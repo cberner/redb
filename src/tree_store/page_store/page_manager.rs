@@ -1,15 +1,15 @@
 use crate::CacheStats;
 use crate::db::{
-    BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, WRITER_BYTE, byte_range,
+    BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE, TXN_BASE, WRITER_BYTE,
+    byte_range,
 };
 #[cfg(feature = "experimental-multiprocess")]
-use crate::db::{CONSISTENT_BYTE, SHARED_READER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE};
+use crate::db::{CONSISTENT_BYTE, SHARED_READER_BYTE, WHOLE_FILE_READER_BYTE};
 use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
 use crate::tree_store::btree_base::{BtreeHeader, Checksum};
-#[cfg(feature = "experimental-multiprocess")]
 use crate::tree_store::page_store::active_transactions;
 use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, PageHint};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
@@ -26,6 +26,7 @@ use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -661,7 +662,6 @@ pub(crate) struct TransactionalMemory {
     in_process_header_lock: Mutex<()>,
     // Where the next scan of the active transaction range starts: a pin lands only at or above
     // the ceiling of the scan before it, since every handle reads the id it pins from the file
-    #[cfg(feature = "experimental-multiprocess")]
     scan_from: Mutex<u64>,
     // The lock the open took, which every write transaction holds while it runs. `None` in
     // multi-writer mode, where a write transaction takes the writer byte itself, and for a
@@ -905,7 +905,6 @@ impl TransactionalMemory {
         }))
     }
 
-    #[cfg(feature = "experimental-multiprocess")]
     fn active_transaction_byte(id: TransactionId) -> Result<u64> {
         match TXN_BASE.checked_add(id.raw_id()) {
             Some(offset) if offset < 1 << 63 => Ok(offset),
@@ -918,7 +917,6 @@ impl TransactionalMemory {
 
     /// Checks that `id` is one this file's locks can announce. A persistent savepoint takes no
     /// "active transaction byte", so nothing else checks the ids the file names.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn check_active_transaction_id(&self, id: TransactionId) -> Result {
         if self.concurrency_mode.is_multi_process_writable() {
             Self::active_transaction_byte(id)?;
@@ -959,7 +957,6 @@ impl TransactionalMemory {
     /// The oldest transaction still being read in any process, given `local`, the oldest this
     /// process reads. Where the file is shared it is found under the caller's exclusive header
     /// hold, which every registration waits behind, so no pin lands below what this reports.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn oldest_active_transaction(
         &self,
         local: Option<TransactionId>,
@@ -989,16 +986,6 @@ impl TransactionalMemory {
         Ok(local)
     }
 
-    #[cfg(not(feature = "experimental-multiprocess"))]
-    #[allow(clippy::unnecessary_wraps, clippy::unused_self)]
-    pub(crate) fn oldest_active_transaction(
-        &self,
-        local: Option<TransactionId>,
-        _header_lock: &HeaderGuard<'_>,
-    ) -> Result<Option<TransactionId>> {
-        Ok(local)
-    }
-
     /// Marks `id` active, keeping the pages its snapshot references from being reclaimed by any
     /// process until [`Self::unlock_mp_transaction`]. The caller's shared header hold orders this
     /// against a writer's reclamation scan, which holds it exclusively: the scan either sees this
@@ -1007,7 +994,6 @@ impl TransactionalMemory {
     /// Caller must not attempt to re-lock an already locked transaction.
     ///
     /// The caller must guarantee that `id` cannot already have been collected.
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn lock_mp_transaction(
         &self,
         id: TransactionId,
@@ -1030,7 +1016,6 @@ impl TransactionalMemory {
 
     /// Releases the byte. Taken without the header lock: releasing only widens what a scanning
     /// writer may reclaim, and a scan that misses it reclaims less
-    #[cfg(feature = "experimental-multiprocess")]
     pub(crate) fn unlock_mp_transaction(&self, id: TransactionId) -> Result {
         if !self.concurrency_mode.is_multi_process_writable() {
             return Ok(());
@@ -1193,7 +1178,6 @@ impl TransactionalMemory {
             #[cfg(feature = "experimental-multiprocess")]
             read_only,
             in_process_header_lock,
-            #[cfg(feature = "experimental-multiprocess")]
             scan_from: Mutex::new(0),
             writer_lock,
             page_size: page_size.try_into().unwrap(),
