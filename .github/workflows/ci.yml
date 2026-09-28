@@ -58,6 +58,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+            rustup component add rustfmt
+            rustup component add clippy
+
+      # Cargo.lock is not checked in, so resolve it before computing the cache key. Otherwise the key
+      # does not change when a dependency publishes a release, and the stale cache is never replaced
+      - name: Generate lockfiles
+        run: |
+            cargo generate-lockfile
+            cargo generate-lockfile --manifest-path fuzz/Cargo.toml
+
       # Kept out of the build cache below, and keyed on the pinned versions alone, so that a
       # dependency change does not rebuild all three from source
       - name: Cache tools
@@ -86,9 +99,9 @@ jobs:
                 target/debug/build/
                 target/debug/deps/
                 fuzz/target/
-            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', '.github/workflows/*.yml', 'rust-toolchain') }}
-            restore-keys: |
-                ${{ runner.os }}-${{ runner.arch }}-
+            # No restore-keys fallback: restoring an older cache would carry its stale artifacts
+            # forward into every cache saved after it
+            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock', '.github/workflows/*.yml', 'rust-toolchain') }}
 
       - name: Non ASCII characters
         if: startsWith(matrix.os, 'ubuntu')
@@ -102,11 +115,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-
-      - name: Install Rust
-        run: |
-            rustup component add rustfmt
-            rustup component add clippy
 
       - name: OSX x86 rust
         if: startsWith(matrix.os, 'macos')
@@ -138,8 +146,6 @@ jobs:
       - name: Compile (`wasm32-unknown-unknown`)
         if: matrix.os == 'ubuntu-latest'
         run: |
-            # Needed for 'cargo pkgid' to run
-            cargo generate-lockfile
             rustup target add wasm32-unknown-unknown
             # Not possible to set default members for specific a target:
             # https://github.com/rust-lang/cargo/issues/6179
