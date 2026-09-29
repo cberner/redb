@@ -7,7 +7,7 @@ use crate::tree_store::btree_base::{
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
 };
-use crate::tree_store::page_store::{Page, PageImpl, PageMut};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, ScopedBorrow};
 use crate::tree_store::{
     AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTracker,
 };
@@ -100,7 +100,7 @@ pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
     allocated: &'b Arc<PageTracker>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
-    _lifetime: PhantomData<&'a ()>,
+    _lifetime: ScopedBorrow<'a>,
 }
 
 impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
@@ -117,7 +117,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             allocated,
             _key_type: PhantomData,
             _value_type: PhantomData,
-            _lifetime: PhantomData,
+            _lifetime: ScopedBorrow::default(),
         }
     }
 

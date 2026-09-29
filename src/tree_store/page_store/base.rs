@@ -239,12 +239,24 @@ impl Clone for PageImpl {
     }
 }
 
+/// A borrow of `'a` that lasts until the value holding it is dropped, unlike a bare
+/// `PhantomData<&'a ()>`, which the borrow checker releases at the holder's last use. The empty
+/// `Drop` impl is what makes drop check require `'a` to outlive the holder.
+#[derive(Clone, Default)]
+pub(crate) struct ScopedBorrow<'a>(PhantomData<&'a ()>);
+
+impl Drop for ScopedBorrow<'_> {
+    fn drop(&mut self) {
+        // no-op. This Drop impl is only here for its effect on drop check; see the type
+    }
+}
+
 // The lifetime should be bound to the lifetime of the transaction in which this page was opened.
 // It is used in the Drop impl to ensure that the page is dropped before the transaction is committed.
 pub(crate) struct PageMut<'txn> {
     pub(super) mem: WritablePage,
     pub(super) page_number: PageNumber,
-    pub(super) _lifetime: PhantomData<&'txn ()>,
+    pub(super) _lifetime: ScopedBorrow<'txn>,
     #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<PageNumberHashSet>>,
 }

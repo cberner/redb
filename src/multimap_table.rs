@@ -4,7 +4,7 @@ use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
-use crate::table::{OwnedAccessGuard, ReadableTableMetadata, TableStats};
+use crate::table::{CompatBorrow, OwnedAccessGuard, ReadableTableMetadata, TableStats};
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::tree_store::encode_bounds;
 use crate::tree_store::{
@@ -326,13 +326,18 @@ impl<V: Key + 'static> Drop for MultimapValue<'_, V> {
     }
 }
 
+/// An iterator over the entries of a multimap table in a range of keys, in key order
+///
+/// Returned by [`ReadableMultimapTable::range`] and [`ReadableMultimapTable::iter`]. It holds the
+/// pages it reads, so the table may not be mutated while it is alive.
 pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
     inner: BtreeCursorRange<K, &'static DynamicCollection<V>>,
     mem: PageResolver,
     transaction_guard: Arc<TransactionGuard>,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
-    _lifetime: PhantomData<&'a ()>,
+    // Keeps the table borrowed for as long as the range is alive; see `ScopedBorrow`
+    _lifetime: CompatBorrow<'a>,
 }
 
 impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
@@ -347,10 +352,37 @@ impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
             transaction_guard: guard,
             _key_type: PhantomData,
             _value_type: PhantomData,
-            _lifetime: PhantomData,
+            _lifetime: CompatBorrow::default(),
         }
     }
 }
+
+/// Under the redb 5 API preview a [`MultimapTable`] cannot be mutated while a [`MultimapRange`]
+/// over it is alive, even after the range's last use, since the range still holds the table's
+/// pages:
+///
+/// ```compile_fail,E0502
+/// use redb::{Database, MultimapTableDefinition, ReadableMultimapTable};
+///
+/// const TABLE: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("my_data");
+///
+/// fn main() -> Result<(), redb::Error> {
+///     # #[cfg(not(target_os = "wasi"))]
+///     let file = tempfile::NamedTempFile::new().unwrap();
+///     # #[cfg(target_os = "wasi")]
+///     # let file = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+///     let db = Database::create(file.path())?;
+///     let txn = db.begin_write()?;
+///     let mut table = txn.open_multimap_table(TABLE)?;
+///     table.insert(1, 1)?;
+///     let mut range = table.iter()?;
+///     let key: u64 = range.next().unwrap()?.0.value();
+///     table.insert(key, 2)?;
+///     Ok(())
+/// }
+/// ```
+#[cfg(all(doctest, feature = "experimental-api-5"))]
+mod multimap_range_keeps_the_table_borrowed {}
 
 impl<'a, K: Key + 'static, V: Key + 'static> Iterator for MultimapRange<'a, K, V> {
     type Item = Result<(AccessGuard<'a, K>, MultimapValue<'a, V>)>;

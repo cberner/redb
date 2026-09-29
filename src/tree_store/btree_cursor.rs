@@ -6,7 +6,7 @@ use crate::tree_store::btree_base::{
 };
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
-use crate::tree_store::page_store::{Page, PageHint, PageImpl};
+use crate::tree_store::page_store::{Page, PageHint, PageImpl, ScopedBorrow};
 use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, PageTracker};
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
@@ -122,7 +122,7 @@ fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, position: Position<'_>
 }
 
 fn child_to_visit<K: Key>(
-    accessor: &BranchAccessor<'_, '_, PageImpl>,
+    accessor: &BranchAccessor<'_, PageImpl>,
     position: Position<'_>,
 ) -> usize {
     match position {
@@ -707,7 +707,7 @@ pub(super) struct CursorMut<'a, 'b, K: Key + 'static, V: Value + 'static> {
     state: CursorState,
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
-    _lifetime: PhantomData<&'a ()>,
+    _lifetime: ScopedBorrow<'a>,
 }
 
 impl CursorPosition {
@@ -771,7 +771,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             state,
             _key_type: PhantomData,
             _value_type: PhantomData,
-            _lifetime: PhantomData,
+            _lifetime: ScopedBorrow::default(),
         }
     }
 

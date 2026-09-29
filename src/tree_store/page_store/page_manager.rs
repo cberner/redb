@@ -18,7 +18,7 @@ use crate::tree_store::page_store::header::{
 };
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
-use crate::tree_store::page_store::{PageImpl, PageMut, hash128_with_seed};
+use crate::tree_store::page_store::{PageImpl, PageMut, ScopedBorrow, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
 use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
@@ -30,7 +30,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{max, min};
 use core::convert::TryInto;
-use core::marker::PhantomData;
 use core::mem;
 use core::ops::{Bound, Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -1855,7 +1854,7 @@ impl TransactionalMemory {
         Ok(PageMut {
             mem,
             page_number,
-            _lifetime: PhantomData,
+            _lifetime: ScopedBorrow::default(),
             #[cfg(debug_assertions)]
             open_pages: self.open_dirty_pages.clone(),
         })
@@ -2146,7 +2145,7 @@ impl TransactionalMemory {
         Ok(PageMut {
             mem,
             page_number,
-            _lifetime: PhantomData,
+            _lifetime: ScopedBorrow::default(),
             #[cfg(debug_assertions)]
             open_pages: self.open_dirty_pages.clone(),
         })

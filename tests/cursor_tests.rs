@@ -634,11 +634,9 @@ fn read_cursor_keeps_transaction_alive() {
     let mut cursor = table.lower_bound(Bound::Included(&5)).unwrap();
     assert_eq!(peeked_key(cursor.next().unwrap()), Some(5));
 
-    // The cursor has no Drop impl, so its borrow of the table ends at the last
-    // use above, and the table can be dropped while the cursor still holds
-    // pages. Only the cursor's own transaction guard keeps the read
-    // transaction registered from here on.
-    drop(table);
+    // The cursor holds pages, so it keeps the table borrowed until it is
+    // dropped (dropping the table under a live cursor does not compile), and
+    // the table keeps the read transaction registered.
     assert!(matches!(
         txn.close(),
         Err(TransactionError::ReadTransactionStillInUse(_))
@@ -655,7 +653,10 @@ fn read_cursor_keeps_transaction_alive() {
         }
         txn.commit().unwrap();
     }
-    // `cursor` is dropped here, without being used again
+    // The cursor still reads its own snapshot
+    let (key, value) = cursor.next().unwrap().unwrap();
+    assert_eq!((key.value(), value.value()), (6, 6));
+    assert_eq!(peeked_key(cursor.peek_next().unwrap()), Some(7));
 }
 
 #[test]
