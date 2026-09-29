@@ -116,6 +116,8 @@
 * Fix `Cursor` releasing its borrow of the table at its last use rather than when it is dropped,
   so mutating the table while a cursor over it was still in scope could panic. Such code no
   longer compiles.
+* Fix `Database::create()` repairing the database it had just created, which failed with
+  `RepairAborted` under a repair callback that aborts.
 
 ## 4.3.0 - 2026-09-14
 ### New features

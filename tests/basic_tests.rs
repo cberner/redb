@@ -169,6 +169,39 @@ fn drop_database_then_drop_write_transaction() {
 }
 
 #[test]
+fn create_does_not_repair() {
+    let tmpfile = create_tempfile();
+    // A new database has nothing to repair, so a repair callback that refuses every repair is
+    // not consulted, and does not keep the database from being created
+    let repairs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = repairs.clone();
+    let db = Database::builder()
+        .set_repair_callback(move |session| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            session.abort();
+        })
+        .create(tmpfile.path())
+        .unwrap();
+    assert_eq!(repairs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    // The close recorded the allocator state, so re-opening needs no repair either
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
 fn deferred_close_invalidates_read_transactions() {
     let tmpfile = create_tempfile();
     let db = Database::builder()

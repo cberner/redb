@@ -414,6 +414,18 @@ impl DatabaseHeader {
         self.full_regions = layout.num_full_regions();
     }
 
+    // Whether both slots still hold what initialization wrote: no transaction has ever committed
+    // to this file. A slot a commit reached, torn or not, counts, so that recovery falling back to
+    // the initial slot is a repair
+    pub(super) fn never_committed(&self) -> bool {
+        self.transaction_slots.iter().all(|slot| {
+            slot.transaction_id.raw_id() == 0
+                && slot.user_root.is_none()
+                && slot.system_root.is_none()
+                && slot.corrupt_bytes.is_none()
+        })
+    }
+
     pub(super) fn primary_slot(&self) -> &TransactionHeader {
         &self.transaction_slots[self.primary_slot]
     }
@@ -911,6 +923,86 @@ mod test {
             &torn_secondary,
             "recovery laundered the torn secondary slot into a valid one"
         );
+    }
+
+    // A torn first commit: recovery falls back to the slot initialization wrote, which is a
+    // repair, callback and all, and not a database nothing was ever committed to
+    #[test]
+    fn a_torn_first_commit_is_repaired() {
+        let tmpfile = crate::create_tempfile();
+        // The close commits once, into the slot initialization left free
+        drop(Database::builder().create(tmpfile.path()).unwrap());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        // Tear that commit, as a crash during a 1-phase commit's flush would
+        let committed_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        corrupt_slot_checksum(&mut header, committed_offset);
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
+
+        // Repaired, the database is the empty one the initial slot describes
+        let db = Database::open(tmpfile.path()).unwrap();
+        let read_txn = db.begin_read().unwrap();
+        assert_eq!(read_txn.list_tables().unwrap().count(), 0);
+    }
+
+    // A crash right after the create leaves the recovery flag set over the header initialization
+    // wrote. Nothing was committed, so there is nothing to repair
+    #[test]
+    fn a_crash_after_the_create_needs_no_repair() {
+        let tmpfile = crate::create_tempfile();
+        drop(Database::builder().create(tmpfile.path()).unwrap());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        // Undo the close's commit: copy the initial slot back over it, and require recovery as
+        // an open leaves the header while it lasts
+        let committed_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let initial_offset = if committed_offset == TRANSACTION_0_OFFSET {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+        let initial: [u8; super::TRANSACTION_SIZE] = header
+            [initial_offset..initial_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+        header[committed_offset..committed_offset + super::TRANSACTION_SIZE]
+            .copy_from_slice(&initial);
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let db = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap();
+        let write_txn = db.begin_write().unwrap();
+        write_txn.open_table(X).unwrap().insert("k", "v").unwrap();
+        write_txn.commit().unwrap();
     }
 
     // If the file is externally truncated below the stored layout, both open and check_integrity

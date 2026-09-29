@@ -1413,6 +1413,22 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    // Whether no transaction has ever committed to this file: the header is the one its
+    // initialization wrote
+    pub(crate) fn never_committed(&self) -> bool {
+        self.state.lock().unwrap().header.never_committed()
+    }
+
+    // The allocator state of a database in which no transaction has ever committed: that of the
+    // empty layout, which is what rebuilding it from the empty trees would produce. There is
+    // nothing to recover, so the recovery flag is cleared as loading a saved state clears it
+    pub(crate) fn load_empty_allocator_state(&self) -> Result<()> {
+        self.reset_allocator_state()?;
+        self.state.lock().unwrap().header.recovery_required = false;
+
+        Ok(())
+    }
+
     // Discards an allocator state that no longer describes the file. Callers that allocate or free
     // must check for one first, since those paths have no way to work without it.
     //

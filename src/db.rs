@@ -1568,13 +1568,20 @@ impl Database {
         )?;
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
-        // we can just load the allocator state from there. Otherwise, we need a full repair
+        // we can just load the allocator state from there. Otherwise, unless nothing has been
+        // committed, we need a full repair
         let repaired = if let Some(tree) = Self::get_allocator_state_table(&mem)? {
             #[cfg(feature = "logging")]
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
             #[cfg(debug_assertions)]
             Self::mark_allocated_page_for_debug(&mem)?;
+            false
+        } else if mem.never_committed() {
+            // Just initialized, or created and never written: with no commit there is nothing to
+            // recover, and a repair would only report a new file as not shut down cleanly, and
+            // fail every create for a repair callback that aborts
+            mem.load_empty_allocator_state()?;
             false
         } else {
             #[cfg(feature = "logging")]
@@ -2275,7 +2282,8 @@ mod test {
         let tmpfile = crate::create_tempfile();
         let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 20);
+        // Fails the fourth write of the second commit below; the create makes three
+        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 17);
         let db = Database::builder()
             .set_cache_size(12686)
             .set_page_size(8 * 1024)
@@ -2774,17 +2782,44 @@ mod writer_byte_test {
         );
     }
 
-    /// A multi-writer repair, the create's included, ends with a commit recording the allocator
-    /// state it rebuilt, for the next open to load
+    /// A multi-writer repair ends with a commit recording the allocator state it rebuilt, for
+    /// the next open to load
     #[test]
     fn a_multi_writer_repair_records_the_allocator_state() {
         let tmpfile = crate::create_tempfile();
         let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        // A commit that records no allocator state, closed without the shutdown header that
+        // would record one, leaves the next open a repair
+        let mut write = db.begin_write().unwrap();
+        write.skip_allocator_state_record();
+        write.open_table(TABLE).unwrap().insert(0, 0).unwrap();
+        write.commit().unwrap();
+        let mem = db.mem.clone();
+        std::mem::forget(db);
+        assert!(Database::get_allocator_state_table(&mem).unwrap().is_none());
+        mem.close(None).unwrap();
+
+        let repaired = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         assert!(
-            Database::get_allocator_state_table(&db.mem)
+            Database::get_allocator_state_table(&repaired.mem)
                 .unwrap()
                 .is_some()
         );
+    }
+
+    /// A database nothing has been committed to needs no repair in any process: each open loads
+    /// the empty allocator state
+    #[test]
+    fn a_peer_opens_a_never_written_database_without_repair() {
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        let mut builder = Database::builder();
+        builder
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
+            .set_repair_callback(|session| session.abort());
+        let peer = builder.open(tmpfile.path()).unwrap();
+        commit_one(&peer);
+        commit_one(&db);
     }
 
     /// Rebuilding keeps live readers and the peer's persistent savepoints usable, even if the
