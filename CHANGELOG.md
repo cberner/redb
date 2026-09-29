@@ -28,6 +28,9 @@
 * Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
   `ReadableTable::upper_bound()` have no default implementation, so implementations of
   `ReadableTable` must provide them.
+* Behind the `experimental-api-5` feature flag, `Range` and `MultimapRange` keep the table
+  borrowed until they are dropped, rather than until their last use. Mutating the table while a
+  range over it is still in scope, which could panic, no longer compiles.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
 * Add the `experimental-multiprocess` feature flag, under which `Builder::set_concurrency_mode()`
@@ -110,6 +113,9 @@
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
+* Fix `Cursor` releasing its borrow of the table at its last use rather than when it is dropped,
+  so mutating the table while a cursor over it was still in scope could panic. Such code no
+  longer compiles.
 
 ## 4.3.0 - 2026-09-14
 ### New features

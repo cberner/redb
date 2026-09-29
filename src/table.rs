@@ -8,7 +8,7 @@ use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeCursor, BtreeCursorMut, BtreeCursorRange, BtreeExtractIf,
     BtreeHeader, BtreeMut, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber,
-    PageResolver, PageTracker, RawBtree,
+    PageResolver, PageTracker, RawBtree, ScopedBorrow,
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, AccessGuardMut, CursorError, StorageError, WriteTransaction};
@@ -19,6 +19,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt::{Debug, Formatter};
+#[cfg(not(feature = "experimental-api-5"))]
 use core::marker::PhantomData;
 use core::ops::Bound;
 #[cfg(not(feature = "experimental-api-5"))]
@@ -1114,12 +1115,24 @@ impl<
     }
 }
 
+/// The borrow of a table that a stable iterator type holds: a [`ScopedBorrow`] under the redb 5
+/// API preview, and until then the borrow that ends at the iterator's last use, as in earlier
+/// versions, since extending it rejects code that compiles today.
+#[cfg(feature = "experimental-api-5")]
+pub(crate) type CompatBorrow<'a> = ScopedBorrow<'a>;
+#[cfg(not(feature = "experimental-api-5"))]
+pub(crate) type CompatBorrow<'a> = PhantomData<&'a ()>;
+
+/// An iterator over the entries of a table in a range of keys, in key order
+///
+/// Returned by [`ReadableTable::range`] and [`ReadableTable::iter`]. It holds the pages it reads,
+/// so the table may not be mutated while it is alive.
 #[derive(Clone)]
 pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursorRange<K, V>,
     _transaction_guard: Arc<TransactionGuard>,
-    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation
-    _lifetime: PhantomData<&'a ()>,
+    // Keeps the table borrowed for as long as the range is alive; see `ScopedBorrow`
+    _lifetime: CompatBorrow<'a>,
 }
 
 impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
@@ -1127,10 +1140,36 @@ impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
         Self {
             inner,
             _transaction_guard: guard,
-            _lifetime: PhantomData,
+            _lifetime: CompatBorrow::default(),
         }
     }
 }
+
+/// Under the redb 5 API preview a [`Table`] cannot be mutated while a [`Range`] over it is alive,
+/// even after the range's last use, since the range still holds the table's pages:
+///
+/// ```compile_fail,E0502
+/// use redb::{Database, ReadableTable, TableDefinition};
+///
+/// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+///
+/// fn main() -> Result<(), redb::Error> {
+///     # #[cfg(not(target_os = "wasi"))]
+///     let file = tempfile::NamedTempFile::new().unwrap();
+///     # #[cfg(target_os = "wasi")]
+///     # let file = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+///     let db = Database::create(file.path())?;
+///     let txn = db.begin_write()?;
+///     let mut table = txn.open_table(TABLE)?;
+///     table.insert(1, 1)?;
+///     let mut range = table.iter()?;
+///     let key: u64 = range.next().unwrap()?.0.value();
+///     table.remove(key)?;
+///     Ok(())
+/// }
+/// ```
+#[cfg(all(doctest, feature = "experimental-api-5"))]
+mod range_keeps_the_table_borrowed {}
 
 impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
     type Item = Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)>;
@@ -1458,16 +1497,14 @@ pub(crate) fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
 /// [`std::collections::btree_map::Cursor`].
 pub struct Cursor<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursor<K, V>,
-    // The cursor owns page handles, so it must keep the transaction registered for as long as it
-    // is alive. The lifetime below cannot do that job: the cursor has no `Drop` impl, so the
-    // borrow it represents ends at the cursor's last use, leaving the table free to be dropped
-    // and the transaction free to be closed while the cursor still holds its pages
+    // The cursor owns page handles, so it keeps the transaction registered for as long as it is
+    // alive
     _transaction_guard: Arc<TransactionGuard>,
-    // This lifetime is here so that `&` can be held on `Table` preventing concurrent mutation.
-    // It also bounds the guards the cursor yields, which is why there is no `'static` cursor:
-    // such a guard could outlive both the cursor and the transaction, letting a writer reclaim
-    // the pages it points at
-    _lifetime: PhantomData<&'a ()>,
+    // Keeps the table borrowed for as long as the cursor is alive, so that it cannot be mutated
+    // while the cursor holds its pages; see `ScopedBorrow`. The lifetime also bounds the guards
+    // the cursor yields, which is why there is no `'static` cursor: such a guard could outlive
+    // both the cursor and the transaction, letting a writer reclaim the pages it points at
+    _lifetime: ScopedBorrow<'a>,
 }
 
 impl<K: Key + 'static, V: Value + 'static> Cursor<'_, K, V> {
@@ -1475,10 +1512,37 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<'_, K, V> {
         Self {
             inner,
             _transaction_guard: guard,
-            _lifetime: PhantomData,
+            _lifetime: ScopedBorrow::default(),
         }
     }
 }
+
+/// A [`Table`] cannot be mutated while a [`Cursor`] over it is alive, even after the cursor's
+/// last use, since the cursor still holds the table's pages:
+///
+/// ```compile_fail,E0502
+/// use std::ops::Bound;
+/// use redb::{Database, ReadableTable, TableDefinition};
+///
+/// const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+///
+/// fn main() -> Result<(), redb::Error> {
+///     # #[cfg(not(target_os = "wasi"))]
+///     let file = tempfile::NamedTempFile::new().unwrap();
+///     # #[cfg(target_os = "wasi")]
+///     # let file = tempfile::NamedTempFile::new_in("/tmp").unwrap();
+///     let db = Database::create(file.path())?;
+///     let txn = db.begin_write()?;
+///     let mut table = txn.open_table(TABLE)?;
+///     table.insert(1, 1)?;
+///     let mut cursor = table.lower_bound(Bound::<u64>::Unbounded)?;
+///     let key: u64 = cursor.next()?.unwrap().0.value();
+///     table.remove(key)?;
+///     Ok(())
+/// }
+/// ```
+#[cfg(doctest)]
+mod cursor_keeps_the_table_borrowed {}
 
 impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
     /// Returns the entry after the cursor's gap without moving the cursor.

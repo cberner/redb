@@ -1800,14 +1800,13 @@ impl<'a> LeafPageMut<'a> {
 }
 
 // Provides a simple zero-copy way to access a branch page
-pub(super) struct BranchAccessor<'a: 'b, 'b, T: Page + 'a> {
+pub(super) struct BranchAccessor<'b, T: Page> {
     page: &'b T,
     num_keys: usize,
     fixed_key_size: Option<usize>,
-    _page_lifetime: PhantomData<&'a ()>,
 }
 
-impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
+impl<'b, T: Page> BranchAccessor<'b, T> {
     pub(crate) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
         debug_assert_eq!(page.memory()[0], BRANCH);
         let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
@@ -1815,7 +1814,6 @@ impl<'a: 'b, 'b, T: Page + 'a> BranchAccessor<'a, 'b, T> {
             page,
             num_keys,
             fixed_key_size,
-            _page_lifetime: PhantomData,
         }
     }
 
@@ -1982,7 +1980,7 @@ impl<'a, 'b> BranchBuilder<'a, 'b> {
         self.keys.push(key);
     }
 
-    pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, '_, T>) {
+    pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, T>) {
         for i in 0..accessor.count_children() {
             let child = accessor.child_page(i).unwrap();
             let checksum = accessor.child_checksum(i).unwrap();
