@@ -120,6 +120,8 @@
   `RepairAborted` under a repair callback that aborts.
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never
   reached its configured size limit.
+* Fix `Durability::None` commits being lost on a clean close, after a panic was caught inside
+  an earlier write transaction.
 
 ## 4.3.0 - 2026-09-14
 ### New features

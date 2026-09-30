@@ -1821,18 +1821,34 @@ fn begin_write_with_allocation_policy(
 }
 
 // Records the allocator state in a commit that also trims the file: the close's last commit,
-// compaction's, and the one ending a repair in the open or the integrity check. `writer_lock`
-// and `header_lock` are the ones the caller lends, when it holds them; nothing is waiting on the
-// write slot in any of these cases
+// compaction's, and the one ending a repair in the open or the integrity check. Not for a state
+// that needs repair: a transaction dropped while a panic unwound leaked its pages, and recording
+// that state would make the leak permanent, where the next open's rebuild reclaims it.
+// `writer_lock` and `header_lock` are the ones the caller lends, when it holds them; nothing is
+// waiting on the write slot in any of these cases
 fn ensure_allocator_state_table_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
     writer_lock: Option<&Arc<WriterLock>>,
     header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result {
-    // Make a new quick-repair commit to update the allocator state table
+    assert!(
+        !mem.needs_repair(),
+        "recording an allocator state that needs repair"
+    );
     #[cfg(feature = "logging")]
     debug!("Writing allocator state table");
+    commit_and_trim(transaction_tracker, mem, writer_lock, header_lock, true)
+}
+
+// A commit that trims the file, and records the allocator state when asked to
+fn commit_and_trim(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+    writer_lock: Option<&Arc<WriterLock>>,
+    header_lock: Option<&HeaderGuard<'_>>,
+    record_allocator_state: bool,
+) -> Result {
     // If compact() left no free pages, the default allocator lands this
     // commit's writes at high page indices (see AllocationPolicy::Lowest)
     // and try_shrink can't reclaim the growth. See
@@ -1845,7 +1861,7 @@ fn ensure_allocator_state_table_and_trim(
         AllocationPolicy::Lowest,
     )
     .map_err(|e| e.into_storage_error())?;
-    tx.set_quick_repair(true);
+    tx.set_quick_repair(record_allocator_state);
     tx.disable_post_commit_free();
     tx.set_shrink_policy(ShrinkPolicy::Maximum);
     tx.commit_with(header_lock)
@@ -1854,17 +1870,22 @@ fn ensure_allocator_state_table_and_trim(
     Ok(())
 }
 
-// Closes the database: persists the allocator state table, so that the next open does not
-// require a repair, and closes the storage backend. Runs exactly once, when the database
-// closes: from Database::drop, or from the end of the write transaction that was live at
-// that point. In both cases the Database is being, or has been, dropped, so no new write
-// transaction can be started concurrently and the commit in here cannot block on the
-// write-transaction slot.
+// Closes the database: makes any pending non-durable commit durable, persists the allocator
+// state table, so that the next open does not require a repair, and closes the storage backend.
+// Runs exactly once, when the database closes: from Database::drop, or from the end of the
+// write transaction that was live at that point. In both cases the Database is being, or has
+// been, dropped, so no new write transaction can be started concurrently and the commit in here
+// cannot block on the write-transaction slot.
 fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
-    // No saved allocator state when it needs repair: the next open must rebuild it instead
-    // of trusting the saved one. Nor after a latched I/O failure, decided ahead of the lock,
+    // A transaction dropped while a panic unwound leaked its pages: the allocator state is not
+    // recorded, and the next open rebuilds it. A pending non-durable commit is still made
+    // durable, by a plain commit, so that the rebuild does not roll it back
+    let promote_only = mem.needs_repair();
+    // Not after a latched I/O failure, nor with nothing to write, decided ahead of the lock,
     // which waits on a peer holding the writer byte
-    let writing = !crate::panicking() && !mem.needs_repair() && mem.check_io_errors().is_ok();
+    let writing = !crate::panicking()
+        && mem.check_io_errors().is_ok()
+        && (!promote_only || mem.pending_non_durable_commit());
     // One hold across the allocator state's commit and the shutdown header: a commit another
     // process made between them would be overwritten by the header. Without the hold, neither
     // is written: the commit would take one of its own and release it, and the header would
@@ -1875,21 +1896,33 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
         None
     };
     let writing = writing && writer_lock.is_some();
-    let recorded = writing
-        && ensure_allocator_state_table_and_trim(
+    let recorded = if !writing {
+        false
+    } else if promote_only {
+        let result = commit_and_trim(transaction_tracker, mem, writer_lock.as_ref(), None, false);
+        #[cfg(feature = "logging")]
+        if result.is_err() {
+            warn!("Failed to make the pending non-durable commits durable. They are lost.");
+        }
+        #[cfg(not(feature = "logging"))]
+        let _ = result;
+        false
+    } else {
+        let result = ensure_allocator_state_table_and_trim(
             transaction_tracker,
             mem,
             writer_lock.as_ref(),
             None,
-        )
-        .is_ok();
-    if writing && !recorded {
+        );
         #[cfg(feature = "logging")]
-        warn!("Failed to write allocator state table. Repair may be required at restart.");
-    }
+        if result.is_err() {
+            warn!("Failed to write allocator state table. Repair may be required at restart.");
+        }
+        result.is_ok()
+    };
     // The shutdown header describes this handle, which matches the file only once the commit
-    // above has synced to the file's latest commit. Without that commit, write no header, and
-    // leave the file for the next open to recover.
+    // above has synced to the file's latest commit and recorded the allocator state. Without a
+    // record, write no header, and leave the file for the next open to recover.
     let writer_lock = writer_lock.filter(|_| recorded);
 
     if mem.close(writer_lock.as_ref()).is_err() {
