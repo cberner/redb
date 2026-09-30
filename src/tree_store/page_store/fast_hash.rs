@@ -11,6 +11,7 @@ mod hash {
     const K: u64 = 0xf135_7aea_2e62_a9c5;
 
     pub(crate) type FastHashMapU64<V> = HashMap<u64, V, BuildHasherDefault<FastHasher64>>;
+    pub(crate) type FastHashSetU64 = HashSet<u64, BuildHasherDefault<FastHasher64>>;
     pub(crate) type PageNumberHashMap<V> = HashMap<PageNumber, V, BuildHasherDefault<FastHasher64>>;
     pub(crate) type PageNumberHashSet = HashSet<PageNumber, BuildHasherDefault<FastHasher64>>;
 
@@ -46,11 +47,12 @@ mod hash {
     use alloc::collections::{BTreeMap, BTreeSet};
 
     pub(crate) type FastHashMapU64<V> = BTreeMap<u64, V>;
+    pub(crate) type FastHashSetU64 = BTreeSet<u64>;
     pub(crate) type PageNumberHashMap<V> = BTreeMap<PageNumber, V>;
     pub(crate) type PageNumberHashSet = BTreeSet<PageNumber>;
 }
 
-pub(crate) use hash::{FastHashMapU64, PageNumberHashMap, PageNumberHashSet};
+pub(crate) use hash::{FastHashMapU64, FastHashSetU64, PageNumberHashMap, PageNumberHashSet};
 
 // Releases the spare capacity of one of the tables above. The ordered fallbacks hold none, so it
 // is a no-op for them.

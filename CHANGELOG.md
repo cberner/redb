@@ -118,6 +118,10 @@
   longer compiles.
 * Fix `Database::create()` repairing the database it had just created, which failed with
   `RepairAborted` under a repair callback that aborts.
+* Fix unbounded memory growth in the page cache when the configured cache size is larger than the
+  database file. Eviction never runs in that case, and nothing else drained the cache's LRU
+  bookkeeping, so every write to a cached page retained 8 bytes permanently even though the set of
+  cached pages was unchanged. The growth was not reflected in the cache's own size accounting.
 
 ## 4.3.0 - 2026-09-14
 ### New features
