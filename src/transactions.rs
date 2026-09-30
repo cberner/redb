@@ -3231,6 +3231,36 @@ mod test {
         assert!(db.check_integrity().unwrap());
     }
 
+    // The close makes pending non-durable commits durable even after a caught panic leaked
+    // pages: it records no allocator snapshot then, and the next open rebuilds the state
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn non_durable_commits_survive_the_close_after_a_caught_panic() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(X).unwrap().insert("leak", "leak").unwrap();
+            panic!("simulated panic with a live write transaction");
+        }));
+        assert!(panic_result.is_err());
+
+        let mut txn = db.begin_write().unwrap();
+        txn.set_durability(crate::Durability::None).unwrap();
+        txn.open_table(X).unwrap().insert("kept", "value").unwrap();
+        txn.commit().unwrap();
+        drop(db);
+
+        let mut db = Database::open(tmpfile.path()).unwrap();
+        {
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(X).unwrap();
+            assert_eq!(table.get("kept").unwrap().unwrap().value(), "value");
+            assert!(table.get("leak").unwrap().is_none());
+        }
+        assert!(db.check_integrity().unwrap());
+    }
+
     // check_integrity() rebuilds the allocator, reclaiming the leak in this process, so the
     // close may record a clean shutdown again; a read-only open requires one
     #[cfg(panic = "unwind")]
