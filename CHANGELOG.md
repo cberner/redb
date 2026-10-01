@@ -118,6 +118,8 @@
   longer compiles.
 * Fix `Database::create()` repairing the database it had just created, which failed with
   `RepairAborted` under a repair callback that aborts.
+* Fix unbounded memory growth in the page cache under write workloads, when the cache never
+  reached its configured size limit.
 
 ## 4.3.0 - 2026-09-14
 ### New features
