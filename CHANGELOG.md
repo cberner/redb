@@ -1,5 +1,9 @@
 # redb - Changelog
 
+## 2.6.4 - 2026-10-02
+* Fix unbounded memory growth in the page cache under write workloads, when the cache never
+  reached its configured size limit.
+
 ## 2.6.3 - 2025-08-23
 * Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
   with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
