@@ -121,6 +121,10 @@
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never
   reached its configured size limit.
 
+## 2.6.4 - 2026-10-02
+* Fix unbounded memory growth in the page cache under write workloads, when the cache never
+  reached its configured size limit.
+
 ## 4.3.0 - 2026-09-14
 ### New features
 * Add optional locking methods to `StorageBackend`. Backends may implement these methods to support
