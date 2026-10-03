@@ -122,6 +122,8 @@
   reached its configured size limit.
 * Fix `Durability::None` commits being lost on a clean close, after a panic was caught inside
   an earlier write transaction.
+* Fix `compact()` leaving free regions at the end of the file, when the compaction emptied more
+  of them than it made commits.
 
 ## 2.6.4 - 2026-10-02
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never
