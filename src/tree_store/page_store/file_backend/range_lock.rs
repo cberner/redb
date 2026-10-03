@@ -360,7 +360,11 @@ fn fcntl_lock(file: &File, command: libc::c_int, lock: &mut Flock) -> libc::c_in
     unsafe { libc::fcntl(file.as_raw_fd(), command, &raw mut *lock) }
 }
 
-/// The last lock failure, as `Unsupported` where the filesystem has no byte-range locks.
+/// The last lock failure, as `Unsupported` where the filesystem has no byte-range locks: EINVAL
+/// is how the Apple platforms report one, and Linux a kernel without open file description
+/// locks; ENOSYS, ENOTSUP and EOPNOTSUPP are `Unsupported` as std classifies them. Not ENOLCK,
+/// which is a lock refused (the lock table is full, or a remote locking protocol failed): an
+/// open that went on without it could share the file with another process
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn lock_error() -> io::Error {
     let err = io::Error::last_os_error();
@@ -374,6 +378,22 @@ fn lock_error() -> io::Error {
     }
 }
 
+// Retried on EINTR, which is the caller's signal handler having run, not a failure to take the
+// lock: while the blocking command waited, or before any of the others checked or acquired the
+// lock, which Linux documents as most likely over NFS
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+fn fcntl_lock_retrying(file: &File, command: libc::c_int, lock: &mut Flock) -> io::Result<()> {
+    loop {
+        if fcntl_lock(file, command, lock) == 0 {
+            return Ok(());
+        }
+        let err = lock_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn set_lock(file: &File, exclusive: bool, range: impl RangeBounds<u64>) -> io::Result<bool> {
     let kind = lock_type(if exclusive {
@@ -382,18 +402,15 @@ fn set_lock(file: &File, exclusive: bool, range: impl RangeBounds<u64>) -> io::R
         libc::F_RDLCK
     });
     let mut lock = flock_struct(kind, range)?;
-    let rc = fcntl_lock(file, libc::F_OFD_SETLK, &mut lock);
-    if rc == 0 {
-        return Ok(true);
-    }
-    let err = lock_error();
-    match err.raw_os_error() {
-        Some(libc::EAGAIN | libc::EACCES) => Ok(false),
-        _ => Err(err),
+    match fcntl_lock_retrying(file, libc::F_OFD_SETLK, &mut lock) {
+        Ok(()) => Ok(true),
+        Err(err) => match err.raw_os_error() {
+            Some(libc::EAGAIN | libc::EACCES) => Ok(false),
+            _ => Err(err),
+        },
     }
 }
 
-// EINTR is the caller's signal handler having run, not a failure to take the lock.
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 fn set_lock_blocking(file: &File, exclusive: bool, range: impl RangeBounds<u64>) -> io::Result<()> {
     let kind = lock_type(if exclusive {
@@ -402,16 +419,7 @@ fn set_lock_blocking(file: &File, exclusive: bool, range: impl RangeBounds<u64>)
         libc::F_RDLCK
     });
     let mut lock = flock_struct(kind, range)?;
-    loop {
-        let rc = fcntl_lock(file, libc::F_OFD_SETLKW, &mut lock);
-        if rc == 0 {
-            return Ok(());
-        }
-        let err = lock_error();
-        if err.kind() != io::ErrorKind::Interrupted {
-            return Err(err);
-        }
-    }
+    fcntl_lock_retrying(file, libc::F_OFD_SETLKW, &mut lock)
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -434,16 +442,12 @@ impl RangeLock for File {
 
     fn unlock_range(&self, range: impl RangeBounds<u64>) -> io::Result<()> {
         let mut lock = flock_struct(lock_type(libc::F_UNLCK), range)?;
-        let rc = fcntl_lock(self, libc::F_OFD_SETLK, &mut lock);
-        if rc == 0 { Ok(()) } else { Err(lock_error()) }
+        fcntl_lock_retrying(self, libc::F_OFD_SETLK, &mut lock)
     }
 
     fn query_lock(&self, range: impl RangeBounds<u64>) -> io::Result<bool> {
         let mut lock = flock_struct(lock_type(libc::F_WRLCK), range)?;
-        let rc = fcntl_lock(self, libc::F_OFD_GETLK, &mut lock);
-        if rc != 0 {
-            return Err(lock_error());
-        }
+        fcntl_lock_retrying(self, libc::F_OFD_GETLK, &mut lock)?;
         // The lock-type constants are c_int on Linux and c_short on the Apple platforms, so
         // both sides are widened rather than compared directly
         Ok(i32::from(lock.l_type) != i32::from(lock_type(libc::F_UNLCK)))
