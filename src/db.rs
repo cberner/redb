@@ -2678,6 +2678,39 @@ mod test {
         assert!(final_file_size < file_size);
     }
 
+    /// Compaction packs what is left into the first region, and drops every region after it
+    #[test]
+    fn compact_drops_every_free_trailing_region() {
+        let tmpfile = crate::create_tempfile();
+        let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+        let region_size = 256 * 1024;
+        let mut db = Database::builder()
+            .set_region_size(region_size)
+            .create(tmpfile.path())
+            .unwrap();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            for i in 0..4096 {
+                table.insert(i, [0u8; 1024].as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            for i in 0..4095 {
+                table.remove(i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        assert!(db.compact().unwrap());
+        let file_size = tmpfile.as_file().metadata().unwrap().len();
+        assert!(file_size < 2 * region_size, "{file_size}");
+    }
+
     #[test]
     fn create_new_db_in_empty_file() {
         let tmpfile = crate::create_tempfile();

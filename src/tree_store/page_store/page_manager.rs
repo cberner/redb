@@ -2215,34 +2215,46 @@ impl TransactionalMemory {
         Ok(())
     }
 
+    // Trims the free pages at the end of the file. With `force`, all of them: every free trailing
+    // region and the free tail of the last region left. Otherwise one step, of the last region
     fn try_shrink(state: &mut InMemoryState, force: bool) -> Result<bool> {
-        let layout = state.header.layout();
-        let last_region_index = layout.num_regions() - 1;
-        let last_allocator = state.get_region(last_region_index);
-        let trailing_free = last_allocator.trailing_free_pages();
-        let last_allocator_len = last_allocator.len();
-        if trailing_free == 0 {
-            return Ok(false);
-        }
-        if trailing_free < last_allocator_len / 2 && !force {
-            return Ok(false);
-        }
-        let reduce_by = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
-            trailing_free
-        } else if force {
-            // Do not shrink the database to zero size
-            min(last_allocator_len - 1, trailing_free)
-        } else {
-            trailing_free / 2
-        };
+        let mut shrunk = false;
+        loop {
+            let layout = state.header.layout();
+            let last_region_index = layout.num_regions() - 1;
+            let last_allocator = state.get_region(last_region_index);
+            let trailing_free = last_allocator.trailing_free_pages();
+            let last_allocator_len = last_allocator.len();
+            if trailing_free == 0 {
+                break;
+            }
+            if trailing_free < last_allocator_len / 2 && !force {
+                break;
+            }
+            let reduce_by = if layout.num_regions() > 1 && trailing_free == last_allocator_len {
+                trailing_free
+            } else if force {
+                // Do not shrink the database to zero size
+                min(last_allocator_len - 1, trailing_free)
+            } else {
+                trailing_free / 2
+            };
+            if reduce_by == 0 {
+                break;
+            }
 
-        let mut new_layout = layout;
-        new_layout.reduce_last_region(reduce_by);
-        state.allocators_mut().resize_to(new_layout);
-        assert!(new_layout.len() <= layout.len());
-        state.header.set_layout(new_layout);
+            let mut new_layout = layout;
+            new_layout.reduce_last_region(reduce_by);
+            state.allocators_mut().resize_to(new_layout);
+            assert!(new_layout.len() < layout.len());
+            state.header.set_layout(new_layout);
+            shrunk = true;
+            if !force {
+                break;
+            }
+        }
 
-        Ok(true)
+        Ok(shrunk)
     }
 
     fn grow(&self, state: &mut InMemoryState, required_order_allocation: u8) -> Result<()> {
