@@ -1604,9 +1604,11 @@ impl Database {
             true
         };
 
-        mem.begin_writable()?;
-        // Past recovery, so a reader finding this byte held knows the flag means a live writer
+        // Past recovery, so the file is consistent, which the byte asserts from here on. Taken
+        // before the flag is published: a reader finding the flag without the byte refuses the
+        // file as one a crash left
         mem.mark_consistent()?;
+        mem.begin_writable()?;
         let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
 
         let transaction_tracker = Arc::new(TransactionTracker::new(next_transaction_id));
@@ -3363,9 +3365,10 @@ mod consistent_byte_test {
     use super::{CONSISTENT_BYTE, ConcurrencyMode, Database, byte_range};
     use crate::backends::FileBackend;
     use crate::tree_store::file_backend::range_lock::RangeLock;
-    use crate::{StorageBackend, TableDefinition};
+    use crate::{BackendError, StorageBackend, TableDefinition};
     use std::fs::{File, OpenOptions};
-    use std::path::Path;
+    use std::ops::Bound;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -3501,6 +3504,97 @@ mod consistent_byte_test {
             "the byte was held while the open was still repairing"
         );
         assert!(held(&probe.lock().unwrap()), "the open never took the byte");
+        drop(db);
+    }
+
+    /// The file, with a shared reader opened as the consistent byte is about to be taken, which
+    /// records what the reader was told
+    #[derive(Debug)]
+    struct ReaderAtConsistentByte {
+        inner: FileBackend,
+        path: PathBuf,
+        reader_saw: Arc<Mutex<Option<String>>>,
+    }
+
+    impl StorageBackend for ReaderAtConsistentByte {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.inner.sync_data()
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.inner.write(offset, data)
+        }
+        fn close(&self) -> Result<(), std::io::Error> {
+            self.inner.close()
+        }
+        fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+            self.inner.try_lock_range(start, end)
+        }
+        fn try_lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.try_lock_shared_range(start, end)
+        }
+        fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.inner.lock_range(start, end)
+        }
+        fn lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<(), BackendError> {
+            if (start, end) == byte_range(CONSISTENT_BYTE) {
+                let saw = match builder(ConcurrencyMode::MultiWriter).open_read_only(&self.path) {
+                    Ok(_) => "opened".to_string(),
+                    Err(err) => format!("{err:?}"),
+                };
+                *self.reader_saw.lock().unwrap() = Some(saw);
+            }
+            self.inner.lock_shared_range(start, end)
+        }
+        fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.inner.unlock_range(start, end)
+        }
+        fn query_lock_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.query_lock_range(start, end)
+        }
+    }
+
+    /// A reader reads the flag and queries the byte under one hold, so the open must take the
+    /// byte before it publishes the flag: taken after, a reader between the two found the flag
+    /// without the byte, and refused a consistent file as one left by a crash
+    #[test]
+    fn an_open_takes_the_byte_before_it_publishes_the_flag() {
+        let tmpfile = crate::create_tempfile();
+        drop(
+            builder(ConcurrencyMode::MultiWriter)
+                .create(tmpfile.path())
+                .unwrap(),
+        );
+
+        let reader_saw = Arc::new(Mutex::new(None));
+        let db = builder(ConcurrencyMode::MultiWriter)
+            .create_with_backend(ReaderAtConsistentByte {
+                inner: FileBackend::new(probe(tmpfile.path())).unwrap(),
+                path: tmpfile.path().to_path_buf(),
+                reader_saw: reader_saw.clone(),
+            })
+            .unwrap();
+        assert_eq!(reader_saw.lock().unwrap().as_deref(), Some("opened"));
         drop(db);
     }
 }

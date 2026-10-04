@@ -855,9 +855,9 @@ impl TransactionalMemory {
     }
 
     /// Reads the header for a shared reader. It consults neither the layout nor the file's length:
-    /// it never allocates, and reads pages by the immutable geometry alone. A writer publishes the
-    /// recovery flag under its exclusive hold, and holds `CONSISTENT_BYTE` only while that flag
-    /// means a live writer.
+    /// it never allocates, and reads pages by the immutable geometry alone. A writer takes
+    /// `CONSISTENT_BYTE` before it publishes the recovery flag, under its exclusive hold, and
+    /// holds the byte while the flag means a live writer, so the flag is never found without it.
     fn read_shared_header(
         storage: &PagedCachedFile,
         in_process_header_lock: &Mutex<()>,
