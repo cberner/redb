@@ -1085,11 +1085,12 @@ impl Database {
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self) -> Result<bool, CompactionError> {
         // These checks must run before begin_write(): the caller may legally hold an open
-        // WriteTransaction (it is not lifetime-bound to the Database), and if that transaction
-        // created a savepoint, blocking in begin_write() below would deadlock. Savepoints must
-        // be diagnosed before read references, because every live savepoint also holds a read
-        // reference. The tracker covers persistent savepoints created by previous Database
-        // instances, because they are re-registered when the database is opened.
+        // WriteTransaction (it is not lifetime-bound to the Database), on which begin_write()
+        // below would wait forever. Savepoints must be diagnosed before read references,
+        // because every live savepoint also holds a read reference, and the write transaction
+        // after both, so that what it holds is reported first. The tracker covers persistent
+        // savepoints created by previous Database instances, because they are re-registered
+        // when the database is opened.
         // In multi-writer mode the tracker's savepoints go stale: a peer may have deleted one
         // since this handle last synced, and only a write transaction of this handle's own syncs
         // them again. Refresh before reporting one as a blocker, unless this process already has
@@ -1109,6 +1110,9 @@ impl Database {
             return Err(CompactionError::EphemeralSavepointExists);
         }
         if self.transaction_tracker.any_user_read_reference_exists() {
+            return Err(CompactionError::TransactionInProgress);
+        }
+        if self.transaction_tracker.write_transaction_live() {
             return Err(CompactionError::TransactionInProgress);
         }
         // Where the file is shared, held until the compaction is over and lent to the

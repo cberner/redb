@@ -124,6 +124,8 @@
   an earlier write transaction.
 * Fix `compact()` leaving free regions at the end of the file, when the compaction emptied more
   of them than it made commits.
+* Fix `compact()` waiting forever when the caller holds a write transaction. It fails with
+  `CompactionError::TransactionInProgress`, as it does for a read transaction.
 
 ## 2.6.4 - 2026-10-02
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never
