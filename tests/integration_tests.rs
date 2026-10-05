@@ -4191,6 +4191,34 @@ fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
     db.compact().unwrap();
 }
 
+// The same with no savepoint: a held write transaction is a transaction in progress, not a
+// wait in begin_write() that the caller can never end
+#[test]
+fn compact_does_not_block_on_held_write_transaction() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.begin_write().unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = db.compact();
+        sender.send(()).unwrap();
+        (db, result)
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("compact() deadlocked on the caller's own write transaction");
+    let (mut db, result) = handle.join().unwrap();
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, CompactionError::TransactionInProgress),
+        "expected TransactionInProgress, got {err:?}"
+    );
+
+    txn.abort().unwrap();
+    db.compact().unwrap();
+}
+
 // A persistent savepoint created by a still-uncommitted transaction must already block
 // compaction, and must stop doing so if that transaction is aborted
 #[test]
