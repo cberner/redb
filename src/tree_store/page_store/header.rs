@@ -44,6 +44,10 @@ use core::mem::size_of;
 
 // Inspired by PNG's magic number
 pub(super) const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+// Stands in for the magic number while a database is initialized, until the rest of the header
+// is durable: a file that a crash left with it holds no database
+pub(super) const INITIALIZING_MAGICNUMBER: [u8; 9] =
+    [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x00];
 const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
 const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
 const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
@@ -85,6 +89,32 @@ fn get_u32(data: &[u8]) -> u32 {
 
 fn get_u64(data: &[u8]) -> u64 {
     u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap())
+}
+
+/// Whether a file of `file_len` bytes, whose first `DB_HEADER_SIZE` bytes are `header`, holds an
+/// initialization that a crash cut short, to which nothing was ever committed. The first step of
+/// one sizes the file for the header and writes `INITIALIZING_MAGICNUMBER` alone, so a file of
+/// that size may hold any part of the marker and nothing else; from the second step on the file
+/// holds all of it, over commit slots that hold no transaction, which a database whose magic
+/// number was damaged into the marker fails
+pub(super) fn initializing(header: &[u8], file_len: u64) -> bool {
+    let (magic_number, rest) = header.split_at(MAGICNUMBER.len());
+    let marker_torn = file_len == DB_HEADER_SIZE as u64
+        && magic_number
+            .iter()
+            .zip(INITIALIZING_MAGICNUMBER)
+            .all(|(byte, marker)| *byte == 0 || *byte == marker)
+        && rest.iter().all(|byte| *byte == 0);
+    let marked = magic_number == INITIALIZING_MAGICNUMBER
+        && [TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET]
+            .into_iter()
+            .all(|offset| {
+                let slot = &header[offset..offset + TRANSACTION_SIZE];
+                slot[USER_ROOT_NON_NULL_OFFSET] == 0
+                    && slot[SYSTEM_ROOT_NON_NULL_OFFSET] == 0
+                    && get_u64(&slot[TRANSACTION_ID_OFFSET..]) == 0
+            });
+    marker_torn || marked
 }
 
 // A header parsed from disk that has not yet committed to a primary slot.
@@ -452,11 +482,15 @@ impl DatabaseHeader {
         self.primary_slot ^= 1;
     }
 
+    // Without the magic number, the header carries `INITIALIZING_MAGICNUMBER` in its place
     pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
         let mut result = [0; DB_HEADER_SIZE];
-        if include_magic_number {
-            result[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
-        }
+        let magic_number = if include_magic_number {
+            MAGICNUMBER
+        } else {
+            INITIALIZING_MAGICNUMBER
+        };
+        result[..MAGICNUMBER.len()].copy_from_slice(&magic_number);
         result[GOD_BYTE_OFFSET] = self.primary_slot.try_into().unwrap();
         if self.recovery_required {
             result[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;

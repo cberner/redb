@@ -14,7 +14,8 @@ use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::cached_file::PagedCachedFile;
 use crate::tree_store::page_store::fast_hash::{PageNumberHashMap, PageNumberHashSet, Shrink};
 use crate::tree_store::page_store::header::{
-    DB_HEADER_SIZE, DatabaseHeader, MAGICNUMBER, TransactionHeader, UnrepairedDatabaseHeader,
+    DB_HEADER_SIZE, DatabaseHeader, INITIALIZING_MAGICNUMBER, MAGICNUMBER, TransactionHeader,
+    UnrepairedDatabaseHeader, initializing,
 };
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
@@ -1067,22 +1068,31 @@ impl TransactionalMemory {
                 [0; MAGICNUMBER.len()]
             };
 
-        if initial_storage_len > 0 {
-            // File already exists check that the magic number matches
-            if magic_number != MAGICNUMBER {
-                return Err(StorageError::Io(io::invalid_data(
-                    "Not a redb database: magic number mismatch",
-                ))
-                .into());
-            }
-        } else {
-            // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
-            if !allow_initialize {
-                return Err(StorageError::Io(io::invalid_data(
-                    "Database file is empty and creating a new database was not requested",
-                ))
-                .into());
-            }
+        // An initialization sizes the file for its header, writes a marker in place of the magic
+        // number, writes the header under it, sizes the file for its layout, and writes the magic
+        // number once the header is durable. A crash leaves a file that `initializing()`
+        // recognizes, to which nothing was ever committed: a create() initializes it again, where
+        // an open() refuses it, as it refuses a file of another kind
+        let uninitialized = initial_storage_len == 0
+            || (allow_initialize
+                && initial_storage_len >= DB_HEADER_SIZE as u64
+                && initializing(
+                    &storage.read_direct(0, DB_HEADER_SIZE)?,
+                    initial_storage_len,
+                ));
+        if !uninitialized && magic_number != MAGICNUMBER {
+            return Err(StorageError::Io(io::invalid_data(
+                "Not a redb database: magic number mismatch",
+            ))
+            .into());
+        }
+        // Check that we're allowed to initialize a new database (i.e. the caller is
+        // Database::create() and not open())
+        if uninitialized && !allow_initialize {
+            return Err(StorageError::Io(io::invalid_data(
+                "Database file is empty and creating a new database was not requested",
+            ))
+            .into());
         }
 
         if magic_number != MAGICNUMBER {
@@ -1110,23 +1120,24 @@ impl TransactionalMemory {
                 page_size.try_into().unwrap(),
             );
 
-            {
-                let file_len = storage.raw_file_len()?;
-
-                if file_len < layout.len() {
-                    storage.resize(layout.len())?;
-                }
-            }
-
             let mut header = DatabaseHeader::new(layout, TransactionId::new(0));
 
             header.recovery_required = false;
             header.two_phase_commit = true;
+            // The marker alone in a file sized for the header, then the header under it: every
+            // state a crash can leave from here on is one the check above recognizes
+            storage.resize(DB_HEADER_SIZE as u64)?;
+            storage.write_direct(0, &INITIALIZING_MAGICNUMBER)?;
+            storage.sync_file()?;
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
                 .copy_from_slice(&header.to_bytes(false));
             storage.flush()?;
+            // The larger file durable before the magic number can be, as grow() orders them: a
+            // header describing the layout must not stand over a file of the header's size
+            storage.resize(layout.len())?;
+            storage.sync_file()?;
             // Write the magic number only after the data structure is initialized and written to disk
             // to ensure that it's crash safe
             storage
@@ -2434,6 +2445,86 @@ mod test {
             .open(tmpfile.path())
             .unwrap();
         assert!(db.check_integrity().unwrap());
+    }
+
+    /// A crash during an initialization leaves a file sized for the header holding any part of
+    /// the initializing marker, or the whole marker over any part of the header, or all of the
+    /// header, at the header's size or the layout's. `create()` initializes each again, where
+    /// `open()` refuses it, and both refuse a file of the header's size holding anything else,
+    /// and a database whose magic number was damaged into the marker
+    #[test]
+    fn create_initializes_again_a_file_a_crash_left_initializing() {
+        use crate::transaction_tracker::TransactionId;
+        use crate::tree_store::page_store::header::{
+            DB_HEADER_SIZE, DatabaseHeader, INITIALIZING_MAGICNUMBER, MAGICNUMBER,
+        };
+        use crate::tree_store::page_store::layout::DatabaseLayout;
+        use std::io::Write;
+
+        fn refused(result: Result<Database, crate::DatabaseError>) -> bool {
+            matches!(
+                result,
+                Err(crate::DatabaseError::Storage(crate::StorageError::Io(err)))
+                    if err.kind() == std::io::ErrorKind::InvalidData
+            )
+        }
+        fn leave(path: &std::path::Path, start: &[u8], len: u64) {
+            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            file.write_all(start).unwrap();
+            file.set_len(len).unwrap();
+        }
+
+        let layout = DatabaseLayout::calculate(1 << 20, 256, 0, 4096);
+        let marked = DatabaseHeader::new(layout, TransactionId::new(0)).to_bytes(false);
+        let blank = [0; DB_HEADER_SIZE];
+        let torn = {
+            let mut torn = blank;
+            torn[..4].copy_from_slice(&marked[..4]);
+            torn
+        };
+        let half = {
+            let mut half = blank;
+            half[..DB_HEADER_SIZE / 2].copy_from_slice(&marked[..DB_HEADER_SIZE / 2]);
+            half
+        };
+        let stray = {
+            let mut stray = blank;
+            stray[MAGICNUMBER.len() + 1] = 0xff;
+            stray
+        };
+        let header_size = DB_HEADER_SIZE as u64;
+        let tmpfile = crate::create_tempfile();
+        leave(tmpfile.path(), &stray, header_size);
+        assert!(refused(Database::open(tmpfile.path())));
+        assert!(refused(Database::create(tmpfile.path())));
+        for (header, len) in [
+            (blank, header_size),
+            (torn, header_size),
+            (half, header_size),
+            (marked, header_size),
+            (marked, layout.len()),
+        ] {
+            leave(tmpfile.path(), &header, len);
+            assert!(refused(Database::open(tmpfile.path())));
+            drop(Database::create(tmpfile.path()).unwrap());
+            Database::open(tmpfile.path()).unwrap();
+        }
+
+        let db = Database::open(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn
+                .open_table(TableDefinition::<u32, u32>::new("x"))
+                .unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        txn.commit().unwrap();
+        drop(db);
+        let len = std::fs::metadata(tmpfile.path()).unwrap().len();
+        leave(tmpfile.path(), &INITIALIZING_MAGICNUMBER, len);
+        assert!(refused(Database::open(tmpfile.path())));
+        assert!(refused(Database::create(tmpfile.path())));
+        assert_eq!(std::fs::metadata(tmpfile.path()).unwrap().len(), len);
     }
 
     // Make sure the database remains consistent after a panic

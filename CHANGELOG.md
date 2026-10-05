@@ -126,6 +126,8 @@
   of them than it made commits.
 * Fix `compact()` waiting forever when the caller holds a write transaction. It fails with
   `CompactionError::TransactionInProgress`, as it does for a read transaction.
+* Fix `Database::create()` refusing a file that a crash during an earlier `create()` left half
+  initialized. The initialization runs again, since nothing was ever committed to the file.
 
 ## 2.6.4 - 2026-10-02
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never

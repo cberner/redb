@@ -774,7 +774,8 @@ impl ReadableDatabase for Database {
 
 impl Database {
     /// Opens the specified file as a redb database.
-    /// * if the file does not exist, or is an empty file, a new database will be initialized in it
+    /// * if the file does not exist, is an empty file, or holds an initialization that a crash
+    ///   cut short, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     #[cfg(not(redb_no_std))]
@@ -2097,7 +2098,8 @@ impl Builder {
     }
 
     /// Opens the specified file as a redb database.
-    /// * if the file does not exist, or is an empty file, a new database will be initialized in it
+    /// * if the file does not exist, is an empty file, or holds an initialization that a crash
+    ///   cut short, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
     #[cfg(not(redb_no_std))]
