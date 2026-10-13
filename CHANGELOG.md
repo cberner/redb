@@ -68,7 +68,7 @@
   of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
   copying it into a new table. The file format is unchanged.
 
-### redb-derive (unreleased)
+## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
   named `'a` or `'b`; the generated implementations no longer shadow the struct's lifetimes.
 * Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
@@ -85,7 +85,7 @@
   all built-in types are unaffected.
 * `#[derive(Value)]` on a struct with exactly one field now forwards the field's `Value::NICHE`,
   so `Option` of such a struct is encoded as `Option` of the field is. The generated code refers
-  to `Value::NICHE`, so such a struct can only be derived against a redb that has it; other
+  to `Value::NICHE`, so such a struct can only be derived against redb 4.4.0 or newer; other
   structs are unaffected.
 
 ## 4.4.0 - 2026-10-13
