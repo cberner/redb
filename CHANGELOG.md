@@ -88,11 +88,10 @@
   to `Value::NICHE`, so such a struct can only be derived against a redb that has it; other
   structs are unaffected.
 
-## 4.4.0 - 2026-XX-XX
+## 4.4.0 - 2026-10-13
 ### New features
 * Implement `Value` and `Key` for the `NonZero` integer types, `NonZeroU8` to `NonZeroU128` and
-  `NonZeroI8` to `NonZeroI128`. They are encoded as the primitives they wrap, and an `Option` of
-  one is the same width as the bare type, with zero encoding `None`.
+  `NonZeroI8` to `NonZeroI128`.
 * Add `Value::NICHE`, an optional byte string that a type never encodes to. When a type declares
   one, `Option` of that type encodes `None` as it, in place of a tag byte. Adding a niche to a type
   changes the encoding of `Option` of it, and its type name with it, so the two are not equivalent
@@ -105,17 +104,9 @@
   modeled on the standard library's `BTreeMap` cursors. Inserting sorted data through
   `insert_before()` can be around 3x faster than `insert()`.
 
-### Minor improvements
-* `CursorMut::insert_before()` and `CursorMut::insert_after()` now return `CursorError`, whose
-  `UnorderedKey` variant replaces `StorageError::UnorderedKey`. `Error::UnorderedKey` is
-  unchanged.
-
 ### Bug fixes
 * Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
   that grew the file size was aborted.
-* Fix `Cursor` releasing its borrow of the table at its last use rather than when it is dropped,
-  so mutating the table while a cursor over it was still in scope could panic. Such code no
-  longer compiles.
 * Fix `Database::create()` repairing the database it had just created, which failed with
   `RepairAborted` under a repair callback that aborts.
 * Fix unbounded memory growth in the page cache under write workloads, when the cache never
