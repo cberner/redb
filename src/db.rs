@@ -195,6 +195,18 @@ pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 /// here on, means only that a writer is live. `SHARED_WRITER_BYTE` is taken before recovery, so
 /// it cannot say that; this byte can.
 pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
+/// One byte per generation of the locking protocol. A handle holds a shared lock on the byte of
+/// the generation it implements while the database is open, and an open fails while a byte of
+/// another generation is locked. Processes that disagree on what the other lock bytes mean
+/// therefore never share a file. Each change to the protocol that an older version cannot follow
+/// takes the next byte.
+pub(crate) const PROTOCOL_GENERATION_BYTES: Range<u64> = LOCK_BASE + 5..LOCK_BASE + 69;
+/// The byte of the generation this version implements.
+pub(crate) const PROTOCOL_GENERATION_BYTE: u64 = PROTOCOL_GENERATION_BYTES.start;
+const _: () = assert!(
+    PROTOCOL_GENERATION_BYTE >= PROTOCOL_GENERATION_BYTES.start
+        && PROTOCOL_GENERATION_BYTE < PROTOCOL_GENERATION_BYTES.end
+);
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
 /// shared for as long as it is reading it
 pub(crate) const TXN_BASE: u64 = LOCK_BASE + 1024;
@@ -1992,6 +2004,12 @@ impl RepairSession {
 /// case. Those two modes need byte-range file locks, so they are supported on Linux, the Apple
 /// platforms and Windows; elsewhere, opening a database in one of them fails. `ExclusiveWriter`
 /// locks the whole file and works everywhere.
+#[cfg_attr(
+    feature = "experimental-multiprocess",
+    doc = "",
+    doc = "Every process must also implement the same generation of the multi-process locking protocol. A handle announces its generation with a lock byte, and an open fails with [`DatabaseError::LockProtocolMismatch`](crate::DatabaseError::LockProtocolMismatch) if a process implementing another generation already has the database open.",
+    doc = "A writer in `ExclusiveWriter` mode locks the whole file instead of announcing a generation. It excludes every other process, and every other process excludes it, with [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen) whatever generation each implements."
+)]
 #[cfg_attr(
     not(feature = "experimental-multiprocess"),
     allow(dead_code, unreachable_pub, clippy::enum_variant_names)

@@ -47,6 +47,13 @@
   to end.
 * In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
+* Under `experimental-multiprocess`, each handle announces the generation of the multi-process
+  locking protocol it implements with a lock byte. An open fails with
+  `DatabaseError::LockProtocolMismatch` while a process implementing another generation has the
+  database open, so redb versions with different protocols never share a file. A writer in
+  `ExclusiveWriter` mode locks the whole file instead of announcing a generation. It excludes every
+  other process, and every other process excludes it, with `DatabaseError::DatabaseAlreadyOpen`
+  whatever generation each implements.
 * Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
   `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
   the niche opens as `Option<Legacy<T>>`, however deeply nested.

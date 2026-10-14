@@ -1,7 +1,8 @@
 use crate::CacheStats;
 use crate::db::{
-    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, SHARED_READER_BYTE,
-    SHARED_WRITER_BYTE, TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
+    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, PROTOCOL_GENERATION_BYTE,
+    PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE, TXN_BASE,
+    WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
 };
 use crate::io;
 use crate::sync::Mutex;
@@ -582,6 +583,20 @@ impl Drop for WriterLock {
     }
 }
 
+/// The error for an open that found a process implementing another generation of the locking
+/// protocol. The `LockProtocolMismatch` variant only exists with the multi-process feature, so a
+/// build without it reports `DatabaseAlreadyOpen` instead.
+fn lock_protocol_mismatch() -> DatabaseError {
+    #[cfg(feature = "experimental-multiprocess")]
+    {
+        DatabaseError::LockProtocolMismatch
+    }
+    #[cfg(not(feature = "experimental-multiprocess"))]
+    {
+        DatabaseError::DatabaseAlreadyOpen
+    }
+}
+
 /// The writer lock a handle holds for the life of the database: the whole file where the
 /// database is not shared, and the writer byte where one process writes. Nothing in multi-writer
 /// mode, where a write transaction takes that byte itself, or for a read-only handle
@@ -693,17 +708,36 @@ impl TransactionalMemory {
             }
         };
         let suffix_range = (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
-        let middle_range = (
-            Bound::Excluded(SHARED_WRITER_BYTE),
-            Bound::Excluded(BACKEND_LOCK_RANGE.start),
-        );
-        let prefix_end = if read_only {
-            Bound::Excluded(SHARED_WRITER_BYTE)
+        let writer_ranges = [
+            suffix_range,
+            (
+                Bound::Excluded(SHARED_WRITER_BYTE),
+                Bound::Excluded(BACKEND_LOCK_RANGE.start),
+            ),
+            (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
+        ];
+        // A read-only handle leaves the shared writer byte and the other generations' protocol
+        // bytes unlocked, because it queries them below. It takes its own generation byte first,
+        // so that the generation query runs before any range that a writer of another generation
+        // would hold exclusively.
+        let read_only_ranges = [
+            byte_range(PROTOCOL_GENERATION_BYTE),
+            suffix_range,
+            (
+                Bound::Included(PROTOCOL_GENERATION_BYTES.end),
+                Bound::Excluded(BACKEND_LOCK_RANGE.start),
+            ),
+            (
+                Bound::Excluded(SHARED_WRITER_BYTE),
+                Bound::Excluded(PROTOCOL_GENERATION_BYTES.start),
+            ),
+            (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
+        ];
+        let ranges: &[(Bound<u64>, Bound<u64>)] = if read_only {
+            &read_only_ranges
         } else {
-            Bound::Included(SHARED_WRITER_BYTE)
+            &writer_ranges
         };
-        let prefix_range = (Bound::Unbounded, prefix_end);
-        let ranges = [suffix_range, middle_range, prefix_range];
         for (taken, range) in ranges.iter().enumerate() {
             match try_lock(*range) {
                 Ok(true) => {}
@@ -729,6 +763,12 @@ impl TransactionalMemory {
                 }
                 Err(err) => return Err(err.into()),
             }
+            // The generation query runs as soon as this handle's own generation byte is held, so
+            // that a writer of another generation is reported as a mismatch rather than as a
+            // lock conflict on one of the later ranges.
+            if read_only && taken == 0 && Self::another_protocol_generation_open(storage)? {
+                return Err(lock_protocol_mismatch());
+            }
         }
 
         // A multi-writer cohort holds nothing a read-only open's shared locks conflict with, so
@@ -746,11 +786,35 @@ impl TransactionalMemory {
         storage.query_lock_range(byte_range(SHARED_WRITER_BYTE))
     }
 
+    /// Whether a process implementing another generation of the locking protocol has the
+    /// database open. The caller must already hold its own generation byte, so that when two
+    /// opens of different generations race, whichever queries second finds the other.
+    fn another_protocol_generation_open(storage: &PagedCachedFile) -> Result<bool> {
+        let below = PROTOCOL_GENERATION_BYTES.start..PROTOCOL_GENERATION_BYTE;
+        let above = PROTOCOL_GENERATION_BYTE + 1..PROTOCOL_GENERATION_BYTES.end;
+        for range in [below, above] {
+            if !range.is_empty() && storage.query_lock_range(range)? {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
     fn lock_mode_bytes(
         storage: &PagedCachedFile,
         read_only: bool,
         concurrency_mode: ConcurrencyMode,
     ) -> Result<(), DatabaseError> {
+        // The generation byte is taken and queried before the mode bytes, so that a process
+        // implementing another generation is reported as a mismatch rather than as a lock
+        // conflict on the mode bytes.
+        if !storage.try_lock_shared_range(byte_range(PROTOCOL_GENERATION_BYTE))? {
+            return Err(DatabaseError::DatabaseAlreadyOpen);
+        }
+        if Self::another_protocol_generation_open(storage)? {
+            return Err(lock_protocol_mismatch());
+        }
         let acquired = if read_only {
             storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
         } else {
@@ -3181,7 +3245,7 @@ mod lock_protocol_test {
     /// handed over keeps the open file description, and so the locks, alive
     #[test]
     fn a_refused_open_releases_the_bytes_it_took() {
-        use crate::db::{SHARED_WRITER_BYTE, WRITER_BYTE, byte_range};
+        use crate::db::{PROTOCOL_GENERATION_BYTE, SHARED_WRITER_BYTE, WRITER_BYTE, byte_range};
 
         let tmpfile = crate::create_tempfile();
         let holder = reopen(tmpfile.path());
@@ -3197,9 +3261,13 @@ mod lock_protocol_test {
         )));
 
         let observer = reopen(tmpfile.path());
-        let byte = byte_range(SHARED_WRITER_BYTE);
-        assert!(observer.try_lock_range(byte).unwrap());
-        observer.unlock_range(byte).unwrap();
+        for byte in [
+            byte_range(SHARED_WRITER_BYTE),
+            byte_range(PROTOCOL_GENERATION_BYTE),
+        ] {
+            assert!(observer.try_lock_range(byte).unwrap());
+            observer.unlock_range(byte).unwrap();
+        }
         drop(kept_by_the_caller);
 
         holder.unlock_range(byte_range(WRITER_BYTE)).unwrap();
@@ -3208,12 +3276,138 @@ mod lock_protocol_test {
             .close()
             .unwrap();
     }
+
+    fn mismatched(result: Result<PagedCachedFile, DatabaseError>) -> bool {
+        #[cfg(feature = "experimental-multiprocess")]
+        {
+            matches!(result, Err(DatabaseError::LockProtocolMismatch))
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        {
+            refused(result)
+        }
+    }
+
+    /// Every handle except an exclusive writer holds a shared lock on its own generation byte,
+    /// and on no other generation's byte, while it is open. An exclusive writer locks the whole
+    /// range.
+    #[test]
+    fn a_handle_announces_its_protocol_generation() {
+        use crate::db::{PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let observer = reopen(tmpfile.path());
+        let own = byte_range(PROTOCOL_GENERATION_BYTE);
+        let others = [
+            PROTOCOL_GENERATION_BYTES.start..PROTOCOL_GENERATION_BYTE,
+            PROTOCOL_GENERATION_BYTE + 1..PROTOCOL_GENERATION_BYTES.end,
+        ];
+        for (read_only, mode) in [
+            (false, ConcurrencyMode::SingleWriter),
+            (true, ConcurrencyMode::SingleWriter),
+            (false, ConcurrencyMode::MultiWriter),
+            (true, ConcurrencyMode::MultiWriter),
+            (true, ConcurrencyMode::ExclusiveWriter),
+        ] {
+            let storage = open(tmpfile.path(), read_only, mode).unwrap();
+            assert!(
+                observer.query_lock(own).unwrap(),
+                "{mode:?} read_only={read_only}"
+            );
+            // The byte is held shared, so a peer of the same generation can hold it too.
+            assert!(observer.try_lock_shared_range(own).unwrap());
+            observer.unlock_range(own).unwrap();
+            for range in others.iter().filter(|range| !range.is_empty()) {
+                assert!(!observer.query_lock(range.clone()).unwrap());
+            }
+            storage.close().unwrap();
+            assert!(!observer.query_lock(own).unwrap());
+        }
+
+        let writer = exclusive_writer(tmpfile.path(), false).unwrap();
+        assert!(!observer.try_lock_shared_range(own).unwrap());
+        for range in others.iter().filter(|range| !range.is_empty()) {
+            assert!(observer.query_lock(range.clone()).unwrap());
+        }
+        writer.close().unwrap();
+    }
+
+    /// A locked byte of another generation refuses every open. The shared modes and a read-only
+    /// exclusive writer query the byte and report a mismatch. An exclusive writer's lock range
+    /// covers the byte, so it reports a lock conflict instead. The mismatch is reported even when
+    /// the peer also holds bytes that the open would conflict with, as a single writer of another
+    /// generation does.
+    #[test]
+    fn an_open_refuses_a_process_of_another_protocol_generation() {
+        use crate::db::{
+            PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, WRITER_BYTE,
+            byte_range,
+        };
+
+        let tmpfile = crate::create_tempfile();
+        let peer = reopen(tmpfile.path());
+        let own = byte_range(PROTOCOL_GENERATION_BYTE);
+        for other in [
+            PROTOCOL_GENERATION_BYTE + 1,
+            PROTOCOL_GENERATION_BYTES.end - 1,
+        ] {
+            for writing in [false, true] {
+                assert!(peer.try_lock_shared_range(byte_range(other)).unwrap());
+                if writing {
+                    // The peer is a single writer, which also holds these two bytes exclusively.
+                    assert!(peer.try_lock_range(byte_range(SHARED_WRITER_BYTE)).unwrap());
+                    assert!(peer.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
+                }
+                for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+                    for read_only in [false, true] {
+                        assert!(
+                            mismatched(open(tmpfile.path(), read_only, mode)),
+                            "{mode:?} read_only={read_only} writing={writing}"
+                        );
+                    }
+                }
+                assert!(
+                    mismatched(exclusive_writer(tmpfile.path(), true)),
+                    "writing={writing}"
+                );
+                assert!(refused(exclusive_writer(tmpfile.path(), false)));
+                // A refused open releases its own generation byte.
+                assert!(peer.try_lock_range(own).unwrap());
+                peer.unlock_range(own).unwrap();
+                peer.unlock_range(byte_range(other)).unwrap();
+                if writing {
+                    peer.unlock_range(byte_range(SHARED_WRITER_BYTE)).unwrap();
+                    peer.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+                }
+            }
+        }
+
+        // A peer of the same generation is not a mismatch.
+        assert!(peer.try_lock_shared_range(own).unwrap());
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+            for read_only in [false, true] {
+                open(tmpfile.path(), read_only, mode)
+                    .unwrap()
+                    .close()
+                    .unwrap();
+            }
+        }
+        exclusive_writer(tmpfile.path(), true)
+            .unwrap()
+            .close()
+            .unwrap();
+        assert!(refused(exclusive_writer(tmpfile.path(), false)));
+        peer.unlock_range(own).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    use crate::db::{BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, SHARED_WRITER_BYTE};
+    use crate::db::{
+        BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, PROTOCOL_GENERATION_BYTE,
+        PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
+    };
     use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
@@ -3253,6 +3447,9 @@ mod lock_failure_test {
         expected_shared: Option<bool>,
         fail_unlock: bool,
         querying: Answer,
+        // The answer to a query of the protocol generation bytes. Every open except an exclusive
+        // writer's makes that query first; `querying` answers the queries that follow it.
+        generation_querying: Answer,
         held: LockRanges,
         released: LockRanges,
         closed: AtomicBool,
@@ -3351,13 +3548,17 @@ mod lock_failure_test {
                     Bound::Excluded(BACKEND_LOCK_RANGE.end),
                 ),
             ));
-            assert!(
-                self.held
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .all(|held| !overlaps(*held, (start, end)))
+            let held = self.held.lock().unwrap();
+            assert!(held.iter().all(|held| !overlaps(*held, (start, end))));
+            let generation_bytes = (
+                Bound::Included(PROTOCOL_GENERATION_BYTES.start),
+                Bound::Excluded(PROTOCOL_GENERATION_BYTES.end),
             );
+            if overlaps((start, end), generation_bytes) {
+                // An open must hold its own generation byte before it queries the others.
+                assert!(held.contains(&byte_range(PROTOCOL_GENERATION_BYTE)));
+                return self.generation_querying.result();
+            }
             self.querying.result()
         }
 
@@ -3412,6 +3613,7 @@ mod lock_failure_test {
                 expected_shared: None,
                 fail_unlock: false,
                 querying,
+                generation_querying: Answer::Refused,
                 held: Arc::new(Mutex::new(Vec::new())),
                 released: released.clone(),
                 closed: AtomicBool::new(false),
@@ -3491,6 +3693,76 @@ mod lock_failure_test {
                 StorageError::Io(_) | StorageError::Unsupported
             ))
         )
+    }
+
+    fn mismatched(result: Result<(), DatabaseError>) -> bool {
+        #[cfg(feature = "experimental-multiprocess")]
+        {
+            matches!(result, Err(DatabaseError::LockProtocolMismatch))
+        }
+        #[cfg(not(feature = "experimental-multiprocess"))]
+        {
+            matches!(result, Err(DatabaseError::DatabaseAlreadyOpen))
+        }
+    }
+
+    /// The shared modes and a read-only exclusive writer announce their own generation, then ask
+    /// whether a process of another generation has the database open, and refuse if one does. An
+    /// exclusive writer locks the whole generation range instead, so it never asks.
+    #[test]
+    fn a_process_of_another_protocol_generation_refuses_the_open() {
+        let asking = [
+            (ConcurrencyMode::SingleWriter, false),
+            (ConcurrencyMode::SingleWriter, true),
+            (ConcurrencyMode::MultiWriter, false),
+            (ConcurrencyMode::MultiWriter, true),
+            (ConcurrencyMode::ExclusiveWriter, true),
+        ];
+        for (mode, read_only) in asking {
+            for answer in [Answer::Acquired, Answer::Failed] {
+                let (mut backend, released) = backend(Answer::Acquired, Answer::Refused);
+                backend.generation_querying = answer;
+                let held = backend.held.clone();
+                let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+                let result = TransactionalMemory::lock_for_open(&storage, read_only, mode);
+                if answer == Answer::Acquired {
+                    assert!(mismatched(result), "{mode:?} read_only={read_only}");
+                } else {
+                    assert!(failed(result), "{mode:?} read_only={read_only}");
+                }
+                storage.close().unwrap();
+                assert!(held.lock().unwrap().is_empty());
+                assert!(
+                    released
+                        .lock()
+                        .unwrap()
+                        .contains(&byte_range(PROTOCOL_GENERATION_BYTE))
+                );
+            }
+        }
+
+        // They ask before taking any byte that a writer of the other generation would also hold,
+        // so that a lock conflict on such a byte cannot hide the mismatch.
+        for (mode, read_only) in asking {
+            let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+            backend.generation_querying = Answer::Acquired;
+            backend.partial_answers = Mutex::new([Answer::Acquired, Answer::Refused].into());
+            let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+            assert!(
+                mismatched(TransactionalMemory::lock_for_open(
+                    &storage, read_only, mode
+                )),
+                "{mode:?} read_only={read_only}"
+            );
+            storage.close().unwrap();
+        }
+
+        let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+        backend.generation_querying = Answer::Failed;
+        let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+        TransactionalMemory::lock_for_open(&storage, false, ConcurrencyMode::ExclusiveWriter)
+            .unwrap();
+        storage.close().unwrap();
     }
 
     #[test]
