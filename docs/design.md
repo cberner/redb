@@ -491,11 +491,12 @@ writer mode, via a whole file lock: exclusive for a writer, shared for read-only
 A writer takes an exclusive lock on the entire database file except for the backend-reserved bytes,
 so no other process may open the database while it is open.
 
-A read-only handle takes a shared lock on the same range, except for the "shared writer byte", which
-is left free so that the check described below can find a multi-writer process holding it. Any number
-of read-only handles may share the file, and each excludes a writer in any mode. Since nothing may
-write the file while they hold it, they perform none of the header synchronization, cache
-invalidation or active transaction bookkeeping the other modes require.
+A read-only handle takes a shared lock on the same range, except for the "shared writer byte" and
+the "protocol generation bytes" of other generations. Those are left unlocked so that the checks
+described below can find a multi-writer process, or a process of another generation, holding them.
+Any number of read-only handles may share the file, and each excludes a writer in any mode. Since
+nothing may write the file while they hold it, they perform none of the header synchronization,
+cache invalidation or active transaction bookkeeping the other modes require.
 
 ## Single writer
 
@@ -543,7 +544,8 @@ The multi-process concurrency modes rely on file range locks and define the foll
 | `BASE + 2`                | shared reader byte                 |
 | `BASE + 3`                | whole-file reader byte             |
 | `BASE + 4`                | consistent byte                    |
-| `BASE + 5..BASE + 896`    | reserved for the core              |
+| `BASE + 5..BASE + 69`     | protocol generation bytes          |
+| `BASE + 69..BASE + 896`   | reserved for the core              |
 | `BASE + 896..BASE + 1024` | reserved for backend locking       |
 | `BASE + 1024`             | active transaction base (TXN_BASE) |
 | `TXN_BASE..2^63`          | active transaction range           |
@@ -585,6 +587,17 @@ is live" after it.
 If the "shared writer lock" is held, readers should consult this byte to determine if the database
 is consistent and a writer is live. Otherwise, they may consult the recovery required bit in the
 database header.
+
+### "protocol generation bytes"
+
+Each generation of this protocol has one of these bytes; the current generation's is `BASE + 5`.
+Every change to the protocol that an older version cannot follow takes the next byte. A handle must
+hold a shared lock on the byte of the generation it implements while the database is open. After
+taking it, the handle must check whether a byte of any other generation is locked, and must refuse
+to open if one is. Processes whose protocols differ therefore never share a file, whatever the file
+format version says. A writer in exclusive-writer mode locks the whole range instead, as part of its
+whole-file lock, which excludes every other process whatever its generation. A read-only handle in
+that mode takes its own byte, like the shared-mode handles.
 
 ## Header synchronization
 

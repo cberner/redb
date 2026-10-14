@@ -280,6 +280,10 @@ impl core::error::Error for TableError {}
 pub enum DatabaseError {
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
+    /// Another process has the database open with a version of redb that implements a different
+    /// generation of the multi-process locking protocol
+    #[cfg(feature = "experimental-multiprocess")]
+    LockProtocolMismatch,
     /// [`crate::RepairSession::abort`] was called or repair was aborted for another reason (such as the database being read-only).
     RepairAborted,
     /// The database file is in an old file format and must be manually upgraded
@@ -294,6 +298,8 @@ impl From<DatabaseError> for Error {
     fn from(err: DatabaseError) -> Error {
         match err {
             DatabaseError::DatabaseAlreadyOpen => Error::DatabaseAlreadyOpen,
+            #[cfg(feature = "experimental-multiprocess")]
+            DatabaseError::LockProtocolMismatch => Error::LockProtocolMismatch,
             DatabaseError::RepairAborted => Error::RepairAborted,
             DatabaseError::UpgradeRequired(x) => Error::UpgradeRequired(x),
             DatabaseError::TransactionInProgress => Error::TransactionInProgress,
@@ -343,6 +349,13 @@ impl Display for DatabaseError {
             }
             DatabaseError::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            #[cfg(feature = "experimental-multiprocess")]
+            DatabaseError::LockProtocolMismatch => {
+                write!(
+                    f,
+                    "Database already open by a process whose version of redb implements a different multi-process locking protocol."
+                )
             }
             DatabaseError::TransactionInProgress => {
                 write!(
@@ -673,6 +686,10 @@ impl core::error::Error for CursorError {}
 pub enum Error {
     /// The Database is already open. Cannot acquire lock.
     DatabaseAlreadyOpen,
+    /// Another process has the database open with a version of redb that implements a different
+    /// generation of the multi-process locking protocol
+    #[cfg(feature = "experimental-multiprocess")]
+    LockProtocolMismatch,
     /// This savepoint is invalid or cannot be created.
     ///
     /// Savepoints become invalid when an older savepoint is restored after it was created,
@@ -846,6 +863,13 @@ impl Display for Error {
             }
             Error::DatabaseAlreadyOpen => {
                 write!(f, "Database already open. Cannot acquire lock.")
+            }
+            #[cfg(feature = "experimental-multiprocess")]
+            Error::LockProtocolMismatch => {
+                write!(
+                    f,
+                    "Database already open by a process whose version of redb implements a different multi-process locking protocol."
+                )
             }
             Error::RepairAborted => {
                 write!(f, "Database repair aborted.")
