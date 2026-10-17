@@ -25,6 +25,8 @@ pub(crate) use page_store::HEADER_LOCK;
 pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
+#[cfg(all(test, feature = "experimental-multiprocess"))]
+pub(crate) use page_store::is_primary_unflushed;
 pub(crate) use page_store::{
     AllocationPolicy, DatabaseLayout, FILE_FORMAT_VERSION3, HeaderGuard, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageAllocator, PageHint, PageNumber, PageNumberHashMap,

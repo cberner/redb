@@ -87,7 +87,7 @@ controls which transaction pointer is the primary.
 `magic number` must be set to the ASCII letters 'redb' followed by 0x1A, 0x0A, 0xA9, 0x0D, 0x0A. This sequence is
 inspired by the PNG magic number.
 
-`god byte`, so named because this byte controls the state of the entire database, is a bitfield containing three flags:
+`god byte`, so named because this byte controls the state of the entire database, is a bitfield containing four flags:
 * first bit: `primary_bit` flag which indicates whether transaction slot 0 or transaction slot 1 contains the latest commit.
 * second bit: `recovery_required` flag, if set then the recovery process must be run when opening the database. This can be
   a full repair, in which the region tracker and regional allocator states -- described below -- are reconstructed by walking
@@ -95,6 +95,9 @@ inspired by the PNG magic number.
 * third bit: `two_phase_commit` flag, which indicates whether the transaction in the primary slot was written using 2-phase
   commit. If so, the primary slot is guaranteed to be valid, and repair won't look at the secondary slot. This flag is always
   updated atomically along with the primary bit.
+* fourth bit: `primary_unflushed` flag, which the multi-process modes set in the write that makes a commit the
+  primary, and clear with a second write once that first write has been flushed. While it is set, other processes
+  serve the secondary slot. See the "Header synchronization" section below.
 
 redb relies on the fact that this is a single byte to perform atomic commits.
 
@@ -605,6 +608,12 @@ Writers must take an exclusive lock on the "header lock" bytes while writing the
 does not need to be held during fsync().
 
 Readers must take a shared lock on the "header lock" bytes while reading the header.
+
+A header write is visible to the other processes as soon as it lands, before the fsync() that makes
+it durable. The write that makes a commit the primary must therefore also set the `primary_unflushed`
+flag, and the writer must clear it with a second header write once its fsync() has completed. A
+process that reads the header with the flag set must use the secondary slot, which holds the
+previous commit.
 
 A writer may cache the header, but only while it holds a lock on the "writer byte". All other
 processes must not cache the header.

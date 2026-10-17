@@ -899,14 +899,22 @@ impl TransactionalMemory {
             Self::read_file_header(storage, page_size.try_into().unwrap(), &header_lock)?
         };
         let file_len = storage.raw_file_len()?;
-        let needs_recovery = unrepaired.recovery_required(file_len);
+        let needs_recovery =
+            unrepaired.recovery_required(file_len) || unrepaired.primary_unflushed();
         if needs_recovery && read_only {
             return Err(DatabaseError::RepairAborted);
         }
-        let (header, _) = unrepaired.finalize(file_len)?;
+        let (mut header, _) = unrepaired.finalize(file_len)?;
         if needs_recovery {
             let _guard =
                 Self::lock_header(storage, in_process_header_lock, concurrency_mode, true)?;
+            if header.primary_unflushed {
+                // The writer that marked the primary died before its flush. Flushing first makes
+                // its header write durable, so the cleared header written below, which another
+                // process reads as soon as it lands, never shows a commit a power loss could lose.
+                storage.flush()?;
+                header.primary_unflushed = false;
+            }
             storage
                 .write(0, DB_HEADER_SIZE, true)?
                 .mem_mut()
@@ -1321,8 +1329,11 @@ impl TransactionalMemory {
             let header_lock = self.lock_header_shared()?;
             Self::read_file_header(&self.storage, self.page_size, &header_lock)?
         };
-        let (header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
-        if !was_clean {
+        let (mut header, was_clean) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+        // The sync above made a dead writer's header write durable, so its primary is published
+        let publish = header.primary_unflushed;
+        header.primary_unflushed = false;
+        if !was_clean || publish {
             let header_lock = self.lock_header_exclusive()?;
             self.write_header(&header, &header_lock)?;
             self.storage.flush()?;
@@ -1379,7 +1390,8 @@ impl TransactionalMemory {
         let unrepaired = Self::read_file_header(&self.storage, self.page_size, header)
             .map_err(DatabaseError::into_storage_error_or_corrupted)?;
         let file_header = unrepaired.finalize_transaction_slots()?;
-        let slot = file_header.primary_slot();
+        // The previous commit while the primary's writer has not flushed it yet
+        let slot = file_header.published_slot();
         self.storage.update_transaction_id(slot.transaction_id);
 
         Ok((slot.transaction_id, slot.user_root))
@@ -1400,13 +1412,14 @@ impl TransactionalMemory {
     ) -> Result<bool> {
         let unrepaired = Self::read_file_header(&self.storage, self.page_size, header_lock)
             .map_err(DatabaseError::into_storage_error_or_corrupted)?;
-        let (header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
+        let (mut header, _) = unrepaired.finalize(self.storage.raw_file_len()?)?;
         // Every writer holds the writer byte while it reloads, so transaction ids only move
         // forward, and comparing them says whether the file has moved on. A latched repair
         // syncs whatever the ids say: the pages it leaked are this handle's alone, and the
         // allocator state the file's latest commit recorded does not include them.
         if header.primary_slot().transaction_id == self.get_last_durable_transaction_id()?
             && !self.needs_repair()
+            && !header.primary_unflushed
         {
             return Ok(false);
         }
@@ -1419,6 +1432,14 @@ impl TransactionalMemory {
         self.storage.discard_write_buffer();
         // The other process may have rewritten any page this handle has cached
         self.storage.invalidate_cache_all();
+        if header.primary_unflushed {
+            // The writer that marked the primary died before its flush. Flushing first makes its
+            // header write durable, so the cleared header, which another process reads as soon
+            // as it lands, never shows a commit a power loss could lose.
+            self.storage.flush()?;
+            header.primary_unflushed = false;
+            self.write_header(&header, header_lock)?;
+        }
         {
             let mut state = self.state.lock().unwrap();
             state.header = header;
@@ -1808,6 +1829,12 @@ impl TransactionalMemory {
         // These two bits need to be written atomically
         header.swap_primary_slot();
         header.two_phase_commit = two_phase;
+        // Another process reads this write as soon as it lands, before the flush below has made
+        // it durable, so in the multi-process modes it also marks the primary unflushed. A second
+        // write clears the mark once the flush is done; until then the other processes serve the
+        // previous commit.
+        let shared = self.concurrency_mode.is_multi_process_writable();
+        header.primary_unflushed = shared;
 
         // Write the new header to disk
         {
@@ -1819,6 +1846,11 @@ impl TransactionalMemory {
             }
         }
         self.storage.flush()?;
+        if shared {
+            header.primary_unflushed = false;
+            let hold = self.header_hold(header_lock)?;
+            self.write_header(&header, &hold)?;
+        }
 
         if shrunk {
             self.storage.resize(header.layout().len())?;

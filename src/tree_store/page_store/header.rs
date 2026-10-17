@@ -61,6 +61,11 @@ pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE
 const PRIMARY_BIT: u8 = 1;
 const RECOVERY_REQUIRED: u8 = 2;
 const TWO_PHASE_COMMIT: u8 = 4;
+// Set by the write that makes a commit the primary in the multi-process modes, and cleared by a
+// second write once the first has been flushed. Another process that finds it set serves the
+// secondary slot, the previous commit, so no process serves a commit a power loss could still
+// lose. It outlives a writer that crashes in that window; the next writer's recovery clears it.
+const PRIMARY_UNFLUSHED: u8 = 8;
 
 // Structure of each commit slot
 const VERSION_OFFSET: usize = 0;
@@ -78,6 +83,12 @@ const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
 const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 
 pub(crate) const PAGE_SIZE: usize = 4096;
+
+/// Whether the primary is marked unflushed in `header`, the first bytes of a database file
+#[cfg(all(test, feature = "experimental-multiprocess"))]
+pub(crate) fn is_primary_unflushed(header: &[u8]) -> bool {
+    header[GOD_BYTE_OFFSET] & PRIMARY_UNFLUSHED != 0
+}
 
 fn get_u32(data: &[u8]) -> u32 {
     u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap())
@@ -99,6 +110,7 @@ pub(super) struct DatabaseHeader {
     primary_slot: usize,
     pub(super) recovery_required: bool,
     pub(super) two_phase_commit: bool,
+    pub(super) primary_unflushed: bool,
     page_size: u32,
     region_header_pages: u32,
     region_max_data_pages: u32,
@@ -117,6 +129,7 @@ impl UnrepairedDatabaseHeader {
         let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
         let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
         let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
+        let primary_unflushed = (data[GOD_BYTE_OFFSET] & PRIMARY_UNFLUSHED) != 0;
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
@@ -187,6 +200,7 @@ impl UnrepairedDatabaseHeader {
                 primary_slot,
                 recovery_required,
                 two_phase_commit,
+                primary_unflushed,
                 page_size,
                 region_header_pages,
                 region_max_data_pages,
@@ -216,6 +230,11 @@ impl UnrepairedDatabaseHeader {
     // The last writer did not shut down cleanly
     pub(super) fn unclean(&self) -> bool {
         self.inner.recovery_required
+    }
+
+    // The last writer marked the primary unflushed, so it may have died before flushing it
+    pub(super) fn primary_unflushed(&self) -> bool {
+        self.inner.primary_unflushed
     }
 
     // Consume self, reconcile the layout against the actual file length, and select a primary slot
@@ -365,6 +384,7 @@ impl DatabaseHeader {
             primary_slot: 0,
             recovery_required: true,
             two_phase_commit: false,
+            primary_unflushed: false,
             page_size: layout.full_region_layout().page_size(),
             region_header_pages: layout.full_region_layout().get_header_pages(),
             region_max_data_pages: layout.full_region_layout().num_pages(),
@@ -434,6 +454,16 @@ impl DatabaseHeader {
         &self.transaction_slots[self.primary_slot ^ 1]
     }
 
+    // The slot another process may serve: the primary once its writer has flushed it, and the
+    // previous commit, in the secondary slot, until then.
+    pub(super) fn published_slot(&self) -> &TransactionHeader {
+        if self.primary_unflushed {
+            self.secondary_slot()
+        } else {
+            self.primary_slot()
+        }
+    }
+
     // Overwrite the secondary slot with a newly committed transaction.
     pub(super) fn write_secondary_slot(
         &mut self,
@@ -463,6 +493,9 @@ impl DatabaseHeader {
         }
         if self.two_phase_commit {
             result[GOD_BYTE_OFFSET] |= TWO_PHASE_COMMIT;
+        }
+        if self.primary_unflushed {
+            result[GOD_BYTE_OFFSET] |= PRIMARY_UNFLUSHED;
         }
         result[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
             .copy_from_slice(&self.page_size.to_le_bytes());
@@ -763,6 +796,57 @@ mod test {
         fn close(&self) -> Result<(), Error> {
             self.inner.close()
         }
+    }
+
+    /// The mark round-trips through the god byte, moves the published slot to the previous commit
+    /// while it is set, and survives finalization by a reader and by a writer alike: clearing it
+    /// takes a flush and a header write, which a writer does separately, not a repair
+    #[test]
+    fn the_unflushed_mark_publishes_the_secondary_until_a_writer_clears_it() {
+        use super::{PRIMARY_UNFLUSHED, UnrepairedDatabaseHeader};
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write = db.begin_write().unwrap();
+        write.open_table(X).unwrap().insert("k", "v").unwrap();
+        write.commit().unwrap();
+        drop(db);
+        let file_len = std::fs::metadata(tmpfile.path()).unwrap().len();
+        let mut bytes: [u8; DB_HEADER_SIZE] = std::fs::read(tmpfile.path()).unwrap()
+            [..DB_HEADER_SIZE]
+            .try_into()
+            .unwrap();
+        let page_size = u32::try_from(super::PAGE_SIZE).unwrap();
+        let parse = |bytes: &[u8; DB_HEADER_SIZE]| {
+            UnrepairedDatabaseHeader::from_bytes(bytes, page_size).unwrap()
+        };
+
+        let unmarked = parse(&bytes);
+        let primary = unmarked.inner.primary_slot().transaction_id;
+        let secondary = unmarked.inner.secondary_slot().transaction_id;
+        assert!(primary > secondary);
+        assert_eq!(unmarked.inner.published_slot().transaction_id, primary);
+        assert!(unmarked.finalize(file_len).unwrap().1);
+
+        bytes[GOD_BYTE_OFFSET] |= PRIMARY_UNFLUSHED;
+        let marked = parse(&bytes);
+        assert_eq!(marked.inner.primary_slot().transaction_id, primary);
+        assert_eq!(marked.inner.published_slot().transaction_id, secondary);
+        assert_eq!(marked.inner.to_bytes(true), bytes);
+        // A reader keeps the mark
+        let kept = parse(&bytes).finalize_transaction_slots().unwrap();
+        assert_eq!(kept.published_slot().transaction_id, secondary);
+        assert_eq!(kept.to_bytes(true), bytes);
+        // So does a writer, and the mark alone does not make the header need a repair
+        let (mut kept, clean) = parse(&bytes).finalize(file_len).unwrap();
+        assert!(clean);
+        assert_eq!(kept.published_slot().transaction_id, secondary);
+        assert_eq!(kept.to_bytes(true), bytes);
+        // Cleared, it publishes the primary
+        kept.primary_unflushed = false;
+        assert_eq!(kept.published_slot().transaction_id, primary);
+        bytes[GOD_BYTE_OFFSET] &= !PRIMARY_UNFLUSHED;
+        assert_eq!(kept.to_bytes(true), bytes);
     }
 
     #[test]

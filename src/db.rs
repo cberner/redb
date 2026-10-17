@@ -198,8 +198,8 @@ pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// One byte per generation of the locking protocol. A handle holds a shared lock on the byte of
 /// the generation it implements while the database is open, and an open fails while a byte of
 /// another generation is locked. Processes that disagree on what the other lock bytes mean
-/// therefore never share a file. Each change to the protocol that an older version cannot follow
-/// takes the next byte.
+/// therefore never share a file. Each change to the protocol that a released version cannot
+/// follow takes the next byte.
 pub(crate) const PROTOCOL_GENERATION_BYTES: Range<u64> = LOCK_BASE + 5..LOCK_BASE + 69;
 /// The byte of the generation this version implements.
 pub(crate) const PROTOCOL_GENERATION_BYTE: u64 = PROTOCOL_GENERATION_BYTES.start;
@@ -3618,6 +3618,353 @@ mod consistent_byte_test {
             .unwrap();
         assert_eq!(reader_saw.lock().unwrap().as_deref(), Some("opened"));
         drop(db);
+    }
+}
+
+/// The mark a commit's header write carries until the writer has flushed it, probed through a
+/// backend that acts at the flush, as another process would
+#[cfg(all(
+    test,
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
+mod unflushed_primary_test {
+    use super::{ConcurrencyMode, Database, ReadOnlyDatabase, ReadableDatabase};
+    use crate::backends::FileBackend;
+    use crate::tree_store::is_primary_unflushed;
+    use crate::{BackendError, ReadableTable, StorageBackend, TableDefinition, TableError};
+    use std::fmt::{self, Debug, Formatter};
+    use std::fs::OpenOptions;
+    use std::io;
+    use std::ops::Bound;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+    const SHARED_MODES: [ConcurrencyMode; 2] =
+        [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter];
+
+    fn builder(mode: ConcurrencyMode) -> crate::Builder {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        builder
+    }
+
+    /// A separate description, so its locks conflict with the database's exactly as another
+    /// process's would
+    fn file(path: &Path) -> FileBackend {
+        FileBackend::new(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Whether the file marks its primary unflushed
+    fn marked(file: &FileBackend) -> bool {
+        let mut head = [0; 16];
+        file.read(0, &mut head).unwrap();
+        is_primary_unflushed(&head)
+    }
+
+    fn commit(db: &Database, value: u64) {
+        let write = db.begin_write().unwrap();
+        write.open_table(TABLE).unwrap().insert(0, value).unwrap();
+        write.commit().unwrap();
+    }
+
+    /// The value of the one key, or `None` before the commit that created the table
+    fn read(db: &impl ReadableDatabase) -> Option<u64> {
+        let read = db.begin_read().unwrap();
+        match read.open_table(TABLE) {
+            Ok(table) => Some(table.get(0).unwrap().unwrap().value()),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Event {
+        /// A write of the header, and whether it marks the primary unflushed
+        Header(bool),
+        Flush,
+    }
+
+    type AtFlush = Box<dyn Fn(&FileBackend) -> io::Result<()> + Send + Sync>;
+
+    /// The file, logging every write of the header and every flush, and running `at_flush`
+    /// ahead of each flush
+    struct Observed {
+        inner: FileBackend,
+        events: Arc<Mutex<Vec<Event>>>,
+        at_flush: AtFlush,
+    }
+
+    impl Observed {
+        fn new(
+            path: &Path,
+            events: Arc<Mutex<Vec<Event>>>,
+            at_flush: impl Fn(&FileBackend) -> io::Result<()> + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                inner: file(path),
+                events,
+                at_flush: Box::new(at_flush),
+            }
+        }
+    }
+
+    impl Debug for Observed {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            self.inner.fmt(f)
+        }
+    }
+
+    impl StorageBackend for Observed {
+        fn len(&self) -> io::Result<u64> {
+            self.inner.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> io::Result<()> {
+            self.inner.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> io::Result<()> {
+            self.inner.set_len(len)
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            (self.at_flush)(&self.inner)?;
+            self.events.lock().unwrap().push(Event::Flush);
+            self.inner.sync_data()
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> io::Result<()> {
+            if offset == 0 {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(Event::Header(is_primary_unflushed(data)));
+            }
+            self.inner.write(offset, data)
+        }
+        fn close(&self) -> io::Result<()> {
+            self.inner.close()
+        }
+        fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+            self.inner.try_lock_range(start, end)
+        }
+        fn try_lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.try_lock_shared_range(start, end)
+        }
+        fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.inner.lock_range(start, end)
+        }
+        fn lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<(), BackendError> {
+            self.inner.lock_shared_range(start, end)
+        }
+        fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.inner.unlock_range(start, end)
+        }
+        fn query_lock_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.query_lock_range(start, end)
+        }
+    }
+
+    fn observed(path: &Path, events: Arc<Mutex<Vec<Event>>>) -> Observed {
+        Observed::new(path, events, |_| Ok(()))
+    }
+
+    /// Whether the handle flushed the file before its first header write, so that a dead
+    /// writer's header write was durable before the cleared header could be read
+    fn flushed_before_writing(events: &Mutex<Vec<Event>>) -> bool {
+        let events = events.lock().unwrap();
+        let flush = events.iter().position(|event| *event == Event::Flush);
+        let write = events
+            .iter()
+            .position(|event| matches!(event, Event::Header(_)));
+        matches!((flush, write), (Some(flush), Some(write)) if flush < write)
+    }
+
+    /// What a commit writes, as the file sees it. In the multi-process modes the write that makes
+    /// the commit the primary marks it unflushed, and a write after the flush clears the mark. A
+    /// single-process commit writes the header once, unmarked: nothing else reads it.
+    #[test]
+    fn the_flip_marks_the_primary_unflushed_and_a_write_after_the_flush_clears_it() {
+        let shared = vec![
+            Event::Header(false),
+            Event::Flush,
+            Event::Header(true),
+            Event::Flush,
+            Event::Header(false),
+        ];
+        for (mode, expected) in [
+            (
+                ConcurrencyMode::ExclusiveWriter,
+                vec![Event::Header(false), Event::Flush],
+            ),
+            (ConcurrencyMode::SingleWriter, shared.clone()),
+            (ConcurrencyMode::MultiWriter, shared),
+        ] {
+            let tmpfile = crate::create_tempfile();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let db = builder(mode)
+                .create_with_backend(observed(tmpfile.path(), events.clone()))
+                .unwrap();
+            commit(&db, 1);
+            events.lock().unwrap().clear();
+            commit(&db, 2);
+            assert_eq!(*events.lock().unwrap(), expected, "{mode:?}");
+            drop(db);
+        }
+    }
+
+    /// Another process serves the previous commit while the flush runs, and the new one once the
+    /// write after the flush has cleared the mark
+    #[test]
+    fn the_previous_commit_is_served_until_the_flush_completes() {
+        for mode in SHARED_MODES {
+            let tmpfile = crate::create_tempfile();
+            let path = tmpfile.path().to_path_buf();
+            let reader: Arc<Mutex<Option<ReadOnlyDatabase>>> = Arc::new(Mutex::new(None));
+            let served = Arc::new(Mutex::new(Vec::new()));
+            let db = builder(mode)
+                .create_with_backend(Observed::new(&path, Arc::new(Mutex::new(Vec::new())), {
+                    let (reader, served, path) = (reader.clone(), served.clone(), path.clone());
+                    move |file| {
+                        if marked(file) {
+                            let mut reader = reader.lock().unwrap();
+                            let reader = reader.get_or_insert_with(|| {
+                                builder(mode).open_read_only(&path).unwrap()
+                            });
+                            served.lock().unwrap().push(read(reader));
+                        }
+                        Ok(())
+                    }
+                }))
+                .unwrap();
+            commit(&db, 1);
+            commit(&db, 2);
+            assert_eq!(*served.lock().unwrap(), [None, Some(1)], "{mode:?}");
+            assert_eq!(
+                read(reader.lock().unwrap().as_ref().unwrap()),
+                Some(2),
+                "{mode:?}"
+            );
+            drop(db);
+        }
+    }
+
+    /// A writer that dies before its flush completes leaves the mark in the file, so the other
+    /// processes keep serving the previous commit. A writer's recovery flushes the file and
+    /// clears the mark, which publishes the commit.
+    #[test]
+    fn a_commit_whose_writer_died_in_the_flush_is_published_by_recovery() {
+        for mode in SHARED_MODES {
+            let tmpfile = crate::create_tempfile();
+            let dying = Arc::new(AtomicBool::new(false));
+            let db = builder(mode)
+                .create_with_backend(Observed::new(
+                    tmpfile.path(),
+                    Arc::new(Mutex::new(Vec::new())),
+                    {
+                        let dying = dying.clone();
+                        move |file| {
+                            if dying.load(Ordering::SeqCst) && marked(file) {
+                                return Err(io::Error::other("power loss"));
+                            }
+                            Ok(())
+                        }
+                    },
+                ))
+                .unwrap();
+            commit(&db, 1);
+            let reader = builder(mode).open_read_only(tmpfile.path()).unwrap();
+            assert_eq!(read(&reader), Some(1), "{mode:?}");
+
+            dying.store(true, Ordering::SeqCst);
+            let write = db.begin_write().unwrap();
+            write.open_table(TABLE).unwrap().insert(0, 2).unwrap();
+            assert!(write.commit().is_err(), "{mode:?}");
+            // The crash: nothing more reaches the file, and the locks go with the process
+            drop(db);
+            assert!(marked(&file(tmpfile.path())), "{mode:?}");
+            assert_eq!(read(&reader), Some(1), "{mode:?}");
+
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let recovered = builder(mode)
+                .create_with_backend(observed(tmpfile.path(), events.clone()))
+                .unwrap();
+            assert!(!marked(&file(tmpfile.path())), "{mode:?}");
+            assert!(flushed_before_writing(&events), "{mode:?}");
+            assert_eq!(read(&recovered), Some(2), "{mode:?}");
+            assert_eq!(read(&reader), Some(2), "{mode:?}");
+            drop(recovered);
+        }
+    }
+
+    /// A multi-writer peer that is still open takes over a dead writer's commit when it next
+    /// reloads the header: it flushes the file and then clears the mark, so the other processes
+    /// see the commit before the peer commits anything itself
+    #[test]
+    fn a_peer_publishes_a_dead_writers_commit_when_it_reloads() {
+        let mode = ConcurrencyMode::MultiWriter;
+        let tmpfile = crate::create_tempfile();
+        let dying = Arc::new(AtomicBool::new(false));
+        let db = builder(mode)
+            .create_with_backend(Observed::new(
+                tmpfile.path(),
+                Arc::new(Mutex::new(Vec::new())),
+                {
+                    let dying = dying.clone();
+                    move |file| {
+                        if dying.load(Ordering::SeqCst) && marked(file) {
+                            return Err(io::Error::other("power loss"));
+                        }
+                        Ok(())
+                    }
+                },
+            ))
+            .unwrap();
+        commit(&db, 1);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let peer = builder(mode)
+            .create_with_backend(observed(tmpfile.path(), events.clone()))
+            .unwrap();
+        let reader = builder(mode).open_read_only(tmpfile.path()).unwrap();
+        assert_eq!(read(&peer), Some(1));
+        assert_eq!(read(&reader), Some(1));
+
+        dying.store(true, Ordering::SeqCst);
+        let write = db.begin_write().unwrap();
+        write.open_table(TABLE).unwrap().insert(0, 2).unwrap();
+        assert!(write.commit().is_err());
+        drop(db);
+        assert!(marked(&file(tmpfile.path())));
+        assert_eq!(read(&peer), Some(1));
+        assert_eq!(read(&reader), Some(1));
+
+        events.lock().unwrap().clear();
+        let write = peer.begin_write().unwrap();
+        assert!(!marked(&file(tmpfile.path())));
+        assert!(flushed_before_writing(&events));
+        assert_eq!(read(&reader), Some(2));
+        write.open_table(TABLE).unwrap().insert(0, 3).unwrap();
+        write.commit().unwrap();
+        assert_eq!(read(&reader), Some(3));
+        drop(peer);
     }
 }
 
