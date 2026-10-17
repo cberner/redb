@@ -24,6 +24,8 @@ pub(crate) use base::{
 };
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
+#[cfg(all(test, feature = "experimental-multiprocess"))]
+pub(crate) use header::is_primary_unflushed;
 pub(crate) use layout::DatabaseLayout;
 #[cfg(all(test, feature = "experimental-multiprocess"))]
 pub(crate) use page_manager::HEADER_LOCK;
