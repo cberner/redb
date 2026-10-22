@@ -2015,6 +2015,7 @@ impl RepairSession {
     allow(dead_code, unreachable_pub, clippy::enum_variant_names)
 )]
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+#[non_exhaustive]
 pub enum ConcurrencyMode {
     /// A writer excludes every other process; read-only handles share the file with each other
     /// and exclude any writer. Enforced by locking the whole file. The default.
