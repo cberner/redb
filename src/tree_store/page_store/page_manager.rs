@@ -35,7 +35,7 @@ use core::mem;
 use core::ops::{Bound, Deref, Range};
 use core::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "logging")]
-use log::warn;
+use log::{error, warn};
 
 // The region header is optional in the v3 file format
 // It's an artifact of the v2 file format, so we initialize new databases without headers to save space
@@ -545,7 +545,11 @@ pub(crate) struct HeaderGuard<'a> {
 impl Drop for HeaderGuard<'_> {
     fn drop(&mut self) {
         if let Some(storage) = self.storage {
-            let _ = storage.unlock_range(HEADER_LOCK);
+            log_release_failure(
+                storage.unlock_range(HEADER_LOCK),
+                "header lock",
+                "other processes sharing it may be unable to begin a transaction or to commit",
+            );
         }
     }
 }
@@ -578,8 +582,25 @@ pub(crate) struct WriterLock {
 impl Drop for WriterLock {
     fn drop(&mut self) {
         if let Some(range) = self.range {
-            let _ = self.storage.unlock_range(range);
+            log_release_failure(
+                self.storage.unlock_range(range),
+                "writer lock",
+                "no other process sharing it can begin a write transaction",
+            );
         }
+    }
+}
+
+fn log_release_failure(result: Result, lock: &str, consequence: &str) {
+    if let Err(failure) = result
+        && !matches!(failure, StorageError::DatabaseClosed)
+    {
+        #[cfg(feature = "logging")]
+        error!(
+            "Failed to release the {lock}: {failure}. Until this database is closed, {consequence}"
+        );
+        #[cfg(not(feature = "logging"))]
+        let _ = (failure, lock, consequence);
     }
 }
 
