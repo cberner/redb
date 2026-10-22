@@ -47,6 +47,8 @@
   to end.
 * In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
+* Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
+  transaction.
 * Under `experimental-multiprocess`, each handle announces the generation of the multi-process
   locking protocol it implements with a lock byte. An open fails with
   `DatabaseError::LockProtocolMismatch` while a process implementing another generation has the
