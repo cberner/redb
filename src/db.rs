@@ -3968,6 +3968,68 @@ mod unflushed_primary_test {
         assert_eq!(read(&reader), Some(3));
         drop(peer);
     }
+
+    /// The cache tag follows the published commit. A read beginning on the committing handle
+    /// while its flush runs is served the previous commit and finds the tag still naming it; the
+    /// read after the commit finds the tag advanced. Neither drops the cache
+    #[cfg(feature = "cache_metrics")]
+    #[test]
+    fn a_commit_drops_no_cache_during_or_after_its_flush() {
+        use std::sync::Weak;
+
+        let mode = ConcurrencyMode::MultiWriter;
+        let tmpfile = crate::create_tempfile();
+        let handle: Arc<Mutex<Weak<Database>>> = Arc::new(Mutex::new(Weak::new()));
+        // Each read begun during a flush: the value served, and the cache before and after
+        // the read began
+        let during: Arc<Mutex<Vec<(u64, usize, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+        let db = Arc::new(
+            builder(mode)
+                .create_with_backend(Observed::new(
+                    tmpfile.path(),
+                    Arc::new(Mutex::new(Vec::new())),
+                    {
+                        let (handle, during) = (handle.clone(), during.clone());
+                        move |file| {
+                            if marked(file)
+                                && let Some(db) = handle.lock().unwrap().upgrade()
+                            {
+                                let before = db.cache_stats().used_bytes();
+                                let read = db.begin_read().unwrap();
+                                let after = db.cache_stats().used_bytes();
+                                let table = read.open_table(TABLE).unwrap();
+                                let value = table.get(0).unwrap().unwrap().value();
+                                during.lock().unwrap().push((value, before, after));
+                            }
+                            Ok(())
+                        }
+                    },
+                ))
+                .unwrap(),
+        );
+        commit(&db, 1);
+        // Armed once the table exists, so the read during the flush has something to read
+        *handle.lock().unwrap() = Arc::downgrade(&db);
+        commit(&db, 2);
+
+        let during = during.lock().unwrap().clone();
+        assert_eq!(during.len(), 1);
+        let (value, before, after) = during[0];
+        assert_eq!(value, 1);
+        assert!(before > 0);
+        assert_eq!(after, before, "a read during the flush dropped the cache");
+
+        let cached = db.cache_stats().used_bytes();
+        assert!(cached > 0);
+        let _read = db.begin_read().unwrap();
+        assert_eq!(
+            db.cache_stats().used_bytes(),
+            cached,
+            "the read after the commit dropped the cache"
+        );
+        assert_eq!(read(db.as_ref()), Some(2));
+        drop(db);
+    }
 }
 
 /// The "active transaction range" locks a read transaction publishes, probed directly: a
@@ -4244,6 +4306,43 @@ mod active_transaction_test {
 
         let _read = db.begin_read().unwrap();
         assert_eq!(db.cache_stats().used_bytes(), cached_bytes);
+    }
+
+    /// Syncing to a peer's commit empties the cache and tags it with that commit, so a read that
+    /// then observes the commit keeps what the write transaction has cached since
+    #[cfg(feature = "cache_metrics")]
+    #[test]
+    fn a_read_after_a_sync_keeps_the_transactions_cache() {
+        use crate::ReadableTable;
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        let peer = Database::builder()
+            .set_concurrency_mode(ConcurrencyMode::MultiWriter)
+            .open(tmpfile.path())
+            .unwrap();
+        let write = peer.begin_write().unwrap();
+        write.open_table(TABLE).unwrap().insert(0, 1).unwrap();
+        write.commit().unwrap();
+
+        // Syncs to the peer's commit, then caches the pages it reads
+        let write = db.begin_write().unwrap();
+        assert_eq!(
+            write
+                .open_table(TABLE)
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .unwrap()
+                .value(),
+            1
+        );
+        let cached_bytes = db.cache_stats().used_bytes();
+        assert!(cached_bytes > 0);
+
+        let _read = db.begin_read().unwrap();
+        assert_eq!(db.cache_stats().used_bytes(), cached_bytes);
+        write.abort().unwrap();
     }
 
     /// A savepoint holds a read transaction live, so its snapshot stays active for as long as

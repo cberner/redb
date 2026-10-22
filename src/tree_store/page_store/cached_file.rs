@@ -798,8 +798,9 @@ impl PagedCachedFile {
         }
     }
 
-    // The caller holds the header lock across publishing this local commit and updating the tag.
-    pub(super) fn record_local_transaction_id(&self, transaction_id: TransactionId) {
+    // Tags the cache as coherent with `transaction_id` without dropping it. The caller holds the
+    // header lock exclusively, so no reader observes the id before the tag names it.
+    pub(super) fn record_transaction_id(&self, transaction_id: TransactionId) {
         *self.read_cache_transaction_id.lock().unwrap() = Some(transaction_id);
     }
 

@@ -1455,6 +1455,10 @@ impl TransactionalMemory {
             header.primary_unflushed = false;
             self.write_header(&header, header_lock)?;
         }
+        // Emptied, the cache is coherent as of this commit, so the tag names it: a reader that
+        // then observes the commit keeps what the write transaction caches meanwhile
+        self.storage
+            .record_transaction_id(header.primary_slot().transaction_id);
         {
             let mut state = self.state.lock().unwrap();
             state.header = header;
@@ -1855,16 +1859,19 @@ impl TransactionalMemory {
         {
             let hold = self.header_hold(header_lock)?;
             self.write_header(&header, &hold)?;
-            if self.concurrency_mode == ConcurrencyMode::MultiWriter {
-                // Writes invalidate the pages they replace, so retained pages remain valid.
-                self.storage.record_local_transaction_id(transaction_id);
-            }
         }
         self.storage.flush()?;
         if shared {
             header.primary_unflushed = false;
             let hold = self.header_hold(header_lock)?;
             self.write_header(&header, &hold)?;
+            if self.concurrency_mode == ConcurrencyMode::MultiWriter {
+                // This handle's writes evicted the pages they replaced, so the cache stays
+                // coherent through its own commit and the tag advances without a drop. Recorded
+                // under the hold that publishes the commit: a reader during the flush above is
+                // served the previous commit, and must find the tag still naming it
+                self.storage.record_transaction_id(transaction_id);
+            }
         }
 
         if shrunk {
