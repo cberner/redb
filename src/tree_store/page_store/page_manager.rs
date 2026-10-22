@@ -966,6 +966,21 @@ impl TransactionalMemory {
         }))
     }
 
+    /// Like `lock_writer`, but returns `None` if a peer holds the writer byte.
+    pub(crate) fn try_lock_writer(&self) -> Result<Option<Arc<WriterLock>>> {
+        if let Some(from_open) = &self.writer_lock {
+            return Ok(Some(from_open.clone()));
+        }
+        if !self.storage.try_lock_range(byte_range(WRITER_BYTE))? {
+            return Ok(None);
+        }
+
+        Ok(Some(Arc::new(WriterLock {
+            storage: self.storage.clone(),
+            range: Some(byte_range(WRITER_BYTE)),
+        })))
+    }
+
     fn active_transaction_byte(id: TransactionId) -> Result<u64> {
         match TXN_BASE.checked_add(id.raw_id()) {
             Some(offset) if offset < 1 << 63 => Ok(offset),

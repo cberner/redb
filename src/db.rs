@@ -1899,8 +1899,7 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // recorded, and the next open rebuilds it. A pending non-durable commit is still made
     // durable, by a plain commit, so that the rebuild does not roll it back
     let promote_only = mem.needs_repair();
-    // Not after a latched I/O failure, nor with nothing to write, decided ahead of the lock,
-    // which waits on a peer holding the writer byte
+    // Not after a latched I/O failure, nor with nothing to write, decided ahead of the lock
     let writing = !crate::panicking()
         && mem.check_io_errors().is_ok()
         && (!promote_only || mem.pending_non_durable_commit());
@@ -1909,7 +1908,9 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     // is written: the commit would take one of its own and release it, and the header would
     // then overwrite a commit made between them
     let writer_lock = if writing {
-        mem.lock_writer().ok()
+        // Multi-writer commits are durable and record allocator state, so close can skip
+        // maintenance rather than deadlock waiting for a peer's write transaction.
+        mem.try_lock_writer().ok().flatten()
     } else {
         None
     };

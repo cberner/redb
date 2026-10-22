@@ -684,6 +684,41 @@ mod peer_commits {
         assert_eq!(value(&db, 1), 1);
     }
 
+    #[test]
+    fn a_close_does_not_wait_for_a_peers_write_transaction() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&db, 1);
+        insert(&peer, 2);
+        let txn = peer.begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(3, 3).unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let closing = thread::spawn(move || {
+            drop(db);
+            tx.send(()).unwrap();
+        });
+        let closed_while_writing = rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        // Release the writer before asserting, so a regression does not leave the test hung.
+        txn.commit().unwrap();
+        closing.join().unwrap();
+        assert!(
+            closed_while_writing,
+            "close waited for the peer's writer lock"
+        );
+        drop(peer);
+
+        let mut db = open(tmpfile.path());
+        for key in 1..=3 {
+            assert_eq!(value(&db, key), key);
+        }
+        assert!(db.check_integrity().unwrap());
+    }
+
     /// A transaction dropped while a panic unwinds leaves its pages in the write buffer, and
     /// the peer can then commit those same pages. The sync discards the buffer, so the page
     /// reads back as the peer committed it.
