@@ -620,6 +620,7 @@ fn database_writer_lock_for_mode(
         // fell back to a whole-storage lock or was unsupported altogether.
         ConcurrencyMode::ExclusiveWriter => None,
         ConcurrencyMode::SingleWriter => Some(byte_range(WRITER_BYTE)),
+        #[cfg(any(test, feature = "experimental-multiprocess"))]
         ConcurrencyMode::MultiWriter => return None,
     };
 
@@ -639,19 +640,15 @@ fn open_writer_lock_for_mode(
     if read_only {
         return Ok(None);
     }
-    match concurrency_mode {
-        ConcurrencyMode::ExclusiveWriter | ConcurrencyMode::SingleWriter => {
-            Ok(database_writer_lock)
-        }
-        ConcurrencyMode::MultiWriter => {
-            storage.lock_range(byte_range(WRITER_BYTE))?;
-
-            Ok(Some(Arc::new(WriterLock {
-                storage: storage.clone(),
-                range: Some(byte_range(WRITER_BYTE)),
-            })))
-        }
+    if !concurrency_mode.is_multi_writer() {
+        return Ok(database_writer_lock);
     }
+    storage.lock_range(byte_range(WRITER_BYTE))?;
+
+    Ok(Some(Arc::new(WriterLock {
+        storage: storage.clone(),
+        range: Some(byte_range(WRITER_BYTE)),
+    })))
 }
 
 pub(crate) struct TransactionalMemory {
@@ -824,20 +821,15 @@ impl TransactionalMemory {
         }
         let acquired = if read_only {
             storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
+        } else if concurrency_mode.is_multi_writer() {
+            storage.try_lock_shared_range(byte_range(SHARED_WRITER_BYTE))?
+                // A read-only exclusive-writer handle leaves the shared writer byte free,
+                // so only this byte reveals one
+                && !storage.query_lock_range(byte_range(WHOLE_FILE_READER_BYTE))?
         } else {
-            match concurrency_mode {
-                ConcurrencyMode::ExclusiveWriter => unreachable!(),
-                ConcurrencyMode::SingleWriter => {
-                    storage.try_lock_range(byte_range(SHARED_WRITER_BYTE))?
-                        && storage.try_lock_range(byte_range(WRITER_BYTE))?
-                }
-                ConcurrencyMode::MultiWriter => {
-                    storage.try_lock_shared_range(byte_range(SHARED_WRITER_BYTE))?
-                        // A read-only exclusive-writer handle leaves the shared writer byte free,
-                        // so only this byte reveals one
-                        && !storage.query_lock_range(byte_range(WHOLE_FILE_READER_BYTE))?
-                }
-            }
+            assert_eq!(concurrency_mode, ConcurrencyMode::SingleWriter);
+            storage.try_lock_range(byte_range(SHARED_WRITER_BYTE))?
+                && storage.try_lock_range(byte_range(WRITER_BYTE))?
         };
 
         if acquired {
@@ -1400,6 +1392,7 @@ impl TransactionalMemory {
         match self.concurrency_mode {
             ConcurrencyMode::ExclusiveWriter => false,
             ConcurrencyMode::SingleWriter => self.read_only,
+            #[cfg(any(test, feature = "experimental-multiprocess"))]
             ConcurrencyMode::MultiWriter => true,
         }
     }
@@ -1872,7 +1865,7 @@ impl TransactionalMemory {
             header.primary_unflushed = false;
             let hold = self.header_hold(header_lock)?;
             self.write_header(&header, &hold)?;
-            if self.concurrency_mode == ConcurrencyMode::MultiWriter {
+            if self.concurrency_mode.is_multi_writer() {
                 // This handle's writes evicted the pages they replaced, so the cache stays
                 // coherent through its own commit and the tag advances without a drop. Recorded
                 // under the hold that publishes the commit: a reader during the flush above is
