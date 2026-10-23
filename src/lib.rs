@@ -70,7 +70,6 @@
 // std builds.
 extern crate alloc;
 
-#[cfg(feature = "experimental-multiprocess")]
 pub use db::ConcurrencyMode;
 #[cfg(not(redb_no_std))]
 pub use db::ReadOnlyDatabase;

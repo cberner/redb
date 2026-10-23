@@ -600,11 +600,10 @@ pub trait ReadableDatabase: SealedInApi5 {
 ///
 /// Multiple processes may open a [`ReadOnlyDatabase`], but it may not be opened concurrently
 /// with a [`Database`].
-#[cfg_attr(
-    feature = "experimental-multiprocess",
-    doc = "",
-    doc = "`SingleWriter` and `MultiWriter` are the exception: a reader shares the file with the writer and follows its commits. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-)]
+///
+/// That holds in `ExclusiveWriter`, the default concurrency mode, alone: in the others, a reader
+/// opened in the writer's mode shares the file with it and follows its commits. See
+/// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
 ///
 /// # Examples
 ///
@@ -857,11 +856,12 @@ impl Database {
     /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
     /// been made durable are made durable if the check passes, or rolled back if the database must
     /// be repaired.
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "In the multi-process concurrency modes the check holds the writer lock: it waits for a write transaction in another process to end, and no other process writes to the file until it returns. A read transaction in another process neither blocks the check nor is disturbed by it. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-    )]
+    ///
+    /// In the concurrency modes that share the file between processes, the check holds the writer
+    /// lock: it waits for a write transaction in another process to end, and no other process
+    /// writes to the file until it returns. A read transaction in another process neither blocks
+    /// the check nor is disturbed by it. See
+    /// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
     pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
         if Arc::get_mut(&mut self.mem).is_none() {
             return Err(DatabaseError::TransactionInProgress);
@@ -956,7 +956,7 @@ impl Database {
         // the next writer can load it without rebuilding again.
         if peer_committed
             && allocator_hash.is_none()
-            && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
+            && self.mem.concurrency_mode().is_multi_writer()
         {
             was_clean = false;
         }
@@ -1007,7 +1007,7 @@ impl Database {
         }
         // In multi-writer mode a repair ends with a commit recording the allocator state, as the
         // open's does; after the savepoints are held, since a commit frees what nothing pins
-        if !was_clean && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
+        if !was_clean && self.mem.concurrency_mode().is_multi_writer() {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
@@ -1107,7 +1107,7 @@ impl Database {
         // since this handle last synced, and only a write transaction of this handle's own syncs
         // them again. Refresh before reporting one as a blocker, unless this process already has
         // a write transaction live, since beginning another would block on it.
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter
+        if self.mem.concurrency_mode().is_multi_writer()
             && self.transaction_tracker.any_persistent_savepoint_exists()
             && !self.transaction_tracker.write_transaction_live()
         {
@@ -1215,7 +1215,7 @@ impl Database {
         // Not in the other modes, where the close records and a second record would leave the
         // file one record larger, the pages of the one it replaces being freed only by the next
         // commit
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
+        if self.mem.concurrency_mode().is_multi_writer() {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
@@ -1633,7 +1633,7 @@ impl Database {
         Self::sync_persistent_savepoints(&transaction_tracker, &mem, writer_lock.as_ref())?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction and the integrity check do, so that the next open, in any process, loads it
-        if repaired && concurrency_mode == ConcurrencyMode::MultiWriter {
+        if repaired && concurrency_mode.is_multi_writer() {
             ensure_allocator_state_table_and_trim(
                 &transaction_tracker,
                 &mem,
@@ -1759,7 +1759,7 @@ fn sync_to_latest_commit(
     writer_lock: &WriterLock,
     header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result<Option<AllocatorStateLatch>> {
-    if mem.concurrency_mode() != ConcurrencyMode::MultiWriter {
+    if !mem.concurrency_mode().is_multi_writer() {
         return Ok(None);
     }
     let synced = {
@@ -2001,20 +2001,30 @@ impl RepairSession {
 /// writes is chosen by `open()` or `open_read_only()`, not by the mode.
 ///
 /// Every process opening one database concurrently must use a compatible mode: one
-/// `SingleWriter` writer or any number of `MultiWriter` writers, plus read-only handles in either
-/// case. Those two modes need byte-range file locks, so they are supported on Linux, the Apple
-/// platforms and Windows; elsewhere, opening a database in one of them fails. `ExclusiveWriter`
-/// locks the whole file and works everywhere.
+/// `SingleWriter` writer, plus any number of read-only handles opened in that mode. It needs
+/// byte-range file locks, so it is supported on Linux, the Apple platforms and Windows; elsewhere,
+/// opening a database in it fails. `ExclusiveWriter` locks the whole file and works everywhere.
 #[cfg_attr(
     feature = "experimental-multiprocess",
     doc = "",
-    doc = "Every process must also implement the same generation of the multi-process locking protocol. A handle announces its generation with a lock byte, and an open fails with [`DatabaseError::LockProtocolMismatch`](crate::DatabaseError::LockProtocolMismatch) if a process implementing another generation already has the database open.",
-    doc = "A writer in `ExclusiveWriter` mode locks the whole file instead of announcing a generation. It excludes every other process, and every other process excludes it, with [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen) whatever generation each implements."
+    doc = "`MultiWriter` admits any number of writers in place of the one, plus read-only handles opened in that mode. It needs byte-range file locks as well."
 )]
-#[cfg_attr(
-    not(feature = "experimental-multiprocess"),
-    allow(dead_code, unreachable_pub, clippy::enum_variant_names)
-)]
+///
+/// Every process must also implement the same generation of the multi-process locking protocol.
+/// A handle announces its generation with a lock byte, and an open fails with
+/// [`DatabaseError::LockProtocolMismatch`](crate::DatabaseError::LockProtocolMismatch) if a
+/// process implementing another generation already has the database open. A writer in
+/// `ExclusiveWriter` mode locks the whole file instead of announcing a generation. It excludes
+/// every other process, and every other process excludes it, with
+/// [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen) whatever
+/// generation each implements.
+///
+/// A `SingleWriter` handle also excludes a writer running redb before 4.3, which locks the whole
+/// file, and is excluded by one. A read-only handle of redb 4.0 to 4.2 holds that lock shared,
+/// and on Linux, where it is a separate lock from the byte-range locks, is not excluded by a
+/// `SingleWriter` writer: it must not be opened on a database such a writer has open, since it
+/// reads a snapshot the writer may reuse. Under the `experimental-api-5` feature the whole-file
+/// lock is not taken in any mode, and no version before 4.3 is excluded.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub enum ConcurrencyMode {
@@ -2027,6 +2037,7 @@ pub enum ConcurrencyMode {
     SingleWriter,
     /// Any number of processes may, concurrently, open the database for reading and writing.
     /// Only one write transaction may be open at a time.
+    #[cfg(any(test, feature = "experimental-multiprocess"))]
     MultiWriter,
 }
 
@@ -2035,6 +2046,23 @@ impl ConcurrencyMode {
     /// (possibly this one) is a writer
     pub(crate) fn is_multi_process_writable(self) -> bool {
         !matches!(self, ConcurrencyMode::ExclusiveWriter)
+    }
+
+    /// Whether any number of processes may write. Names the variant for the comparisons, since
+    /// it exists only where the feature offers it, and in the crate's own tests
+    #[cfg_attr(
+        not(any(test, feature = "experimental-multiprocess")),
+        allow(clippy::unused_self)
+    )]
+    pub(crate) fn is_multi_writer(self) -> bool {
+        #[cfg(any(test, feature = "experimental-multiprocess"))]
+        {
+            matches!(self, ConcurrencyMode::MultiWriter)
+        }
+        #[cfg(not(any(test, feature = "experimental-multiprocess")))]
+        {
+            false
+        }
     }
 }
 
@@ -2103,7 +2131,6 @@ impl Builder {
     }
 
     /// Set how processes may share this database. Defaults to [`ConcurrencyMode::ExclusiveWriter`].
-    #[cfg(feature = "experimental-multiprocess")]
     pub fn set_concurrency_mode(&mut self, mode: ConcurrencyMode) -> &mut Self {
         self.concurrency_mode = mode;
         self
@@ -2161,11 +2188,10 @@ impl Builder {
     /// If the file has been opened for writing (i.e. as a [`Database`]) [`DatabaseError::DatabaseAlreadyOpen`]
     /// will be returned on platforms which support file locks (macOS, Windows, Linux). On other platforms,
     /// the caller MUST avoid calling this method when the database is open for writing.
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "Only an `ExclusiveWriter` writer is refused: in `SingleWriter` and `MultiWriter` a reader opened in the same mode as the writer shares the file with it and picks up its commits. See [`Self::set_concurrency_mode`]."
-    )]
+    ///
+    /// Only an `ExclusiveWriter` writer is refused: in the other modes, a reader opened in the
+    /// writer's mode shares the file with it and picks up its commits. See
+    /// [`Self::set_concurrency_mode`].
     #[cfg(not(redb_no_std))]
     pub fn open_read_only(
         &self,

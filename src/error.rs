@@ -500,7 +500,6 @@ pub enum SetDurabilityError {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
     /// A non-durable commit would be invisible to the other processes sharing the database
-    #[cfg(feature = "experimental-multiprocess")]
     NonDurableCommitUnsupported,
 }
 
@@ -508,7 +507,6 @@ impl From<SetDurabilityError> for Error {
     fn from(err: SetDurabilityError) -> Error {
         match err {
             SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
-            #[cfg(feature = "experimental-multiprocess")]
             SetDurabilityError::NonDurableCommitUnsupported => Error::NonDurableCommitUnsupported,
         }
     }
@@ -523,7 +521,6 @@ impl Display for SetDurabilityError {
                     "Persistent savepoint modified. Cannot reduce transaction durability"
                 )
             }
-            #[cfg(feature = "experimental-multiprocess")]
             SetDurabilityError::NonDurableCommitUnsupported => {
                 write!(
                     f,
@@ -698,7 +695,6 @@ pub enum Error {
     /// A persistent savepoint was modified
     PersistentSavepointModified,
     /// A non-durable commit would be invisible to the other processes sharing the database
-    #[cfg(feature = "experimental-multiprocess")]
     NonDurableCommitUnsupported,
     /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
     /// another process creates could take its id
@@ -773,7 +769,6 @@ impl Display for Error {
             Error::Corrupted(msg) => {
                 write!(f, "DB corrupted: {msg}")
             }
-            #[cfg(feature = "experimental-multiprocess")]
             Error::NonDurableCommitUnsupported => {
                 write!(
                     f,

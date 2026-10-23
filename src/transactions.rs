@@ -1,4 +1,4 @@
-use crate::db::{ConcurrencyMode, TransactionGuard};
+use crate::db::TransactionGuard;
 use crate::error::CommitError;
 use crate::multimap_table::ReadOnlyUntypedMultimapTable;
 use crate::sealed::Sealed;
@@ -982,7 +982,7 @@ impl WriteTransaction {
             two_phase_commit: false,
             // A multi-writer commit records the allocator state, which `set_quick_repair()`
             // keeps on there
-            quick_repair: mem.concurrency_mode() == ConcurrencyMode::MultiWriter,
+            quick_repair: mem.concurrency_mode().is_multi_writer(),
             post_commit_free: PostCommitFree::Enabled,
             restored_transaction: None,
             shrink_policy: ShrinkPolicy::Default,
@@ -1309,7 +1309,7 @@ impl WriteTransaction {
     )]
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
         #[cfg(feature = "experimental-multiprocess")]
-        if self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
+        if self.mem.concurrency_mode().is_multi_writer() {
             return Err(SavepointError::EphemeralSavepointUnsupported);
         }
         self.create_savepoint()
@@ -1496,11 +1496,11 @@ impl WriteTransaction {
     ///
     /// If a persistent savepoint has been created or deleted, in this transaction, the durability may not
     /// be reduced below [`Durability::Immediate`]
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "[`Durability::None`] is refused, with [`SetDurabilityError::NonDurableCommitUnsupported`], in the multi-process concurrency modes: a commit held only in this process's memory would be invisible to the other processes. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-    )]
+    ///
+    /// [`Durability::None`] is refused, with [`SetDurabilityError::NonDurableCommitUnsupported`],
+    /// in the concurrency modes that share the database between processes: a commit held only in
+    /// this process's memory would be invisible to the other processes. See
+    /// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
     pub fn set_durability(&mut self, durability: Durability) -> Result<(), SetDurabilityError> {
         let persistent_modified = self
             .savepoint_state
@@ -1511,7 +1511,6 @@ impl WriteTransaction {
             return Err(SetDurabilityError::PersistentSavepointModified);
         }
         // A non-durable commit exists only in this process's memory
-        #[cfg(feature = "experimental-multiprocess")]
         if matches!(durability, Durability::None)
             && self.mem.concurrency_mode().is_multi_process_writable()
         {
@@ -1565,11 +1564,10 @@ impl WriteTransaction {
     /// database process to crash, can cause the database to crash with the god byte primary bit
     /// pointing to an invalid commit slot, leaving the database in an invalid, potentially attacker-
     /// controlled state.
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "Disabling it has no effect in the multi-process concurrency modes, which always commit in 2 phases. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-    )]
+    ///
+    /// Disabling it has no effect in the concurrency modes that share the database between
+    /// processes, which always commit in 2 phases. See
+    /// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
     pub fn set_two_phase_commit(&mut self, enabled: bool) {
         self.two_phase_commit = enabled;
     }
@@ -1592,7 +1590,7 @@ impl WriteTransaction {
     pub fn set_quick_repair(&mut self, enabled: bool) {
         // A multi-writer commit records the allocator state, for the next writer, in any
         // process, to load rather than rebuild from the trees
-        if !enabled && self.mem.concurrency_mode() == ConcurrencyMode::MultiWriter {
+        if !enabled && self.mem.concurrency_mode().is_multi_writer() {
             return;
         }
         self.quick_repair = enabled;

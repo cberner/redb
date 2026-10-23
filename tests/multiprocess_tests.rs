@@ -1,17 +1,24 @@
-#![cfg(feature = "experimental-multiprocess")]
-
 use redb::backends::InMemoryBackend;
 use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
 
-/// The modes in which processes share a file
+/// The modes in which processes share a file: `MultiWriter` where the feature offers it
 fn shared_modes() -> &'static [ConcurrencyMode] {
-    &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
+    #[cfg(feature = "experimental-multiprocess")]
+    {
+        &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
+    }
+    #[cfg(not(feature = "experimental-multiprocess"))]
+    {
+        &[ConcurrencyMode::SingleWriter]
+    }
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod shared_reader {
     use super::*;
-    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
+    use redb::{ReadableDatabase, TableDefinition};
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -202,9 +209,6 @@ mod writer_byte {
     use super::*;
     use redb::TableDefinition;
     use std::path::Path;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
@@ -215,8 +219,13 @@ mod writer_byte {
     }
 
     /// Which is what makes one write transaction at a time across the cohort
+    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn a_write_transaction_excludes_another_process() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration;
+
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
         let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
         let peer = create(tmpfile.path(), ConcurrencyMode::MultiWriter).unwrap();
@@ -241,6 +250,7 @@ mod writer_byte {
     }
 
     /// The byte is released by the whole transaction ending, not by the commit alone
+    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn an_aborted_transaction_releases_the_byte() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
@@ -275,7 +285,10 @@ mod writer_byte {
     }
 }
 
-#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[cfg(all(
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
 #[test]
 fn the_concurrency_mode_excludes_incompatible_opens() {
     fn create(path: &std::path::Path, mode: ConcurrencyMode) -> Result<Database, DatabaseError> {
@@ -304,10 +317,15 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
 
 /// A multi-writer check runs on the file as another process last committed it, and the handle
 /// goes on from there: fresh savepoint ids, and a close that commits after what it synced to
-#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[cfg(all(
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
 #[test]
 fn an_integrity_check_syncs_to_a_peers_commits() {
-    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
+    use redb::{ReadableDatabase, TableDefinition};
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
@@ -357,7 +375,9 @@ fn an_integrity_check_syncs_to_a_peers_commits() {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
-    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
+    use redb::{ReadableDatabase, TableDefinition};
     use std::io::{Read, Seek, SeekFrom, Write};
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
@@ -414,7 +434,10 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
 }
 
 /// The check waits for another process's write transaction to end, as a write transaction would
-#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[cfg(all(
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
 #[test]
 fn an_integrity_check_waits_for_a_peers_write_transaction() {
     use std::sync::mpsc;
@@ -451,7 +474,10 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
 
 /// A multi-writer handle's write transaction begins from the file as another process last
 /// committed it, and so does the commit its close makes.
-#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[cfg(all(
+    feature = "experimental-multiprocess",
+    any(target_os = "linux", target_vendor = "apple", windows)
+))]
 mod peer_commits {
     use super::*;
     use redb::{CompactionError, ReadableDatabase, ReadableTable, TableDefinition};
@@ -769,8 +795,10 @@ mod peer_commits {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn file_backend_custom_open_supports_shared_modes() {
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
     use redb::backends::FileBackend;
-    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    use redb::{ReadableDatabase, TableDefinition};
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
     for &mode in shared_modes() {
@@ -850,7 +878,9 @@ fn sharing_a_backend_without_locks_is_unsupported() {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod reclamation {
     use super::*;
-    use redb::{ReadableDatabase, ReadableTable, TableDefinition};
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
+    use redb::{ReadableDatabase, TableDefinition};
 
     const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -917,9 +947,11 @@ mod reclamation {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod compaction {
     use super::*;
+    #[cfg(feature = "experimental-api-5")]
+    use redb::ReadableTable;
     use redb::{
         CompactionError, MultimapTableDefinition, ReadOnlyDatabase, ReadableDatabase,
-        ReadableTable, ReadableTableMetadata, TableDefinition,
+        ReadableTableMetadata, TableDefinition,
     };
     use std::path::Path;
 
