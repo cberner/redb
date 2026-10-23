@@ -604,20 +604,6 @@ fn log_release_failure(result: Result, lock: &str, consequence: &str) {
     }
 }
 
-/// The error for an open that found a process implementing another generation of the locking
-/// protocol. The `LockProtocolMismatch` variant only exists with the multi-process feature, so a
-/// build without it reports `DatabaseAlreadyOpen` instead.
-fn lock_protocol_mismatch() -> DatabaseError {
-    #[cfg(feature = "experimental-multiprocess")]
-    {
-        DatabaseError::LockProtocolMismatch
-    }
-    #[cfg(not(feature = "experimental-multiprocess"))]
-    {
-        DatabaseError::DatabaseAlreadyOpen
-    }
-}
-
 /// The writer lock a handle holds for the life of the database: the whole file where the
 /// database is not shared, and the writer byte where one process writes. Nothing in multi-writer
 /// mode, where a write transaction takes that byte itself, or for a read-only handle
@@ -788,7 +774,7 @@ impl TransactionalMemory {
             // that a writer of another generation is reported as a mismatch rather than as a
             // lock conflict on one of the later ranges.
             if read_only && taken == 0 && Self::another_protocol_generation_open(storage)? {
-                return Err(lock_protocol_mismatch());
+                return Err(DatabaseError::LockProtocolMismatch);
             }
         }
 
@@ -834,7 +820,7 @@ impl TransactionalMemory {
             return Err(DatabaseError::DatabaseAlreadyOpen);
         }
         if Self::another_protocol_generation_open(storage)? {
-            return Err(lock_protocol_mismatch());
+            return Err(DatabaseError::LockProtocolMismatch);
         }
         let acquired = if read_only {
             storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
@@ -3353,14 +3339,7 @@ mod lock_protocol_test {
     }
 
     fn mismatched(result: Result<PagedCachedFile, DatabaseError>) -> bool {
-        #[cfg(feature = "experimental-multiprocess")]
-        {
-            matches!(result, Err(DatabaseError::LockProtocolMismatch))
-        }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        {
-            refused(result)
-        }
+        matches!(result, Err(DatabaseError::LockProtocolMismatch))
     }
 
     /// Every handle except an exclusive writer holds a shared lock on its own generation byte,
@@ -3771,14 +3750,7 @@ mod lock_failure_test {
     }
 
     fn mismatched(result: Result<(), DatabaseError>) -> bool {
-        #[cfg(feature = "experimental-multiprocess")]
-        {
-            matches!(result, Err(DatabaseError::LockProtocolMismatch))
-        }
-        #[cfg(not(feature = "experimental-multiprocess"))]
-        {
-            matches!(result, Err(DatabaseError::DatabaseAlreadyOpen))
-        }
+        matches!(result, Err(DatabaseError::LockProtocolMismatch))
     }
 
     /// The shared modes and a read-only exclusive writer announce their own generation, then ask
