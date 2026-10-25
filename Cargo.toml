@@ -61,10 +61,6 @@ experimental-api-5 = []
 # of `Option<T>` written before `T` declared one. Requires "experimental-api-5". May change
 # incompatibly, or be removed, in any release
 experimental-niches = ["experimental-api-5"]
-# Unstable support for several processes writing one database: `ConcurrencyMode::MultiWriter`.
-# Requires "std", "experimental-api-5" and a platform with byte-range file locks. May change
-# incompatibly, or be removed, in any release
-experimental-multiprocess = ["std", "experimental-api-5"]
 
 [profile.bench]
 debug = true

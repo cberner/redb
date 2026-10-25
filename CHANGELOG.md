@@ -43,14 +43,16 @@
   transaction in another process as a transaction in progress. A `SingleWriter` handle excludes a
   writer running redb before 4.3, and is excluded by one; a read-only handle of redb 4.0 to 4.2 is
   not excluded on Linux, and must not be opened on a database a `SingleWriter` process has open.
-* Under the `experimental-multiprocess` feature flag, which requires `experimental-api-5`,
-  `ConcurrencyMode::MultiWriter` lets any number of processes open the database for writing, one
-  write transaction at a time. Every commit records the allocator state, for the next writer to
-  load; compaction's own commits are the exception, and `Database::compact()` ends with one that
-  does. Ephemeral savepoints are refused there, with
+* Add `ConcurrencyMode::MultiWriter`, in which any number of processes open the database for
+  writing, one write transaction at a time, and any number open it read-only. Every commit records
+  the allocator state, for the next writer to load; compaction's own commits are the exception, and
+  `Database::compact()` ends with one that does. Ephemeral savepoints are refused there, with
   `SavepointError::EphemeralSavepointUnsupported`, and a write transaction begins from the file as
   another process last committed it, as do the close and `Database::check_integrity()`, which
-  waits for a write transaction in another process to end.
+  waits for a write transaction in another process to end. Like `SingleWriter`, the mode needs
+  byte-range file locks, excludes a writer running redb before 4.3, and does not exclude a
+  read-only handle of redb 4.0 to 4.2 on Linux. The `experimental-multiprocess` feature flag,
+  which gated the mode in 4.3, is removed.
 * In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write

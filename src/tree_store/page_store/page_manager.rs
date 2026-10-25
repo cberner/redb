@@ -620,7 +620,6 @@ fn database_writer_lock_for_mode(
         // fell back to a whole-storage lock or was unsupported altogether.
         ConcurrencyMode::ExclusiveWriter => None,
         ConcurrencyMode::SingleWriter => Some(byte_range(WRITER_BYTE)),
-        #[cfg(any(test, feature = "experimental-multiprocess"))]
         ConcurrencyMode::MultiWriter => return None,
     };
 
@@ -1392,7 +1391,6 @@ impl TransactionalMemory {
         match self.concurrency_mode {
             ConcurrencyMode::ExclusiveWriter => false,
             ConcurrencyMode::SingleWriter => self.read_only,
-            #[cfg(any(test, feature = "experimental-multiprocess"))]
             ConcurrencyMode::MultiWriter => true,
         }
     }
@@ -2885,7 +2883,6 @@ mod header_lock_test {
     /// A peer's close clears the recovery flag in the file while this handle is still writing.
     /// The commit that syncs to that close sets the flag again, so that a crash of this handle
     /// is still recovered from.
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn syncing_to_a_peers_close_keeps_the_recovery_flag() {
         use super::DB_HEADER_SIZE;

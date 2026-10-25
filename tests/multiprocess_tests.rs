@@ -1,16 +1,9 @@
 use redb::backends::InMemoryBackend;
 use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
 
-/// The modes in which processes share a file: `MultiWriter` where the feature offers it
+/// The modes in which processes share a file
 fn shared_modes() -> &'static [ConcurrencyMode] {
-    #[cfg(feature = "experimental-multiprocess")]
-    {
-        &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
-    }
-    #[cfg(not(feature = "experimental-multiprocess"))]
-    {
-        &[ConcurrencyMode::SingleWriter]
-    }
+    &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
@@ -219,7 +212,6 @@ mod writer_byte {
     }
 
     /// Which is what makes one write transaction at a time across the cohort
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn a_write_transaction_excludes_another_process() {
         use std::sync::mpsc;
@@ -250,7 +242,6 @@ mod writer_byte {
     }
 
     /// The byte is released by the whole transaction ending, not by the commit alone
-    #[cfg(feature = "experimental-multiprocess")]
     #[test]
     fn an_aborted_transaction_releases_the_byte() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
@@ -285,10 +276,7 @@ mod writer_byte {
     }
 }
 
-#[cfg(all(
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn the_concurrency_mode_excludes_incompatible_opens() {
     fn create(path: &std::path::Path, mode: ConcurrencyMode) -> Result<Database, DatabaseError> {
@@ -317,10 +305,7 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
 
 /// A multi-writer check runs on the file as another process last committed it, and the handle
 /// goes on from there: fresh savepoint ids, and a close that commits after what it synced to
-#[cfg(all(
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn an_integrity_check_syncs_to_a_peers_commits() {
     #[cfg(feature = "experimental-api-5")]
@@ -434,10 +419,7 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
 }
 
 /// The check waits for another process's write transaction to end, as a write transaction would
-#[cfg(all(
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn an_integrity_check_waits_for_a_peers_write_transaction() {
     use std::sync::mpsc;
@@ -474,10 +456,7 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
 
 /// A multi-writer handle's write transaction begins from the file as another process last
 /// committed it, and so does the commit its close makes.
-#[cfg(all(
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod peer_commits {
     use super::*;
     use redb::{CompactionError, ReadableDatabase, ReadableTable, TableDefinition};

@@ -7,10 +7,10 @@ mod cached_file;
 mod fast_hash;
 #[cfg(not(redb_no_std))]
 pub mod file_backend;
-mod header;
+pub(crate) mod header;
 mod layout;
 mod lru_cache;
-mod page_manager;
+pub(crate) mod page_manager;
 mod region;
 mod savepoint;
 #[allow(clippy::pedantic, dead_code)]
@@ -24,11 +24,7 @@ pub(crate) use base::{
 };
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
-#[cfg(all(test, feature = "experimental-multiprocess"))]
-pub(crate) use header::is_primary_unflushed;
 pub(crate) use layout::DatabaseLayout;
-#[cfg(all(test, feature = "experimental-multiprocess"))]
-pub(crate) use page_manager::HEADER_LOCK;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, HeaderGuard, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, WriterLock, xxh3_checksum,

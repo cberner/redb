@@ -2001,14 +2001,10 @@ impl RepairSession {
 /// writes is chosen by `open()` or `open_read_only()`, not by the mode.
 ///
 /// Every process opening one database concurrently must use a compatible mode: one
-/// `SingleWriter` writer, plus any number of read-only handles opened in that mode. It needs
-/// byte-range file locks, so it is supported on Linux, the Apple platforms and Windows; elsewhere,
-/// opening a database in it fails. `ExclusiveWriter` locks the whole file and works everywhere.
-#[cfg_attr(
-    feature = "experimental-multiprocess",
-    doc = "",
-    doc = "`MultiWriter` admits any number of writers in place of the one, plus read-only handles opened in that mode. It needs byte-range file locks as well."
-)]
+/// `SingleWriter` writer or any number of `MultiWriter` writers, plus any number of read-only
+/// handles opened in the same mode. Those two modes need byte-range file locks, so they are
+/// supported on Linux, the Apple platforms and Windows; elsewhere, opening a database in one of
+/// them fails. `ExclusiveWriter` locks the whole file and works everywhere.
 ///
 /// Every process must also implement the same generation of the multi-process locking protocol.
 /// A handle announces its generation with a lock byte, and an open fails with
@@ -2019,12 +2015,12 @@ impl RepairSession {
 /// [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen) whatever
 /// generation each implements.
 ///
-/// A `SingleWriter` handle also excludes a writer running redb before 4.3, which locks the whole
-/// file, and is excluded by one. A read-only handle of redb 4.0 to 4.2 holds that lock shared,
-/// and on Linux, where it is a separate lock from the byte-range locks, is not excluded by a
-/// `SingleWriter` writer: it must not be opened on a database such a writer has open, since it
-/// reads a snapshot the writer may reuse. Under the `experimental-api-5` feature the whole-file
-/// lock is not taken in any mode, and no version before 4.3 is excluded.
+/// A `SingleWriter` or `MultiWriter` handle also excludes a writer running redb before 4.3, which
+/// locks the whole file, and is excluded by one. A read-only handle of redb 4.0 to 4.2 holds that
+/// lock shared, and on Linux, where it is a separate lock from the byte-range locks, is not
+/// excluded by a writer in either mode: it must not be opened on a database such a writer has
+/// open, since it reads a snapshot the writer may reuse. Under the `experimental-api-5` feature
+/// the whole-file lock is not taken in any mode, and no version before 4.3 is excluded.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub enum ConcurrencyMode {
@@ -2037,7 +2033,6 @@ pub enum ConcurrencyMode {
     SingleWriter,
     /// Any number of processes may, concurrently, open the database for reading and writing.
     /// Only one write transaction may be open at a time.
-    #[cfg(any(test, feature = "experimental-multiprocess"))]
     MultiWriter,
 }
 
@@ -2048,21 +2043,9 @@ impl ConcurrencyMode {
         !matches!(self, ConcurrencyMode::ExclusiveWriter)
     }
 
-    /// Whether any number of processes may write. Names the variant for the comparisons, since
-    /// it exists only where the feature offers it, and in the crate's own tests
-    #[cfg_attr(
-        not(any(test, feature = "experimental-multiprocess")),
-        allow(clippy::unused_self)
-    )]
+    /// Whether any number of processes may write
     pub(crate) fn is_multi_writer(self) -> bool {
-        #[cfg(any(test, feature = "experimental-multiprocess"))]
-        {
-            matches!(self, ConcurrencyMode::MultiWriter)
-        }
-        #[cfg(not(any(test, feature = "experimental-multiprocess")))]
-        {
-            false
-        }
+        matches!(self, ConcurrencyMode::MultiWriter)
     }
 }
 
@@ -2802,16 +2785,12 @@ mod test {
 
 /// Probed directly, since the public API reports every lock conflict the same way and so
 /// cannot say which byte caused one.
-#[cfg(all(
-    test,
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod writer_byte_test {
     use super::{ConcurrencyMode, Database, WRITER_BYTE, byte_range};
     use crate::TableDefinition;
-    use crate::tree_store::HEADER_LOCK;
     use crate::tree_store::file_backend::range_lock::RangeLock;
+    use crate::tree_store::page_store::page_manager::HEADER_LOCK;
     use std::fs::{File, OpenOptions};
     use std::path::Path;
 
@@ -3406,11 +3385,7 @@ mod writer_byte_test {
 }
 
 /// The consistent byte, probed directly: a byte-range lock is invisible through the public API.
-#[cfg(all(
-    test,
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod consistent_byte_test {
     use super::{CONSISTENT_BYTE, ConcurrencyMode, Database, byte_range};
     use crate::backends::FileBackend;
@@ -3651,16 +3626,14 @@ mod consistent_byte_test {
 
 /// The mark a commit's header write carries until the writer has flushed it, probed through a
 /// backend that acts at the flush, as another process would
-#[cfg(all(
-    test,
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod unflushed_primary_test {
     use super::{ConcurrencyMode, Database, ReadOnlyDatabase, ReadableDatabase};
+    #[cfg(feature = "experimental-api-5")]
+    use crate::ReadableTable;
     use crate::backends::FileBackend;
-    use crate::tree_store::is_primary_unflushed;
-    use crate::{BackendError, ReadableTable, StorageBackend, TableDefinition, TableError};
+    use crate::tree_store::page_store::header::is_primary_unflushed;
+    use crate::{BackendError, StorageBackend, TableDefinition, TableError};
     use std::fmt::{self, Debug, Formatter};
     use std::fs::OpenOptions;
     use std::io;
@@ -4060,15 +4033,11 @@ mod unflushed_primary_test {
 
 /// The "active transaction range" locks a read transaction publishes, probed directly: a
 /// byte-range lock is invisible through the public API
-#[cfg(all(
-    test,
-    feature = "experimental-multiprocess",
-    any(target_os = "linux", target_vendor = "apple", windows)
-))]
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod active_transaction_test {
     use super::{ConcurrencyMode, Database, ReadableDatabase, TXN_BASE, WRITER_BYTE, byte_range};
-    use crate::tree_store::HEADER_LOCK;
     use crate::tree_store::file_backend::range_lock::RangeLock;
+    use crate::tree_store::page_store::page_manager::HEADER_LOCK;
     use crate::{Durability, SavepointError, SetDurabilityError, TableDefinition};
     use std::fs::{File, OpenOptions};
     use std::path::Path;
@@ -4184,6 +4153,7 @@ mod active_transaction_test {
     #[test]
     fn read_only_snapshot_survives_new_read_before_construction() {
         use super::{ReadTransaction, TransactionGuard};
+        #[cfg(feature = "experimental-api-5")]
         use crate::ReadableTable;
 
         for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
