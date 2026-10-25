@@ -6,7 +6,7 @@ mod btree_iters;
 mod btree_mutator;
 mod extract_if;
 mod multimap_btree;
-mod page_store;
+pub(crate) mod page_store;
 mod table_tree;
 mod table_tree_base;
 
@@ -19,14 +19,10 @@ pub(crate) use btree_cursor_range::BtreeCursorRange;
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, encode_bounds};
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
-#[cfg(all(test, feature = "experimental-multiprocess"))]
-pub(crate) use page_store::HEADER_LOCK;
 #[cfg(not(redb_no_std))]
 pub(crate) use page_store::ReadOnlyBackend;
 #[cfg(not(redb_no_std))]
 pub use page_store::file_backend;
-#[cfg(all(test, feature = "experimental-multiprocess"))]
-pub(crate) use page_store::is_primary_unflushed;
 pub(crate) use page_store::{
     AllocationPolicy, DatabaseLayout, FILE_FORMAT_VERSION3, HeaderGuard, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, PAGE_SIZE, Page, PageAllocator, PageHint, PageNumber, PageNumberHashMap,

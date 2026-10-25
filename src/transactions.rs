@@ -1302,13 +1302,13 @@ impl WriteTransaction {
     ///
     /// Returns [`SavepointError::InvalidSavepoint`] if the transaction is "dirty" (a data
     /// table has been opened, renamed, or deleted, or a savepoint has been restored)
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "Refused, with [`SavepointError::EphemeralSavepointUnsupported`], in [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter): the savepoint would be known to this process alone, and a persistent savepoint another process creates could take its id. Persistent savepoints are supported. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-    )]
+    ///
+    /// Refused, with [`SavepointError::EphemeralSavepointUnsupported`], in
+    /// [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter): the savepoint would
+    /// be known to this process alone, and a persistent savepoint another process creates could
+    /// take its id. Persistent savepoints are supported. See
+    /// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
     pub fn ephemeral_savepoint(&self) -> Result<Savepoint, SavepointError> {
-        #[cfg(feature = "experimental-multiprocess")]
         if self.mem.concurrency_mode().is_multi_writer() {
             return Err(SavepointError::EphemeralSavepointUnsupported);
         }
@@ -1582,11 +1582,11 @@ impl WriteTransaction {
     /// as part of each commit (so it doesn't need to be reconstructed), and enables 2-phase commit
     /// (which guarantees that the primary commit slot is valid without needing to look at the
     /// checksums). This means commits are slower, but recovery after a crash is almost instant.
-    #[cfg_attr(
-        feature = "experimental-multiprocess",
-        doc = "",
-        doc = "Disabling it has no effect in [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter), where every commit saves the allocator state, for the next write transaction, in any process, to load rather than reconstruct. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode)."
-    )]
+    ///
+    /// Disabling it has no effect in
+    /// [`ConcurrencyMode::MultiWriter`](crate::ConcurrencyMode::MultiWriter), where every commit
+    /// saves the allocator state, for the next write transaction, in any process, to load rather
+    /// than reconstruct. See [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
     pub fn set_quick_repair(&mut self, enabled: bool) {
         // A multi-writer commit records the allocator state, for the next writer, in any
         // process, to load rather than rebuild from the trees
@@ -2925,10 +2925,7 @@ mod test {
     // so it is untrusted: an id past the lock range must be reported as corruption rather than
     // tracked as this process's oldest read, where the next commit's scan and `TransactionId::next`
     // would run past the end of the range.
-    #[cfg(all(
-        feature = "experimental-multiprocess",
-        any(target_os = "linux", target_vendor = "apple", windows)
-    ))]
+    #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
     #[test]
     fn a_savepoint_naming_an_unrepresentable_transaction_is_corruption() {
         use super::{SAVEPOINT_TABLE, SavepointId, SerializedSavepoint};
@@ -2968,10 +2965,7 @@ mod test {
         ));
     }
 
-    #[cfg(all(
-        feature = "experimental-multiprocess",
-        any(target_os = "linux", target_vendor = "apple", windows)
-    ))]
+    #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
     #[test]
     fn failed_multi_writer_open_releases_locks_without_committing() {
         use super::{SAVEPOINT_TABLE, SavepointId, SerializedSavepoint};

@@ -29,6 +29,7 @@
 //! - MVCC support for concurrent readers & writer, without blocking
 //! - Crash-safe by default
 //! - Savepoints and rollbacks
+//! - Multi-process access to one database, with a single or several writer processes
 //!
 //! # Example
 //!

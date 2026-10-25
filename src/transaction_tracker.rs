@@ -306,7 +306,7 @@ impl TransactionTracker {
         state.write_slot = WriteSlotState::Finalizing;
     }
 
-    #[cfg(all(test, feature = "experimental-multiprocess"))]
+    #[cfg(test)]
     pub(crate) fn holds_writer_byte(&self) -> bool {
         matches!(
             self.state.lock().unwrap().write_slot,

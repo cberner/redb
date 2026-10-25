@@ -85,7 +85,6 @@ const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
 pub(crate) const PAGE_SIZE: usize = 4096;
 
 /// Whether the primary is marked unflushed in `header`, the first bytes of a database file
-#[cfg(all(test, feature = "experimental-multiprocess"))]
 pub(crate) fn is_primary_unflushed(header: &[u8]) -> bool {
     header[GOD_BYTE_OFFSET] & PRIMARY_UNFLUSHED != 0
 }
@@ -129,7 +128,7 @@ impl UnrepairedDatabaseHeader {
         let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
         let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
         let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
-        let primary_unflushed = (data[GOD_BYTE_OFFSET] & PRIMARY_UNFLUSHED) != 0;
+        let primary_unflushed = is_primary_unflushed(data);
         let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
         let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
         let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
