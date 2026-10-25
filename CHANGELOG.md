@@ -33,6 +33,29 @@
   range over it is still in scope, which could panic, no longer compiles.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
+* Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
+  `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
+  the niche opens as `Option<Legacy<T>>`, however deeply nested.
+* Under `experimental-niches`, `&str` declares a `NICHE`, so `Option<&str>` is stored without a
+  tag byte, and is no longer equivalent to `Option<&str>` without the flag. A table of
+  `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
+  longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
+  it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `String` declares the same `NICHE` as `&str`, so `Option<String>`
+  is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
+  A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
+  migrated by copying it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `bool` declares a `NICHE`, so `Option<bool>` is stored in one byte
+  rather than two, and is no longer equivalent to `Option<bool>` without the flag. A table of
+  `Option<bool>` written without the flag opens as `Option<Legacy<bool>>`, and is migrated by
+  copying it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `char` declares a `NICHE`, so `Option<char>` is stored in three
+  bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
+  of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
+  copying it into a new table. The file format is unchanged.
+
+## 4.5.0 - 2026-XX-XX
+### New features
 * Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
   may share the database. `ExclusiveWriter`, the default, locks the whole file, as earlier versions
   do. In `SingleWriter`, one process writes, and any number of processes may open the database
@@ -55,34 +78,16 @@
   which gated the mode in 4.3, is removed.
 * In `MultiWriter`, existing handles recover automatically after another process exits
   during compaction or repair. They can resume writing without reopening the database.
-* Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
-  transaction.
 * Add `DatabaseError::LockProtocolMismatch`. Each handle announces the generation of the
   multi-process locking protocol it implements with a lock byte, and an open fails with that error
   while a process implementing another generation has the database open, so redb versions with
   different protocols never share a file. A writer in the default concurrency mode locks the whole
   file instead of announcing a generation. It excludes every other process, and every other process
   excludes it, with `DatabaseError::DatabaseAlreadyOpen` whatever generation each implements.
-* Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
-  `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
-  the niche opens as `Option<Legacy<T>>`, however deeply nested.
-* Under `experimental-niches`, `&str` declares a `NICHE`, so `Option<&str>` is stored without a
-  tag byte, and is no longer equivalent to `Option<&str>` without the flag. A table of
-  `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
-  longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
-  it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `String` declares the same `NICHE` as `&str`, so `Option<String>`
-  is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
-  A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
-  migrated by copying it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `bool` declares a `NICHE`, so `Option<bool>` is stored in one byte
-  rather than two, and is no longer equivalent to `Option<bool>` without the flag. A table of
-  `Option<bool>` written without the flag opens as `Option<Legacy<bool>>`, and is migrated by
-  copying it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `char` declares a `NICHE`, so `Option<char>` is stored in three
-  bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
-  of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
-  copying it into a new table. The file format is unchanged.
+
+### Bug fixes
+* Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
+  transaction.
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
