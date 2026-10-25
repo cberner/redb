@@ -3,6 +3,11 @@
 use redb::backends::InMemoryBackend;
 use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
 
+/// The modes in which processes share a file
+fn shared_modes() -> &'static [ConcurrencyMode] {
+    &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
+}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod shared_reader {
     use super::*;
@@ -13,14 +18,14 @@ mod shared_reader {
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
-    fn shared() -> redb::Builder {
+    fn shared(mode: ConcurrencyMode) -> redb::Builder {
         let mut builder = Database::builder();
-        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
+        builder.set_concurrency_mode(mode);
         builder
     }
 
-    fn create(path: &Path) -> Database {
-        let db = shared().create(path).unwrap();
+    fn create(path: &Path, mode: ConcurrencyMode) -> Database {
+        let db = shared(mode).create(path).unwrap();
         let write = db.begin_write().unwrap();
         {
             let mut table = write.open_table(TABLE).unwrap();
@@ -39,27 +44,29 @@ mod shared_reader {
     /// Following a peer's commits means seeing its data, not only its newer id
     #[test]
     fn a_shared_reader_sees_a_peers_writes() {
-        let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let writer = create(tmpfile.path());
-        let reader = shared().open_read_only(tmpfile.path()).unwrap();
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let writer = create(tmpfile.path(), mode);
+            let reader = shared(mode).open_read_only(tmpfile.path()).unwrap();
 
-        // Caches the page the value lives on
-        assert_eq!(value(&reader), 0);
+            // Caches the page the value lives on
+            assert_eq!(value(&reader), 0);
 
-        // Staleness needs the allocator to recycle the cached page, so churn until it does
-        for expected in 1..60u64 {
-            let write = writer.begin_write().unwrap();
-            {
-                let mut table = write.open_table(TABLE).unwrap();
-                table.insert(0, expected).unwrap();
+            // Staleness needs the allocator to recycle the cached page, so churn until it does
+            for expected in 1..60u64 {
+                let write = writer.begin_write().unwrap();
+                {
+                    let mut table = write.open_table(TABLE).unwrap();
+                    table.insert(0, expected).unwrap();
+                }
+                write.commit().unwrap();
+
+                assert_eq!(
+                    value(&reader),
+                    expected,
+                    "{mode:?}: the reader served a cached page after the writer committed {expected}"
+                );
             }
-            write.commit().unwrap();
-
-            assert_eq!(
-                value(&reader),
-                expected,
-                "the reader served a cached page after the writer committed {expected}"
-            );
         }
     }
 
@@ -69,28 +76,30 @@ mod shared_reader {
     fn a_shared_reader_ignores_the_layout() {
         use std::io::{Seek, SeekFrom, Write};
 
-        let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let writer = create(tmpfile.path());
-        let write = writer.begin_write().unwrap();
-        {
-            let mut table = write.open_table(TABLE).unwrap();
-            table.insert(0, 7).unwrap();
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let writer = create(tmpfile.path(), mode);
+            let write = writer.begin_write().unwrap();
+            {
+                let mut table = write.open_table(TABLE).unwrap();
+                table.insert(0, 7).unwrap();
+            }
+            write.commit().unwrap();
+
+            // The region counts, torn to zero under the live writer
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            file.seek(SeekFrom::Start(24)).unwrap();
+            file.write_all(&[0u8; 8]).unwrap();
+            drop(file);
+
+            let reader = shared(mode).open_read_only(tmpfile.path()).unwrap();
+            assert_eq!(value(&reader), 7, "{mode:?}");
+            // Its close would rewrite the header, which is not what this tests
+            std::mem::forget(writer);
         }
-        write.commit().unwrap();
-
-        // The region counts, torn to zero under the live writer
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-        file.seek(SeekFrom::Start(24)).unwrap();
-        file.write_all(&[0u8; 8]).unwrap();
-        drop(file);
-
-        let reader = shared().open_read_only(tmpfile.path()).unwrap();
-        assert_eq!(value(&reader), 7);
-        // Its close would rewrite the header, which is not what this tests
-        std::mem::forget(writer);
     }
 
     /// Simulates power loss: once `dead`, every write is dropped
@@ -131,57 +140,60 @@ mod shared_reader {
     /// byte alone would walk a tree the repair is discarding. The consistent byte keeps it out
     #[test]
     fn a_repairing_writer_does_not_admit_a_shared_reader() {
-        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
 
-        // Crashed after a commit, so the next open has to repair it
-        let dead = Arc::new(AtomicBool::new(false));
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(tmpfile.path())
-            .unwrap();
-        let db = Database::builder()
-            .create_with_backend(CrashBackend {
-                inner: redb::backends::FileBackend::new(file).unwrap(),
-                dead: Arc::clone(&dead),
-            })
-            .unwrap();
-        let write = db.begin_write().unwrap();
-        {
-            let mut table = write.open_table(TABLE).unwrap();
-            table.insert(0, 9).unwrap();
-        }
-        write.commit().unwrap();
-        dead.store(true, Ordering::SeqCst);
-        drop(db);
-
-        // The repair callback fires inside do_repair()
-        let path = tmpfile.path().to_path_buf();
-        let during: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
-        let recorder = Arc::clone(&during);
-
-        let mut builder = shared();
-        builder.set_repair_callback(move |_| {
-            let mut recorded = recorder.lock().unwrap();
-            if recorded.is_some() {
-                return;
+            // Crashed after a commit, so the next open has to repair it
+            let dead = Arc::new(AtomicBool::new(false));
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let db = Database::builder()
+                .create_with_backend(CrashBackend {
+                    inner: redb::backends::FileBackend::new(file).unwrap(),
+                    dead: Arc::clone(&dead),
+                })
+                .unwrap();
+            let write = db.begin_write().unwrap();
+            {
+                let mut table = write.open_table(TABLE).unwrap();
+                table.insert(0, 9).unwrap();
             }
-            *recorded = Some(match shared().open_read_only(&path) {
-                Ok(_) => "opened".to_string(),
-                Err(err) => format!("{err:?}"),
+            write.commit().unwrap();
+            dead.store(true, Ordering::SeqCst);
+            drop(db);
+
+            // The repair callback fires inside do_repair()
+            let path = tmpfile.path().to_path_buf();
+            let during: Arc<std::sync::Mutex<Option<String>>> =
+                Arc::new(std::sync::Mutex::new(None));
+            let recorder = Arc::clone(&during);
+
+            let mut builder = shared(mode);
+            builder.set_repair_callback(move |_| {
+                let mut recorded = recorder.lock().unwrap();
+                if recorded.is_some() {
+                    return;
+                }
+                *recorded = Some(match shared(mode).open_read_only(&path) {
+                    Ok(_) => "opened".to_string(),
+                    Err(err) => format!("{err:?}"),
+                });
             });
-        });
-        let repaired = builder.open(tmpfile.path()).unwrap();
+            let repaired = builder.open(tmpfile.path()).unwrap();
 
-        assert_eq!(
-            during.lock().unwrap().take().as_deref(),
-            Some("RepairAborted"),
-            "a shared reader was admitted while the database was still being repaired"
-        );
+            assert_eq!(
+                during.lock().unwrap().take().as_deref(),
+                Some("RepairAborted"),
+                "{mode:?}: a shared reader was admitted while the database was still being repaired"
+            );
 
-        let reader = shared().open_read_only(tmpfile.path()).unwrap();
-        assert_eq!(value(&reader), 9);
-        drop(repaired);
+            let reader = shared(mode).open_read_only(tmpfile.path()).unwrap();
+            assert_eq!(value(&reader), 9);
+            drop(repaired);
+        }
     }
 }
 
@@ -349,51 +361,56 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
     use std::io::{Read, Seek, SeekFrom, Write};
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
-    let tmpfile = tempfile::NamedTempFile::new().unwrap();
-    let mut db = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
-        .create(tmpfile.path())
-        .unwrap();
-    for key in [1, 2] {
-        let txn = db.begin_write().unwrap();
-        txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
-        txn.commit().unwrap();
-    }
-    let peer = Database::builder()
-        .set_concurrency_mode(ConcurrencyMode::MultiWriter)
-        .open_read_only(tmpfile.path())
-        .unwrap();
-    let read = peer.begin_read().unwrap();
+    for &mode in shared_modes() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Database::builder()
+            .set_concurrency_mode(mode)
+            .create(tmpfile.path())
+            .unwrap();
+        for key in [1, 2] {
+            let txn = db.begin_write().unwrap();
+            txn.open_table(TABLE).unwrap().insert(key, key).unwrap();
+            txn.commit().unwrap();
+        }
+        let peer = Database::builder()
+            .set_concurrency_mode(mode)
+            .open_read_only(tmpfile.path())
+            .unwrap();
+        let read = peer.begin_read().unwrap();
 
-    // The header: the god byte at 9, whose low bit names the primary of the two 128-byte commit
-    // slots at 64 and 192, each ending in a 16-byte checksum
-    let mut file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(tmpfile.path())
-        .unwrap();
-    let mut god_byte = [0u8];
-    file.seek(SeekFrom::Start(9)).unwrap();
-    file.read_exact(&mut god_byte).unwrap();
-    let checksum = 64 + 128 * u64::from(god_byte[0] & 1) + 112;
-    let mut bytes = [0u8; 16];
-    file.seek(SeekFrom::Start(checksum)).unwrap();
-    file.read_exact(&mut bytes).unwrap();
-    for byte in &mut bytes {
-        *byte ^= 0xFF;
-    }
-    file.seek(SeekFrom::Start(checksum)).unwrap();
-    file.write_all(&bytes).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
+        // The header: the god byte at 9, whose low bit names the primary of the two 128-byte
+        // commit slots at 64 and 192, each ending in a 16-byte checksum
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut god_byte = [0u8];
+        file.seek(SeekFrom::Start(9)).unwrap();
+        file.read_exact(&mut god_byte).unwrap();
+        let checksum = 64 + 128 * u64::from(god_byte[0] & 1) + 112;
+        let mut bytes = [0u8; 16];
+        file.seek(SeekFrom::Start(checksum)).unwrap();
+        file.read_exact(&mut bytes).unwrap();
+        for byte in &mut bytes {
+            *byte ^= 0xFF;
+        }
+        file.seek(SeekFrom::Start(checksum)).unwrap();
+        file.write_all(&bytes).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
 
-    assert!(matches!(
-        db.check_integrity(),
-        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
-    ));
-    let table = read.open_table(TABLE).unwrap();
-    assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
-    assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+        assert!(
+            matches!(
+                db.check_integrity(),
+                Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+            ),
+            "{mode:?}"
+        );
+        let table = read.open_table(TABLE).unwrap();
+        assert_eq!(table.get(1).unwrap().unwrap().value(), 1);
+        assert_eq!(table.get(2).unwrap().unwrap().value(), 2);
+    }
 }
 
 /// The check waits for another process's write transaction to end, as a write transaction would
@@ -756,7 +773,7 @@ fn file_backend_custom_open_supports_shared_modes() {
     use redb::{ReadableDatabase, ReadableTable, TableDefinition};
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
-    for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+    for &mode in shared_modes() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
         let mut builder = Database::builder();
         builder.set_concurrency_mode(mode);
@@ -774,11 +791,12 @@ fn file_backend_custom_open_supports_shared_modes() {
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
 
-        let peer = if mode == ConcurrencyMode::MultiWriter {
-            Some(open().unwrap())
-        } else {
+        // A single writer excludes a second one; a multi-writer admits it
+        let peer = if mode == ConcurrencyMode::SingleWriter {
             assert!(matches!(open(), Err(DatabaseError::DatabaseAlreadyOpen)));
             None
+        } else {
+            Some(open().unwrap())
         };
         for value in 1..4 {
             let writer = peer.as_ref().unwrap_or(&db);
@@ -811,15 +829,17 @@ fn file_backend_custom_open_supports_shared_modes() {
 /// A backend without locks can only be used in exclusive-writer mode.
 #[test]
 fn sharing_a_backend_without_locks_is_unsupported() {
-    let mut builder = Database::builder();
-    builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
-    let err = builder
-        .create_with_backend(InMemoryBackend::new())
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        DatabaseError::Storage(StorageError::Unsupported)
-    ));
+    for &mode in shared_modes() {
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        let err = builder
+            .create_with_backend(InMemoryBackend::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Unsupported)),
+            "{mode:?}"
+        );
+    }
 
     // ... while the default mode opens on one as it always has
     Database::builder()
@@ -933,7 +953,7 @@ mod compaction {
     /// A read transaction in another process is a transaction in progress, as a local one is
     #[test]
     fn compaction_refuses_a_peers_read_transaction() {
-        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+        for &mode in shared_modes() {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
             let mut writer = create(tmpfile.path(), mode);
             insert(&writer, 0..1, &[1u8; 512]);
@@ -959,7 +979,7 @@ mod compaction {
     #[test]
     fn untyped_tables_pin_a_peers_snapshot_until_dropped() {
         const MULTIMAP: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("multi");
-        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+        for &mode in shared_modes() {
             for multimap in [false, true] {
                 let tmpfile = tempfile::NamedTempFile::new().unwrap();
                 let mut writer = create(tmpfile.path(), mode);
@@ -1023,7 +1043,7 @@ mod compaction {
     /// that moved
     #[test]
     fn compaction_shrinks_a_file_a_peer_has_open() {
-        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+        for &mode in shared_modes() {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
             let mut writer = create(tmpfile.path(), mode);
             let value = vec![7u8; 1024];
