@@ -3177,6 +3177,42 @@ mod lock_protocol_test {
         }
     }
 
+    /// With `older` holding the whole-file lock of redb before 4.3 exclusive, as a writer of
+    /// such a version does, `open` is refused. On Windows that lock covers the query mutex, so
+    /// the open waits for it instead.
+    #[cfg(not(feature = "experimental-api-5"))]
+    fn assert_excluded_by_older_writer(
+        older: &File,
+        open: impl FnOnce() -> Result<PagedCachedFile, DatabaseError> + Send + 'static,
+    ) {
+        older.try_lock().unwrap();
+        #[cfg(not(windows))]
+        {
+            assert!(refused(open()));
+            older.unlock().unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::sync::mpsc;
+            use std::time::Duration;
+
+            let (result_tx, result_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                result_tx.send(open()).unwrap();
+            });
+            let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
+            older.unlock().unwrap();
+            assert!(matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)));
+            result_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+                .close()
+                .unwrap();
+            worker.join().unwrap();
+        }
+    }
+
     #[cfg(not(feature = "experimental-api-5"))]
     #[test]
     fn exclusive_writer_opens_exclude_older_whole_file_writers() {
@@ -3190,33 +3226,8 @@ mod lock_protocol_test {
             ));
             storage.close().unwrap();
 
-            older.try_lock().unwrap();
-            #[cfg(not(windows))]
-            assert!(refused(exclusive_writer(tmpfile.path(), read_only)));
-            #[cfg(windows)]
-            {
-                // Older whole-file locks cover the query mutex, so retrying waits for them.
-                use std::sync::mpsc;
-                use std::time::Duration;
-
-                let path = tmpfile.path().to_owned();
-                let (result_tx, result_rx) = mpsc::channel();
-                let worker = std::thread::spawn(move || {
-                    result_tx.send(exclusive_writer(&path, read_only)).unwrap();
-                });
-                let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
-                older.unlock().unwrap();
-                assert!(matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)));
-                result_rx
-                    .recv_timeout(Duration::from_secs(5))
-                    .unwrap()
-                    .unwrap()
-                    .close()
-                    .unwrap();
-                worker.join().unwrap();
-            }
-            #[cfg(not(windows))]
-            older.unlock().unwrap();
+            let path = tmpfile.path().to_owned();
+            assert_excluded_by_older_writer(&older, move || exclusive_writer(&path, read_only));
         }
     }
 
@@ -3236,22 +3247,30 @@ mod lock_protocol_test {
         older.try_lock().unwrap();
     }
 
-    #[cfg(target_os = "linux")]
+    /// A shared-mode handle holds the whole-file lock of redb before 4.3 shared, so a writer of
+    /// such a version, which takes it exclusive, is excluded while one is open, and excludes one.
+    /// A reader of 4.0 to 4.2 holds it shared as well, so it is admitted beside a shared-mode
+    /// reader, as it is beside a whole-file reader.
+    #[cfg(not(feature = "experimental-api-5"))]
     #[test]
-    fn multi_process_opens_do_not_take_legacy_locks() {
+    fn shared_mode_opens_exclude_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();
         let older = reopen(tmpfile.path());
-        older.try_lock().unwrap();
-        // On filesystems that emulate flock with range locks, exclusion is unavoidable.
-        if older.query_lock(0..=0).unwrap() {
-            return;
-        }
         for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for read_only in [false, true] {
-                open(tmpfile.path(), read_only, mode)
-                    .unwrap()
-                    .close()
-                    .unwrap();
+                let storage = open(tmpfile.path(), read_only, mode).unwrap();
+                assert!(
+                    matches!(older.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
+                    "{mode:?}, read_only={read_only}"
+                );
+                if read_only {
+                    older.try_lock_shared().unwrap();
+                    older.unlock().unwrap();
+                }
+                storage.close().unwrap();
+
+                let path = tmpfile.path().to_owned();
+                assert_excluded_by_older_writer(&older, move || open(&path, read_only, mode));
             }
         }
     }
