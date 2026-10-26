@@ -55,35 +55,14 @@
   copying it into a new table. The file format is unchanged.
 
 ## 4.5.0 - 2026-XX-XX
-### New features
+### Multi-process support
 * Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
-  may share the database. `ExclusiveWriter`, the default, locks the whole file, as earlier versions
-  do. In `SingleWriter`, one process writes, and any number of processes may open the database
-  read-only while it does, each new read transaction seeing the writer's durable commits; it needs
-  byte-range file locks, so it is supported on Linux, the Apple platforms and Windows. In that mode
-  commits are always 2-phase, `Durability::None` is refused with
-  `SetDurabilityError::NonDurableCommitUnsupported`, and `Database::compact()` treats a read
-  transaction in another process as a transaction in progress. A `SingleWriter` handle excludes a
-  writer running redb before 4.3, and is excluded by one; a read-only handle of redb 4.0 to 4.2 is
-  not excluded on Linux, and must not be opened on a database a `SingleWriter` process has open.
-* Add `ConcurrencyMode::MultiWriter`, in which any number of processes open the database for
-  writing, one write transaction at a time, and any number open it read-only. Every commit records
-  the allocator state, for the next writer to load; compaction's own commits are the exception, and
-  `Database::compact()` ends with one that does. Ephemeral savepoints are refused there, with
-  `SavepointError::EphemeralSavepointUnsupported`, and a write transaction begins from the file as
-  another process last committed it, as do the close and `Database::check_integrity()`, which
-  waits for a write transaction in another process to end. Like `SingleWriter`, the mode needs
-  byte-range file locks, excludes a writer running redb before 4.3, and does not exclude a
-  read-only handle of redb 4.0 to 4.2 on Linux. The `experimental-multiprocess` feature flag,
-  which gated the mode in 4.3, is removed.
-* In `MultiWriter`, existing handles recover automatically after another process exits
-  during compaction or repair. They can resume writing without reopening the database.
-* Add `DatabaseError::LockProtocolMismatch`. Each handle announces the generation of the
-  multi-process locking protocol it implements with a lock byte, and an open fails with that error
-  while a process implementing another generation has the database open, so redb versions with
-  different protocols never share a file. A writer in the default concurrency mode locks the whole
-  file instead of announcing a generation. It excludes every other process, and every other process
-  excludes it, with `DatabaseError::DatabaseAlreadyOpen` whatever generation each implements.
+  may share the database.
+* `ConcurrencyMode::ExclusiveWriter` (the default) locks the whole file, as earlier versions do.
+* `ConcurrencyMode::SingleWriter`, allows one process to write, and any number of processes may open
+  the database read-only.
+* `ConcurrencyMode::MultiWriter`, allows any number of processes to open the database for
+  writing, one write transaction at a time, and any may number open it read-only.
 
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
