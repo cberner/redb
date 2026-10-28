@@ -14,16 +14,28 @@
     clippy::unreadable_literal
 )]
 
+//! Python bindings for redb.
+//!
+//! Tables declare their key and value types from the closed set in [`types::Type`]. Every
+//! table operation dispatches once on that pair and then runs redb's statically typed API, so
+//! the type names, orderings and encodings match a Rust program's exactly.
+
 mod database;
 mod error;
+mod multimap;
+mod table;
 mod transaction;
+mod types;
 
 use pyo3::prelude::*;
 
-#[pymodule]
-pub fn redb(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    database::register(m)?;
+#[pymodule(name = "redb")]
+fn redb_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    types::register(m)?;
     error::register(m)?;
+    database::register(m)?;
     transaction::register(m)?;
+    table::register(m)?;
+    multimap::register(m)?;
     Ok(())
 }

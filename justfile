@@ -45,6 +45,10 @@ install_py: pre_no_sandbox
     maturin develop --manifest-path=./crates/redb-python/Cargo.toml
     python3 -m pip install pytest hypothesis
 
+# Runs the Python model-based fuzzer for the given number of seconds
+fuzz_py seconds='600': install_py
+    python3 ./crates/redb-python/test/fuzz.py --seconds {{seconds}}
+
 test: pre
     ./scripts/podman-sandbox.sh 'RUST_BACKTRACE=1 cargo test --frozen --all-features'
 
