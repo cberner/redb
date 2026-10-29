@@ -1,4 +1,4 @@
-use crate::error::{map_database_error, map_transaction_error};
+use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
 use pyo3::prelude::*;
 use std::path::PathBuf;
@@ -16,14 +16,12 @@ impl PyDatabase {
     /// If the file is an existing redb database it is opened.
     #[classmethod]
     fn create(_cls: &Bound<'_, pyo3::types::PyType>, path: PathBuf) -> PyResult<Self> {
-        let db = ::redb::Database::create(&path).map_err(map_database_error)?;
+        let db = ::redb::Database::create(&path).pyerr()?;
         Ok(Self { inner: db })
     }
 
     fn begin_write(slf: Py<Self>, py: Python<'_>) -> PyResult<PyWriteTransaction> {
-        let txn = py
-            .detach(|| slf.get().inner.begin_write())
-            .map_err(map_transaction_error)?;
+        let txn = py.detach(|| slf.get().inner.begin_write()).pyerr()?;
         Ok(PyWriteTransaction::new(slf, txn))
     }
 }

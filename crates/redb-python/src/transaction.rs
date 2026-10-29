@@ -1,5 +1,5 @@
 use crate::database::PyDatabase;
-use crate::error::{TransactionCompleted, map_commit_error, map_storage_error};
+use crate::error::{PyErrExt, TransactionCompleted};
 use pyo3::prelude::*;
 use pyo3::types::PyAny;
 use std::sync::Mutex;
@@ -87,9 +87,9 @@ impl PyWriteTransaction {
         };
         let ActiveWrite { txn, db: _db } = active;
         if exc_type.is_none() {
-            py.detach(|| txn.commit()).map_err(map_commit_error)?;
+            py.detach(|| txn.commit()).pyerr()?;
         } else {
-            py.detach(|| txn.abort()).map_err(map_storage_error)?;
+            py.detach(|| txn.abort()).pyerr()?;
         }
         Ok(false)
     }
