@@ -609,7 +609,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                         V::fixed_width(),
                         <() as Value>::fixed_width(),
                     );
-                    let (position, found) = accessor.position::<V>(value_bytes_ref);
+                    let (position, found) = accessor.position::<V>(value_bytes_ref)?;
                     if found {
                         return Ok(true);
                     }
@@ -768,7 +768,8 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 let leaf_data = v.as_inline();
                 let accessor =
                     LeafAccessor::new(leaf_data, V::fixed_width(), <() as Value>::fixed_width());
-                if let Some(position) = accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())
+                if let Some(position) =
+                    accessor.find_key::<V>(V::as_bytes(value.borrow()).as_ref())?
                 {
                     let old_num_pairs = accessor.num_pairs();
                     if old_num_pairs == 1 {

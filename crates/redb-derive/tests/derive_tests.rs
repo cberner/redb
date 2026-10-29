@@ -794,3 +794,125 @@ fn lifetime_names() {
     test_key_helper::<LifetimeNames>(&original);
     test_value_helper::<LifetimeNames>(original, expected_name);
 }
+
+#[derive(Key, Value, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NonZeroWrapper {
+    id: NonZeroU32,
+}
+
+#[derive(Key, Value, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct NamedThenNonZero {
+    name: String,
+    id: NonZeroU32,
+}
+
+#[test]
+fn derived_try_from_bytes_rejects_invalid_field() {
+    let err = <NonZeroWrapper as Value>::try_from_bytes(&0u32.to_le_bytes()).unwrap_err();
+    assert!(err.to_string().contains("invalid NonZeroU32 encoding"));
+
+    let valid = NonZeroWrapper {
+        id: NonZeroU32::new(1).unwrap(),
+    };
+    let valid_bytes = <NonZeroWrapper as Value>::as_bytes(&valid);
+    assert_eq!(
+        <NonZeroWrapper as Value>::try_from_bytes(&valid_bytes).unwrap(),
+        valid
+    );
+    assert_eq!(
+        NonZeroWrapper::try_compare(&valid_bytes, &0u32.to_le_bytes())
+            .unwrap_err()
+            .to_string(),
+        <NonZeroWrapper as Value>::try_from_bytes(&0u32.to_le_bytes())
+            .unwrap_err()
+            .to_string()
+    );
+    assert_eq!(
+        NonZeroWrapper::try_compare(&valid_bytes, &valid_bytes).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+
+    // The first field would sort first, but the zero id is still an invalid encoding.
+    let good = NamedThenNonZero {
+        name: "b".to_string(),
+        id: NonZeroU32::new(1).unwrap(),
+    };
+    let good_bytes = <NamedThenNonZero as Value>::as_bytes(&good);
+    let bad = [1, b'a', 0, 0, 0, 0];
+    assert!(<NamedThenNonZero as Value>::try_from_bytes(&bad).is_err());
+    assert!(NamedThenNonZero::try_compare(&good_bytes, &bad).is_err());
+
+    // Length 1 stored with the three-byte form, then a valid id.
+    let non_minimal = [254, 1, 0, b'a', 1, 0, 0, 0];
+    assert!(
+        <NamedThenNonZero as Value>::try_from_bytes(&non_minimal)
+            .unwrap_err()
+            .to_string()
+            .contains("non-minimal length encoding")
+    );
+
+    let mut trailing = good_bytes.clone();
+    trailing.push(0);
+    assert!(
+        <NamedThenNonZero as Value>::try_from_bytes(&trailing)
+            .unwrap_err()
+            .to_string()
+            .contains("trailing bytes")
+    );
+    assert_eq!(
+        <NamedThenNonZero as Value>::try_from_bytes(&good_bytes).unwrap(),
+        good
+    );
+}
+
+#[test]
+fn derived_unit_and_fixed_width_reject_extra_bytes() {
+    assert_eq!(
+        <ZeroField as Value>::try_from_bytes(&[]).unwrap(),
+        ZeroField {}
+    );
+    assert!(
+        <ZeroField as Value>::try_from_bytes(&[0])
+            .unwrap_err()
+            .to_string()
+            .contains("invalid unit struct encoding")
+    );
+    assert!(ZeroField::try_compare(&[0], &[]).is_err());
+    assert_eq!(
+        ZeroField::try_compare(&[], &[]).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+
+    assert_eq!(
+        <TupleStruct0 as Value>::try_from_bytes(&[]).unwrap(),
+        TupleStruct0()
+    );
+    assert!(<TupleStruct0 as Value>::try_from_bytes(&[1]).is_err());
+
+    let value = TupleStruct2(1, true);
+    let bytes = <TupleStruct2 as Value>::as_bytes(&value);
+    assert_eq!(
+        <TupleStruct2 as Value>::try_from_bytes(&bytes).unwrap(),
+        value
+    );
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(
+        <TupleStruct2 as Value>::try_from_bytes(&extra)
+            .unwrap_err()
+            .to_string()
+            .contains("trailing bytes")
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid NonZeroU32 encoding")]
+fn derived_from_bytes_panics_on_invalid_field() {
+    let _ = <NonZeroWrapper as Value>::from_bytes(&0u32.to_le_bytes());
+}
+
+#[test]
+#[should_panic(expected = "invalid NonZeroU32 encoding")]
+fn derived_compare_panics_on_invalid_field() {
+    let _ = NonZeroWrapper::compare(&0u32.to_le_bytes(), &0u32.to_le_bytes());
+}

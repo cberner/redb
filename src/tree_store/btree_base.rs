@@ -32,6 +32,15 @@ pub(super) const DEFERRED: Checksum = 999;
 // whose least key is `right`. Branch keys only route lookups, so a `Key` implementation may
 // shorten them to any encoding that still sorts between the two, which packs more children into
 // each branch page.
+pub(super) fn try_key_compare<K: Key>(left: &[u8], right: &[u8]) -> Result<Ordering> {
+    K::try_compare(left, right).map_err(|err| {
+        StorageError::Corrupted(format!(
+            "failed to compare {} key: {err}",
+            K::type_name().name()
+        ))
+    })
+}
+
 pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
     debug_assert!(K::compare(left, right).is_lt());
     // Branch keys of a fixed width type are stored at that stride, so a shorter separator would
@@ -256,9 +265,30 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
         }
     }
 
-    /// Access the stored value
+    fn bytes(&self) -> &[u8] {
+        &self.page.memory()[self.offset..(self.offset + self.len)]
+    }
+
+    /// Access the stored value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored bytes are not a valid encoding of `V`.
+    /// [`try_value`](Self::try_value) returns that failure as [`StorageError::Corrupted`].
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        self.try_value().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Access the stored value.
+    ///
+    /// Returns [`StorageError::Corrupted`] when the stored bytes are not a valid encoding of `V`.
+    pub fn try_value(&self) -> Result<V::SelfType<'_>> {
+        V::try_from_bytes(self.bytes()).map_err(|err| {
+            StorageError::Corrupted(format!(
+                "failed to decode stored {} value: {err}",
+                V::type_name().name()
+            ))
+        })
     }
 
     pub(crate) fn arc_view(&self) -> (Arc<[u8]>, Range<usize>) {
@@ -341,9 +371,30 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         }
     }
 
-    /// Access the stored value
+    fn bytes(&self) -> &[u8] {
+        &self.page.memory()[self.offset..(self.offset + self.len)]
+    }
+
+    /// Access the stored value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored bytes are not a valid encoding of `V`.
+    /// [`try_value`](Self::try_value) returns that failure as [`StorageError::Corrupted`].
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        self.try_value().unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    /// Access the stored value.
+    ///
+    /// Returns [`StorageError::Corrupted`] when the stored bytes are not a valid encoding of `V`.
+    pub fn try_value(&self) -> Result<V::SelfType<'_>> {
+        V::try_from_bytes(self.bytes()).map_err(|err| {
+            StorageError::Corrupted(format!(
+                "failed to decode stored {} value: {err}",
+                V::type_name().name()
+            ))
+        })
     }
 
     /// Replace the stored value
@@ -519,7 +570,7 @@ impl<'a> LeafAccessor<'a> {
         }
     }
 
-    pub(crate) fn position<K: Key>(&self, query: &[u8]) -> (usize, bool) {
+    pub(crate) fn position<K: Key>(&self, query: &[u8]) -> Result<(usize, bool)> {
         // inclusive
         let mut min_entry = 0;
         // inclusive. Start past end, since it might be positioned beyond the end of the leaf
@@ -527,12 +578,12 @@ impl<'a> LeafAccessor<'a> {
         while min_entry < max_entry {
             let mid = min_entry.midpoint(max_entry);
             let key = self.key_unchecked(mid);
-            match K::compare(query, key) {
+            match try_key_compare::<K>(query, key)? {
                 Ordering::Less => {
                     max_entry = mid;
                 }
                 Ordering::Equal => {
-                    return (mid, true);
+                    return Ok((mid, true));
                 }
                 Ordering::Greater => {
                     min_entry = mid + 1;
@@ -540,12 +591,12 @@ impl<'a> LeafAccessor<'a> {
             }
         }
         debug_assert_eq!(min_entry, max_entry);
-        (min_entry, false)
+        Ok((min_entry, false))
     }
 
-    pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Option<usize> {
-        let (entry, found) = self.position::<K>(query);
-        if found { Some(entry) } else { None }
+    pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Result<Option<usize>> {
+        let (entry, found) = self.position::<K>(query)?;
+        Ok(if found { Some(entry) } else { None })
     }
 
     fn key_section_start(&self) -> usize {
@@ -1840,17 +1891,17 @@ impl<'b, T: Page> BranchAccessor<'b, T> {
         self.key_end(self.num_keys() - 1).unwrap()
     }
 
-    pub(super) fn child_for_key<K: Key>(&self, query: &[u8]) -> (usize, PageNumber) {
+    pub(super) fn child_for_key<K: Key>(&self, query: &[u8]) -> Result<(usize, PageNumber)> {
         let mut min_child = 0; // inclusive
         let mut max_child = self.num_keys(); // inclusive
         while min_child < max_child {
             let mid = min_child.midpoint(max_child);
-            match K::compare(query, self.key(mid).unwrap()) {
+            match try_key_compare::<K>(query, self.key(mid).unwrap())? {
                 Ordering::Less => {
                     max_child = mid;
                 }
                 Ordering::Equal => {
-                    return (mid, self.child_page(mid).unwrap());
+                    return Ok((mid, self.child_page(mid).unwrap()));
                 }
                 Ordering::Greater => {
                     min_child = mid + 1;
@@ -1859,7 +1910,7 @@ impl<'b, T: Page> BranchAccessor<'b, T> {
         }
         debug_assert_eq!(min_child, max_child);
 
-        (min_child, self.child_page(min_child).unwrap())
+        Ok((min_child, self.child_page(min_child).unwrap()))
     }
 
     fn key_section_start(&self) -> usize {

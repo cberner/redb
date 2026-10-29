@@ -1,6 +1,6 @@
 //! Types that open the tables written before redb 5.0, when the built-in types had no niche
 
-use crate::{Key, TypeName, Value};
+use crate::{Key, TypeName, Value, ValueError};
 use alloc::borrow::Cow;
 use core::cmp::Ordering;
 use core::marker::PhantomData;
@@ -68,6 +68,13 @@ impl<T: Value> Value for Legacy<T> {
         T::from_bytes(data)
     }
 
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<T::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        T::try_from_bytes(data)
+    }
+
     fn as_bytes<'a, 'b: 'a>(value: &'a T::SelfType<'b>) -> T::AsBytes<'a>
     where
         Self: 'b,
@@ -82,7 +89,11 @@ impl<T: Value> Value for Legacy<T> {
 
 impl<T: Key> Key for Legacy<T> {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        T::compare(data1, data2)
+        Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
+        T::try_compare(data1, data2)
     }
 
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {

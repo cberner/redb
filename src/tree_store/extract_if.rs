@@ -112,9 +112,11 @@ where
                 let Some(entry) = self.range.peek_next()? else {
                     break;
                 };
+                let key = entry.try_key()?;
+                let value = entry.try_value()?;
                 assert!(!self.predicate_running);
                 self.predicate_running = true;
-                let matched = (self.predicate)(entry.key(), entry.value());
+                let matched = (self.predicate)(key, value);
                 self.predicate_running = false;
                 matched
             };
@@ -137,9 +139,11 @@ where
                 let Some(entry) = self.range.peek_prev()? else {
                     break;
                 };
+                let key = entry.try_key()?;
+                let value = entry.try_value()?;
                 assert!(!self.predicate_running);
                 self.predicate_running = true;
-                let matched = (self.predicate)(entry.key(), entry.value());
+                let matched = (self.predicate)(key, value);
                 self.predicate_running = false;
                 matched
             };

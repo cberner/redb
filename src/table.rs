@@ -1219,9 +1219,21 @@ impl<V: Value + 'static> OwnedAccessGuard<V> {
         }
     }
 
-    /// Access the stored value
+    /// Access the stored value.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the stored bytes are not a valid encoding of `V`.
+    /// [`try_value`](Self::try_value) returns that failure as [`StorageError::Corrupted`].
     pub fn value(&self) -> V::SelfType<'_> {
         self.inner.value()
+    }
+
+    /// Access the stored value.
+    ///
+    /// Returns [`StorageError::Corrupted`] when the stored bytes are not a valid encoding of `V`.
+    pub fn try_value(&self) -> Result<V::SelfType<'_>> {
+        self.inner.try_value()
     }
 }
 

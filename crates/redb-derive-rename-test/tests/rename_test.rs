@@ -36,4 +36,10 @@ fn derive_with_renamed_redb_dependency() {
         <Composite as renamed_redb::Key>::compare(&small, &large),
         std::cmp::Ordering::Less
     );
+    assert_eq!(
+        <Composite as renamed_redb::Key>::try_compare(&small, &large).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    // A truncated encoding must be an error from the derived method, not a panic in `from_bytes`.
+    assert!(<Composite as renamed_redb::Value>::try_from_bytes(&[]).is_err());
 }

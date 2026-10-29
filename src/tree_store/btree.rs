@@ -2,7 +2,7 @@ use crate::db::TransactionGuard;
 use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, branch_checksum, leaf_checksum,
+    LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, branch_checksum, leaf_checksum, try_key_compare,
 };
 use crate::tree_store::btree_cursor::{BtreeCursor, BtreeCursorMut, CursorMut, Position};
 use crate::tree_store::btree_iters::{bounds_are_empty, encode_bounds};
@@ -629,7 +629,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                if let Some(entry_index) = accessor.find_key::<K>(query) {
+                if let Some(entry_index) = accessor.find_key::<K>(query)? {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
                     let guard = AccessGuardMut::new(
                         page,
@@ -650,7 +650,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             BRANCH => {
                 let (child_index, child_page) = {
                     let accessor = BranchAccessor::new(&page, K::fixed_width());
-                    accessor.child_for_key::<K>(query)
+                    accessor.child_for_key::<K>(query)?
                 };
                 let child_page_mut = if self.page_allocator.uncommitted(child_page) {
                     self.page_allocator.get_page_mut(child_page)?
@@ -779,7 +779,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         upper_bound: Bound<Vec<u8>>,
         poisoned: &mut bool,
     ) -> Result {
-        if self.root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound) {
+        if self.root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound)? {
             return Ok(());
         }
 
@@ -842,10 +842,10 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
             Bound::Unbounded => cursor.seek_to(Position::Start)?,
         }
         while let Some(entry) = cursor.peek_next()? {
-            if !Self::before_upper_bound(upper_bound, entry.key_bytes()) {
+            if !Self::before_upper_bound(upper_bound, entry.key_bytes())? {
                 break;
             }
-            if predicate(entry.key(), entry.value()) {
+            if predicate(entry.try_key()?, entry.try_value()?) {
                 cursor.move_next()?;
             } else {
                 cursor.remove_next_discard()?;
@@ -854,12 +854,12 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         cursor.finish_pending_removals()
     }
 
-    fn before_upper_bound(bound: Bound<&[u8]>, key: &[u8]) -> bool {
-        match bound {
-            Bound::Included(bound) => K::compare(key, bound).is_le(),
-            Bound::Excluded(bound) => K::compare(key, bound).is_lt(),
+    fn before_upper_bound(bound: Bound<&[u8]>, key: &[u8]) -> Result<bool> {
+        Ok(match bound {
+            Bound::Included(bound) => try_key_compare::<K>(key, bound)?.is_le(),
+            Bound::Excluded(bound) => try_key_compare::<K>(key, bound)?.is_lt(),
             Bound::Unbounded => true,
-        }
+        })
     }
 
     pub(crate) fn len(&self) -> Result<u64> {
@@ -1093,14 +1093,14 @@ impl<K: Key, V: Value> Btree<K, V> {
                 LEAF => {
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                    return Ok(accessor.find_key::<K>(query).map(|entry_index| {
+                    return Ok(accessor.find_key::<K>(query)?.map(|entry_index| {
                         let (start, end) = accessor.value_range(entry_index).unwrap();
                         AccessGuard::with_page(page.clone(), start..end)
                     }));
                 }
                 BRANCH => {
                     let accessor = BranchAccessor::new(page, K::fixed_width());
-                    accessor.child_for_key::<K>(query).1
+                    accessor.child_for_key::<K>(query)?.1
                 }
                 _ => unreachable!(),
             };

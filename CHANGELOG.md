@@ -55,6 +55,24 @@
   copying it into a new table. The file format is unchanged.
 
 ## 4.5.0 - 2026-XX-XX
+### Decoding stored values
+* Add `Value::try_from_bytes()`, which decodes a value and returns an error when the bytes are
+  not a valid encoding. The default calls `from_bytes()`. Built-in types, including `Option`,
+  tuples, arrays, and `Vec`, implement it. `from_bytes()` will be removed in redb 5.0; override
+  `try_from_bytes()` for panic-safe decoding.
+* Add `Key::try_compare()`, which compares two encodings and returns an error when either is
+  invalid. The default calls `compare()`. Integer, `chrono`, `Option`, array, tuple, and
+  `NonZero` keys implement it. Lookups call it and return `StorageError::Corrupted` when an
+  encoding is invalid. `compare()` panics in that case, the same way `from_bytes()` does.
+* `()` accepts only an empty encoding. `Vec` and tuples reject a length prefix that is longer
+  than the shortest form. `NaiveDate` and `NaiveTime` comparisons require their fixed width.
+* `#[derive(Value)]` and `#[derive(Key)]` implement `try_from_bytes` and `try_compare`. A
+  malformed field returns an error instead of panicking through the trait default. The derive
+  requires redb 4.5.
+* Add `AccessGuard::try_value()`, `AccessGuardMut::try_value()`, and
+  `OwnedAccessGuard::try_value()`. They decode through `try_from_bytes()` and return
+  `StorageError::Corrupted` when decoding fails. `value()` still panics in that case.
+
 ### Multi-process support
 * Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
   may share the database.
@@ -67,6 +85,12 @@
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
+
+## redb-derive 0.3.0 - 2026-XX-XX
+* `#[derive(Value)]` implements `try_from_bytes`, and `#[derive(Key)]` implements `try_compare`.
+  This requires redb 4.5. Each field is decoded with its `try_from_bytes`. A unit struct accepts
+  only an empty encoding. A multi-field struct rejects a non-shortest length prefix, a truncated
+  encoding, and trailing bytes, as tuples do.
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are

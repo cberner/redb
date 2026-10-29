@@ -1,5 +1,5 @@
-use crate::complex_types::{decode_varint_len, encode_varint_len};
-use crate::types::{Key, TypeName, Value};
+use crate::complex_types::{encode_varint_len, try_decode_varint_len};
+use crate::types::{Key, TypeName, Value, ValueError, value_error};
 use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
@@ -43,26 +43,45 @@ fn serialize_tuple_elements_fixed(slices: &[&[u8]]) -> Vec<u8> {
 }
 
 fn parse_lens<const N: usize>(fixed_width: [Option<usize>; N], data: &[u8]) -> (usize, [usize; N]) {
+    try_parse_lens(fixed_width, data).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn try_parse_lens<const N: usize>(
+    fixed_width: [Option<usize>; N],
+    data: &[u8],
+) -> core::result::Result<(usize, [usize; N]), ValueError> {
     let mut result = [0; N];
     let mut offset = 0;
     for (i, &fixed) in fixed_width.iter().enumerate() {
         if let Some(len) = fixed {
             result[i] = len;
         } else {
-            let (len, bytes_read) = decode_varint_len(&data[offset..]);
+            let (len, bytes_read) = try_decode_varint_len(data.get(offset..).unwrap_or_default())?;
             result[i] = len;
-            offset += bytes_read;
+            offset = offset
+                .checked_add(bytes_read)
+                .ok_or_else(|| value_error("encoded tuple is too short"))?;
         }
     }
-    (offset, result)
+    Ok((offset, result))
 }
 
-fn not_equal<T: Key>(data1: &[u8], data2: &[u8]) -> Option<Ordering> {
-    match T::compare(data1, data2) {
-        Ordering::Less => Some(Ordering::Less),
+fn try_not_equal<T: Key>(
+    data1: &[u8],
+    data2: &[u8],
+) -> core::result::Result<Option<Ordering>, ValueError> {
+    Ok(match T::try_compare(data1, data2)? {
         Ordering::Equal => None,
-        Ordering::Greater => Some(Ordering::Greater),
-    }
+        order => Some(order),
+    })
+}
+
+fn tuple_slice(data: &[u8], start: usize, len: usize) -> core::result::Result<&[u8], ValueError> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| value_error("encoded tuple is too short"))?;
+    data.get(start..end)
+        .ok_or_else(|| value_error("encoded tuple is too short"))
 }
 
 // The `Key` operations of one element's type, so that `tuple_separator()`, which is generic only
@@ -284,48 +303,64 @@ macro_rules! type_name_impl {
     };
 }
 
-macro_rules! from_bytes_variable_impl {
+macro_rules! try_from_bytes_variable_impl {
     ( $data:expr $(,$t:ty, $v:ident, $i:literal )+ | $t_last:ty, $v_last:ident, $i_last:literal ) => {
         #[allow(clippy::manual_bits)]
         {
-            let (mut offset, lens) = parse_lens::<$i_last>(
+            let (mut offset, lens) = try_parse_lens::<$i_last>(
                 [
                     $(
                         <$t>::fixed_width(),
                     )+
                 ],
-                $data);
+                $data,
+            )?;
             $(
                 let len = lens[$i];
-                let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
-                offset += len;
+                let end = offset
+                    .checked_add(len)
+                    .ok_or_else(|| value_error("encoded tuple is too short"))?;
+                if end > $data.len() {
+                    return Err(value_error("encoded tuple is too short"));
+                }
+                let $v = <$t>::try_from_bytes(&$data[offset..end])?;
+                offset = end;
             )+
-            let $v_last = <$t_last>::from_bytes(&$data[offset..]);
-            ($(
+            let $v_last = <$t_last>::try_from_bytes(&$data[offset..])?;
+            Ok(($(
                 $v,
             )+
                 $v_last
-            )
+            ))
         }
     };
 }
 
-macro_rules! from_bytes_fixed_impl {
+macro_rules! try_from_bytes_fixed_impl {
     ( $data:expr $(,$t:ty, $v:ident )+ ) => {
         {
-            let mut offset = 0;
+            let mut offset: usize = 0;
             $(
                 let len = <$t>::fixed_width().unwrap();
-                let $v = <$t>::from_bytes(&$data[offset..(offset + len)]);
+                let end = offset
+                    .checked_add(len)
+                    .ok_or_else(|| value_error("encoded tuple is too short"))?;
+                if end > $data.len() {
+                    return Err(value_error("encoded tuple is too short"));
+                }
+                let $v = <$t>::try_from_bytes(&$data[offset..end])?;
                 #[allow(unused_assignments)]
                 {
-                    offset += len;
+                    offset = end;
                 }
             )+
+            if offset != $data.len() {
+                return Err(value_error("encoded tuple has trailing bytes"));
+            }
 
-            ($(
+            Ok(($(
                 $v,
-            )+)
+            )+))
         }
     };
 }
@@ -339,23 +374,32 @@ macro_rules! compare_variable_impl {
                     <$t>::fixed_width(),
                 )+
             ];
-            let (mut offset0, lens0) = parse_lens::<$i_last>(fixed_width, $data0);
-            let (mut offset1, lens1) = parse_lens::<$i_last>(fixed_width, $data1);
+            let (mut offset0, lens0) = try_parse_lens::<$i_last>(fixed_width, $data0)?;
+            let (mut offset1, lens1) = try_parse_lens::<$i_last>(fixed_width, $data1)?;
+            let mut order = Ordering::Equal;
             $(
                 let index = $i;
                 let len0 = lens0[index];
                 let len1 = lens1[index];
-                if let Some(order) = not_equal::<$t>(
-                    &$data0[offset0..(offset0 + len0)],
-                    &$data1[offset1..(offset1 + len1)],
-                ) {
-                    return order;
+                let next = try_not_equal::<$t>(
+                    tuple_slice($data0, offset0, len0)?,
+                    tuple_slice($data1, offset1, len1)?,
+                )?;
+                if order.is_eq() && let Some(next) = next {
+                    order = next;
                 }
                 offset0 += len0;
                 offset1 += len1;
             )+
 
-            <$t_last>::compare(&$data0[offset0..], &$data1[offset1..])
+            let last = <$t_last>::try_compare(
+                $data0.get(offset0..).ok_or_else(|| value_error("encoded tuple is too short"))?,
+                $data1.get(offset1..).ok_or_else(|| value_error("encoded tuple is too short"))?,
+            )?;
+            if order.is_eq() {
+                order = last;
+            }
+            Ok(order)
         }
     };
 }
@@ -365,13 +409,15 @@ macro_rules! compare_fixed_impl {
         {
             let mut offset0 = 0;
             let mut offset1 = 0;
+            let mut order = Ordering::Equal;
             $(
                 let len = <$t>::fixed_width().unwrap();
-                if let Some(order) = not_equal::<$t>(
-                    &$data0[offset0..(offset0 + len)],
-                    &$data1[offset1..(offset1 + len)],
-                ) {
-                    return order;
+                let next = try_not_equal::<$t>(
+                    tuple_slice($data0, offset0, len)?,
+                    tuple_slice($data1, offset1, len)?,
+                )?;
+                if order.is_eq() && let Some(next) = next {
+                    order = next;
                 }
                 #[allow(unused_assignments)]
                 {
@@ -379,8 +425,11 @@ macro_rules! compare_fixed_impl {
                     offset1 += len;
                 }
             )+
+            if offset0 != $data0.len() || offset1 != $data1.len() {
+                return Err(value_error("encoded tuple has trailing bytes"));
+            }
 
-            Ordering::Equal
+            Ok(order)
         }
     };
 }
@@ -406,10 +455,19 @@ macro_rules! tuple_impl {
             where
                 Self: 'a,
             {
+                Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_from_bytes<'a>(
+                data: &'a [u8],
+            ) -> core::result::Result<Self::SelfType<'a>, ValueError>
+            where
+                Self: 'a,
+            {
                 if Self::fixed_width().is_some() {
-                    from_bytes_fixed_impl!(data $(,$t,$v)+, $t_last, $v_last)
+                    try_from_bytes_fixed_impl!(data $(,$t,$v)+, $t_last, $v_last)
                 } else {
-                    from_bytes_variable_impl!(data $(,$t,$v,$i)+ | $t_last, $v_last, $i_last)
+                    try_from_bytes_variable_impl!(data $(,$t,$v,$i)+ | $t_last, $v_last, $i_last)
                 }
             }
 
@@ -428,6 +486,13 @@ macro_rules! tuple_impl {
 
         impl<$($t: Key,)+ $t_last: Key> Key for ($($t,)+ $t_last) {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_compare(
+                data1: &[u8],
+                data2: &[u8],
+            ) -> core::result::Result<Ordering, ValueError> {
                 if Self::fixed_width().is_some() {
                     compare_fixed_impl!(data1, data2, $($t,)+ $t_last)
                 } else {
@@ -473,7 +538,14 @@ impl<T: Value> Value for (T,) {
     where
         Self: 'a,
     {
-        (T::from_bytes(data),)
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        Ok((T::try_from_bytes(data)?,))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -492,7 +564,11 @@ impl<T: Value> Value for (T,) {
 
 impl<T: Key> Key for (T,) {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        T::compare(data1, data2)
+        Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
+        T::try_compare(data1, data2)
     }
 
     // Encoded and compared exactly as `T`, so it separates the same way

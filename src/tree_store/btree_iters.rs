@@ -1,6 +1,6 @@
 use crate::Result;
-use crate::tree_store::btree_base::BranchAccessor;
 use crate::tree_store::btree_base::{BRANCH, LEAF};
+use crate::tree_store::btree_base::{BranchAccessor, try_key_compare};
 use crate::tree_store::page_store::{Page, PageHint, PageImpl};
 use crate::tree_store::{PageNumber, PageResolver};
 use crate::types::{Key, Value};
@@ -117,12 +117,12 @@ where
 pub(crate) fn bounds_are_empty<K: Key + 'static>(
     lower: &Bound<Vec<u8>>,
     upper: &Bound<Vec<u8>>,
-) -> bool {
-    match (lower, upper) {
+) -> Result<bool> {
+    Ok(match (lower, upper) {
         (Unbounded, _) | (_, Unbounded) => false,
         (Included(start), Excluded(end)) | (Excluded(start), Included(end) | Excluded(end)) => {
-            K::compare(start, end).is_ge()
+            try_key_compare::<K>(start, end)?.is_ge()
         }
-        (Included(start), Included(end)) => K::compare(start, end).is_gt(),
-    }
+        (Included(start), Included(end)) => try_key_compare::<K>(start, end)?.is_gt(),
+    })
 }

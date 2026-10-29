@@ -2,7 +2,7 @@ use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, OwnedEntryBuffer, RawBranchBuilder, branch_separator,
     is_single_large_value, leaf_below_merge_threshold, leaf_split_required,
-    retained_after_removals,
+    retained_after_removals, try_key_compare,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
     DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
@@ -517,7 +517,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     // has not risen above the stored separator.
                     let routes = match (stored, bound) {
                         (None, _) | (_, None) => true,
-                        (Some(stored), Some(bound)) => K::compare(bound, stored).is_le(),
+                        (Some(stored), Some(bound)) => try_key_compare::<K>(bound, stored)?.is_le(),
                     };
                     if routes {
                         // With no stored separator, a raised bound must keep
@@ -752,7 +752,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         Ok(match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                let (position, found) = accessor.position::<K>(key);
+                let (position, found) = accessor.position::<K>(key)?;
 
                 // Fast-path to avoid re-building and splitting pages with a single large value
                 if !found && is_single_large_value(&accessor, self.page_allocator.get_page_size()) {
@@ -1027,7 +1027,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
                 let sub_result = self.insert_helper(
                     self.page_allocator.get_page(child_page, PageHint::None)?,
@@ -1199,7 +1199,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-                let (position, found) = accessor.position::<K>(key);
+                let (position, found) = accessor.position::<K>(key)?;
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
                 assert!(value.len() <= old_len);
@@ -1209,7 +1209,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                let (child_index, child_page) = accessor.child_for_key::<K>(key)?;
                 self.insert_inplace_helper(
                     self.page_allocator.get_page_mut(child_page)?,
                     key,
@@ -1306,7 +1306,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
         let (position, found) = {
             let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
-            accessor.position::<K>(key)
+            accessor.position::<K>(key)?
         };
         if !found {
             // Leaf is unchanged; caller short-circuits via `found.is_none()`.
@@ -1441,7 +1441,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let original_page_number = page.get_page_number();
         let (child_index, child_page_number) = {
             let accessor = BranchAccessor::new(&page, K::fixed_width());
-            accessor.child_for_key::<K>(key)
+            accessor.child_for_key::<K>(key)?
         };
         let (result, found) = self.delete_helper(
             self.page_allocator

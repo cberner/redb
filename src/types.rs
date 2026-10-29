@@ -1,4 +1,5 @@
 use alloc::borrow::Cow;
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -153,6 +154,29 @@ impl TypeName {
     }
 }
 
+/// Failure to decode bytes with [`Value::try_from_bytes`].
+pub type ValueError = Box<dyn core::error::Error + Send + Sync>;
+
+#[derive(Debug)]
+struct ValueDecodeError {
+    message: String,
+}
+
+impl core::fmt::Display for ValueDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl core::error::Error for ValueDecodeError {}
+
+#[cold]
+pub(crate) fn value_error(message: impl core::fmt::Display) -> ValueError {
+    Box::new(ValueDecodeError {
+        message: message.to_string(),
+    })
+}
+
 /// Types that implement this trait can be used as values in a redb table
 pub trait Value: Debug {
     /// `SelfType<'a>` must be the same type as Self with all lifetimes replaced with 'a
@@ -179,13 +203,31 @@ pub trait Value: Debug {
     /// Width of a fixed type, or None for variable width
     fn fixed_width() -> Option<usize>;
 
-    /// Deserializes data
-    /// Implementations may return a view over data, or an owned type
+    /// Deserializes data.
+    /// Implementations may return a view over data, or an owned type.
+    ///
+    /// This method may panic when `data` is not a valid encoding. It will be removed in redb
+    /// 5.0. Implement [`try_from_bytes`](Self::try_from_bytes), and decode with that method when
+    /// a panic is not acceptable.
     ///
     /// Note: Implementations may assume that `data` is the return value of `as_bytes(&v)` for some `v` of type `Self`.
     fn from_bytes<'a>(data: &'a [u8]) -> Self::SelfType<'a>
     where
         Self: 'a;
+
+    /// Deserializes data, returning an error when `data` is not a valid encoding of `Self`.
+    ///
+    /// The default calls [`from_bytes`](Self::from_bytes), so it panics when that method panics.
+    /// Override it for panic-safe decoding. It will be required in redb 5.0, when `from_bytes`
+    /// is removed.
+    ///
+    /// `as_bytes` and `try_from_bytes` must be inverses for every value `as_bytes` produces.
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        Ok(Self::from_bytes(data))
+    }
 
     /// Serialize the value to a slice
     ///
@@ -231,8 +273,21 @@ impl MutInPlaceValue for &[u8] {
 pub trait Key: Value {
     /// Compare data1 with data2.
     ///
-    /// The implementation must ensure there is a total order
+    /// The implementation must ensure there is a total order.
+    ///
+    /// This method may panic when either encoding is invalid. It will be removed in redb 5.0.
+    /// Implement [`try_compare`](Self::try_compare), and compare with that method when a panic
+    /// is not acceptable.
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering;
+
+    /// Compares the two encodings, returning an error when either is not a valid encoding of `Self`.
+    ///
+    /// The default calls [`compare`](Self::compare), so it panics when that method panics.
+    /// Override it for panic-safe comparison. It will be required in redb 5.0, when `compare`
+    /// is removed.
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
+        Ok(Self::compare(data1, data2))
+    }
 
     /// Returns a separator between `left` and `right`.
     ///
@@ -277,11 +332,22 @@ impl Value for () {
     }
 
     #[allow(clippy::unused_unit, clippy::semicolon_if_nothing_returned)]
-    fn from_bytes<'a>(_data: &'a [u8]) -> ()
+    fn from_bytes<'a>(data: &'a [u8]) -> ()
     where
         Self: 'a,
     {
-        ()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<(), ValueError>
+    where
+        Self: 'a,
+    {
+        if data.is_empty() {
+            Ok(())
+        } else {
+            Err(value_error("invalid () encoding"))
+        }
     }
 
     #[allow(clippy::ignored_unit_patterns)]
@@ -298,8 +364,14 @@ impl Value for () {
 }
 
 impl Key for () {
-    fn compare(_data1: &[u8], _data2: &[u8]) -> Ordering {
-        Ordering::Equal
+    fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
+        Self::try_from_bytes(data1)?;
+        Self::try_from_bytes(data2)?;
+        Ok(Ordering::Equal)
     }
 }
 
@@ -325,10 +397,17 @@ impl Value for bool {
     where
         Self: 'a,
     {
-        match data[0] {
-            0 => false,
-            1 => true,
-            _ => unreachable!(),
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<bool, ValueError>
+    where
+        Self: 'a,
+    {
+        match data {
+            [0] => Ok(false),
+            [1] => Ok(true),
+            _ => Err(value_error("invalid bool encoding")),
         }
     }
 
@@ -349,9 +428,31 @@ impl Value for bool {
 
 impl Key for bool {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let value1 = Self::from_bytes(data1);
-        let value2 = Self::from_bytes(data2);
-        value1.cmp(&value2)
+        // `false` and `true` encode to 0 and 1, so byte order is value order. A malformed
+        // encoding still has a total order and does not panic.
+        data1.cmp(data2)
+    }
+}
+
+// `None` without a niche is a `0` tag and, for a fixed-width `T`, that many zero bytes.
+// Anything else with a `0` tag is not an encoding `as_bytes` produces.
+fn untagged_option_payload<T: Value>(
+    data: &[u8],
+) -> core::result::Result<Option<&[u8]>, ValueError> {
+    match data.first().copied() {
+        Some(0) if is_untagged_option_none::<T>(data) => Ok(None),
+        Some(1) => Ok(Some(&data[1..])),
+        _ => Err(value_error("invalid Option encoding")),
+    }
+}
+
+fn is_untagged_option_none<T: Value>(data: &[u8]) -> bool {
+    if data.first() != Some(&0) {
+        return false;
+    }
+    match T::fixed_width() {
+        Some(width) => data.len() == width + 1 && data[1..].iter().all(|byte| *byte == 0),
+        None => data.len() == 1,
     }
 }
 
@@ -378,17 +479,26 @@ impl<T: Value> Value for Option<T> {
     where
         Self: 'a,
     {
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(
+        data: &'a [u8],
+    ) -> core::result::Result<Option<T::SelfType<'a>>, ValueError>
+    where
+        Self: 'a,
+    {
         if let Some(niche) = T::NICHE {
             return if data == niche {
-                None
+                Ok(None)
             } else {
-                Some(T::from_bytes(data))
+                T::try_from_bytes(data).map(Some)
             };
         }
-        match data[0] {
-            0 => None,
-            1 => Some(T::from_bytes(&data[1..])),
-            _ => unreachable!(),
+        match data.first().copied() {
+            Some(0) if is_untagged_option_none::<T>(data) => Ok(None),
+            Some(1) => T::try_from_bytes(&data[1..]).map(Some),
+            _ => Err(value_error("invalid Option encoding")),
         }
     }
 
@@ -433,29 +543,42 @@ impl<T: Value> Value for Option<T> {
 }
 
 impl<T: Key> Key for Option<T> {
-    #[allow(clippy::collapsible_else_if)]
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
+        // Both sides are validated before the tag decides the order. A `None` compared with a
+        // malformed `Some` is an error, not `Less`.
         if let Some(niche) = T::NICHE {
             // `None` sorts below every `Some`, as it does when encoded with a tag
             return match (data1 == niche, data2 == niche) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Less,
-                (false, true) => Ordering::Greater,
-                (false, false) => T::compare(data1, data2),
+                (true, true) => Ok(Ordering::Equal),
+                (true, false) => {
+                    T::try_from_bytes(data2)?;
+                    Ok(Ordering::Less)
+                }
+                (false, true) => {
+                    T::try_from_bytes(data1)?;
+                    Ok(Ordering::Greater)
+                }
+                (false, false) => T::try_compare(data1, data2),
             };
         }
-        if data1[0] == 0 {
-            if data2[0] == 0 {
-                Ordering::Equal
-            } else {
-                Ordering::Less
+        match (
+            untagged_option_payload::<T>(data1)?,
+            untagged_option_payload::<T>(data2)?,
+        ) {
+            (None, None) => Ok(Ordering::Equal),
+            (None, Some(payload)) => {
+                T::try_from_bytes(payload)?;
+                Ok(Ordering::Less)
             }
-        } else {
-            if data2[0] == 0 {
-                Ordering::Greater
-            } else {
-                T::compare(&data1[1..], &data2[1..])
+            (Some(payload), None) => {
+                T::try_from_bytes(payload)?;
+                Ok(Ordering::Greater)
             }
+            (Some(left), Some(right)) => T::try_compare(left, right),
         }
     }
 
@@ -478,7 +601,7 @@ impl<T: Key> Key for Option<T> {
             return separator;
         }
         // `None` sorts below every `Some` and encodes as the tag alone, so nothing is shorter
-        if left[0] == 0 {
+        if left.first().copied().unwrap_or(0) == 0 || right.len() < 2 {
             return Cow::Borrowed(left);
         }
         // Both are `Some`, so a separator between the payloads, behind the same tag, separates
@@ -584,7 +707,15 @@ impl<const N: usize> Value for &[u8; N] {
     where
         Self: 'a,
     {
-        data.try_into().unwrap()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<&'a [u8; N], ValueError>
+    where
+        Self: 'a,
+    {
+        data.try_into()
+            .map_err(|_| value_error(format_args!("expected {N} bytes, got {}", data.len())))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8; N]
@@ -623,22 +754,46 @@ impl<const N: usize, T: Value> Value for [T; N] {
     where
         Self: 'a,
     {
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<[T::SelfType<'a>; N], ValueError>
+    where
+        Self: 'a,
+    {
         let mut result = Vec::with_capacity(N);
         if let Some(fixed) = T::fixed_width() {
+            let Some(expected) = fixed.checked_mul(N) else {
+                return Err(value_error("encoded array is too large"));
+            };
+            if data.len() != expected {
+                return Err(value_error(format_args!(
+                    "expected {expected} bytes, got {}",
+                    data.len()
+                )));
+            }
             for i in 0..N {
-                result.push(T::from_bytes(&data[fixed * i..fixed * (i + 1)]));
+                result.push(T::try_from_bytes(&data[fixed * i..fixed * (i + 1)])?);
             }
         } else {
-            // Set offset to the first data item
+            if data.len() < size_of::<u32>().saturating_mul(N) {
+                return Err(value_error("encoded array is too short"));
+            }
             let mut start = size_of::<u32>() * N;
             for i in 0..N {
                 let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
                 let end = u32::from_le_bytes(data[range].try_into().unwrap()) as usize;
-                result.push(T::from_bytes(&data[start..end]));
+                if end < start || end > data.len() {
+                    return Err(value_error("encoded array is too short"));
+                }
+                result.push(T::try_from_bytes(&data[start..end])?);
                 start = end;
             }
+            if start != data.len() {
+                return Err(value_error("encoded array has trailing bytes"));
+            }
         }
-        result.try_into().unwrap()
+        Ok(result.try_into().unwrap())
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Vec<u8>
@@ -675,31 +830,52 @@ impl<const N: usize, T: Value> Value for [T; N] {
 
 impl<const N: usize, T: Key> Key for [T; N] {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+        Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_compare(data1: &[u8], data2: &[u8]) -> core::result::Result<Ordering, ValueError> {
         if let Some(fixed) = T::fixed_width() {
+            let width = fixed
+                .checked_mul(N)
+                .ok_or_else(|| value_error("invalid array encoding"))?;
+            if data1.len() != width || data2.len() != width {
+                return Err(value_error("invalid array encoding"));
+            }
+            let mut order = Ordering::Equal;
             for i in 0..N {
                 let range = fixed * i..fixed * (i + 1);
-                let comparison = T::compare(&data1[range.clone()], &data2[range]);
-                if !comparison.is_eq() {
-                    return comparison;
+                let comparison = T::try_compare(&data1[range.clone()], &data2[range])?;
+                if order.is_eq() {
+                    order = comparison;
                 }
             }
-        } else {
-            // Set offset to the first data item
-            let mut start1 = size_of::<u32>() * N;
-            let mut start2 = size_of::<u32>() * N;
-            for i in 0..N {
-                let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
-                let end1 = u32::from_le_bytes(data1[range.clone()].try_into().unwrap()) as usize;
-                let end2 = u32::from_le_bytes(data2[range].try_into().unwrap()) as usize;
-                let comparison = T::compare(&data1[start1..end1], &data2[start2..end2]);
-                if !comparison.is_eq() {
-                    return comparison;
-                }
-                start1 = end1;
-                start2 = end2;
-            }
+            return Ok(order);
         }
-        Ordering::Equal
+        // Set offset to the first data item
+        let mut start1 = size_of::<u32>() * N;
+        let mut start2 = size_of::<u32>() * N;
+        if data1.len() < start1 || data2.len() < start2 {
+            return Err(value_error("invalid array encoding"));
+        }
+        let mut order = Ordering::Equal;
+        for i in 0..N {
+            let range = size_of::<u32>() * i..size_of::<u32>() * (i + 1);
+            let end1 = u32::from_le_bytes(data1[range.clone()].try_into().unwrap()) as usize;
+            let end2 = u32::from_le_bytes(data2[range].try_into().unwrap()) as usize;
+            if end1 < start1 || end1 > data1.len() || end2 < start2 || end2 > data2.len() {
+                return Err(value_error("invalid array encoding"));
+            }
+            let comparison = T::try_compare(&data1[start1..end1], &data2[start2..end2])?;
+            if order.is_eq() {
+                order = comparison;
+            }
+            start1 = end1;
+            start2 = end2;
+        }
+        if start1 != data1.len() || start2 != data2.len() {
+            return Err(value_error("invalid array encoding"));
+        }
+        Ok(order)
     }
 
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
@@ -800,7 +976,14 @@ impl Value for &str {
     where
         Self: 'a,
     {
-        core::str::from_utf8(data).unwrap()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<&'a str, ValueError>
+    where
+        Self: 'a,
+    {
+        core::str::from_utf8(data).map_err(|_| value_error("invalid UTF-8 in &str encoding"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -826,9 +1009,9 @@ fn round_up_to_char_boundary(utf8: &[u8], mut index: usize) -> usize {
 
 impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = Self::from_bytes(data1);
-        let str2 = Self::from_bytes(data2);
-        str1.cmp(str2)
+        // Valid UTF-8 orders as its bytes. Comparing the bytes also orders a malformed
+        // encoding without panicking.
+        data1.cmp(data2)
     }
 
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
@@ -870,7 +1053,16 @@ impl Value for String {
     where
         Self: 'a,
     {
-        core::str::from_utf8(data).unwrap().to_string()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<String, ValueError>
+    where
+        Self: 'a,
+    {
+        core::str::from_utf8(data)
+            .map(ToString::to_string)
+            .map_err(|_| value_error("invalid UTF-8 in String encoding"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a str
@@ -887,9 +1079,8 @@ impl Value for String {
 
 impl Key for String {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = core::str::from_utf8(data1).unwrap();
-        let str2 = core::str::from_utf8(data2).unwrap();
-        str1.cmp(str2)
+        // Encoded the same way as `&str`, so it orders the same way
+        <&str as Key>::compare(data1, data2)
     }
 
     // Encoded the same way as `&str`, so it separates the same way
@@ -921,7 +1112,19 @@ impl Value for char {
     where
         Self: 'a,
     {
-        char::from_u32(u32::from_le_bytes([data[0], data[1], data[2], 0])).unwrap()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<char, ValueError>
+    where
+        Self: 'a,
+    {
+        let bytes: &[u8; 3] = data
+            .try_into()
+            .map_err(|_| value_error("invalid char encoding"))?;
+        let [a, b, c] = *bytes;
+        char::from_u32(u32::from_le_bytes([a, b, c, 0]))
+            .ok_or_else(|| value_error("invalid char encoding"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> [u8; 3]
@@ -939,7 +1142,9 @@ impl Value for char {
 
 impl Key for char {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+        // The code point is stored little-endian, so the last byte is the most
+        // significant. Forward byte order is not `char` order.
+        data1.iter().rev().cmp(data2.iter().rev())
     }
 }
 
@@ -960,7 +1165,21 @@ macro_rules! le_value {
             where
                 Self: 'a,
             {
-                <$t>::from_le_bytes(data.try_into().unwrap())
+                Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<$t, ValueError>
+            where
+                Self: 'a,
+            {
+                let bytes: [u8; core::mem::size_of::<$t>()] = data.try_into().map_err(|_| {
+                    value_error(format_args!(
+                        "expected {} bytes, got {}",
+                        core::mem::size_of::<$t>(),
+                        data.len()
+                    ))
+                })?;
+                Ok(<$t>::from_le_bytes(bytes))
             }
 
             fn as_bytes<'a, 'b: 'a>(
@@ -986,7 +1205,14 @@ macro_rules! le_impl {
 
         impl Key for $t {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-                Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+                Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_compare(
+                data1: &[u8],
+                data2: &[u8],
+            ) -> core::result::Result<Ordering, ValueError> {
+                Ok(Self::try_from_bytes(data1)?.cmp(&Self::try_from_bytes(data2)?))
             }
         }
     };
@@ -1027,8 +1253,16 @@ macro_rules! nonzero_impl {
             where
                 Self: 'a,
             {
-                // Only `as_bytes()` output is decoded, and that is never zero
-                <$t>::new(<$prim as Value>::from_bytes(data)).unwrap()
+                Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<$t, ValueError>
+            where
+                Self: 'a,
+            {
+                let value = <$prim as Value>::try_from_bytes(data)?;
+                <$t>::new(value)
+                    .ok_or_else(|| value_error(concat!("invalid ", stringify!($t), " encoding")))
             }
 
             fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -1045,7 +1279,16 @@ macro_rules! nonzero_impl {
 
         impl Key for $t {
             fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-                <$prim as Key>::compare(data1, data2)
+                Self::try_compare(data1, data2).unwrap_or_else(|err| panic!("{err}"))
+            }
+
+            fn try_compare(
+                data1: &[u8],
+                data2: &[u8],
+            ) -> core::result::Result<Ordering, ValueError> {
+                Ok(Self::try_from_bytes(data1)?
+                    .get()
+                    .cmp(&Self::try_from_bytes(data2)?.get()))
             }
         }
     };
@@ -1067,12 +1310,104 @@ mod tests {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "expected 4 bytes")]
+    fn malformed_u32_compare_panics() {
+        let _ = <u32 as Key>::compare(&[1, 2], &1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn malformed_builtin_values_return_errors() {
+        assert!(<&str as Value>::try_from_bytes(&[0xff]).is_err());
+        assert!(<String as Value>::try_from_bytes(&[0xff]).is_err());
+        assert!(<bool as Value>::try_from_bytes(&[2]).is_err());
+        assert!(<bool as Value>::try_from_bytes(&[]).is_err());
+        assert!(<u32 as Value>::try_from_bytes(&[1, 2]).is_err());
+        assert!(<u32 as Key>::try_compare(&[1, 2], &1u32.to_le_bytes()).is_err());
+        assert_eq!(
+            <u32 as Key>::try_compare(&1u32.to_le_bytes(), &2u32.to_le_bytes()).unwrap(),
+            Ordering::Less
+        );
+        assert!(<Option<u32> as Value>::try_from_bytes(&[2, 0, 0, 0, 0]).is_err());
+        assert!(<Option<u32> as Value>::try_from_bytes(&[]).is_err());
+        assert!(
+            <Option<u32> as Value>::try_from_bytes(&[0, 0, 0, 0, 0])
+                .unwrap()
+                .is_none()
+        );
+        assert!(<Option<u32> as Value>::try_from_bytes(&[0, 0xff, 0, 0, 0]).is_err());
+        assert!(
+            <Option<Vec<u8>> as Value>::try_from_bytes(&[0])
+                .unwrap()
+                .is_none()
+        );
+        assert!(<Option<Vec<u8>> as Value>::try_from_bytes(&[0, 0xff]).is_err());
+        let none = <Option<u32> as Value>::as_bytes(&None);
+        assert!(<Option<u32> as Key>::try_compare(none.as_ref(), &[2, 0, 0, 0, 0]).is_err());
+        let left = [NonZeroU32::new(1).unwrap(), NonZeroU32::new(2).unwrap()];
+        let right = [NonZeroU32::new(3).unwrap(), NonZeroU32::new(4).unwrap()];
+        let mut bad_array = <[NonZeroU32; 2] as Value>::as_bytes(&left);
+        bad_array[4..].fill(0);
+        assert!(
+            <[NonZeroU32; 2] as Key>::try_compare(
+                bad_array.as_ref(),
+                <[NonZeroU32; 2] as Value>::as_bytes(&right).as_ref()
+            )
+            .is_err()
+        );
+        let mut bad_variable = <(String, NonZeroU32) as Value>::as_bytes(&(
+            String::from("a"),
+            NonZeroU32::new(1).unwrap(),
+        ));
+        let variable_len = bad_variable.len();
+        bad_variable[variable_len - 4..].fill(0);
+        assert!(
+            <(String, NonZeroU32) as Key>::try_compare(
+                bad_variable.as_ref(),
+                <(String, NonZeroU32) as Value>::as_bytes(&(
+                    String::from("b"),
+                    NonZeroU32::new(2).unwrap(),
+                ))
+                .as_ref()
+            )
+            .is_err()
+        );
+        let mut bad_tuple = <(NonZeroU32, NonZeroU32) as Value>::as_bytes(&(left[0], left[1]));
+        bad_tuple[4..].fill(0);
+        assert!(
+            <(NonZeroU32, NonZeroU32) as Key>::try_compare(
+                bad_tuple.as_ref(),
+                <(NonZeroU32, NonZeroU32) as Value>::as_bytes(&(right[0], right[1])).as_ref()
+            )
+            .is_err()
+        );
+        assert!(<char as Value>::try_from_bytes(&[0xff, 0xff, 0xff]).is_err());
+        assert!(<NonZeroU32 as Value>::try_from_bytes(&[0, 0, 0, 0]).is_err());
+        assert!(<Vec<u8> as Value>::try_from_bytes(&[]).is_err());
+        assert!(<Vec<u8> as Value>::try_from_bytes(&[0]).unwrap().is_empty());
+        // 254 means a u16 length follows. Zero fits in the one-byte form, `[0]`.
+        assert!(<Vec<u8> as Value>::try_from_bytes(&[254, 0, 0]).is_err());
+        assert!(<() as Value>::try_from_bytes(&[]).is_ok());
+        assert!(<() as Value>::try_from_bytes(b"x").is_err());
+        assert_eq!(<() as Key>::try_compare(&[], &[]).unwrap(), Ordering::Equal);
+        assert!(<() as Key>::try_compare(b"x", &[]).is_err());
+        assert!(<(u8, u8) as Value>::try_from_bytes(&[1]).is_err());
+        assert!(<bool as Value>::try_from_bytes(&[1]).unwrap());
+        assert_eq!(<&str as Value>::try_from_bytes(b"ok").unwrap(), "ok");
+
+        let guard = crate::AccessGuard::<&str>::with_owned_value(vec![0xff]);
+        assert!(matches!(
+            guard.try_value(),
+            Err(crate::StorageError::Corrupted(_))
+        ));
+        let guard = crate::AccessGuard::<&str>::with_owned_value(b"ok".to_vec());
+        assert_eq!(guard.try_value().unwrap(), "ok");
+    }
+
+    #[test]
     fn classification_is_readable_through_reconstruction() {
         // The derive macro reads a field type's classification by rebuilding its `TypeName`
-        // through `TypeName::new` and comparing, because the generated code has to compile
-        // against older redb versions that lack `is_user_defined()` (see `#[redb(crate)]` in
-        // redb-derive). Equality must keep agreeing with `is_user_defined()` for every
-        // classification.
+        // through `TypeName::new` and comparing, because `is_user_defined()` is crate-private.
+        // Equality must keep agreeing with `is_user_defined()` for every classification.
         let samples = [
             TypeName::new("Plain"),
             TypeName::internal("Plain"),
@@ -1257,6 +1592,33 @@ mod tests {
                 <Option<bool> as Value>::type_name().name(),
                 "niche::Option<bool>"
             );
+        }
+    }
+
+    fn check_comparison(a: char, b: char) {
+        let a_bytes = <char as Value>::as_bytes(&a);
+        let b_bytes = <char as Value>::as_bytes(&b);
+        assert_eq!(
+            <char as Key>::compare(a_bytes.as_slice(), b_bytes.as_slice()),
+            a.cmp(&b),
+            "{a:?} <=> {b:?}"
+        );
+    }
+
+    #[test]
+    fn char_compare_follows_code_point_order() {
+        let chars = [
+            '\0',
+            'a',
+            char::from_u32(0x00ff).unwrap(),
+            char::from_u32(0x0100).unwrap(),
+            char::from_u32(0x1f600).unwrap(),
+            char::MAX,
+        ];
+        for &a in &chars {
+            for &b in &chars {
+                check_comparison(a, b);
+            }
         }
     }
 

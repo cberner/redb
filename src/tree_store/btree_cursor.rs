@@ -2,7 +2,7 @@ use crate::AccessGuard;
 use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, LEAF, LeafAccessor, MAX_BTREE_DEPTH, OwnedEntryBuffer,
-    leaf_below_merge_threshold, leaf_fits_one_page, retained_after_removals,
+    leaf_below_merge_threshold, leaf_fits_one_page, retained_after_removals, try_key_compare,
 };
 use crate::tree_store::btree_iters::EntryGuard;
 use crate::tree_store::btree_mutator::MutateHelper;
@@ -11,6 +11,7 @@ use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, Pa
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -107,16 +108,16 @@ impl Direction {
     }
 }
 
-fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, position: Position<'_>) -> usize {
+fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, position: Position<'_>) -> Result<usize> {
     match position {
-        Position::Start => 0,
-        Position::End => accessor.num_pairs(),
+        Position::Start => Ok(0),
+        Position::End => Ok(accessor.num_pairs()),
         Position::Before(query) | Position::After(query) => {
-            let (mut position_index, found) = accessor.position::<K>(query);
+            let (mut position_index, found) = accessor.position::<K>(query)?;
             if matches!(position, Position::After(_)) && found {
                 position_index += 1;
             }
-            position_index
+            Ok(position_index)
         }
     }
 }
@@ -124,11 +125,13 @@ fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, position: Position<'_>
 fn child_to_visit<K: Key>(
     accessor: &BranchAccessor<'_, PageImpl>,
     position: Position<'_>,
-) -> usize {
+) -> Result<usize> {
     match position {
-        Position::Start => 0,
-        Position::End => accessor.count_children() - 1,
-        Position::Before(query) | Position::After(query) => accessor.child_for_key::<K>(query).0,
+        Position::Start => Ok(0),
+        Position::End => Ok(accessor.count_children() - 1),
+        Position::Before(query) | Position::After(query) => {
+            Ok(accessor.child_for_key::<K>(query)?.0)
+        }
     }
 }
 
@@ -149,7 +152,7 @@ where
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                     (
-                        lower_bound_entry::<K>(&accessor, position),
+                        lower_bound_entry::<K>(&accessor, position)?,
                         accessor.num_pairs(),
                     )
                 };
@@ -161,7 +164,7 @@ where
             }
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
-                let child_index = child_to_visit::<K>(&accessor, position);
+                let child_index = child_to_visit::<K>(&accessor, position)?;
                 (child_index, accessor.child_page(child_index).unwrap())
             }
             _ => unreachable!(),
@@ -417,18 +420,18 @@ impl InsertRun {
     }
 
     // True unless `key` sorts strictly between the gap's live bounds.
-    fn rejects<K: Key>(&self, key: &[u8]) -> bool {
+    fn rejects<K: Key>(&self, key: &[u8]) -> Result<bool> {
         if let Some(previous) = &self.previous_key
-            && K::compare(key, previous).is_le()
+            && try_key_compare::<K>(key, previous)?.is_le()
         {
-            return true;
+            return Ok(true);
         }
         if let Some(next) = self.next_key()
-            && K::compare(key, next).is_ge()
+            && try_key_compare::<K>(key, next)?.is_ge()
         {
-            return true;
+            return Ok(true);
         }
-        false
+        Ok(false)
     }
 }
 
@@ -455,12 +458,22 @@ impl<K: Key + 'static, V: Value + 'static> EntryRef<'_, K, V> {
         )
     }
 
-    pub(super) fn key(&self) -> K::SelfType<'_> {
-        K::from_bytes(&self.page.memory()[self.key_range.clone()])
+    pub(super) fn try_key(&self) -> Result<K::SelfType<'_>> {
+        K::try_from_bytes(&self.page.memory()[self.key_range.clone()]).map_err(|err| {
+            StorageError::Corrupted(format!(
+                "failed to decode stored {} key: {err}",
+                K::type_name().name()
+            ))
+        })
     }
 
-    pub(super) fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.value_range.clone()])
+    pub(super) fn try_value(&self) -> Result<V::SelfType<'_>> {
+        V::try_from_bytes(&self.page.memory()[self.value_range.clone()]).map_err(|err| {
+            StorageError::Corrupted(format!(
+                "failed to decode stored {} value: {err}",
+                V::type_name().name()
+            ))
+        })
     }
 }
 
@@ -1447,7 +1460,7 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
         assert!(self.state.leaf_run_rewrite.is_none());
         self.ensure_insert_run(RunDirection::Ascending)?;
         let run = self.state.insert_run.as_mut().unwrap();
-        if run.rejects::<K>(key) {
+        if run.rejects::<K>(key)? {
             // A run opened just for a rejected key holds nothing; drop it
             // again, so rejection never leaves an open run behind to trip
             // operations that require no pending inserts.
@@ -1475,7 +1488,7 @@ impl<K: Key + 'static, V: Value + 'static> CursorMut<'_, '_, K, V> {
         assert!(self.state.leaf_run_rewrite.is_none());
         self.ensure_insert_run(RunDirection::Descending)?;
         let run = self.state.insert_run.as_mut().unwrap();
-        if run.rejects::<K>(key) {
+        if run.rejects::<K>(key)? {
             // A run opened just for a rejected key holds nothing; drop it
             // again, so rejection never leaves an open run behind to trip
             // operations that require no pending inserts.
@@ -2175,7 +2188,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
         if !has_entry {
             return Ok(false);
         }
-        if !self.entry_in_range(direction) {
+        if !self.entry_in_range(direction)? {
             return Ok(false);
         }
         self.settled = Some(direction);
@@ -2343,7 +2356,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
 
     // Whether the live end's current entry is still inside the range bounded
     // by the parked end.
-    fn entry_in_range(&self, direction: Direction) -> bool {
+    fn entry_in_range(&self, direction: Direction) -> Result<bool> {
         let EndState::Live(state) = self.end_ref(direction) else {
             unreachable!("end must be live");
         };
@@ -2355,18 +2368,18 @@ impl<'a, K: Key + 'static, V: Value + 'static> RangeMut<'a, K, V> {
             EndState::Pending(batch) => &batch.bound,
             EndState::Live(_) => unreachable!("peer end must be parked while this end is live"),
         };
-        match direction {
+        Ok(match direction {
             Direction::Next => match bound {
-                Included(bound) => K::compare(key, bound).is_le(),
-                Excluded(bound) => K::compare(key, bound).is_lt(),
+                Included(bound) => try_key_compare::<K>(key, bound)?.is_le(),
+                Excluded(bound) => try_key_compare::<K>(key, bound)?.is_lt(),
                 Unbounded => true,
             },
             Direction::Previous => match bound {
-                Included(bound) => K::compare(key, bound).is_ge(),
-                Excluded(bound) => K::compare(key, bound).is_gt(),
+                Included(bound) => try_key_compare::<K>(key, bound)?.is_ge(),
+                Excluded(bound) => try_key_compare::<K>(key, bound)?.is_gt(),
                 Unbounded => true,
             },
-        }
+        })
     }
 
     fn end_ref(&self, direction: Direction) -> &EndState {
@@ -2918,8 +2931,8 @@ mod tests {
             assert!(insert(&mut cursor, 24, 24));
             // A mid-run flush resumes at the same gap, between the piles.
             cursor.flush_insert_run(true).unwrap();
-            assert_eq!(cursor.peek_prev().unwrap().unwrap().key(), 24);
-            assert_eq!(cursor.peek_next().unwrap().unwrap().key(), 25);
+            assert_eq!(cursor.peek_prev().unwrap().unwrap().try_key().unwrap(), 24);
+            assert_eq!(cursor.peek_next().unwrap().unwrap().try_key().unwrap(), 25);
             drop(cursor);
 
             let expected = [10, 20, 21, 22, 24, 25, 29, 30].map(|key| (key, key));

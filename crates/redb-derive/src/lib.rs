@@ -19,8 +19,7 @@ use syn::{Data, DeriveInput, Fields, GenericParam, Ident, parse_macro_input};
 
 // The path of the redb crate in generated code: `::redb`, unless an explicit
 // `#[redb(crate = "path")]` on the deriving struct names it otherwise, as when the dependency
-// is renamed (`my_redb = { package = "redb" }`) or the implementations are derived against one
-// of several versions of the redb package.
+// is renamed (`my_redb = { package = "redb" }`). The named crate must be redb 4.5 or later.
 fn redb_crate_path_for(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let mut path = None;
     for attr in &input.attrs {
@@ -37,22 +36,16 @@ fn redb_crate_path_for(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
             }
         })?;
     }
-    Ok(path.map_or_else(|| quote! { ::redb }, |path| quote! { #path }))
+    let path = path.unwrap_or_else(|| syn::parse_quote!(::redb));
+    Ok(quote! { #path })
 }
 
 /// Derives `redb::Key` for a struct whose fields all implement `Key`.
 ///
-/// The generated implementation refers to the redb crate as `::redb`. When it should be
-/// generated for a crate under another name -- a renamed dependency
-/// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
-/// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
-/// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
-/// versions as well. For a struct with exactly one field, the derived `Value` implementation
-/// forwards the field's `Value::NICHE`, so such a struct needs a version that has that
-/// constant. The tagging of user-defined field types in the composed type name follows
-/// the named version's classification: redb 4.1 and older classify composites (`Option`,
-/// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
-/// untagged there, and their names collide exactly where that version's own type names do.
+/// The generated implementation refers to the redb crate as `::redb`. When the dependency is
+/// renamed (`my_redb = { package = "redb" }`), name that crate with `#[redb(crate = "my_redb")]`.
+/// The derive requires redb 4.5. It implements `try_compare`: both encodings are decoded with
+/// `Value::try_from_bytes`, then ordered with `Ord`. `compare` panics through `try_compare`.
 #[proc_macro_derive(Key, attributes(redb))]
 pub fn derive_key(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -74,18 +67,29 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let redb = redb_crate_path_for(input)?;
+    let redb = &redb_crate_path_for(input)?;
+    let compare_fns = quote! {
+        fn compare(
+            data1: &[::std::primitive::u8],
+            data2: &[::std::primitive::u8],
+        ) -> ::std::cmp::Ordering {
+            <Self as #redb::Key>::try_compare(data1, data2)
+                .unwrap_or_else(|err| ::std::panic!("{err}"))
+        }
+
+        fn try_compare(
+            data1: &[::std::primitive::u8],
+            data2: &[::std::primitive::u8],
+        ) -> ::std::result::Result<::std::cmp::Ordering, #redb::ValueError> {
+            let value1 = <Self as #redb::Value>::try_from_bytes(data1)?;
+            let value2 = <Self as #redb::Value>::try_from_bytes(data2)?;
+            ::std::result::Result::Ok(::std::cmp::Ord::cmp(&value1, &value2))
+        }
+    };
 
     Ok(quote! {
         impl #impl_generics #redb::Key for #name #ty_generics #where_clause {
-            fn compare(
-                data1: &[::std::primitive::u8],
-                data2: &[::std::primitive::u8],
-            ) -> ::std::cmp::Ordering {
-                let value1 = <Self as #redb::Value>::from_bytes(data1);
-                let value2 = <Self as #redb::Value>::from_bytes(data2);
-                ::std::cmp::Ord::cmp(&value1, &value2)
-            }
+            #compare_fns
         }
     })
 }
@@ -96,17 +100,12 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
 /// forwards the field's `Value::NICHE`, and `Option` of it is encoded as `Option` of the field
 /// is. Other structs declare no niche.
 ///
-/// The generated implementation refers to the redb crate as `::redb`. When it should be
-/// generated for a crate under another name -- a renamed dependency
-/// (`my_redb = { package = "redb" }`), or one of several versions of redb -- name that crate
-/// with `#[redb(crate = "my_redb")]`. For a struct with fields, the generated implementation
-/// uses `TypeName` API that redb makes public from 3.0 on; a unit struct works with older
-/// versions as well. For a struct with exactly one field, the derived `Value` implementation
-/// forwards the field's `Value::NICHE`, so such a struct needs a version that has that
-/// constant. The tagging of user-defined field types in the composed type name follows
-/// the named version's classification: redb 4.1 and older classify composites (`Option`,
-/// `Vec`, tuples, arrays) of user-defined types as built-in, so such composite fields render
-/// untagged there, and their names collide exactly where that version's own type names do.
+/// The generated implementation refers to the redb crate as `::redb`. When the dependency is
+/// renamed (`my_redb = { package = "redb" }`), name that crate with `#[redb(crate = "my_redb")]`.
+/// The derive requires redb 4.5. It implements `try_from_bytes`, and `from_bytes` panics through
+/// it. Each field is decoded with that field's `try_from_bytes`. A unit struct accepts only an
+/// empty slice. A multi-field struct rejects a length prefix that is not the shortest form, a
+/// truncated encoding, and trailing bytes, as tuples do.
 #[proc_macro_derive(Value, attributes(redb))]
 pub fn derive_value(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -130,13 +129,33 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     let self_type = generate_self_type(name, generics)?;
-    let redb = redb_crate_path_for(input)?;
+    let redb = &redb_crate_path_for(input)?;
 
-    let type_name_impl = generate_type_name(name, &data_struct.fields, &redb);
-    let as_bytes_impl = generate_as_bytes(&data_struct.fields, &redb);
-    let from_bytes_impl = generate_from_bytes(name, &data_struct.fields, &redb);
-    let fixed_width_impl = generate_fixed_width(&data_struct.fields, &redb);
-    let niche_impl = generate_niche(&data_struct.fields, &redb);
+    let type_name_impl = generate_type_name(name, &data_struct.fields, redb);
+    let as_bytes_impl = generate_as_bytes(&data_struct.fields, redb);
+    let fixed_width_impl = generate_fixed_width(&data_struct.fields, redb);
+    let niche_impl = generate_niche(&data_struct.fields, redb);
+    let try_from_bytes_body = generate_try_from_bytes_body(name, &data_struct.fields, redb);
+    let from_bytes_fns = quote! {
+        fn from_bytes<'__redb_a>(
+            data: &'__redb_a [::std::primitive::u8],
+        ) -> Self::SelfType<'__redb_a>
+        where
+            Self: '__redb_a,
+        {
+            <Self as #redb::Value>::try_from_bytes(data)
+                .unwrap_or_else(|err| ::std::panic!("{err}"))
+        }
+
+        fn try_from_bytes<'__redb_a>(
+            data: &'__redb_a [::std::primitive::u8],
+        ) -> ::std::result::Result<Self::SelfType<'__redb_a>, #redb::ValueError>
+        where
+            Self: '__redb_a,
+        {
+            #try_from_bytes_body
+        }
+    };
 
     Ok(quote! {
         impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
@@ -153,14 +172,7 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
                 #fixed_width_impl
             }
 
-            fn from_bytes<'__redb_a>(
-                data: &'__redb_a [::std::primitive::u8],
-            ) -> Self::SelfType<'__redb_a>
-            where
-                Self: '__redb_a,
-            {
-                #from_bytes_impl
-            }
+            #from_bytes_fns
 
             fn as_bytes<'__redb_a, '__redb_b: '__redb_a>(
                 value: &'__redb_a Self::SelfType<'__redb_b>,
@@ -217,15 +229,8 @@ fn generate_self_type(
 // The classification is read by rebuilding the `TypeName` through `TypeName::new` -- the
 // user-defined constructor -- and comparing: `TypeName` equality is exactly (classification,
 // name), so the rebuilt name is equal iff the field's classification is user-defined. redb's
-// `TypeName::is_user_defined()` would say the same, but it is crate-private, and `new`,
-// `name()`, and `PartialEq` reach back to redb 3.0, which `#[redb(crate = "...")]` may name
-// (`name()` is private before that, so field-bearing structs already floor there).
-//
-// The classification is whatever the named redb reports: 4.1 and older classify composites of
-// user-defined types (`Option<UserType>`, say) as built-in, so those fields render untagged
-// and collide exactly where that version's own type names do. Recursing into the field's type
-// syntax instead would misrender aliases (`type A = Option<UserType>`) and change composed
-// names between redb versions, breaking existing tables on upgrade.
+// `TypeName::is_user_defined()` would say the same, but it is crate-private. Recursing into the
+// field's type syntax instead would misrender aliases (`type A = Option<UserType>`).
 fn render_field_type_name(
     field_type: &syn::Type,
     redb: &proc_macro2::TokenStream,
@@ -445,7 +450,34 @@ fn generate_as_bytes(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_m
     }
 }
 
-fn generate_from_bytes(
+fn construct_ok(name: &Ident, fields: &Fields, field_vars: &[Ident]) -> proc_macro2::TokenStream {
+    match fields {
+        Fields::Named(fields_named) => {
+            let field_names: Vec<_> = fields_named
+                .named
+                .iter()
+                .map(|field| &field.ident)
+                .collect();
+            quote! {
+                ::std::result::Result::Ok(#name {
+                    #(#field_names: #field_vars),*
+                })
+            }
+        }
+        Fields::Unnamed(_) => {
+            quote! {
+                ::std::result::Result::Ok(#name(#(#field_vars),*))
+            }
+        }
+        Fields::Unit => {
+            quote! { ::std::result::Result::Ok(#name) }
+        }
+    }
+}
+
+// Fallible decoder. `from_bytes` panics through it. Field encodings are delegated to each
+// field's `try_from_bytes`, including a length prefix that is not the shortest form.
+fn generate_try_from_bytes_body(
     name: &Ident,
     fields: &Fields,
     redb: &proc_macro2::TokenStream,
@@ -454,106 +486,191 @@ fn generate_from_bytes(
     let field_vars: Vec<_> = (0..field_types.len())
         .map(|i| quote::format_ident!("field_{}", i))
         .collect();
-    let num_fields = field_types.len();
+    let constructed = construct_ok(name, fields, &field_vars);
 
-    let body = if num_fields == 0 {
-        quote! {}
-    } else if num_fields == 1 {
-        let field_var = &field_vars[0];
-        let field_type = &field_types[0];
-        quote! {
-            let #field_var = <#field_type as #redb::Value>::from_bytes(data);
-        }
-    } else {
-        let field_types_except_last = &field_types[..num_fields - 1];
-        let field_vars_except_last = &field_vars[..num_fields - 1];
-        let last_field_var = field_vars.last();
-        let last_field_type = field_types.last();
-
-        quote! {
-            let mut offset = 0usize;
-            let mut var_lengths = ::std::vec::Vec::new();
-
-            #(
-                if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
-                    let (len, bytes_read) = match data[offset] {
-                        0u8..=253u8 => (data[offset] as ::std::primitive::usize, 1usize),
-                        254u8 => (
-                            ::std::primitive::u16::from_le_bytes([
-                                data[offset + 1],
-                                data[offset + 2],
-                            ]) as ::std::primitive::usize,
-                            3usize,
-                        ),
-                        255u8 => (
-                            ::std::primitive::u32::from_le_bytes([
-                                data[offset + 1],
-                                data[offset + 2],
-                                data[offset + 3],
-                                data[offset + 4],
-                            ]) as ::std::primitive::usize,
-                            5usize,
-                        ),
-                    };
-                    var_lengths.push(len);
-                    offset += bytes_read;
-                }
-            )*
-
-            let mut var_index = 0usize;
-            #(
-                let #field_vars_except_last = if let ::std::option::Option::Some(fixed_width) =
-                    <#field_types_except_last as #redb::Value>::fixed_width()
-                {
-                    let field_data = &data[offset..offset + fixed_width];
-                    offset += fixed_width;
-                    <#field_types_except_last as #redb::Value>::from_bytes(field_data)
-                } else {
-                    let len = var_lengths[var_index];
-                    let field_data = &data[offset..offset + len];
-                    offset += len;
-                    var_index += 1;
-                    <#field_types_except_last as #redb::Value>::from_bytes(field_data)
-                };
-            )*
-
-            let #last_field_var = if let ::std::option::Option::Some(fixed_width) =
-                <#last_field_type as #redb::Value>::fixed_width()
-            {
-                let field_data = &data[offset..offset + fixed_width];
-                <#last_field_type as #redb::Value>::from_bytes(field_data)
+    if field_types.is_empty() {
+        return quote! {
+            fn decode_error(message: &'static str) -> #redb::ValueError {
+                ::std::boxed::Box::new(::std::io::Error::new(
+                    ::std::io::ErrorKind::InvalidData,
+                    message,
+                ))
+            }
+            if data.is_empty() {
+                #constructed
             } else {
-                <#last_field_type as #redb::Value>::from_bytes(&data[offset..])
-            };
-        }
-    };
-    match fields {
-        Fields::Named(fields_named) => {
-            let field_names: Vec<_> = fields_named
-                .named
-                .iter()
-                .map(|field| &field.ident)
-                .collect();
+                ::std::result::Result::Err(decode_error("invalid unit struct encoding"))
+            }
+        };
+    }
 
-            quote! {
-                {
-                    #body
-                    #name {
-                        #(#field_names: #field_vars),*
+    if let [field_type] = field_types.as_slice() {
+        let field_var = &field_vars[0];
+        return quote! {
+            let #field_var = <#field_type as #redb::Value>::try_from_bytes(data)?;
+            #constructed
+        };
+    }
+
+    let last = field_types.len() - 1;
+    let field_types_except_last = &field_types[..last];
+    let field_vars_except_last = &field_vars[..last];
+    let last_field_var = &field_vars[last];
+    let last_field_type = &field_types[last];
+
+    quote! {
+        fn decode_error(message: &'static str) -> #redb::ValueError {
+            ::std::boxed::Box::new(::std::io::Error::new(
+                ::std::io::ErrorKind::InvalidData,
+                message,
+            ))
+        }
+        fn read_len(
+            data: &[::std::primitive::u8],
+            offset: ::std::primitive::usize,
+        ) -> ::std::result::Result<
+            (::std::primitive::usize, ::std::primitive::usize),
+            #redb::ValueError,
+        > {
+            let ::std::option::Option::Some(rest) = data.get(offset..) else {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            };
+            let ::std::option::Option::Some(tag) = rest.first() else {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            };
+            match *tag {
+                0u8..=253u8 => ::std::result::Result::Ok((
+                    <::std::primitive::usize as ::std::convert::From<::std::primitive::u8>>::from(
+                        *tag,
+                    ),
+                    1usize,
+                )),
+                254u8 => {
+                    let ::std::option::Option::Some(bytes) = rest.get(1..3) else {
+                        return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                    };
+                    let ::std::result::Result::Ok(bytes) =
+                        <[::std::primitive::u8; 2] as ::std::convert::TryFrom<&[::std::primitive::u8]>>::try_from(
+                            bytes,
+                        )
+                    else {
+                        return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                    };
+                    let len = <::std::primitive::usize as ::std::convert::From<
+                        ::std::primitive::u16,
+                    >>::from(::std::primitive::u16::from_le_bytes(bytes));
+                    if len < 254 {
+                        return ::std::result::Result::Err(decode_error("non-minimal length encoding"));
                     }
+                    ::std::result::Result::Ok((len, 3usize))
+                }
+                255u8 => {
+                    let ::std::option::Option::Some(bytes) = rest.get(1..5) else {
+                        return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                    };
+                    let ::std::result::Result::Ok(bytes) =
+                        <[::std::primitive::u8; 4] as ::std::convert::TryFrom<&[::std::primitive::u8]>>::try_from(
+                            bytes,
+                        )
+                    else {
+                        return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                    };
+                    let len_u32 = ::std::primitive::u32::from_le_bytes(bytes);
+                    let ::std::result::Result::Ok(len) =
+                        <::std::primitive::usize as ::std::convert::TryFrom<::std::primitive::u32>>::try_from(
+                            len_u32,
+                        )
+                    else {
+                        return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                    };
+                    if <::std::primitive::u16 as ::std::convert::TryFrom<::std::primitive::usize>>::try_from(
+                        len,
+                    )
+                    .is_ok()
+                    {
+                        return ::std::result::Result::Err(decode_error(
+                            "non-minimal length encoding",
+                        ));
+                    }
+                    ::std::result::Result::Ok((len, 5usize))
                 }
             }
         }
-        Fields::Unnamed(_) => {
-            quote! {
-                {
-                    #body
-                    #name(#(#field_vars),*)
+
+        let mut offset = 0usize;
+        let mut var_lengths = ::std::vec::Vec::new();
+        #(
+            if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
+                let (len, bytes_read) = read_len(data, offset)?;
+                let ::std::option::Option::Some(next) = offset.checked_add(bytes_read) else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                if next > data.len() {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
                 }
+                var_lengths.push(len);
+                offset = next;
             }
-        }
-        Fields::Unit => {
-            quote! { #name }
-        }
+        )*
+
+        let mut var_index = 0usize;
+        #(
+            let #field_vars_except_last = if let ::std::option::Option::Some(fixed_width) =
+                <#field_types_except_last as #redb::Value>::fixed_width()
+            {
+                let ::std::option::Option::Some(end) = offset.checked_add(fixed_width) else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                if end > data.len() {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                }
+                let ::std::option::Option::Some(field_data) = data.get(offset..end) else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                offset = end;
+                <#field_types_except_last as #redb::Value>::try_from_bytes(field_data)?
+            } else {
+                let ::std::option::Option::Some(len) = var_lengths.get(var_index).copied() else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                var_index += 1;
+                let ::std::option::Option::Some(end) = offset.checked_add(len) else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                if end > data.len() {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                }
+                let ::std::option::Option::Some(field_data) = data.get(offset..end) else {
+                    return ::std::result::Result::Err(decode_error("encoded value is too short"));
+                };
+                offset = end;
+                <#field_types_except_last as #redb::Value>::try_from_bytes(field_data)?
+            };
+        )*
+
+        let #last_field_var = if let ::std::option::Option::Some(fixed_width) =
+            <#last_field_type as #redb::Value>::fixed_width()
+        {
+            let ::std::option::Option::Some(end) = offset.checked_add(fixed_width) else {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            };
+            if end > data.len() {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            }
+            if end != data.len() {
+                return ::std::result::Result::Err(decode_error("encoded value has trailing bytes"));
+            }
+            let ::std::option::Option::Some(field_data) = data.get(offset..end) else {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            };
+            <#last_field_type as #redb::Value>::try_from_bytes(field_data)?
+        } else {
+            let ::std::option::Option::Some(field_data) = data.get(offset..) else {
+                return ::std::result::Result::Err(decode_error("encoded value is too short"));
+            };
+            <#last_field_type as #redb::Value>::try_from_bytes(field_data)?
+        };
+
+        #constructed
     }
 }

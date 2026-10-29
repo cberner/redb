@@ -1,3 +1,4 @@
+use crate::tree_store::btree_base::try_key_compare;
 use crate::tree_store::btree_cursor::{Cursor, Position};
 use crate::tree_store::btree_iters::{EntryGuard, bounds_are_empty, encode_bounds};
 use crate::tree_store::page_store::PageHint;
@@ -76,7 +77,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
         manager: PageResolver,
         hint: PageHint,
     ) -> Result<Self> {
-        if table_root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound) {
+        if table_root.is_none() || bounds_are_empty::<K>(&lower_bound, &upper_bound)? {
             return Ok(Self::empty(manager, hint));
         }
 
@@ -189,20 +190,20 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
         }
     }
 
-    fn entry_within_open_bound(&self, entry: &EntryGuard<K, V>, side: Side) -> bool {
+    fn entry_within_open_bound(&self, entry: &EntryGuard<K, V>, side: Side) -> Result<bool> {
         let key = entry.key_bytes();
-        match side {
+        Ok(match side {
             Side::Front => match self.upper_bound.as_ref().map(Vec::as_slice) {
-                Included(bound) => K::compare(key, bound).is_le(),
-                Excluded(bound) => K::compare(key, bound).is_lt(),
+                Included(bound) => try_key_compare::<K>(key, bound)?.is_le(),
+                Excluded(bound) => try_key_compare::<K>(key, bound)?.is_lt(),
                 Unbounded => true,
             },
             Side::Back => match self.lower_bound.as_ref().map(Vec::as_slice) {
-                Included(bound) => K::compare(key, bound).is_ge(),
-                Excluded(bound) => K::compare(key, bound).is_gt(),
+                Included(bound) => try_key_compare::<K>(key, bound)?.is_ge(),
+                Excluded(bound) => try_key_compare::<K>(key, bound)?.is_gt(),
                 Unbounded => true,
             },
-        }
+        })
     }
 
     fn next_from(&mut self, side: Side) -> Option<Result<EntryGuard<K, V>>> {
@@ -239,11 +240,18 @@ impl<K: Key + 'static, V: Value + 'static> BtreeCursorRange<K, V> {
             }
             Err(err) => return Some(Err(err)),
         };
-        if self.opposite_slot(side).is_uninitialized()
-            && !self.entry_within_open_bound(&entry, side)
-        {
-            self.close();
-            return None;
+        // Once the opposite end has started, this entry is inside the remaining
+        // span and the bound check is unused. Skip it: `try_key_compare` decodes
+        // both keys, which derived keys do in full.
+        if self.opposite_slot(side).is_uninitialized() {
+            let within = match self.entry_within_open_bound(&entry, side) {
+                Ok(within) => within,
+                Err(err) => return Some(Err(err)),
+            };
+            if !within {
+                self.close();
+                return None;
+            }
         }
         Some(Ok(entry))
     }

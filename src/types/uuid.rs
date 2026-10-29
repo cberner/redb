@@ -1,3 +1,4 @@
+use crate::types::{ValueError, value_error};
 use crate::{Key, TypeName, Value};
 use core::cmp::Ordering;
 use uuid::Uuid;
@@ -20,7 +21,14 @@ impl Value for Uuid {
     where
         Self: 'a,
     {
-        Uuid::from_slice(data).unwrap()
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        Uuid::from_slice(data).map_err(|_| value_error("invalid uuid::Uuid encoding"))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>

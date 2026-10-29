@@ -9,6 +9,7 @@
 //!| NaiveDateTime         | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                         | 13   |                                                  |
 //!| FixedOffset           | `{seconds_from_utc:i32}`                                                                                                 | 4    |                                                  |
 //!| DateTime<FixedOffset> | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}\|{seconds_from_utc:i32}` | 17   | Time is stored in UTC with the offset in seconds |
+use crate::types::{ValueError, value_error};
 use crate::{Key, TypeName, Value};
 
 use chrono_v0_4::{
@@ -34,12 +35,19 @@ impl Value for NaiveDate {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            6,
-            "NaiveDate must be 6 bytes long, got {}",
-            data.len()
-        );
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        if data.len() != 6 {
+            return Err(value_error(format_args!(
+                "NaiveDate must be 6 bytes long, got {}",
+                data.len()
+            )));
+        }
         date_from_bytes(data)
     }
 
@@ -59,9 +67,14 @@ impl Value for NaiveDate {
 }
 impl Key for NaiveDate {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let date1 = date_from_bytes(data1);
-        let date2 = date_from_bytes(data2);
-        date1.cmp(&date2)
+        compare_decoded(data1, data2, |data| NaiveDate::try_from_bytes(data))
+    }
+
+    fn try_compare(
+        data1: &[u8],
+        data2: &[u8],
+    ) -> core::result::Result<core::cmp::Ordering, ValueError> {
+        try_compare_decoded(data1, data2, |data| NaiveDate::try_from_bytes(data))
     }
 }
 /// A 7-byte representation of a time in the format `{seconds_from_midnight:i32:first 3 bytes}\|{nanoseconds:i32}`.
@@ -85,11 +98,19 @@ impl Value for NaiveTime {
     where
         Self: 'a,
     {
-        assert!(
-            data.len() == 7,
-            "NaiveTime must be 7 bytes long, got {}",
-            data.len()
-        );
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        if data.len() != 7 {
+            return Err(value_error(format_args!(
+                "NaiveTime must be 7 bytes long, got {}",
+                data.len()
+            )));
+        }
         time_from_bytes(data)
     }
 
@@ -116,9 +137,14 @@ impl Value for NaiveTime {
 }
 impl Key for NaiveTime {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let time1 = time_from_bytes(data1);
-        let time2 = time_from_bytes(data2);
-        time1.cmp(&time2)
+        compare_decoded(data1, data2, |data| NaiveTime::try_from_bytes(data))
+    }
+
+    fn try_compare(
+        data1: &[u8],
+        data2: &[u8],
+    ) -> core::result::Result<core::cmp::Ordering, ValueError> {
+        try_compare_decoded(data1, data2, |data| NaiveTime::try_from_bytes(data))
     }
 }
 /// A 13-byte representation of a date and time in the format `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:i32:first 3 bytes}\|{nanoseconds:i32}`.
@@ -142,16 +168,23 @@ impl Value for NaiveDateTime {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            13,
-            "NaiveDateTime must be 13 bytes long, got {}",
-            data.len()
-        );
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
 
-        let date = date_from_bytes(&data[0..6]);
-        let time = time_from_bytes(&data[6..13]);
-        NaiveDateTime::new(date, time)
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        if data.len() != 13 {
+            return Err(value_error(format_args!(
+                "NaiveDateTime must be 13 bytes long, got {}",
+                data.len()
+            )));
+        }
+        Ok(NaiveDateTime::new(
+            date_from_bytes(&data[0..6])?,
+            time_from_bytes(&data[6..13])?,
+        ))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -187,9 +220,14 @@ impl Value for NaiveDateTime {
 }
 impl Key for NaiveDateTime {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let date_time1 = NaiveDateTime::from_bytes(data1);
-        let date_time2 = NaiveDateTime::from_bytes(data2);
-        date_time1.cmp(&date_time2)
+        compare_decoded(data1, data2, |data| NaiveDateTime::try_from_bytes(data))
+    }
+
+    fn try_compare(
+        data1: &[u8],
+        data2: &[u8],
+    ) -> core::result::Result<core::cmp::Ordering, ValueError> {
+        try_compare_decoded(data1, data2, |data| NaiveDateTime::try_from_bytes(data))
     }
 }
 
@@ -212,18 +250,24 @@ impl Value for DateTime<FixedOffset> {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            17,
-            "DateTime<FixedOffset> must be 17 bytes long, got {}",
-            data.len()
-        );
-        let date = date_from_bytes(&data[0..6]);
-        let time = time_from_bytes(&data[6..13]);
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
 
-        let offset = offset_from_bytes(&data[13..17]);
-        let time = NaiveDateTime::new(date, time);
-        offset.from_utc_datetime(&time)
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        if data.len() != 17 {
+            return Err(value_error(format_args!(
+                "DateTime<FixedOffset> must be 17 bytes long, got {}",
+                data.len()
+            )));
+        }
+        let time = NaiveDateTime::new(
+            date_from_bytes(&data[0..6])?,
+            time_from_bytes(&data[6..13])?,
+        );
+        Ok(offset_from_bytes(&data[13..17])?.from_utc_datetime(&time))
     }
 
     fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> Self::AsBytes<'a>
@@ -266,9 +310,18 @@ impl Value for DateTime<FixedOffset> {
 }
 impl Key for DateTime<FixedOffset> {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let datetime1 = DateTime::<FixedOffset>::from_bytes(data1);
-        let datetime2 = DateTime::<FixedOffset>::from_bytes(data2);
-        datetime1.cmp(&datetime2)
+        compare_decoded(data1, data2, |data| {
+            DateTime::<FixedOffset>::try_from_bytes(data)
+        })
+    }
+
+    fn try_compare(
+        data1: &[u8],
+        data2: &[u8],
+    ) -> core::result::Result<core::cmp::Ordering, ValueError> {
+        try_compare_decoded(data1, data2, |data| {
+            DateTime::<FixedOffset>::try_from_bytes(data)
+        })
     }
 }
 impl Value for FixedOffset {
@@ -290,12 +343,19 @@ impl Value for FixedOffset {
     where
         Self: 'a,
     {
-        assert_eq!(
-            data.len(),
-            4,
-            "FixedOffset must be 4 bytes long got {}",
-            data.len()
-        );
+        Self::try_from_bytes(data).unwrap_or_else(|err| panic!("{err}"))
+    }
+
+    fn try_from_bytes<'a>(data: &'a [u8]) -> core::result::Result<Self::SelfType<'a>, ValueError>
+    where
+        Self: 'a,
+    {
+        if data.len() != 4 {
+            return Err(value_error(format_args!(
+                "FixedOffset must be 4 bytes long got {}",
+                data.len()
+            )));
+        }
         offset_from_bytes(data)
     }
 
@@ -312,27 +372,62 @@ impl Value for FixedOffset {
 }
 impl Key for FixedOffset {
     fn compare(data1: &[u8], data2: &[u8]) -> core::cmp::Ordering {
-        let offset1 = FixedOffset::from_bytes(data1);
-        let offset2 = FixedOffset::from_bytes(data2);
-        offset1.local_minus_utc().cmp(&offset2.local_minus_utc())
+        compare_decoded(data1, data2, |data| {
+            Ok(FixedOffset::try_from_bytes(data)?.local_minus_utc())
+        })
+    }
+
+    fn try_compare(
+        data1: &[u8],
+        data2: &[u8],
+    ) -> core::result::Result<core::cmp::Ordering, ValueError> {
+        try_compare_decoded(data1, data2, |data| {
+            Ok(FixedOffset::try_from_bytes(data)?.local_minus_utc())
+        })
     }
 }
-fn offset_from_bytes(data: &[u8]) -> FixedOffset {
-    let offset_seconds = i32::from_le_bytes(data.try_into().unwrap());
-    FixedOffset::east_opt(offset_seconds)
-        .expect("Invalid offset seconds, must be between -86400 and 86400")
+
+fn try_compare_decoded<T: Ord>(
+    data1: &[u8],
+    data2: &[u8],
+    decode: impl Fn(&[u8]) -> core::result::Result<T, ValueError>,
+) -> core::result::Result<core::cmp::Ordering, ValueError> {
+    Ok(decode(data1)?.cmp(&decode(data2)?))
 }
-fn date_from_bytes(data: &[u8]) -> NaiveDate {
+
+fn compare_decoded<T: Ord>(
+    data1: &[u8],
+    data2: &[u8],
+    decode: impl Fn(&[u8]) -> core::result::Result<T, ValueError>,
+) -> core::cmp::Ordering {
+    try_compare_decoded(data1, data2, decode).unwrap_or_else(|err| panic!("{err}"))
+}
+
+fn offset_from_bytes(data: &[u8]) -> core::result::Result<FixedOffset, ValueError> {
+    let offset_seconds = i32::from_le_bytes(
+        data.try_into()
+            .map_err(|_| value_error("invalid chrono::FixedOffset"))?,
+    );
+    FixedOffset::east_opt(offset_seconds).ok_or_else(|| value_error("invalid chrono::FixedOffset"))
+}
+fn date_from_bytes(data: &[u8]) -> core::result::Result<NaiveDate, ValueError> {
+    if data.len() < 6 {
+        return Err(value_error("invalid chrono::NaiveDate"));
+    }
     let year = i32::from_le_bytes(data[0..4].try_into().unwrap());
     let month = u32::from(data[4]);
     let day = u32::from(data[5]);
-    NaiveDate::from_ymd_opt(year, month, day).expect("Invalid date")
+    NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| value_error("invalid chrono::NaiveDate"))
 }
-fn time_from_bytes(data: &[u8]) -> NaiveTime {
+fn time_from_bytes(data: &[u8]) -> core::result::Result<NaiveTime, ValueError> {
+    if data.len() < 7 {
+        return Err(value_error("invalid chrono::NaiveTime"));
+    }
     let num_seconds = u32::from_le_bytes([data[0], data[1], data[2], 0]);
     let num_nanoseconds = u32::from_le_bytes(data[3..7].try_into().unwrap());
     NaiveTime::from_num_seconds_from_midnight_opt(num_seconds, num_nanoseconds)
-        .expect("Invalid time")
+        .ok_or_else(|| value_error("invalid chrono::NaiveTime"))
 }
 
 #[cfg(test)]
@@ -368,6 +463,9 @@ mod tests {
         );
         let date_from_bytes = NaiveDate::from_bytes(&bytes);
         assert_eq!(date, date_from_bytes);
+        let mut longer = bytes.to_vec();
+        longer.push(0);
+        assert!(NaiveDate::try_compare(&longer, &bytes).is_err());
     }
     #[test]
     fn test_naive_time() {
@@ -385,6 +483,9 @@ mod tests {
         );
         let time_from_bytes = NaiveTime::from_bytes(&bytes);
         assert_eq!(time, time_from_bytes);
+        let mut longer = bytes.to_vec();
+        longer.push(0);
+        assert!(NaiveTime::try_compare(&longer, &bytes).is_err());
     }
     #[test]
     fn test_naive_date_time() {
@@ -419,8 +520,23 @@ mod tests {
             core::cmp::Ordering::Equal,
             "Bytes should compare equal to themselves"
         );
+        assert_eq!(
+            FixedOffset::try_compare(&bytes, &bytes).unwrap(),
+            core::cmp::Ordering::Equal
+        );
+        // An offset outside -86_400..=86_400 is not a valid encoding.
+        let invalid = i32::MAX.to_le_bytes();
+        assert!(FixedOffset::try_compare(&invalid, &bytes).is_err());
         let offset_from_bytes = FixedOffset::from_bytes(&bytes);
         assert_eq!(offset, offset_from_bytes);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid chrono::FixedOffset")]
+    fn malformed_fixed_offset_compare_panics() {
+        let bytes = FixedOffset::as_bytes(&FixedOffset::east_opt(3600).unwrap());
+        let invalid = i32::MAX.to_le_bytes();
+        let _ = FixedOffset::compare(&invalid, &bytes);
     }
     #[test]
     fn test_date_time_fixed_offset() {
