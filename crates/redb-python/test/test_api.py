@@ -1,14 +1,46 @@
-"""Tests for redb write transactions."""
+"""Example-based checks of the bindings."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 import redb
+
+
+def test_errors_form_a_flat_hierarchy() -> None:
+    assert redb.Error.__bases__ == (Exception,)
+    subclasses = [
+        cls
+        for cls in vars(redb).values()
+        if isinstance(cls, type) and issubclass(cls, redb.Error)
+    ]
+    subclasses.remove(redb.Error)
+    assert redb.Io in subclasses
+    assert redb.TransactionCompleted in subclasses
+    for cls in subclasses:
+        assert cls.__bases__ == (redb.Error,)
+
+
+def test_create_new_database_creates_file(tmp_db_path: Path) -> None:
+    redb.Database.create(str(tmp_db_path))
+    assert tmp_db_path.is_file()
+    assert tmp_db_path.stat().st_size > 0
+
+
+def test_create_on_non_database_file_raises(tmp_db_path: Path) -> None:
+    tmp_db_path.write_bytes(b"not a redb database, just some bytes")
+    with pytest.raises(redb.Io):
+        redb.Database.create(str(tmp_db_path))
+
+
+def test_create_on_open_database_raises(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with pytest.raises(redb.DatabaseAlreadyOpen) as excinfo:
+        redb.Database.create(str(tmp_db_path))
+    assert "already open" in str(excinfo.value)
+    del db
 
 
 def test_begin_write_commit(tmp_db_path: Path) -> None:
@@ -60,12 +92,9 @@ def test_reentering_finalized_transaction_raises(tmp_db_path: Path) -> None:
     txn = db.begin_write()
     with txn:
         pass
-    with pytest.raises(redb.TransactionCompleted) as excinfo:
+    with pytest.raises(redb.TransactionCompleted):
         with txn:
             pass
-    # TransactionCompleted < TransactionError < Error in the hierarchy.
-    assert isinstance(excinfo.value, redb.TransactionError)
-    assert isinstance(excinfo.value, redb.Error)
 
 
 def test_nested_with_block_raises(tmp_db_path: Path) -> None:
@@ -77,21 +106,6 @@ def test_nested_with_block_raises(tmp_db_path: Path) -> None:
         with txn:
             with txn:
                 pass
-
-
-@given(commits=st.lists(st.booleans(), min_size=1, max_size=20))
-@settings(max_examples=25, deadline=None)
-def test_sequential_transactions(tmp_path_factory, commits: list) -> None:
-    path = tmp_path_factory.mktemp("redb") / "txn.redb"
-    db = redb.Database.create(str(path))
-    for commit in commits:
-        if commit:
-            with db.begin_write():
-                pass
-        else:
-            with pytest.raises(RuntimeError, match="rollback"):
-                with db.begin_write():
-                    raise RuntimeError("rollback")
 
 
 def test_context_manager_aborts_on_exception(tmp_db_path: Path) -> None:
