@@ -1,6 +1,6 @@
 [project]
 name = "redb"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 dynamic = ["version"]
 classifier = ["Development Status :: 4 - Beta",
     "License :: OSI Approved :: MIT License",
