@@ -1,5 +1,6 @@
 use crate::error::PyErrExt;
-use crate::transaction::PyWriteTransaction;
+use crate::transaction::{PyReadTransaction, PyWriteTransaction};
+use ::redb::ReadableDatabase;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 
@@ -29,6 +30,12 @@ impl PyDatabase {
     fn begin_write(slf: Py<Self>, py: Python<'_>) -> PyResult<PyWriteTransaction> {
         let txn = py.detach(|| slf.get().inner.begin_write()).pyerr()?;
         Ok(PyWriteTransaction::new(slf, txn))
+    }
+
+    /// Begins a read transaction: a snapshot of the data committed so far
+    fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
+        let txn = py.detach(|| slf.get().inner.begin_read()).pyerr()?;
+        Ok(PyReadTransaction::new(slf, txn))
     }
 }
 
