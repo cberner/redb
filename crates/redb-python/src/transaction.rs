@@ -1,95 +1,81 @@
 use crate::database::PyDatabase;
 use crate::error::{PyErrExt, TransactionCompleted};
 use pyo3::prelude::*;
-use pyo3::types::PyAny;
 use std::sync::Mutex;
 
-// Field order is load-bearing: `txn` MUST be dropped before `db`. If the
-// `WriteTransaction` is the last holder of the database reference and the
-// user drops the transaction without entering a `with` block, `Database::drop`
-// runs a finalizing `begin_write()` that blocks on any active writer.
-// Dropping `db` first while `txn` still holds the writer slot would
-// self-deadlock; struct fields drop in declaration order, so listing `txn`
-// first keeps it correct.
-struct ActiveWrite {
+// Field order is the drop order: `txn` must go before `db`, since dropping the last reference
+// to a Database waits for its live write transaction, which would be this one.
+struct Active {
     txn: ::redb::WriteTransaction,
     db: Py<PyDatabase>,
 }
 
-enum State {
-    Pending(ActiveWrite),
-    InWith(ActiveWrite),
-    Finalized,
+fn completed() -> PyErr {
+    TransactionCompleted::new_err("transaction already committed or aborted")
 }
 
-#[pyclass(module = "redb", name = "WriteTransaction")]
+/// Commits or aborts, without the GIL
+fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
+    // `txn` is consumed here, before `db` drops at the end of the scope
+    let Active { txn, db: _db } = active;
+    if commit {
+        py.detach(|| txn.commit()).pyerr()
+    } else {
+        py.detach(|| txn.abort()).pyerr()
+    }
+}
+
+/// A write transaction, used from one thread at a time.
+///
+/// Commit or abort it explicitly, or use it as a context manager: leaving the `with` block
+/// commits, or aborts if an exception is propagating out of it.
+#[pyclass(module = "redb", name = "WriteTransaction", frozen)]
 pub(crate) struct PyWriteTransaction {
-    state: Mutex<State>,
+    // None once committed or aborted
+    state: Mutex<Option<Active>>,
 }
 
 impl PyWriteTransaction {
     pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::WriteTransaction) -> Self {
         Self {
-            state: Mutex::new(State::Pending(ActiveWrite { txn, db })),
+            state: Mutex::new(Some(Active { txn, db })),
         }
+    }
+
+    fn take(&self) -> Option<Active> {
+        self.state.lock().unwrap().take()
     }
 }
 
 #[pymethods]
 impl PyWriteTransaction {
+    /// Writes every change made in the transaction to the database
+    fn commit(&self, py: Python<'_>) -> PyResult<()> {
+        finish(py, self.take().ok_or_else(completed)?, true)
+    }
+
+    /// Discards every change made in the transaction
+    fn abort(&self, py: Python<'_>) -> PyResult<()> {
+        finish(py, self.take().ok_or_else(completed)?, false)
+    }
+
     fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        {
-            let mut state = slf.state.lock().unwrap();
-            match std::mem::replace(&mut *state, State::Finalized) {
-                State::Pending(active) => {
-                    *state = State::InWith(active);
-                }
-                State::InWith(active) => {
-                    *state = State::InWith(active);
-                    return Err(TransactionCompleted::new_err(
-                        "transaction is already in use by a `with` block",
-                    ));
-                }
-                State::Finalized => {
-                    return Err(TransactionCompleted::new_err(
-                        "transaction already committed or aborted",
-                    ));
-                }
-            }
+        if slf.state.lock().unwrap().is_none() {
+            return Err(completed());
         }
         Ok(slf)
     }
 
-    // Auto-finalize on context manager exit: commit on success, abort if an
-    // exception is propagating out of the `with` block. To abort early, raise
-    // an exception inside the block.
-    #[pyo3(signature = (exc_type, exc_value, traceback))]
+    // A no-op after an explicit commit or abort inside the block, like closing a closed file
     fn __exit__(
         &self,
         py: Python<'_>,
         exc_type: &Bound<'_, PyAny>,
-        exc_value: &Bound<'_, PyAny>,
-        traceback: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        let _ = (exc_value, traceback);
-        let active = {
-            let mut state = self.state.lock().unwrap();
-            match std::mem::replace(&mut *state, State::Finalized) {
-                State::InWith(active) => active,
-                other => {
-                    // Python guarantees __exit__ pairs with a successful
-                    // __enter__, so any other state means external tampering;
-                    // restore and no-op rather than acting on a stale handle.
-                    *state = other;
-                    return Ok(false);
-                }
-            }
-        };
-        let ActiveWrite { txn, db: _db } = active;
-        if exc_type.is_none() {
-            py.detach(|| txn.commit()).pyerr()?;
-        } else {
-            py.detach(|| txn.abort()).pyerr()?;
+        if let Some(active) = self.take() {
+            finish(py, active, exc_type.is_none())?;
         }
         Ok(false)
     }

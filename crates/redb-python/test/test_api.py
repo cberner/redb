@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,13 @@ def test_create_on_open_database_raises(tmp_db_path: Path) -> None:
         redb.Database.create(str(tmp_db_path))
     assert "already open" in str(excinfo.value)
     del db
+
+
+def test_open_requires_an_existing_database(tmp_db_path: Path) -> None:
+    with pytest.raises(redb.Io):
+        redb.Database.open(str(tmp_db_path))
+    redb.Database.create(str(tmp_db_path))
+    redb.Database.open(str(tmp_db_path))
 
 
 def test_begin_write_commit(tmp_db_path: Path) -> None:
@@ -97,17 +105,6 @@ def test_reentering_finalized_transaction_raises(tmp_db_path: Path) -> None:
             pass
 
 
-def test_nested_with_block_raises(tmp_db_path: Path) -> None:
-    # Re-entering a transaction that's already inside a `with` block must
-    # raise rather than panic across the FFI boundary.
-    db = redb.Database.create(str(tmp_db_path))
-    txn = db.begin_write()
-    with pytest.raises(redb.TransactionCompleted):
-        with txn:
-            with txn:
-                pass
-
-
 def test_context_manager_aborts_on_exception(tmp_db_path: Path) -> None:
     db = redb.Database.create(str(tmp_db_path))
     txn = db.begin_write()
@@ -118,3 +115,48 @@ def test_context_manager_aborts_on_exception(tmp_db_path: Path) -> None:
     with pytest.raises(redb.TransactionCompleted):
         with txn:
             pass
+
+
+@pytest.mark.parametrize(
+    "finish", [redb.WriteTransaction.commit, redb.WriteTransaction.abort]
+)
+def test_finished_transaction_is_completed(tmp_db_path: Path, finish) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    txn = db.begin_write()
+    finish(txn)
+    with pytest.raises(redb.TransactionCompleted):
+        txn.commit()
+    with pytest.raises(redb.TransactionCompleted):
+        txn.abort()
+    with pytest.raises(redb.TransactionCompleted):
+        with txn:
+            pass
+
+
+def test_exit_after_explicit_finish_is_a_noop(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        txn.commit()
+    with pytest.raises(RuntimeError, match="boom"):
+        with db.begin_write() as txn:
+            txn.abort()
+            raise RuntimeError("boom")
+
+
+def test_blocked_writer_releases_the_gil(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    txn = db.begin_write()
+    done = threading.Event()
+
+    def writer() -> None:
+        with db.begin_write():
+            pass
+        done.set()
+
+    thread = threading.Thread(target=writer)
+    thread.start()
+    # Blocked on our transaction; this would hang if it held the GIL
+    assert not done.wait(0.05)
+    txn.commit()
+    thread.join(10)
+    assert done.is_set()
