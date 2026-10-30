@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import threading
 from pathlib import Path
 
@@ -235,3 +236,50 @@ def test_get_and_insert(tmp_db_path: Path) -> None:
         users = txn.open_table(USERS)
         assert users.get(1) == b"alicia"  # committed
         assert 3 not in users  # aborted
+
+
+def test_read_transaction(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    read = db.begin_read()
+    users = read.open_table(USERS)
+    assert isinstance(users, redb.ReadOnlyTable)
+    assert users.name == "users"
+    assert len(users) == 1
+    assert users.get(1) == users[1] == b"alice"
+    assert 1 in users
+    assert users.get(2) is None
+    assert 2 not in users
+    with pytest.raises(KeyError):
+        users[2]
+    with pytest.raises(AttributeError):
+        users.insert(2, b"bob")
+    with pytest.raises(redb.TableDoesNotExist):
+        read.open_table(redb.TableDefinition("missing", redb.u64, redb.bytes))
+    # A snapshot: a later commit is invisible to it, and visible to a later read
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[2] = b"bob"
+    assert 2 not in users
+    assert 2 in db.begin_read().open_table(USERS)
+    # Closing is refused while a table is alive, and the table stays usable
+    with pytest.raises(redb.ReadTransactionStillInUse):
+        read.close()
+    assert users[1] == b"alice"
+    del users
+    gc.collect()
+    read.close()
+    with pytest.raises(redb.TransactionCompleted):
+        read.open_table(USERS)
+    with db.begin_read() as read:
+        users = read.open_table(USERS)
+    assert users[1] == b"alice"  # the table outlives the block
+    # ... and the Database object, which it keeps open: the file stays locked until it goes
+    del db, read
+    gc.collect()
+    assert users[1] == b"alice"
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(str(tmp_db_path))
+    del users
+    gc.collect()
+    redb.Database.open(str(tmp_db_path))

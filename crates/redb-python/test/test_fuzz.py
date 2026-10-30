@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from hypothesis import settings
 from hypothesis import strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, precondition, rule
+from hypothesis.stateful import Bundle, RuleBasedStateMachine, consumes, precondition, rule
 
 import redb
 
@@ -57,6 +57,7 @@ def writing(machine: RedbMachine) -> bool:
 
 class RedbMachine(RuleBasedStateMachine):
     names = st.sampled_from(sorted(TABLES))
+    reads = Bundle("reads")
 
     def __init__(self) -> None:
         super().__init__()
@@ -70,12 +71,16 @@ class RedbMachine(RuleBasedStateMachine):
         self.handles: dict[str, redb.Table] = {}
         # A handle from a transaction that was committed or aborted
         self.stale: redb.Table | None = None
+        self.open_reads = 0
 
     def teardown(self) -> None:
         self.handles.clear()
         self.stale = self.write = self.db = None
         gc.collect()
-        self.dir.cleanup()
+        try:
+            self.dir.cleanup()
+        except OSError:
+            pass  # a read transaction still in the bundle keeps the file open on Windows
 
     def _table(self, name: str) -> tuple[redb.Table, dict[Any, Any]]:
         """The write transaction's handle on `name`, opened on first use, with its model"""
@@ -151,7 +156,7 @@ class RedbMachine(RuleBasedStateMachine):
         with pytest.raises(redb.TransactionCompleted):
             len(self.stale)
 
-    @precondition(lambda self: self.write is None)
+    @precondition(lambda self: self.write is None and self.open_reads == 0)
     @rule()
     def reopen_database(self) -> None:
         """Closes and reopens the file: what was committed is what is there"""
@@ -161,6 +166,36 @@ class RedbMachine(RuleBasedStateMachine):
         with self.db.begin_write() as txn:
             for name, model in self.committed.items():
                 assert len(txn.open_table(TABLES[name])) == len(model)
+
+    @rule(target=reads)
+    def begin_read(self) -> tuple[redb.ReadTransaction, Model]:
+        """A snapshot of what is committed now, kept for later steps to read"""
+        assert self.db is not None
+        self.open_reads += 1
+        snapshot = {name: dict(table) for name, table in self.committed.items()}
+        return self.db.begin_read(), snapshot
+
+    @rule(read=reads, name=names, data=st.data())
+    def read_get(
+        self, read: tuple[redb.ReadTransaction, Model], name: str, data: st.DataObject
+    ) -> None:
+        txn, snapshot = read
+        if name not in snapshot:
+            with pytest.raises(redb.TableDoesNotExist):
+                txn.open_table(TABLES[name])
+            return
+        table, model = txn.open_table(TABLES[name]), snapshot[name]
+        key = data.draw(KEYS[TABLES[name].key_type])
+        assert table.get(key) == model.get(key)
+        assert len(table) == len(model)
+
+    @rule(read=consumes(reads))
+    def close_read(self, read: tuple[redb.ReadTransaction, Model]) -> None:
+        txn, _ = read
+        txn.close()
+        self.open_reads -= 1
+        with pytest.raises(redb.TransactionCompleted):
+            txn.open_table(TABLES["u64_u64"])
 
     @rule()
     def collect_garbage(self) -> None:

@@ -1,12 +1,14 @@
+use crate::database::PyDatabase;
 use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
 use crate::types::{PyValue, Type, with_types};
 use ::redb::{
-    AccessGuard, Key, ReadableTable, ReadableTableMetadata, Table, TableDefinition, Value,
-    WriteTransaction,
+    AccessGuard, Key, ReadOnlyTable, ReadTransaction, ReadableTable, ReadableTableMetadata, Table,
+    TableDefinition, Value, WriteTransaction,
 };
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
+use std::any::Any;
 
 /// The name and types of a table
 #[pyclass(module = "redb", name = "TableDefinition", frozen)]
@@ -75,6 +77,20 @@ fn py_value<V: PyValue>(py: Python<'_>, found: Option<AccessGuard<'_, V>>) -> Py
     }
 }
 
+// The operations a write transaction's table and a read-only table share, over redb's traits
+
+fn lookup<K: Key + PyValue + 'static, V: PyValue + 'static>(
+    py: Python<'_>,
+    table: &impl ReadableTable<K, V>,
+    key: &K::Owned,
+) -> PyResult<Py<PyAny>> {
+    py_value::<V>(py, table.get(K::lend(key)).pyerr()?)
+}
+
+fn length(table: &impl ReadableTableMetadata) -> PyResult<usize> {
+    Ok(usize::try_from(table.len().pyerr()?).unwrap_or(usize::MAX))
+}
+
 /// A write transaction's handle on one of its tables.
 ///
 /// Each operation opens the redb table, runs, and closes it again, so this is only the name's
@@ -125,9 +141,7 @@ impl PyTable {
 
     fn __len__(&self) -> PyResult<usize> {
         with_types!(self.key, self.value, K, V, {
-            self.with_table::<K, V, _>(|table| {
-                Ok(usize::try_from(table.len().pyerr()?).unwrap_or(usize::MAX))
-            })
+            self.with_table::<K, V, _>(|table| length(table))
         })
     }
 
@@ -135,7 +149,7 @@ impl PyTable {
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         with_types!(self.key, self.value, K, V, {
             let key = K::from_py(key)?;
-            self.with_table::<K, V, _>(|table| py_value::<V>(py, table.get(K::lend(&key)).pyerr()?))
+            self.with_table::<K, V, _>(|table| lookup::<K, V>(py, table, &key))
         })
     }
 
@@ -176,8 +190,81 @@ impl PyTable {
     }
 }
 
+/// A table of a read transaction's snapshot, which it keeps alive
+#[pyclass(module = "redb", name = "ReadOnlyTable", frozen)]
+pub(crate) struct PyReadOnlyTable {
+    name: String,
+    key: Type,
+    value: Type,
+    table: Box<dyn Any + Send + Sync>,
+    // Dropped after `table`, whose snapshot needs the Database's storage open
+    _db: Py<PyDatabase>,
+}
+
+impl PyReadOnlyTable {
+    pub(crate) fn new(
+        txn: &ReadTransaction,
+        db: Py<PyDatabase>,
+        definition: &PyTableDefinition,
+    ) -> PyResult<Self> {
+        let table: Box<dyn Any + Send + Sync> =
+            with_types!(definition.key, definition.value, K, V, {
+                Box::new(
+                    txn.open_table(TableDefinition::<K, V>::new(&definition.name))
+                        .pyerr()?,
+                )
+            });
+        Ok(Self {
+            name: definition.name.clone(),
+            key: definition.key,
+            value: definition.value,
+            table,
+            _db: db,
+        })
+    }
+
+    /// The redb table, as the types its definition dispatched to
+    fn table<K: Key + 'static, V: Value + 'static>(&self) -> &ReadOnlyTable<K, V> {
+        self.table
+            .downcast_ref()
+            .expect("opened with its definition's types")
+    }
+}
+
+#[pymethods]
+impl PyReadOnlyTable {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        with_types!(self.key, self.value, K, V, { length(self.table::<K, V>()) })
+    }
+
+    /// The value at `key`, or None
+    fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        with_types!(self.key, self.value, K, V, {
+            lookup::<K, V>(py, self.table::<K, V>(), &K::from_py(key)?)
+        })
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let value = self.get(py, key)?;
+        if value.is_none(py) {
+            return Err(PyKeyError::new_err(key.clone().unbind()));
+        }
+        Ok(value)
+    }
+
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Ok(!self.get(py, key)?.is_none(py))
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTableDefinition>()?;
     m.add_class::<PyTable>()?;
+    m.add_class::<PyReadOnlyTable>()?;
     Ok(())
 }

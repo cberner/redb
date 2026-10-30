@@ -1,6 +1,6 @@
 use crate::database::PyDatabase;
-use crate::error::{PyErrExt, TransactionCompleted};
-use crate::table::{PyTable, PyTableDefinition};
+use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
+use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition};
 use pyo3::prelude::*;
 use std::sync::Mutex;
 
@@ -100,7 +100,83 @@ impl PyWriteTransaction {
     }
 }
 
+fn closed() -> PyErr {
+    TransactionCompleted::new_err("read transaction already closed")
+}
+
+// Field order is the drop order: `txn` before `db`. Dropping the last reference to a Database
+// closes its storage whatever read transactions are alive, so each of them keeps the Database.
+struct ReadActive {
+    txn: ::redb::ReadTransaction,
+    db: Py<PyDatabase>,
+}
+
+/// A read transaction: a snapshot of the database, which the tables opened from it keep alive
+/// until they are dropped
+#[pyclass(module = "redb", name = "ReadTransaction", frozen)]
+pub(crate) struct PyReadTransaction {
+    // None once closed
+    state: Mutex<Option<ReadActive>>,
+}
+
+impl PyReadTransaction {
+    pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::ReadTransaction) -> Self {
+        Self {
+            state: Mutex::new(Some(ReadActive { txn, db })),
+        }
+    }
+}
+
+#[pymethods]
+impl PyReadTransaction {
+    /// Opens a table of the snapshot
+    fn open_table(
+        &self,
+        py: Python<'_>,
+        definition: &PyTableDefinition,
+    ) -> PyResult<PyReadOnlyTable> {
+        let state = self.state.lock().unwrap();
+        let active = state.as_ref().ok_or_else(closed)?;
+        PyReadOnlyTable::new(&active.txn, active.db.clone_ref(py), definition)
+    }
+
+    /// Ends the transaction now; refused while a table from it is still alive
+    fn close(&self) -> PyResult<()> {
+        let mut state = self.state.lock().unwrap();
+        let ReadActive { txn, db } = state.take().ok_or_else(closed)?;
+        match txn.close() {
+            Ok(()) => Ok(()),
+            Err(::redb::TransactionError::ReadTransactionStillInUse(txn)) => {
+                *state = Some(ReadActive { txn: *txn, db });
+                Err(ReadTransactionStillInUse::new_err(
+                    "a table from this transaction is still alive",
+                ))
+            }
+            Err(err) => Err(err).pyerr(),
+        }
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        if slf.state.lock().unwrap().is_none() {
+            return Err(closed());
+        }
+        Ok(slf)
+    }
+
+    // Releases the transaction; tables still referenced keep the snapshot alive
+    fn __exit__(
+        &self,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> bool {
+        self.state.lock().unwrap().take();
+        false
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyWriteTransaction>()?;
+    m.add_class::<PyReadTransaction>()?;
     Ok(())
 }
