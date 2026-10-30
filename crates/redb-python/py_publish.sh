@@ -1,6 +1,6 @@
 #!/bin/bash
 
-PYTHON3=/opt/python/cp311-cp311/bin/python3
+PYTHON3=/opt/python/cp312-cp312/bin/python3
 
 cp -r /redb-ro /redb
 cd /redb
