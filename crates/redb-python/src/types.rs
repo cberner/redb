@@ -1,6 +1,8 @@
+use ::redb::Value;
+use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyType};
+use pyo3::types::{PyByteArray, PyBytes, PyType};
 
 /// The key and value types a table may declare.
 ///
@@ -39,6 +41,57 @@ impl Type {
             "expected a redb.Type or bytes (int needs an explicit width such as redb.u64), got {}",
             obj.repr()?
         )))
+    }
+}
+
+/// Conversion between a redb value type and Python objects
+pub(crate) trait PyValue: Value {
+    /// The owned form of a value taken from Python, which `lend` gives redb a view of
+    type Owned;
+
+    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Self::Owned>;
+    fn lend(owned: &Self::Owned) -> Self::SelfType<'_>;
+    fn to_py<'py>(py: Python<'py>, value: Self::SelfType<'_>) -> PyResult<Bound<'py, PyAny>>;
+}
+
+impl PyValue for &'static [u8] {
+    type Owned = Vec<u8>;
+
+    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+        if let Ok(bytes) = obj.cast::<PyBytes>() {
+            Ok(bytes.as_bytes().to_vec())
+        } else if let Ok(bytes) = obj.cast::<PyByteArray>() {
+            Ok(bytes.to_vec())
+        } else {
+            Err(PyTypeError::new_err(format!(
+                "expected bytes, got {}",
+                obj.get_type().name()?
+            )))
+        }
+    }
+
+    fn lend(owned: &Vec<u8>) -> &[u8] {
+        owned
+    }
+
+    fn to_py<'py>(py: Python<'py>, value: &[u8]) -> PyResult<Bound<'py, PyAny>> {
+        Ok(PyBytes::new(py, value).into_any())
+    }
+}
+
+impl PyValue for u64 {
+    type Owned = u64;
+
+    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<u64> {
+        obj.extract()
+    }
+
+    fn lend(owned: &u64) -> u64 {
+        *owned
+    }
+
+    fn to_py(py: Python<'_>, value: u64) -> PyResult<Bound<'_, PyAny>> {
+        value.into_bound_py_any(py)
     }
 }
 
