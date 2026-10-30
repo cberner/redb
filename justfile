@@ -45,6 +45,14 @@ install_py: pre_no_sandbox
     maturin develop --manifest-path=./crates/redb-python/Cargo.toml
     python3 -m pip install pytest hypothesis
 
+# Checks the unsafe code of the Python bindings, through the crate's Rust tests, under both of
+# Miri's aliasing models. Miri is a component of its nightly, so pinning the nightly pins Miri
+miri_py:
+    rustup toolchain install nightly-2026-10-30 --profile minimal --component miri
+    cargo +nightly-2026-10-30 miri setup
+    cargo +nightly-2026-10-30 miri test -p redb-python --lib
+    MIRIFLAGS=-Zmiri-tree-borrows cargo +nightly-2026-10-30 miri test -p redb-python --lib
+
 test: pre
     ./scripts/podman-sandbox.sh 'RUST_BACKTRACE=1 cargo test --frozen --all-features'
 

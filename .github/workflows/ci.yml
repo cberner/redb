@@ -212,3 +212,8 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           RUSTFLAGS="" just test_wasi
+
+      - name: Run Miri on the CPython wrapper
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          RUSTFLAGS="" just miri_py

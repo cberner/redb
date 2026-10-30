@@ -14,6 +14,7 @@
     clippy::unreadable_literal
 )]
 
+mod cache;
 mod database;
 mod error;
 mod table;
