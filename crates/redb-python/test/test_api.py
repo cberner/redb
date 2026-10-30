@@ -206,3 +206,32 @@ def test_table_keeps_its_transaction_alive(tmp_db_path: Path) -> None:
     # Dropping the table dropped the transaction, which released the writer slot
     with db.begin_write():
         pass
+
+
+def test_get_and_insert(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        assert users.get(1) is None
+        assert users.insert(1, b"alice") is None
+        assert users.insert(1, b"alicia") == b"alice"
+        users[2] = bytearray(b"bob")
+        assert users[2] == b"bob"
+        assert len(users) == 2
+        assert 1 in users
+        assert 3 not in users
+        with pytest.raises(KeyError):
+            users[3]
+        with pytest.raises(TypeError):
+            users[b"1"] = b"x"
+        with pytest.raises(TypeError):
+            users[3] = "x"
+        with pytest.raises(OverflowError):
+            users[-1] = b"x"
+    txn = db.begin_write()
+    txn.open_table(USERS)[3] = b"carol"
+    txn.abort()
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        assert users.get(1) == b"alicia"  # committed
+        assert 3 not in users  # aborted
