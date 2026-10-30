@@ -24,6 +24,21 @@ def test_errors_form_a_flat_hierarchy() -> None:
         assert cls.__bases__ == (redb.Error,)
 
 
+def test_table_definition() -> None:
+    users = redb.TableDefinition("users", redb.u64, redb.bytes)
+    assert users.name == "users"
+    assert users.key_type is redb.Type.u64
+    assert users.value_type is redb.bytes
+    assert redb.TableDefinition("t", bytes, bytes).key_type is redb.bytes
+    assert repr(users) == 'TableDefinition("users", redb.u64, redb.bytes)'
+    with pytest.raises(TypeError, match="explicit width"):
+        redb.TableDefinition("t", int, bytes)
+    with pytest.raises(TypeError):
+        redb.TableDefinition("t", "u64", bytes)
+    with pytest.raises(ValueError):
+        redb.TableDefinition("", bytes, bytes)
+
+
 def test_create_new_database_creates_file(tmp_db_path: Path) -> None:
     redb.Database.create(str(tmp_db_path))
     assert tmp_db_path.is_file()
