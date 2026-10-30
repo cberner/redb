@@ -42,6 +42,37 @@ impl Type {
     }
 }
 
+/// Runs `$body` with `$T` bound to the redb type that `$t` names at runtime.
+///
+/// redb's API is generic over the key and value types, while a Python table definition only
+/// holds `Type` values. So every operation dispatches on them through a match with an arm per
+/// type, in which the body is compiled once per type; this macro is that match, written once.
+/// Adding a type is adding an arm.
+macro_rules! with_type {
+    ($t:expr, $T:ident, $body:block) => {
+        match $t {
+            $crate::types::Type::Bytes => {
+                type $T = &'static [u8];
+                $body
+            }
+            $crate::types::Type::U64 => {
+                type $T = u64;
+                $body
+            }
+        }
+    };
+}
+
+/// Runs `$body` with `$K` and `$V` bound to the redb types of a table's key and value: one
+/// `with_type!` inside another, so the body is compiled once per pair of types
+macro_rules! with_types {
+    ($k:expr, $v:expr, $K:ident, $V:ident, $body:block) => {
+        $crate::types::with_type!($k, $K, { $crate::types::with_type!($v, $V, $body) })
+    };
+}
+
+pub(crate) use {with_type, with_types};
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Type>()?;
     // Each type is a module attribute too: `redb.u64` is `redb.Type.u64`

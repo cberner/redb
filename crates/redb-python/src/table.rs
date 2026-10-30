@@ -1,4 +1,7 @@
-use crate::types::Type;
+use crate::error::PyErrExt;
+use crate::transaction::PyWriteTransaction;
+use crate::types::{Type, with_types};
+use ::redb::{Key, ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -53,7 +56,73 @@ impl PyTableDefinition {
     }
 }
 
+/// Opens the redb table `name` with the types its definition dispatched to
+fn open<'txn, K: Key + 'static, V: Value + 'static>(
+    txn: &'txn WriteTransaction,
+    name: &str,
+) -> PyResult<Table<'txn, K, V>> {
+    txn.open_table(TableDefinition::new(name)).pyerr()
+}
+
+/// A write transaction's handle on one of its tables.
+///
+/// Each operation opens the redb table, runs, and closes it again, so this is only the name's
+/// binding to the table: dropping it does nothing.
+#[pyclass(module = "redb", name = "Table", frozen)]
+pub(crate) struct PyTable {
+    txn: Py<PyWriteTransaction>,
+    name: String,
+    key: Type,
+    value: Type,
+}
+
+impl PyTable {
+    pub(crate) fn new(
+        txn: Py<PyWriteTransaction>,
+        definition: &PyTableDefinition,
+    ) -> PyResult<Self> {
+        let table = Self {
+            txn,
+            name: definition.name.clone(),
+            key: definition.key,
+            value: definition.value,
+        };
+        // Creates the table if it does not exist, and checks the types of one that does
+        with_types!(table.key, table.value, K, V, {
+            table.with_table::<K, V, _>(|_| Ok(()))?;
+        });
+        Ok(table)
+    }
+
+    /// Opens the redb table for `f`, and closes it after
+    fn with_table<K: Key + 'static, V: Value + 'static, R>(
+        &self,
+        f: impl for<'txn> FnOnce(&mut Table<'txn, K, V>) -> PyResult<R>,
+    ) -> PyResult<R> {
+        self.txn
+            .get()
+            .with_txn(|txn| f(&mut open::<K, V>(txn, &self.name)?))
+    }
+}
+
+#[pymethods]
+impl PyTable {
+    #[getter]
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn __len__(&self) -> PyResult<usize> {
+        with_types!(self.key, self.value, K, V, {
+            self.with_table::<K, V, _>(|table| {
+                Ok(usize::try_from(table.len().pyerr()?).unwrap_or(usize::MAX))
+            })
+        })
+    }
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTableDefinition>()?;
+    m.add_class::<PyTable>()?;
     Ok(())
 }

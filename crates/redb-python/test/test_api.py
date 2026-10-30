@@ -9,6 +9,8 @@ import pytest
 
 import redb
 
+USERS = redb.TableDefinition("users", redb.u64, redb.bytes)
+
 
 def test_errors_form_a_flat_hierarchy() -> None:
     assert redb.Error.__bases__ == (Exception,)
@@ -175,3 +177,32 @@ def test_blocked_writer_releases_the_gil(tmp_db_path: Path) -> None:
     txn.commit()
     thread.join(10)
     assert done.is_set()
+
+
+def test_open_table(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        assert users.name == "users"
+        assert len(users) == 0
+        assert len(txn.open_table(USERS)) == 0
+        # The same name with other types, created earlier in this transaction
+        with pytest.raises(redb.TableTypeMismatch):
+            txn.open_table(redb.TableDefinition("users", redb.bytes, redb.bytes))
+    with pytest.raises(redb.TransactionCompleted):
+        len(users)
+    # ... and once the table exists in the database
+    with db.begin_write() as txn:
+        with pytest.raises(redb.TableTypeMismatch):
+            txn.open_table(redb.TableDefinition("users", redb.bytes, redb.bytes))
+        assert len(txn.open_table(USERS)) == 0
+
+
+def test_table_keeps_its_transaction_alive(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    users = db.begin_write().open_table(USERS)
+    assert len(users) == 0
+    del users
+    # Dropping the table dropped the transaction, which released the writer slot
+    with db.begin_write():
+        pass
