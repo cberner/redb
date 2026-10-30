@@ -107,6 +107,18 @@ class RedbMachine(RuleBasedStateMachine):
         keys = KEYS[TABLES[name].key_type]
         return data.draw(st.none() | keys), data.draw(st.none() | keys)
 
+    def _check_range(
+        self, table: Any, model: dict[Any, Any], data: st.DataObject, reverse: bool
+    ) -> None:
+        """A range with drawn bounds against the model"""
+        start, end = self._bounds(table.name, data)
+        expected = [(k, v) for k, v in sorted(model.items()) if in_range(k, start, end)]
+        if reverse:
+            expected.reverse()
+        assert list(table.range(start, end, reverse=reverse)) == expected
+        if start is None and end is None and not reverse:
+            assert list(table) == expected
+
     def _end_write(self, finished: bool) -> None:
         # A handle keeps its transaction alive, so one is kept only once it has been finished
         self.stale = next(iter(self.handles.values()), None) if finished else None
@@ -166,6 +178,28 @@ class RedbMachine(RuleBasedStateMachine):
         table, model = self._table(name)
         self._check_size(table, model)
 
+    @rule(name=names, data=st.data(), reverse=st.booleans())
+    def range(self, name: str, data: st.DataObject, reverse: bool) -> None:
+        table, model = self._table(name)
+        self._check_range(table, model, data, reverse)
+
+    @rule(name=names, data=st.data())
+    def change_while_iterating(self, name: str, data: st.DataObject) -> None:
+        table, model = self._table(name)
+        entries = iter(table)
+        first = next(entries, None)
+        assert first == (min(model.items()) if model else None)
+        key = data.draw(KEYS[TABLES[name].key_type])
+        value = data.draw(VALUES[TABLES[name].value_type])
+        table[key] = value
+        model[key] = value
+        if first is None:
+            # Exhausted before the change, which stays final, as for a dict
+            assert next(entries, None) is None
+        else:
+            with pytest.raises(RuntimeError):
+                next(entries)
+
     @precondition(lambda self: self.stale is not None)
     @rule()
     def stale_handle(self) -> None:
@@ -217,13 +251,7 @@ class RedbMachine(RuleBasedStateMachine):
         if name not in snapshot:
             return
         table, model = txn.open_table(TABLES[name]), snapshot[name]
-        start, end = self._bounds(name, data)
-        expected = [(k, v) for k, v in sorted(model.items()) if in_range(k, start, end)]
-        if reverse:
-            expected.reverse()
-        assert list(table.range(start, end, reverse=reverse)) == expected
-        if start is None and end is None and not reverse:
-            assert list(table) == expected
+        self._check_range(table, model, data, reverse)
 
     @rule(read=consumes(reads))
     def close_read(self, read: tuple[redb.ReadTransaction, Model]) -> None:

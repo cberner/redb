@@ -1,15 +1,16 @@
 use crate::database::PyDatabase;
 use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
-use crate::types::{PyValue, Type, with_types};
+use crate::types::{PyValue, Type, with_type, with_types};
 use ::redb::{
     AccessGuard, Key, OwnedRange, ReadOnlyTable, ReadTransaction, ReadableTable,
     ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction,
 };
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::any::Any;
 use std::borrow::Borrow;
+use std::collections::VecDeque;
 use std::ops::Bound as Limit;
 
 /// The name and types of a table
@@ -135,17 +136,22 @@ impl<T> Borrow<T> for Lent<T> {
     }
 }
 
-/// A Python range's bounds for redb: `start` inclusive and `end` exclusive, as in `range()`
+/// A Python range's bounds for redb: `start` inclusive and `end` exclusive, as in `range()`,
+/// unless a batch already returned `start`
 type Limits<T> = (Limit<Lent<T>>, Limit<Lent<T>>);
 
 fn limits<'a, K: PyValue>(
     start: Option<&'a K::Owned>,
+    start_inclusive: bool,
     end: Option<&'a K::Owned>,
 ) -> Limits<K::SelfType<'a>> {
-    (
-        start.map_or(Limit::Unbounded, |key| Limit::Included(Lent(K::lend(key)))),
-        end.map_or(Limit::Unbounded, |key| Limit::Excluded(Lent(K::lend(key)))),
-    )
+    let lower = match start {
+        None => Limit::Unbounded,
+        Some(key) if start_inclusive => Limit::Included(Lent(K::lend(key))),
+        Some(key) => Limit::Excluded(Lent(K::lend(key))),
+    };
+    let upper = end.map_or(Limit::Unbounded, |key| Limit::Excluded(Lent(K::lend(key))));
+    (lower, upper)
 }
 
 /// A write transaction's handle on one of its tables.
@@ -243,12 +249,56 @@ impl PyTable {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
-        with_types!(self.key, self.value, K, V, {
+        let replaced = with_types!(self.key, self.value, K, V, {
             let (key, value) = (K::from_py(key)?, V::from_py(value)?);
             self.with_table::<K, V, _>(|table| {
                 py_value::<V>(py, table.insert(K::lend(&key), V::lend(&value)).pyerr()?)
             })
+        })?;
+        self.txn.get().mutated(&self.name);
+        Ok(replaced)
+    }
+
+    /// Iterates the `(key, value)` entries with `start <= key < end` in key order, or in
+    /// reverse; either bound may be None. Changing the table while iterating is an error, as
+    /// it is for a dict.
+    #[pyo3(signature = (start=None, end=None, *, reverse=false))]
+    fn range(
+        slf: Py<Self>,
+        py: Python<'_>,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        reverse: bool,
+    ) -> PyResult<PyRangeIter> {
+        let table = slf.get();
+        // Converts the bounds now, so that a key of the wrong type fails at the call, and
+        // keeps them as keys of the table's type: a bytearray could change between batches
+        let (start, end) = with_type!(table.key, K, {
+            let key = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<Py<PyAny>>> {
+                bound
+                    .map(|key| Ok(K::to_py(py, K::lend(&K::from_py(key)?))?.unbind()))
+                    .transpose()
+            };
+            (key(start)?, key(end)?)
+        });
+        let mutations = table.txn.get().mutation_count(&table.name);
+        Ok(PyRangeIter {
+            source: Source::Live(Cursor {
+                table: slf,
+                mutations,
+                start,
+                start_inclusive: true,
+                end,
+                batch: FIRST_BATCH,
+                buffer: VecDeque::new(),
+                done: false,
+            }),
+            reverse,
         })
+    }
+
+    fn __iter__(slf: Py<Self>, py: Python<'_>) -> PyResult<PyRangeIter> {
+        Self::range(slf, py, None, None, false)
     }
 
     fn __setitem__(
@@ -361,12 +411,14 @@ impl PyReadOnlyTable {
             let end = end.map(K::from_py).transpose()?;
             let range = self
                 .table::<K, V>()
-                .range_owned(limits::<K>(start.as_ref(), end.as_ref()))
+                .range_owned(limits::<K>(start.as_ref(), true, end.as_ref()))
                 .pyerr()?;
             Ok(PyRangeIter {
-                range: Box::new(range),
+                source: Source::Snapshot {
+                    range: Box::new(range),
+                    _db: self.db.clone_ref(py),
+                },
                 reverse,
-                _db: self.db.clone_ref(py),
             })
         })
     }
@@ -404,13 +456,105 @@ where
     }
 }
 
-/// Iterates the entries of a range of a read-only table
+// Batches start small, so a short scan converts little it will not use, and grow for long ones
+const FIRST_BATCH: usize = 16;
+const MAX_BATCH: usize = 256;
+
+/// Where a range over a write transaction's table stands between batches.
+///
+/// The redb table is reopened for each operation, so a range over it cannot be held across
+/// Python calls; each batch queries the table again, from the last key the previous one
+/// returned. The batches all come from one state of the table, because the iterator stops
+/// once the table has changed, as a dict's does.
+struct Cursor {
+    table: Py<PyTable>,
+    // The table's mutation count when the iteration began
+    mutations: u64,
+    start: Option<Py<PyAny>>,
+    start_inclusive: bool,
+    end: Option<Py<PyAny>>,
+    batch: usize,
+    buffer: VecDeque<Pair>,
+    // Whether the iteration has ended, which is when `next` first returns nothing
+    done: bool,
+}
+
+impl Cursor {
+    fn next(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>> {
+        if self.done {
+            return Ok(None); // which later changes to the table do not undo, as for a dict
+        }
+        let table = self.table.get();
+        if table.txn.get().mutation_count(&table.name) != self.mutations {
+            return Err(PyRuntimeError::new_err("table changed during iteration"));
+        }
+        if self.buffer.is_empty() {
+            self.fill(py, reverse)?;
+        }
+        let entry = self.buffer.pop_front();
+        self.done = entry.is_none();
+        Ok(entry)
+    }
+
+    /// Queries the next batch of entries into the buffer
+    fn fill(&mut self, py: Python<'_>, reverse: bool) -> PyResult<()> {
+        let table = self.table.get();
+        with_types!(table.key, table.value, K, V, {
+            let start = self
+                .start
+                .as_ref()
+                .map(|key| K::from_py(key.bind(py)))
+                .transpose()?;
+            let end = self
+                .end
+                .as_ref()
+                .map(|key| K::from_py(key.bind(py)))
+                .transpose()?;
+            table.with_table::<K, V, _>(|redb_table| {
+                let bounds = limits::<K>(start.as_ref(), self.start_inclusive, end.as_ref());
+                let mut entries = redb_table.range(bounds).pyerr()?;
+                for _ in 0..self.batch {
+                    let next = if reverse {
+                        entries.next_back()
+                    } else {
+                        entries.next()
+                    };
+                    let Some(entry) = next else { break };
+                    let (key, value) = entry.pyerr()?;
+                    let key = K::to_py(py, key.value())?.unbind();
+                    let value = V::to_py(py, value.value())?.unbind();
+                    self.buffer.push_back((key.clone_ref(py), value));
+                    if reverse {
+                        self.end = Some(key);
+                    } else {
+                        self.start = Some(key);
+                        self.start_inclusive = false;
+                    }
+                }
+                Ok(())
+            })?;
+        });
+        self.batch = (self.batch * 2).min(MAX_BATCH);
+        Ok(())
+    }
+}
+
+enum Source {
+    /// A read transaction's snapshot, streamed
+    Snapshot {
+        range: Box<dyn Snapshot>,
+        // Dropped after `range`, whose snapshot needs the Database's storage open
+        _db: Py<PyDatabase>,
+    },
+    /// A write transaction's table, queried again per batch; its table keeps the Database
+    Live(Cursor),
+}
+
+/// Iterates the entries of a range of a table
 #[pyclass(module = "redb", name = "RangeIter")]
 pub(crate) struct PyRangeIter {
-    range: Box<dyn Snapshot>,
+    source: Source,
     reverse: bool,
-    // Dropped after `range`, whose snapshot needs the Database's storage open
-    _db: Py<PyDatabase>,
 }
 
 #[pymethods]
@@ -420,7 +564,10 @@ impl PyRangeIter {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Pair>> {
-        self.range.advance(py, self.reverse)
+        match &mut self.source {
+            Source::Snapshot { range, .. } => range.advance(py, self.reverse),
+            Source::Live(cursor) => cursor.next(py, self.reverse),
+        }
     }
 }
 
