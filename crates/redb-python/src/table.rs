@@ -1,7 +1,7 @@
 use crate::database::PyDatabase;
 use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
-use crate::types::{PyValue, Type, with_types};
+use crate::types::{PyValue, Type, with_type, with_types};
 use ::redb::{
     AccessGuard, Key, OwnedRange, ReadOnlyTable, ReadTransaction, ReadableTable,
     ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction,
@@ -135,17 +135,22 @@ impl<T> Borrow<T> for Lent<T> {
     }
 }
 
-/// A Python range's bounds for redb: `start` inclusive and `end` exclusive, as in `range()`
+/// A Python range's bounds for redb: `start` inclusive and `end` exclusive, as in `range()`,
+/// unless a batch already returned `start`
 type Limits<T> = (Limit<Lent<T>>, Limit<Lent<T>>);
 
 fn limits<'a, K: PyValue>(
     start: Option<&'a K::Owned>,
+    start_inclusive: bool,
     end: Option<&'a K::Owned>,
 ) -> Limits<K::SelfType<'a>> {
-    (
-        start.map_or(Limit::Unbounded, |key| Limit::Included(Lent(K::lend(key)))),
-        end.map_or(Limit::Unbounded, |key| Limit::Excluded(Lent(K::lend(key)))),
-    )
+    let lower = match start {
+        None => Limit::Unbounded,
+        Some(key) if start_inclusive => Limit::Included(Lent(K::lend(key))),
+        Some(key) => Limit::Excluded(Lent(K::lend(key))),
+    };
+    let upper = end.map_or(Limit::Unbounded, |key| Limit::Excluded(Lent(K::lend(key))));
+    (lower, upper)
 }
 
 /// A write transaction's handle on one of its tables.
@@ -249,6 +254,42 @@ impl PyTable {
                 py_value::<V>(py, table.insert(K::lend(&key), V::lend(&value)).pyerr()?)
             })
         })
+    }
+
+    /// Iterates the `(key, value)` entries with `start <= key < end` in key order, or in
+    /// reverse; either bound may be None
+    #[pyo3(signature = (start=None, end=None, *, reverse=false))]
+    fn range(
+        slf: Py<Self>,
+        py: Python<'_>,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        reverse: bool,
+    ) -> PyResult<PyRange> {
+        let table = slf.get();
+        // Converted now, so a wrong type fails at the call and a bytearray cannot change later
+        let (start, end) = with_type!(table.key, K, {
+            let key = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<Py<PyAny>>> {
+                bound
+                    .map(|key| Ok(K::to_py(py, K::lend(&K::from_py(key)?))?.unbind()))
+                    .transpose()
+            };
+            (key(start)?, key(end)?)
+        });
+        Ok(PyRange {
+            source: Source::Write(WriteRange {
+                table: slf,
+                start,
+                start_inclusive: true,
+                end,
+                done: false,
+            }),
+            reverse,
+        })
+    }
+
+    fn __iter__(slf: Py<Self>, py: Python<'_>) -> PyResult<PyRange> {
+        Self::range(slf, py, None, None, false)
     }
 
     fn __setitem__(
@@ -355,42 +396,44 @@ impl PyReadOnlyTable {
         start: Option<&Bound<'_, PyAny>>,
         end: Option<&Bound<'_, PyAny>>,
         reverse: bool,
-    ) -> PyResult<PyRangeIter> {
+    ) -> PyResult<PyRange> {
         with_types!(self.key, self.value, K, V, {
             let start = start.map(K::from_py).transpose()?;
             let end = end.map(K::from_py).transpose()?;
             let range = self
                 .table::<K, V>()
-                .range_owned(limits::<K>(start.as_ref(), end.as_ref()))
+                .range_owned(limits::<K>(start.as_ref(), true, end.as_ref()))
                 .pyerr()?;
-            Ok(PyRangeIter {
-                range: Box::new(range),
+            Ok(PyRange {
+                source: Source::Read {
+                    range: Box::new(range),
+                    _db: self.db.clone_ref(py),
+                },
                 reverse,
-                _db: self.db.clone_ref(py),
             })
         })
     }
 
-    fn __iter__(&self, py: Python<'_>) -> PyResult<PyRangeIter> {
+    fn __iter__(&self, py: Python<'_>) -> PyResult<PyRange> {
         self.range(py, None, None, false)
     }
 }
 
-/// A range of a read-only table, streamed from the snapshot it keeps alive
-trait Snapshot: Send + Sync {
-    fn advance(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>>;
+/// A range of a read transaction's table, with redb's key and value types hidden
+trait ReadRange: Send + Sync {
+    fn next(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>>;
 }
 
-impl<K, V> Snapshot for OwnedRange<K, V>
+impl<K, V> ReadRange for OwnedRange<K, V>
 where
     K: Key + PyValue + Send + Sync + 'static,
     V: PyValue + Send + Sync + 'static,
 {
-    fn advance(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>> {
+    fn next(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>> {
         let entry = if reverse {
             self.next_back()
         } else {
-            self.next()
+            Iterator::next(self)
         };
         entry
             .map(|entry| {
@@ -404,23 +447,84 @@ where
     }
 }
 
-/// Iterates the entries of a range of a read-only table
-#[pyclass(module = "redb", name = "RangeIter")]
-pub(crate) struct PyRangeIter {
-    range: Box<dyn Snapshot>,
+/// A range of a write transaction's table, which is reopened and sought again at each call
+struct WriteRange {
+    table: Py<PyTable>,
+    // The bounds still to cover; `start` (or `end`, in reverse) moves past each key returned
+    start: Option<Py<PyAny>>,
+    start_inclusive: bool,
+    end: Option<Py<PyAny>>,
+    done: bool,
+}
+
+impl WriteRange {
+    fn next(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>> {
+        if self.done {
+            return Ok(None); // and stays exhausted, as a dict's iterator does
+        }
+        let table = self.table.get();
+        let entry = with_types!(table.key, table.value, K, V, {
+            let start = self
+                .start
+                .as_ref()
+                .map(|key| K::from_py(key.bind(py)))
+                .transpose()?;
+            let end = self
+                .end
+                .as_ref()
+                .map(|key| K::from_py(key.bind(py)))
+                .transpose()?;
+            table.with_table::<K, V, _>(|redb_table| {
+                let bounds = limits::<K>(start.as_ref(), self.start_inclusive, end.as_ref());
+                let mut entries = redb_table.range(bounds).pyerr()?;
+                let entry = if reverse {
+                    entries.next_back()
+                } else {
+                    entries.next()
+                };
+                py_entry::<K, V>(py, entry.transpose().pyerr()?)
+            })
+        })?;
+        match &entry {
+            Some((key, _)) if reverse => self.end = Some(key.clone_ref(py)),
+            Some((key, _)) => {
+                self.start = Some(key.clone_ref(py));
+                self.start_inclusive = false;
+            }
+            None => self.done = true,
+        }
+        Ok(entry)
+    }
+}
+
+/// Where the entries come from; only a read-only table has an owned range in redb
+enum Source {
+    Read {
+        range: Box<dyn ReadRange>,
+        // Dropped after `range`, whose snapshot needs the Database's storage open
+        _db: Py<PyDatabase>,
+    },
+    Write(WriteRange),
+}
+
+/// Iterates the entries of a range of a table
+#[pyclass(module = "redb", name = "Range")]
+pub(crate) struct PyRange {
+    source: Source,
     reverse: bool,
-    // Dropped after `range`, whose snapshot needs the Database's storage open
-    _db: Py<PyDatabase>,
 }
 
 #[pymethods]
-impl PyRangeIter {
+impl PyRange {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Pair>> {
-        self.range.advance(py, self.reverse)
+        match &mut self.source {
+            Source::Read { range, .. } => range.next(py, self.reverse),
+            Source::Write(range) => range.next(py, self.reverse),
+        }
     }
 }
 
@@ -428,6 +532,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTableDefinition>()?;
     m.add_class::<PyTable>()?;
     m.add_class::<PyReadOnlyTable>()?;
-    m.add_class::<PyRangeIter>()?;
+    m.add_class::<PyRange>()?;
     Ok(())
 }

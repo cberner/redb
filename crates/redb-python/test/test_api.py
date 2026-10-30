@@ -324,3 +324,29 @@ def test_ranges(tmp_db_path: Path) -> None:
     del entries
     gc.collect()
     redb.Database.open(str(tmp_db_path))
+
+
+def test_live_ranges(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        assert list(users) == []
+        for key in (3, 1, 2):
+            users[key] = str(key).encode()
+        assert list(users) == [(1, b"1"), (2, b"2"), (3, b"3")]
+        assert list(users.range(2, reverse=True)) == [(3, b"3"), (2, b"2")]
+        assert list(users.range(None, 3)) == [(1, b"1"), (2, b"2")]
+        with pytest.raises(TypeError):
+            users.range(b"1")
+        # A longer scan, seeking the table again for each entry
+        for key in range(4, 100):
+            users[key] = b"x"
+        assert [key for key, _ in users] == list(range(1, 100))
+        assert [key for key, _ in users.range(10, 50, reverse=True)] == list(range(49, 9, -1))
+    # Finishing the transaction ends an iteration too
+    txn = db.begin_write()
+    entries = iter(txn.open_table(USERS))
+    assert next(entries) == (1, b"1")
+    txn.abort()
+    with pytest.raises(redb.TransactionCompleted):
+        next(entries)
