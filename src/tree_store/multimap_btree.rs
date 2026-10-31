@@ -1,4 +1,3 @@
-use crate::Result;
 use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::{
@@ -10,6 +9,8 @@ use crate::tree_store::{
     PageNumberHashMap, PageResolver, PageTracker, RawBtree,
 };
 use crate::types::{Key, TypeName, Value};
+use crate::{Result, StorageError};
+use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -61,7 +62,7 @@ fn multimap_stats_helper(
                 let entry = accessor.entry(i).unwrap();
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
-                match collection.collection_type() {
+                match collection.collection_type()? {
                     Inline => {
                         let inline_accessor = LeafAccessor::new(
                             collection.as_inline(),
@@ -85,14 +86,14 @@ fn multimap_stats_helper(
                 let entry = accessor.entry(i).unwrap();
                 let collection: &UntypedDynamicCollection =
                     UntypedDynamicCollection::new(entry.value());
-                match collection.collection_type() {
+                match collection.collection_type()? {
                     Inline => {
                         // data is inline, so it was already counted above
                     }
                     SubtreeV2 => {
                         // this is a sub-tree, so traverse it
                         let stats = btree_stats(
-                            Some(collection.as_subtree().root),
+                            Some(collection.as_subtree()?.root),
                             mem,
                             fixed_value_size,
                             <() as Value>::fixed_width(),
@@ -176,7 +177,7 @@ pub(super) fn verify_tree_and_subtree_checksums(
             AllPageNumbersBtreeIter::new(header.root, key_size, mem.clone(), hint);
         for table_page in table_pages_iter {
             let page = mem.get_page(table_page?, hint)?;
-            let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
+            let subtree_roots = parse_subtree_roots(&page, key_size, value_size)?;
             for header in subtree_roots {
                 if !RawBtree::new(
                     Some(header),
@@ -229,8 +230,8 @@ pub(super) fn relocate_subtrees(
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).unwrap();
                 let collection = UntypedDynamicCollection::from_bytes(entry.value());
-                if matches!(collection.collection_type(), SubtreeV2) {
-                    let sub_root = collection.as_subtree();
+                if matches!(collection.collection_type()?, SubtreeV2) {
+                    let sub_root = collection.as_subtree()?;
                     let mut tree = UntypedBtreeMut::new(
                         Some(sub_root),
                         page_allocator.clone(),
@@ -301,8 +302,8 @@ pub(super) fn finalize_tree_and_subtree_checksums(
         for i in 0..accessor.num_pairs() {
             let entry = accessor.entry(i).unwrap();
             let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
-            if matches!(collection.collection_type(), SubtreeV2) {
-                let sub_root = collection.as_subtree();
+            if matches!(collection.collection_type()?, SubtreeV2) {
+                let sub_root = collection.as_subtree()?;
                 if page_allocator.uncommitted(sub_root.root) {
                     let mut subtree = UntypedBtreeMut::new(
                         Some(sub_root),
@@ -334,11 +335,9 @@ fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> Vec<BtreeHeader> {
+) -> Result<Vec<BtreeHeader>> {
     match page.memory()[0] {
-        BRANCH => {
-            vec![]
-        }
+        BRANCH => Ok(vec![]),
         LEAF => {
             let mut result = vec![];
             let accessor = LeafAccessor::new(
@@ -349,12 +348,12 @@ fn parse_subtree_roots<T: Page>(
             for i in 0..accessor.num_pairs() {
                 let entry = accessor.entry(i).unwrap();
                 let collection = <&DynamicCollection<()>>::from_bytes(entry.value());
-                if matches!(collection.collection_type(), SubtreeV2) {
-                    result.push(collection.as_subtree());
+                if matches!(collection.collection_type()?, SubtreeV2) {
+                    result.push(collection.as_subtree()?);
                 }
             }
 
-            result
+            Ok(result)
         }
         _ => unreachable!(),
     }
@@ -402,7 +401,7 @@ impl UntypedMultiBtree {
             let page = self.mem.get_page(path.page_number(), self.hint)?;
             match page.memory()[0] {
                 LEAF => {
-                    for header in parse_subtree_roots(&page, self.key_width, self.value_width) {
+                    for header in parse_subtree_roots(&page, self.key_width, self.value_width)? {
                         let subtree = UntypedBtree::new(
                             Some(header),
                             self.mem.clone(),
@@ -435,15 +434,45 @@ pub(crate) enum DynamicCollectionType {
     SubtreeV2,
 }
 
-impl From<u8> for DynamicCollectionType {
-    fn from(value: u8) -> Self {
+impl DynamicCollectionType {
+    fn from_byte(value: u8) -> Result<Self> {
         match value {
-            LEAF => Inline,
+            LEAF => Ok(Inline),
             // 2 => Subtree,
-            3 => SubtreeV2,
-            _ => unreachable!(),
+            3 => Ok(SubtreeV2),
+            value => Err(StorageError::Corrupted(format!(
+                "Invalid dynamic collection type byte {value}"
+            ))),
         }
     }
+}
+
+fn collection_type_from_data(data: &[u8]) -> Result<DynamicCollectionType> {
+    match data.first() {
+        Some(tag) => DynamicCollectionType::from_byte(*tag),
+        None => Err(StorageError::Corrupted(
+            "Dynamic collection is missing its type byte".to_string(),
+        )),
+    }
+}
+
+fn subtree_header(data: &[u8]) -> Result<BtreeHeader> {
+    match collection_type_from_data(data)? {
+        SubtreeV2 => {}
+        Inline => {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid dynamic collection type byte {LEAF}"
+            )));
+        }
+    }
+    let header_len = BtreeHeader::serialized_size();
+    let header = data.get(1..(1 + header_len)).ok_or_else(|| {
+        StorageError::Corrupted(format!(
+            "Dynamic collection subtree header is truncated ({} bytes)",
+            data.len()
+        ))
+    })?;
+    Ok(BtreeHeader::from_le_bytes(header.try_into().unwrap()))
 }
 
 #[allow(clippy::from_over_into)]
@@ -524,12 +553,12 @@ impl<V: Key> DynamicCollection<V> {
         unsafe { &*(core::ptr::from_ref::<[u8]>(data) as *const DynamicCollection<V>) }
     }
 
-    pub(crate) fn collection_type(&self) -> DynamicCollectionType {
-        DynamicCollectionType::from(self.data[0])
+    pub(crate) fn collection_type(&self) -> Result<DynamicCollectionType> {
+        collection_type_from_data(&self.data)
     }
 
     pub(crate) fn as_inline(&self) -> &[u8] {
-        debug_assert!(matches!(self.collection_type(), Inline));
+        debug_assert_eq!(self.data.first().copied(), Some(LEAF));
         &self.data[1..]
     }
 
@@ -541,17 +570,12 @@ impl<V: Key> DynamicCollection<V> {
         (collection_range.start + 1)..collection_range.end
     }
 
-    pub(crate) fn as_subtree(&self) -> BtreeHeader {
-        assert!(matches!(self.collection_type(), SubtreeV2));
-        BtreeHeader::from_le_bytes(
-            self.data[1..=BtreeHeader::serialized_size()]
-                .try_into()
-                .unwrap(),
-        )
+    pub(crate) fn as_subtree(&self) -> Result<BtreeHeader> {
+        subtree_header(&self.data)
     }
 
-    pub(crate) fn get_num_values(&self) -> u64 {
-        match self.collection_type() {
+    pub(crate) fn get_num_values(&self) -> Result<u64> {
+        Ok(match self.collection_type()? {
             Inline => {
                 let leaf_data = self.as_inline();
                 let accessor =
@@ -566,7 +590,7 @@ impl<V: Key> DynamicCollection<V> {
                         .unwrap(),
                 )
             }
-        }
+        })
     }
 
     pub(crate) fn make_inline_data(data: &[u8]) -> Vec<u8> {
@@ -611,21 +635,16 @@ impl UntypedDynamicCollection {
         Self::new(data)
     }
 
-    fn collection_type(&self) -> DynamicCollectionType {
-        DynamicCollectionType::from(self.data[0])
+    fn collection_type(&self) -> Result<DynamicCollectionType> {
+        collection_type_from_data(&self.data)
     }
 
     fn as_inline(&self) -> &[u8] {
-        debug_assert!(matches!(self.collection_type(), Inline));
+        debug_assert_eq!(self.data.first().copied(), Some(LEAF));
         &self.data[1..]
     }
 
-    fn as_subtree(&self) -> BtreeHeader {
-        assert!(matches!(self.collection_type(), SubtreeV2));
-        BtreeHeader::from_le_bytes(
-            self.data[1..=BtreeHeader::serialized_size()]
-                .try_into()
-                .unwrap(),
-        )
+    fn as_subtree(&self) -> Result<BtreeHeader> {
+        subtree_header(&self.data)
     }
 }
