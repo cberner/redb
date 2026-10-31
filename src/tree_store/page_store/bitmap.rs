@@ -1,4 +1,6 @@
 use crate::tree_store::page_store::xxh3_checksum;
+use crate::{Result, StorageError};
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -92,7 +94,7 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self> {
         let height = u32::from_le_bytes(
             data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
                 .try_into()
@@ -109,12 +111,12 @@ impl BtreeBitmap {
                     .try_into()
                     .unwrap(),
             ) as usize;
-            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end]));
+            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self { heights }
+        Ok(Self { heights })
     }
 
     // Initializes a new allocator, with no ids free
@@ -278,8 +280,18 @@ impl U64GroupedBitmap {
         result
     }
 
-    pub fn from_bytes(serialized: &[u8]) -> Self {
-        assert_eq!(0, (serialized.len() - size_of::<u32>()) % size_of::<u64>());
+    pub fn from_bytes(serialized: &[u8]) -> Result<Self> {
+        if serialized.len() < size_of::<u32>()
+            || !(serialized.len() - size_of::<u32>()).is_multiple_of(size_of::<u64>())
+        {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid serialized bitmap length {}: expected a {}-byte header followed by \
+                 {}-byte words",
+                serialized.len(),
+                size_of::<u32>(),
+                size_of::<u64>(),
+            )));
+        }
         let len = u32::from_le_bytes(serialized[..size_of::<u32>()].try_into().unwrap());
         let words = (serialized.len() - size_of::<u32>()) / size_of::<u64>();
         let mut data = Vec::with_capacity(words);
@@ -293,7 +305,7 @@ impl U64GroupedBitmap {
             data.push(value);
         }
 
-        Self { len, data }
+        Ok(Self { len, data })
     }
 
     fn data_index_of(bit: u32) -> (usize, usize) {
