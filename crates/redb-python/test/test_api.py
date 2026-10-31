@@ -374,3 +374,30 @@ def test_changes_end_iteration(tmp_db_path: Path) -> None:
         entries = iter(users)
         others[1] = b"x"
         assert next(entries) == (1, b"x")
+
+
+def test_removal(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        for key in range(1, 7):
+            users[key] = str(key).encode()
+        assert users.remove(1) == b"1"
+        assert users.remove(1) is None
+        del users[2]
+        with pytest.raises(KeyError):
+            del users[2]
+        assert users.pop_first() == (3, b"3")
+        assert users.pop_last() == (6, b"6")
+        assert list(users) == [(4, b"4"), (5, b"5")]
+        # Removing ends an iteration, like inserting
+        entries = iter(users)
+        assert users.pop_first() == (4, b"4")
+        with pytest.raises(RuntimeError, match="changed during iteration"):
+            next(entries)
+        assert users.pop_last() == (5, b"5")
+        assert users.pop_first() is None
+        assert users.pop_last() is None
+        assert len(users) == 0
+        with pytest.raises(TypeError):
+            users.remove(b"1")

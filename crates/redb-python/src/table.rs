@@ -269,6 +269,30 @@ impl PyTable {
         })
     }
 
+    /// Removes `key`; returns the value it had, or None
+    fn remove(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        with_types!(self.key, self.value, K, V, {
+            let key = K::from_py(key)?;
+            self.with_table_mut::<K, V, _>(|table| {
+                py_value::<V>(py, table.remove(K::lend(&key)).pyerr()?)
+            })
+        })
+    }
+
+    /// Removes and returns the entry with the smallest key, or None if the table is empty
+    fn pop_first(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            self.with_table_mut::<K, V, _>(|table| py_entry::<K, V>(py, table.pop_first().pyerr()?))
+        })
+    }
+
+    /// Removes and returns the entry with the largest key, or None if the table is empty
+    fn pop_last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            self.with_table_mut::<K, V, _>(|table| py_entry::<K, V>(py, table.pop_last().pyerr()?))
+        })
+    }
+
     /// Iterates the `(key, value)` entries with `start <= key < end` in key order, or in
     /// reverse; either bound may be None. Changing the table while iterating is an error, as
     /// it is for a dict.
@@ -315,6 +339,13 @@ impl PyTable {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         self.insert(py, key, value).map(drop)
+    }
+
+    fn __delitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.remove(py, key)?.is_none(py) {
+            return Err(PyKeyError::new_err(key.clone().unbind()));
+        }
+        Ok(())
     }
 }
 
