@@ -1,3 +1,4 @@
+use crate::Result;
 use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::BtreeBitmap;
 #[cfg(test)]
@@ -115,7 +116,7 @@ impl BuddyAllocator {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self> {
         let max_order = data[MAX_ORDER_OFFSET];
         let num_pages = u32::from_le_bytes(
             data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
@@ -133,16 +134,16 @@ impl BuddyAllocator {
                     .try_into()
                     .unwrap(),
             ) as usize;
-            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end]));
+            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end])?);
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self {
+        Ok(Self {
             free,
             len: num_pages,
             max_order,
-        }
+        })
     }
 
     #[inline]
