@@ -80,6 +80,18 @@ pub enum StorageError {
     LockPoisoned(&'static panic::Location<'static>),
 }
 
+impl StorageError {
+    // Corruption that redb detected in the file. Release builds return the error so the caller can
+    // report it. Debug builds panic instead, so a test or fuzzer run gets a backtrace to the site
+    // that detected it.
+    #[cold]
+    #[track_caller]
+    pub(crate) fn corrupted(message: &str) -> Self {
+        debug_assert!(false, "{message}");
+        Self::Corrupted(message.to_string())
+    }
+}
+
 impl<T> From<PoisonError<T>> for StorageError {
     fn from(_: PoisonError<T>) -> StorageError {
         StorageError::LockPoisoned(panic::Location::caller())

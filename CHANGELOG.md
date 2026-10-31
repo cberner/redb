@@ -72,6 +72,8 @@
   transaction.
 * Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a
   `write_misses()` near `u64::MAX` in release builds when called while another thread is writing.
+* Repair and `check_integrity()` report a page with an invalid type byte as `StorageError::Corrupted`
+  instead of panicking.
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
