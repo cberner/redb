@@ -1,9 +1,10 @@
 use crate::database::PyDatabase;
 use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
 use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, TryLockError};
 
 // Field order is the drop order: `txn` must go before `db`, since dropping the last reference
 // to a Database waits for its live write transaction, which would be this one.
@@ -51,8 +52,21 @@ impl PyWriteTransaction {
         }
     }
 
-    fn take(&self) -> Option<Active> {
-        self.state.lock().unwrap().take()
+    /// The state, held for the length of one operation. An operation that finds it held is
+    /// running inside another: a `retain` or `extract_if` predicate using the table it filters,
+    /// or another thread's call while such a predicate runs. Waiting would deadlock, since the
+    /// holder needs the GIL back to finish, so it fails instead.
+    fn lock(&self) -> PyResult<MutexGuard<'_, Option<Active>>> {
+        self.state.try_lock().map_err(|err| match err {
+            TryLockError::WouldBlock => PyRuntimeError::new_err(
+                "transaction in use by another operation (a predicate cannot use its own table)",
+            ),
+            TryLockError::Poisoned(err) => panic!("{err}"),
+        })
+    }
+
+    fn take(&self) -> PyResult<Option<Active>> {
+        Ok(self.lock()?.take())
     }
 
     pub(crate) fn mutated(&self, table: &str) {
@@ -78,7 +92,7 @@ impl PyWriteTransaction {
         &self,
         f: impl FnOnce(&::redb::WriteTransaction) -> PyResult<R>,
     ) -> PyResult<R> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock()?;
         let active = state.as_ref().ok_or_else(completed)?;
         f(&active.txn)
     }
@@ -93,16 +107,16 @@ impl PyWriteTransaction {
 
     /// Writes every change made in the transaction to the database
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
-        finish(py, self.take().ok_or_else(completed)?, true)
+        finish(py, self.take()?.ok_or_else(completed)?, true)
     }
 
     /// Discards every change made in the transaction
     fn abort(&self, py: Python<'_>) -> PyResult<()> {
-        finish(py, self.take().ok_or_else(completed)?, false)
+        finish(py, self.take()?.ok_or_else(completed)?, false)
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        if slf.state.lock().unwrap().is_none() {
+        if slf.lock()?.is_none() {
             return Err(completed());
         }
         Ok(slf)
@@ -116,7 +130,7 @@ impl PyWriteTransaction {
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        if let Some(active) = self.take() {
+        if let Some(active) = self.take()? {
             finish(py, active, exc_type.is_none())?;
         }
         Ok(false)

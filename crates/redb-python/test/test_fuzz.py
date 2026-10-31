@@ -222,6 +222,22 @@ class RedbMachine(RuleBasedStateMachine):
         if expected is not None:
             del model[expected[0]]
 
+    @rule(name=names, data=st.data())
+    def retain(self, name: str, data: st.DataObject) -> None:
+        """Drops a drawn set of keys through the predicate, which sees every entry"""
+        table, model = self._table(name)
+        doomed = set(data.draw(st.lists(KEYS[TABLES[name].key_type], max_size=4)))
+        seen = []
+
+        def predicate(key: Any, value: Any) -> bool:
+            seen.append((key, value))
+            return key not in doomed
+
+        table.retain(predicate)
+        assert sorted(seen) == sorted(model.items())
+        for key in doomed:
+            model.pop(key, None)
+
     @precondition(lambda self: self.stale is not None)
     @rule()
     def stale_handle(self) -> None:

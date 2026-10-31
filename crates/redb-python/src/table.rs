@@ -153,6 +153,51 @@ fn limits<'a, K: PyValue>(
     (lower, upper)
 }
 
+/// A Python predicate for redb's `retain`, which cannot stop at a Python exception: once the
+/// predicate has raised, it is not called again, every later entry is kept, and the exception
+/// is raised when redb returns.
+struct Predicate<'py> {
+    callable: &'py Bound<'py, PyAny>,
+    failure: Option<PyErr>,
+}
+
+impl<'py> Predicate<'py> {
+    fn new(callable: &'py Bound<'py, PyAny>) -> Self {
+        Self {
+            callable,
+            failure: None,
+        }
+    }
+
+    fn test<K: PyValue, V: PyValue>(
+        &mut self,
+        key: K::SelfType<'_>,
+        value: V::SelfType<'_>,
+    ) -> bool {
+        if self.failure.is_some() {
+            return true;
+        }
+        let py = self.callable.py();
+        let verdict = (|| {
+            self.callable
+                .call1((K::to_py(py, key)?, V::to_py(py, value)?))?
+                .is_truthy()
+        })();
+        verdict.unwrap_or_else(|err| {
+            self.failure = Some(err);
+            true
+        })
+    }
+
+    /// The exception the predicate raised, if it did, else `result`
+    fn finish<R>(self, result: PyResult<R>) -> PyResult<R> {
+        match self.failure {
+            Some(err) => Err(err),
+            None => result,
+        }
+    }
+}
+
 /// A write transaction's handle on one of its tables.
 ///
 /// Each operation opens the redb table, runs, and closes it again, so this is only the name's
@@ -290,6 +335,18 @@ impl PyTable {
     fn pop_last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
         with_types!(self.key, self.value, K, V, {
             self.with_table_mut::<K, V, _>(|table| py_entry::<K, V>(py, table.pop_last().pyerr()?))
+        })
+    }
+
+    /// Removes the entries for which `predicate(key, value)` is false. If the predicate raises,
+    /// the entries it had rejected are gone, the rest stay, and the exception propagates.
+    fn retain(&self, predicate: &Bound<'_, PyAny>) -> PyResult<()> {
+        let mut predicate = Predicate::new(predicate);
+        with_types!(self.key, self.value, K, V, {
+            self.with_table_mut::<K, V, _>(|table| {
+                let result = table.retain(|key, value| predicate.test::<K, V>(key, value));
+                predicate.finish(result.pyerr())
+            })
         })
     }
 
