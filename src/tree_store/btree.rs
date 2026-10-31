@@ -2,7 +2,7 @@ use crate::db::TransactionGuard;
 use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
     AccessGuardMut, BRANCH, BranchAccessor, BranchMutator, BtreeHeader, Checksum, DEFERRED, LEAF,
-    LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, branch_checksum, leaf_checksum,
+    LeafAccessor, LeafPageMut, MAX_BTREE_DEPTH, PageType, branch_checksum, leaf_checksum,
 };
 use crate::tree_store::btree_cursor::{BtreeCursor, BtreeCursorMut, CursorMut, Position};
 use crate::tree_store::btree_iters::{bounds_are_empty, encode_bounds};
@@ -121,11 +121,11 @@ impl UntypedBtree {
         visitor(&path)?;
         let page = self.mem.get_page(path.page_number(), self.hint)?;
 
-        match page.memory()[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 // No-op
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
@@ -138,7 +138,6 @@ impl UntypedBtree {
                     self.visit_pages_helper(child_path, visitor)?;
                 }
             }
-            _ => unreachable!(),
         }
 
         Ok(())

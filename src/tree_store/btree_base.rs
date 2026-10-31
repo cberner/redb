@@ -18,6 +18,28 @@ use core::ops::Range;
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
 
+// The page type byte as read from disk. Traversals that may run on pages whose checksum has not
+// been verified decode it with this, so a corrupt byte is reported rather than hit as unreachable.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum PageType {
+    Leaf,
+    Branch,
+}
+
+impl PageType {
+    pub(crate) fn from_page(page: &impl Page) -> Result<Self> {
+        let page_type = page.memory()[0];
+        match page_type {
+            LEAF => Ok(Self::Leaf),
+            BRANCH => Ok(Self::Branch),
+            _ => Err(StorageError::corrupted(&format!(
+                "Invalid page type byte {page_type} for page {:?}",
+                page.get_page_number()
+            ))),
+        }
+    }
+}
+
 // Descending a btree recurses once per level, so a corrupted file whose branch pages form a cycle,
 // or a crafted chain of them, overflows the stack -- which aborts rather than unwinding. No real
 // tree comes close to this depth: the page format addresses 4PiB, and branches hold enough children
