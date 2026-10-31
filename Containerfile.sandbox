@@ -1,0 +1,33 @@
+ARG RUST_VERSION
+FROM docker.io/library/rust:${RUST_VERSION}-bookworm
+
+ARG RUST_VERSION
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add clippy rustfmt \
+    && cargo install --locked --version 1.36.0 just \
+    && cargo install --locked --version 0.20.2 cargo-deny \
+    && rm -rf /usr/local/cargo/git /usr/local/cargo/registry
+
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
+
+WORKDIR /workspace
+
+COPY . /workspace
+
+# These commands resolve and copy dependency sources. They do not compile or
+# execute project dependency code.
+RUN CARGO_HOME=/tmp/cargo HOME=/tmp/home cargo generate-lockfile \
+    && if ! CARGO_HOME=/tmp/cargo HOME=/tmp/home \
+        cargo vendor --locked --versioned-dirs /vendor \
+        > /tmp/vendor-config.toml 2> /tmp/vendor.log; then \
+        cat /tmp/vendor.log >&2; exit 1; \
+    fi \
+    && cp /tmp/vendor-config.toml .cargo/config.toml \
+    && printf '\n[net]\noffline = true\n' >> .cargo/config.toml \
+    && rm -rf /tmp/cargo /tmp/home /tmp/vendor-config.toml /tmp/vendor.log

@@ -1,0 +1,77 @@
+[package]
+name = "redb"
+description = "Rust Embedded DataBase"
+readme = "README.md"
+version = "4.4.0"
+exclude = ["fuzz/"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[workspace]
+members = [".", "crates/redb-bench", "crates/redb-bench-compare", "crates/redb-derive", "crates/redb-derive-rename-test", "crates/redb-python"]
+default-members = [".", "crates/redb-derive", "crates/redb-derive-rename-test", "crates/redb-python"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+homepage = "https://www.redb.org"
+repository = "https://github.com/cberner/redb"
+authors = ["Christopher Berner <me@cberner.com>"]
+
+[dependencies]
+log = { version = "0.4.17", optional = true }
+chrono_v0_4 = { package = "chrono", version= "0.4.41", optional = true }
+uuid = { version= "1.17.0", optional = true }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+libc = "0.2.174"
+
+# Byte-range file locks for the multi-process locking protocol; std exposes only whole-file locks
+[target.'cfg(any(target_os = "linux", target_vendor = "apple"))'.dependencies]
+libc = "0.2.174"
+
+# Common test/bench dependencies
+[dev-dependencies]
+rand = "0.10.1"
+tempfile = "3.5.0"
+# for backwards compatibility testing - pin at 2.6.0
+redb2_6 = { version = "=2.6.0", package = "redb" }
+uuid = { version= "1.17.0", features = ["v4"] }
+redb-derive = { path = "./crates/redb-derive" }
+
+[features]
+default = ["std"]
+# Enables linking against the Rust standard library. Turning it off requires "experimental-api-5",
+# and builds redb as a no_std crate; alloc is still required. Without "experimental-api-5" it is a
+# no-op, so that dependents who already set default-features = false keep the std build
+std = []
+# Enables log messages
+logging = ["dep:log"]
+# Enable cache hit metrics
+cache_metrics = []
+# Unstable additions and changes to the public API, planned for redb 5. May change incompatibly, or
+# be removed, in any release
+experimental-api-5 = []
+# Unstable niches for built-in types, planned for redb 5, and `Legacy<T>`, which opens the tables
+# of `Option<T>` written before `T` declared one. Requires "experimental-api-5". May change
+# incompatibly, or be removed, in any release
+experimental-niches = ["experimental-api-5"]
+
+[profile.bench]
+debug = true
+
+# RocksDB, a dev-dependency of the comparison benchmarks, carries more debug info than everything
+# else in a debug build put together, and nothing here steps through it. Leaving it out keeps the
+# build small enough for CI to cache.
+[profile.dev.package.librocksdb-sys]
+debug = false
+
+[lints.clippy]
+big_endian_bytes = "deny"
+dbg_macro = "deny"
+host_endian_bytes = "deny"

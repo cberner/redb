@@ -1,0 +1,20 @@
+use redb::{Database, Error, ReadableDatabase, TableDefinition};
+
+const TABLE: TableDefinition<u64, u64> = TableDefinition::new("my_data");
+
+#[allow(clippy::result_large_err)]
+fn main() -> Result<(), Error> {
+    let db = Database::create("int_keys.redb")?;
+    let write_txn = db.begin_write()?;
+    {
+        let mut table = write_txn.open_table(TABLE)?;
+        table.insert(0, 0)?;
+    }
+    write_txn.commit()?;
+
+    let read_txn = db.begin_read()?;
+    let table = read_txn.open_table(TABLE)?;
+    assert_eq!(table.get_owned(0)?.unwrap().value(), 0);
+
+    Ok(())
+}

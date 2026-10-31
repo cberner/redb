@@ -1,0 +1,15 @@
+[package]
+name = "redb-derive-rename-test"
+description = "Tests that redb-derive works when the redb dependency is renamed"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dev-dependencies]
+renamed_redb = { package = "redb", path = "../.." }
+redb-derive = { path = "../redb-derive" }

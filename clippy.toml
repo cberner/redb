@@ -1,0 +1,3 @@
+disallowed-methods = [
+    "usize::to_le_bytes",
+]

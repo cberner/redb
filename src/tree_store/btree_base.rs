@@ -1,0 +1,2540 @@
+use crate::tree_store::page_store::{
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageImpl, PageMut, xxh3_checksum,
+};
+use crate::tree_store::{PageAllocator, PageNumber, PageTracker};
+use crate::types::{Key, MutInPlaceValue, Value};
+use crate::{Result, StorageError};
+use alloc::borrow::Cow;
+use alloc::collections::VecDeque;
+use alloc::format;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+use core::marker::PhantomData;
+use core::mem::size_of;
+use core::ops::Range;
+
+pub(crate) const LEAF: u8 = 1;
+pub(crate) const BRANCH: u8 = 2;
+
+// Descending a btree recurses once per level, so a corrupted file whose branch pages form a cycle,
+// or a crafted chain of them, overflows the stack -- which aborts rather than unwinding. No real
+// tree comes close to this depth: the page format addresses 4PiB, and branches hold enough children
+// that even a minimally filled tree over it is only tens of levels deep.
+pub(crate) const MAX_BTREE_DEPTH: usize = 128;
+
+pub(super) type Checksum = u128;
+// Dummy value. Final value will be computed during commit
+pub(super) const DEFERRED: Checksum = 999;
+
+// The key to store in a branch node between a child whose greatest key is `left` and the next,
+// whose least key is `right`. Branch keys only route lookups, so a `Key` implementation may
+// shorten them to any encoding that still sorts between the two, which packs more children into
+// each branch page.
+pub(super) fn branch_separator<'a, K: Key>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+    debug_assert!(K::compare(left, right).is_lt());
+    // Branch keys of a fixed width type are stored at that stride, so a shorter separator would
+    // corrupt the page, and a same width one would save nothing. Never ask for one.
+    if K::fixed_width().is_some() {
+        return Cow::Borrowed(left);
+    }
+    let separator = K::separator(left, right);
+    debug_assert!(
+        K::compare(left, &separator).is_le(),
+        "separator sorts below the left child's greatest key"
+    );
+    debug_assert!(
+        K::compare(&separator, right).is_lt(),
+        "separator does not sort below the right child's least key"
+    );
+    separator
+}
+
+pub(super) fn leaf_checksum<T: Page>(
+    page: &T,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+) -> Result<Checksum, StorageError> {
+    let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+    let last_pair = accessor.num_pairs().checked_sub(1).ok_or_else(|| {
+        StorageError::Corrupted(format!(
+            "Leaf page {:?} corrupted. Number of pairs is zero",
+            page.get_page_number()
+        ))
+    })?;
+    let end = accessor.value_end(last_pair).ok_or_else(|| {
+        StorageError::Corrupted(format!(
+            "Leaf page {:?} corrupted. Couldn't find offset for pair {}",
+            page.get_page_number(),
+            last_pair,
+        ))
+    })?;
+    if end > page.memory().len() {
+        Err(StorageError::Corrupted(format!(
+            "Leaf page {:?} corrupted. Last offset {} beyond end of data {}",
+            page.get_page_number(),
+            end,
+            page.memory().len()
+        )))
+    } else {
+        Ok(xxh3_checksum(&page.memory()[..end]))
+    }
+}
+
+pub(super) fn branch_checksum<T: Page>(
+    page: &T,
+    fixed_key_size: Option<usize>,
+) -> Result<Checksum, StorageError> {
+    let accessor = BranchAccessor::new(page, fixed_key_size);
+    let last_key = accessor.num_keys().checked_sub(1).ok_or_else(|| {
+        StorageError::Corrupted(format!(
+            "Branch page {:?} corrupted. Number of keys is zero",
+            page.get_page_number()
+        ))
+    })?;
+    let end = accessor.key_end(last_key).ok_or_else(|| {
+        StorageError::Corrupted(format!(
+            "Branch page {:?} corrupted. Can't find offset for key {}",
+            page.get_page_number(),
+            last_key
+        ))
+    })?;
+    if end > page.memory().len() {
+        Err(StorageError::Corrupted(format!(
+            "Branch page {:?} corrupted. Last offset {} beyond end of data {}",
+            page.get_page_number(),
+            end,
+            page.memory().len()
+        )))
+    } else {
+        Ok(xxh3_checksum(&page.memory()[..end]))
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) struct BtreeHeader {
+    pub(crate) root: PageNumber,
+    pub(crate) checksum: Checksum,
+    pub(crate) length: u64,
+}
+
+impl BtreeHeader {
+    pub(crate) fn new(root: PageNumber, checksum: Checksum, length: u64) -> Self {
+        Self {
+            root,
+            checksum,
+            length,
+        }
+    }
+
+    pub(crate) const fn serialized_size() -> usize {
+        PageNumber::serialized_size() + size_of::<Checksum>() + size_of::<u64>()
+    }
+
+    pub(crate) fn from_le_bytes(bytes: [u8; Self::serialized_size()]) -> Self {
+        let root =
+            PageNumber::from_le_bytes(bytes[..PageNumber::serialized_size()].try_into().unwrap());
+        let mut offset = PageNumber::serialized_size();
+        let checksum = Checksum::from_le_bytes(
+            bytes[offset..(offset + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        );
+        offset += size_of::<Checksum>();
+        let length = u64::from_le_bytes(
+            bytes[offset..(offset + size_of::<u64>())]
+                .try_into()
+                .unwrap(),
+        );
+
+        Self {
+            root,
+            checksum,
+            length,
+        }
+    }
+
+    pub(crate) fn to_le_bytes(self) -> [u8; Self::serialized_size()] {
+        let mut result = [0; Self::serialized_size()];
+        result[..PageNumber::serialized_size()].copy_from_slice(&self.root.to_le_bytes());
+        result[PageNumber::serialized_size()
+            ..(PageNumber::serialized_size() + size_of::<Checksum>())]
+            .copy_from_slice(&self.checksum.to_le_bytes());
+        result[(PageNumber::serialized_size() + size_of::<Checksum>())..]
+            .copy_from_slice(&self.length.to_le_bytes());
+
+        result
+    }
+}
+
+enum OnDrop {
+    None,
+    RemoveEntry {
+        position: usize,
+        fixed_key_size: Option<usize>,
+    },
+}
+
+enum EitherPage<'txn> {
+    Immutable(PageImpl),
+    Mutable(PageMut<'txn>),
+    OwnedMemory(Vec<u8>),
+    ArcMemory(Arc<[u8]>),
+}
+
+impl EitherPage<'_> {
+    fn memory(&self) -> &[u8] {
+        match self {
+            EitherPage::Immutable(page) => page.memory(),
+            EitherPage::Mutable(page) => page.memory(),
+            EitherPage::OwnedMemory(mem) => mem.as_slice(),
+            EitherPage::ArcMemory(mem) => mem,
+        }
+    }
+}
+
+/// Scoped accessor to data in the database
+///
+/// When this structure is dropped (goes out of scope), the data is released
+pub struct AccessGuard<'a, V: Value + 'static> {
+    page: EitherPage<'a>,
+    offset: usize,
+    len: usize,
+    on_drop: OnDrop,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, V: Value + 'static> AccessGuard<'a, V> {
+    pub(crate) fn with_page(page: PageImpl, range: Range<usize>) -> Self {
+        Self {
+            page: EitherPage::Immutable(page),
+            offset: range.start,
+            len: range.len(),
+            on_drop: OnDrop::None,
+            _value_type: PhantomData,
+        }
+    }
+
+    pub(crate) fn with_arc_page(page: Arc<[u8]>, range: Range<usize>) -> Self {
+        Self {
+            page: EitherPage::ArcMemory(page),
+            offset: range.start,
+            len: range.len(),
+            on_drop: OnDrop::None,
+            _value_type: PhantomData,
+        }
+    }
+
+    pub(crate) fn with_owned_value(value: Vec<u8>) -> Self {
+        let len = value.len();
+        Self {
+            page: EitherPage::OwnedMemory(value),
+            offset: 0,
+            len,
+            on_drop: OnDrop::None,
+            _value_type: PhantomData,
+        }
+    }
+
+    pub(super) fn remove_on_drop(
+        page: PageMut<'a>,
+        offset: usize,
+        len: usize,
+        position: usize,
+        fixed_key_size: Option<usize>,
+    ) -> Self {
+        Self {
+            page: EitherPage::Mutable(page),
+            offset,
+            len,
+            on_drop: OnDrop::RemoveEntry {
+                position,
+                fixed_key_size,
+            },
+            _value_type: PhantomData,
+        }
+    }
+
+    /// Access the stored value
+    pub fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+    }
+
+    pub(crate) fn arc_view(&self) -> (Arc<[u8]>, Range<usize>) {
+        match &self.page {
+            EitherPage::Immutable(page) => (page.to_arc(), self.offset..(self.offset + self.len)),
+            EitherPage::ArcMemory(arc) => (arc.clone(), self.offset..(self.offset + self.len)),
+            EitherPage::OwnedMemory(vec) => {
+                let bytes = &vec[self.offset..(self.offset + self.len)];
+                (Arc::from(bytes), 0..self.len)
+            }
+            EitherPage::Mutable(page) => {
+                let bytes = &page.memory()[self.offset..(self.offset + self.len)];
+                (Arc::from(bytes), 0..self.len)
+            }
+        }
+    }
+}
+
+impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
+    fn drop(&mut self) {
+        match self.on_drop {
+            OnDrop::None => {}
+            OnDrop::RemoveEntry {
+                position,
+                fixed_key_size,
+            } => {
+                if let EitherPage::Mutable(ref mut mut_page) = self.page {
+                    let mut mutator =
+                        LeafMutator::new(mut_page.memory_mut(), fixed_key_size, V::fixed_width());
+                    mutator.remove(position);
+                } else if !crate::panicking() {
+                    unreachable!();
+                }
+            }
+        }
+    }
+}
+
+pub struct AccessGuardMut<'a, V: Value + 'static> {
+    page: PageMut<'a>,
+    offset: usize,
+    len: usize,
+    entry_index: usize,
+    parent: Option<(PageMut<'a>, usize)>,
+    page_allocator: PageAllocator,
+    allocated: Arc<PageTracker>,
+    root_ref: &'a mut BtreeHeader,
+    key_width: Option<usize>,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        page: PageMut<'a>,
+        offset: usize,
+        len: usize,
+        entry_index: usize,
+        parent: Option<(PageMut<'a>, usize)>,
+        page_allocator: PageAllocator,
+        allocated: Arc<PageTracker>,
+        root_ref: &'a mut BtreeHeader,
+        key_width: Option<usize>,
+    ) -> Self {
+        assert!(page_allocator.uncommitted(page.get_page_number()));
+        if let Some((ref parent_page, _)) = parent {
+            assert!(page_allocator.uncommitted(parent_page.get_page_number()));
+        }
+        AccessGuardMut {
+            page,
+            offset,
+            len,
+            entry_index,
+            parent,
+            page_allocator,
+            allocated,
+            root_ref,
+            key_width,
+            _value_type: PhantomData,
+        }
+    }
+
+    /// Access the stored value
+    pub fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+    }
+
+    /// Replace the stored value
+    pub fn insert<'v>(&mut self, value: impl Borrow<V::SelfType<'v>>) -> Result<()> {
+        let value_bytes = V::as_bytes(value.borrow());
+
+        // Enforce the same size limits as the other write paths (Table::insert, the entry() API).
+        // Without this, replacing a value via get_mut()/and_modify() could bypass the limit.
+        let value_len = value_bytes.as_ref().len();
+        if value_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len));
+        }
+        let key_len = {
+            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            accessor.entry(self.entry_index).unwrap().key().len()
+        };
+        if value_len + key_len > MAX_PAIR_LENGTH {
+            return Err(StorageError::ValueTooLarge(value_len + key_len));
+        }
+
+        if LeafMutator::sufficient_replace_inplace_space(
+            &self.page,
+            self.entry_index,
+            self.key_width,
+            V::fixed_width(),
+            value_bytes.as_ref(),
+        ) {
+            let mut mutator =
+                LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
+            mutator.replace(self.entry_index, value_bytes.as_ref());
+        } else {
+            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+            let mut builder = LeafBuilder::new(
+                &self.page_allocator,
+                &self.allocated,
+                accessor.num_pairs(),
+                self.key_width,
+                V::fixed_width(),
+            );
+
+            for i in 0..accessor.num_pairs() {
+                let entry = accessor.entry(i).unwrap();
+                if i == self.entry_index {
+                    builder.push(entry.key(), value_bytes.as_ref());
+                } else {
+                    builder.push(entry.key(), entry.value());
+                }
+            }
+
+            let new_page = builder.build()?;
+
+            // Update parent branch page if it exists, otherwise update root
+            if let Some((ref mut parent_page, parent_entry_index)) = self.parent {
+                let mut mutator = BranchMutator::new(parent_page.memory_mut());
+                mutator.write_child_page(parent_entry_index, new_page.get_page_number(), DEFERRED);
+            } else {
+                self.root_ref.root = new_page.get_page_number();
+                self.root_ref.checksum = DEFERRED;
+            }
+
+            let old_page_number = self.page.get_page_number();
+            self.page = new_page;
+            assert!(
+                self.page_allocator
+                    .free_if_uncommitted(old_page_number, &self.allocated)
+            );
+        }
+
+        // Update our page reference to the new page and recalculate offset/length
+        let new_accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+        let (new_start, new_end) = new_accessor.value_range(self.entry_index).unwrap();
+
+        self.offset = new_start;
+        self.len = new_end - new_start;
+
+        Ok(())
+    }
+}
+
+impl<V: Value + 'static> Drop for AccessGuardMut<'_, V> {
+    fn drop(&mut self) {
+        // no-op. This Drop impl is only here to ensure that self is dropped before the transaction
+        // is committed. (i.e. that the lifetime 'a is shorter than the transaction)
+    }
+}
+
+pub struct AccessGuardMutInPlace<'a, V: Value + 'static> {
+    page: PageMut<'a>,
+    offset: usize,
+    len: usize,
+    _value_type: PhantomData<V>,
+}
+
+impl<'a, V: Value + 'static> AccessGuardMutInPlace<'a, V> {
+    pub(crate) fn new(page: PageMut<'a>, offset: usize, len: usize) -> Self {
+        AccessGuardMutInPlace {
+            page,
+            offset,
+            len,
+            _value_type: PhantomData,
+        }
+    }
+}
+
+impl<V: MutInPlaceValue + 'static> AsMut<V::BaseRefType> for AccessGuardMutInPlace<'_, V> {
+    fn as_mut(&mut self) -> &mut V::BaseRefType {
+        V::from_bytes_mut(&mut self.page.memory_mut()[self.offset..(self.offset + self.len)])
+    }
+}
+
+impl<V: Value + 'static> Drop for AccessGuardMutInPlace<'_, V> {
+    fn drop(&mut self) {
+        // no-op. This Drop impl is only here to ensure that self is dropped before the transaction
+        // is committed. (i.e. that the lifetime 'a is shorter than the transaction)
+    }
+}
+
+// Provides a simple zero-copy way to access entries
+pub struct EntryAccessor<'a> {
+    key: &'a [u8],
+    value: &'a [u8],
+}
+
+impl<'a> EntryAccessor<'a> {
+    fn new(key: &'a [u8], value: &'a [u8]) -> Self {
+        EntryAccessor { key, value }
+    }
+}
+
+impl<'a: 'b, 'b> EntryAccessor<'a> {
+    pub(crate) fn key(&'b self) -> &'a [u8] {
+        self.key
+    }
+
+    pub(crate) fn value(&'b self) -> &'a [u8] {
+        self.value
+    }
+}
+
+// Provides a simple zero-copy way to access a leaf page
+pub(crate) struct LeafAccessor<'a> {
+    page: &'a [u8],
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    num_pairs: usize,
+}
+
+impl<'a> LeafAccessor<'a> {
+    pub(crate) fn new(
+        page: &'a [u8],
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        debug_assert_eq!(page[0], LEAF);
+        let num_pairs = u16::from_le_bytes(page[2..4].try_into().unwrap()) as usize;
+        LeafAccessor {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+            num_pairs,
+        }
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(super) fn print_node<K: Key, V: Value>(&self, include_value: bool) {
+        let mut i = 0;
+        while let Some(entry) = self.entry(i) {
+            eprint!(" key_{i}={:?}", K::from_bytes(entry.key()));
+            if include_value {
+                eprint!(" value_{i}={:?}", V::from_bytes(entry.value()));
+            }
+            i += 1;
+        }
+    }
+
+    pub(crate) fn position<K: Key>(&self, query: &[u8]) -> (usize, bool) {
+        // inclusive
+        let mut min_entry = 0;
+        // inclusive. Start past end, since it might be positioned beyond the end of the leaf
+        let mut max_entry = self.num_pairs();
+        while min_entry < max_entry {
+            let mid = min_entry.midpoint(max_entry);
+            let key = self.key_unchecked(mid);
+            match K::compare(query, key) {
+                Ordering::Less => {
+                    max_entry = mid;
+                }
+                Ordering::Equal => {
+                    return (mid, true);
+                }
+                Ordering::Greater => {
+                    min_entry = mid + 1;
+                }
+            }
+        }
+        debug_assert_eq!(min_entry, max_entry);
+        (min_entry, false)
+    }
+
+    pub(crate) fn find_key<K: Key>(&self, query: &[u8]) -> Option<usize> {
+        let (entry, found) = self.position::<K>(query);
+        if found { Some(entry) } else { None }
+    }
+
+    fn key_section_start(&self) -> usize {
+        let mut offset = 4;
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * self.num_pairs;
+        }
+        if self.fixed_value_size.is_none() {
+            offset += size_of::<u32>() * self.num_pairs;
+        }
+
+        offset
+    }
+
+    fn key_start(&self, n: usize) -> Option<usize> {
+        if n == 0 {
+            Some(self.key_section_start())
+        } else {
+            self.key_end(n - 1)
+        }
+    }
+
+    fn key_end(&self, n: usize) -> Option<usize> {
+        if n >= self.num_pairs() {
+            None
+        } else {
+            if let Some(fixed) = self.fixed_key_size {
+                return Some(self.key_section_start() + fixed * (n + 1));
+            }
+            let offset = 4 + size_of::<u32>() * n;
+            let end = u32::from_le_bytes(
+                self.page
+                    .get(offset..(offset + size_of::<u32>()))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(end)
+        }
+    }
+
+    fn value_start(&self, n: usize) -> Option<usize> {
+        if n == 0 {
+            self.key_end(self.num_pairs() - 1)
+        } else {
+            self.value_end(n - 1)
+        }
+    }
+
+    fn value_end(&self, n: usize) -> Option<usize> {
+        if n >= self.num_pairs() {
+            None
+        } else {
+            if let Some(fixed) = self.fixed_value_size {
+                return Some(self.key_end(self.num_pairs.checked_sub(1)?)? + fixed * (n + 1));
+            }
+            let mut offset = 4 + size_of::<u32>() * n;
+            if self.fixed_key_size.is_none() {
+                offset += size_of::<u32>() * self.num_pairs;
+            }
+            let end = u32::from_le_bytes(
+                self.page
+                    .get(offset..(offset + size_of::<u32>()))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            Some(end)
+        }
+    }
+
+    pub(crate) fn num_pairs(&self) -> usize {
+        self.num_pairs
+    }
+
+    pub(super) fn offset_of_first_value(&self) -> usize {
+        self.offset_of_value(0).unwrap()
+    }
+
+    pub(super) fn offset_of_value(&self, n: usize) -> Option<usize> {
+        self.value_start(n)
+    }
+
+    pub(super) fn value_range(&self, n: usize) -> Option<(usize, usize)> {
+        Some((self.value_start(n)?, self.value_end(n)?))
+    }
+
+    // Returns the length of all keys and values between [start, end)
+    pub(crate) fn length_of_pairs(&self, start: usize, end: usize) -> usize {
+        self.length_of_values(start, end) + self.length_of_keys(start, end)
+    }
+
+    fn length_of_values(&self, start: usize, end: usize) -> usize {
+        if end == 0 {
+            return 0;
+        }
+        let end_offset = self.value_end(end - 1).unwrap();
+        let start_offset = self.value_start(start).unwrap();
+        end_offset - start_offset
+    }
+
+    // Returns the length of all keys between [start, end)
+    pub(crate) fn length_of_keys(&self, start: usize, end: usize) -> usize {
+        if end == 0 {
+            return 0;
+        }
+        let end_offset = self.key_end(end - 1).unwrap();
+        let start_offset = self.key_start(start).unwrap();
+        end_offset - start_offset
+    }
+
+    pub(crate) fn total_length(&self) -> usize {
+        // Values are stored last
+        self.value_end(self.num_pairs() - 1).unwrap()
+    }
+
+    fn key_unchecked(&self, n: usize) -> &[u8] {
+        &self.page[self.key_start(n).unwrap()..self.key_end(n).unwrap()]
+    }
+
+    pub(crate) fn entry(&self, n: usize) -> Option<EntryAccessor<'a>> {
+        let key = &self.page[self.key_start(n)?..self.key_end(n)?];
+        let value = &self.page[self.value_start(n)?..self.value_end(n)?];
+        Some(EntryAccessor::new(key, value))
+    }
+
+    pub(crate) fn entry_ranges(&self, n: usize) -> Option<(Range<usize>, Range<usize>)> {
+        let key = self.key_start(n)?..self.key_end(n)?;
+        let value = self.value_start(n)?..self.value_end(n)?;
+        Some((key, value))
+    }
+
+    pub(super) fn last_entry(&self) -> EntryAccessor<'a> {
+        self.entry(self.num_pairs() - 1).unwrap()
+    }
+}
+
+pub(super) struct LeafBuilder<'a, 'b> {
+    pairs: Vec<(&'a [u8], &'a [u8])>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    total_key_bytes: usize,
+    total_value_bytes: usize,
+    page_allocator: &'b PageAllocator,
+    allocated_pages: &'b PageTracker,
+}
+
+// Key-value pairs copied into owned memory, so they survive any tree mutation.
+// The buffer stays in ascending key order: `extend_from_leaf` appends leaves
+// that are entirely greater at the back and prepends smaller ones at the
+// front; `data` grows append-only since the pair ranges are absolute offsets
+// into it.
+#[derive(Default)]
+pub(super) struct OwnedEntryBuffer {
+    pairs: VecDeque<(Range<usize>, Range<usize>)>,
+    data: Vec<u8>,
+}
+
+impl OwnedEntryBuffer {
+    fn store(&mut self, key: &[u8], value: &[u8]) -> (Range<usize>, Range<usize>) {
+        let key_start = self.data.len();
+        self.data.extend_from_slice(key);
+        let key_end = self.data.len();
+        self.data.extend_from_slice(value);
+        let value_end = self.data.len();
+        (key_start..key_end, key_end..value_end)
+    }
+
+    // Copies all of the leaf's pairs except `removed_indexes` (which must be
+    // strictly ascending). The leaf must be entirely greater than the buffered
+    // entries when `back` is true, and entirely smaller otherwise, keeping the
+    // buffer in ascending key order.
+    pub(super) fn extend_from_leaf(
+        &mut self,
+        accessor: &LeafAccessor<'_>,
+        removed_indexes: &[usize],
+        back: bool,
+    ) {
+        debug_assert!(removed_indexes.windows(2).all(|pair| pair[0] < pair[1]));
+        let num_pairs = accessor.num_pairs();
+        self.pairs.reserve(num_pairs - removed_indexes.len());
+        self.data.reserve(accessor.length_of_pairs(0, num_pairs));
+
+        let mut retained = Vec::with_capacity(num_pairs - removed_indexes.len());
+        let mut next_removed = 0;
+        for index in 0..num_pairs {
+            if removed_indexes.get(next_removed) == Some(&index) {
+                next_removed += 1;
+                continue;
+            }
+            let entry = accessor.entry(index).unwrap();
+            retained.push(self.store(entry.key(), entry.value()));
+        }
+        debug_assert_eq!(next_removed, removed_indexes.len());
+        if back {
+            self.pairs.extend(retained);
+        } else {
+            // Prepending in reverse leaves the leaf's entries ascending at the
+            // front.
+            for pair in retained.into_iter().rev() {
+                self.pairs.push_front(pair);
+            }
+        }
+    }
+
+    // Appends one pair, which must be greater than every buffered entry.
+    pub(super) fn push_back(&mut self, key: &[u8], value: &[u8]) {
+        let pair = self.store(key, value);
+        self.pairs.push_back(pair);
+    }
+
+    // Prepends one pair, which must be smaller than every buffered entry.
+    pub(super) fn push_front(&mut self, key: &[u8], value: &[u8]) {
+        let pair = self.store(key, value);
+        self.pairs.push_front(pair);
+    }
+
+    // Copies `range` of the leaf's pairs to one end of the buffer. The pairs
+    // must all be greater than the buffered entries when `back` is true, and
+    // entirely smaller otherwise.
+    pub(super) fn extend_from_leaf_range(
+        &mut self,
+        accessor: &LeafAccessor<'_>,
+        range: Range<usize>,
+        back: bool,
+    ) {
+        self.pairs.reserve(range.len());
+        self.data
+            .reserve(accessor.length_of_pairs(range.start, range.end));
+        if back {
+            for index in range {
+                let entry = accessor.entry(index).unwrap();
+                let pair = self.store(entry.key(), entry.value());
+                self.pairs.push_back(pair);
+            }
+        } else {
+            // Prepending in reverse leaves the leaf's entries ascending at
+            // the front.
+            for index in range.rev() {
+                let entry = accessor.entry(index).unwrap();
+                let pair = self.store(entry.key(), entry.value());
+                self.pairs.push_front(pair);
+            }
+        }
+    }
+
+    pub(super) fn num_pairs(&self) -> usize {
+        self.pairs.len()
+    }
+
+    pub(super) fn total_bytes(&self) -> usize {
+        self.data.len()
+    }
+
+    pub(super) fn back(&self) -> Option<(&[u8], &[u8])> {
+        self.pairs
+            .back()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+
+    pub(super) fn front(&self) -> Option<(&[u8], &[u8])> {
+        self.pairs
+            .front()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+
+    pub(super) fn entries(&self) -> impl Iterator<Item = (&[u8], &[u8])> {
+        self.pairs
+            .iter()
+            .map(|(key, value)| (&self.data[key.clone()], &self.data[value.clone()]))
+    }
+}
+
+impl<'a, 'b> LeafBuilder<'a, 'b> {
+    pub(super) fn required_bytes(&self, num_pairs: usize, keys_values_bytes: usize) -> usize {
+        RawLeafBuilder::required_bytes(
+            num_pairs,
+            keys_values_bytes,
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+
+    pub(super) fn new(
+        page_allocator: &'b PageAllocator,
+        allocated_pages: &'b PageTracker,
+        capacity: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        Self {
+            pairs: Vec::with_capacity(capacity),
+            fixed_key_size,
+            fixed_value_size,
+            total_key_bytes: 0,
+            total_value_bytes: 0,
+            page_allocator,
+            allocated_pages,
+        }
+    }
+
+    pub(super) fn push(&mut self, key: &'a [u8], value: &'a [u8]) {
+        self.total_key_bytes += key.len();
+        self.total_value_bytes += value.len();
+        self.pairs.push((key, value));
+    }
+
+    pub(super) fn push_all_except(
+        &mut self,
+        accessor: &'a LeafAccessor<'_>,
+        except: Option<usize>,
+    ) {
+        if let Some(except) = except {
+            self.push_all_except_indexes(accessor, &[except]);
+        } else {
+            self.push_all_except_indexes(accessor, &[]);
+        }
+    }
+
+    // `except` must contain valid leaf indexes in strictly ascending order.
+    pub(super) fn push_all_except_indexes(
+        &mut self,
+        accessor: &'a LeafAccessor<'_>,
+        except: &[usize],
+    ) {
+        debug_assert!(except.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut next_except = 0;
+        for i in 0..accessor.num_pairs() {
+            if next_except < except.len() && except[next_except] == i {
+                next_except += 1;
+                continue;
+            }
+            let entry = accessor.entry(i).unwrap();
+            self.push(entry.key(), entry.value());
+        }
+        debug_assert_eq!(next_except, except.len());
+    }
+
+    pub(super) fn should_split(&self) -> bool {
+        leaf_split_required(
+            self.pairs.len(),
+            self.total_key_bytes + self.total_value_bytes,
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.page_allocator.get_page_size(),
+        )
+    }
+
+    // Returns the two halves, and the separator to store between them in their parent
+    pub(super) fn build_split<'txn, K: Key>(
+        self,
+    ) -> Result<(PageMut<'txn>, Cow<'a, [u8]>, PageMut<'txn>)> {
+        let total_size = self.total_key_bytes + self.total_value_bytes;
+        let mut division = 0;
+        let mut first_split_key_bytes = 0;
+        let mut first_split_value_bytes = 0;
+        for (key, value) in self.pairs.iter().take(self.pairs.len() - 1) {
+            first_split_key_bytes += key.len();
+            first_split_value_bytes += value.len();
+            division += 1;
+            if first_split_key_bytes + first_split_value_bytes >= total_size / 2 {
+                break;
+            }
+        }
+
+        // num_pairs is stored as a u16, so neither half may exceed u16::MAX pairs. The
+        // byte-based division above can be arbitrarily lopsided when pair sizes are skewed
+        // (e.g. merging a leaf full of tiny pairs with one containing a huge value)
+        let max_pairs = usize::from(u16::MAX);
+        assert!(self.pairs.len() <= 2 * max_pairs);
+        let clamped = division.clamp(self.pairs.len().saturating_sub(max_pairs), max_pairs);
+        if clamped != division {
+            division = clamped;
+            first_split_key_bytes = self.pairs[..division].iter().map(|(k, _)| k.len()).sum();
+            first_split_value_bytes = self.pairs[..division].iter().map(|(_, v)| v.len()).sum();
+        }
+
+        let required_size =
+            self.required_bytes(division, first_split_key_bytes + first_split_value_bytes);
+        let mut page1 = self
+            .page_allocator
+            .allocate(required_size, self.allocated_pages)?;
+        let mut builder = RawLeafBuilder::new(
+            page1.memory_mut(),
+            division,
+            self.fixed_key_size,
+            self.fixed_value_size,
+            first_split_key_bytes,
+        );
+        for (key, value) in self.pairs.iter().take(division) {
+            builder.append(key, value);
+        }
+        drop(builder);
+
+        let required_size = self.required_bytes(
+            self.pairs.len() - division,
+            self.total_key_bytes + self.total_value_bytes
+                - first_split_key_bytes
+                - first_split_value_bytes,
+        );
+        let mut page2 = self
+            .page_allocator
+            .allocate(required_size, self.allocated_pages)?;
+        let mut builder = RawLeafBuilder::new(
+            page2.memory_mut(),
+            self.pairs.len() - division,
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.total_key_bytes - first_split_key_bytes,
+        );
+        for (key, value) in &self.pairs[division..] {
+            builder.append(key, value);
+        }
+        drop(builder);
+
+        let separator = branch_separator::<K>(self.pairs[division - 1].0, self.pairs[division].0);
+        Ok((page1, separator, page2))
+    }
+
+    pub(super) fn build<'txn>(self) -> Result<PageMut<'txn>> {
+        let required_size = self.required_bytes(
+            self.pairs.len(),
+            self.total_key_bytes + self.total_value_bytes,
+        );
+        let mut page = self
+            .page_allocator
+            .allocate(required_size, self.allocated_pages)?;
+        let mut builder = RawLeafBuilder::new(
+            page.memory_mut(),
+            self.pairs.len(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+            self.total_key_bytes,
+        );
+        for (key, value) in self.pairs {
+            builder.append(key, value);
+        }
+        drop(builder);
+        Ok(page)
+    }
+}
+
+// The leaf split policy, for a hypothetical set of pairs. A leaf must split once it would
+// exceed the page size, or u16::MAX pairs even if they still fit in a page (possible with large
+// page sizes and tiny pairs); otherwise build() would panic in RawLeafBuilder::new.
+// build_split() clamps each half. A single pair never splits: it gets its own larger page,
+// matching the single-large-value handling elsewhere. Shared by LeafBuilder::should_split and
+// the mutator's run repacking (build_replacement_leaves), which must agree.
+pub(super) fn leaf_split_required(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
+    !leaf_fits_one_page(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+        page_size,
+    ) && num_pairs > 1
+}
+
+// True when a leaf holding these pairs fits into a single order zero page.
+pub(super) fn leaf_fits_one_page(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
+    let required = RawLeafBuilder::required_bytes(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+    );
+    required <= page_size && u16::try_from(num_pairs).is_ok()
+}
+
+// Merge a leaf when it is less than 33% full: splits occur when a page is full and produce two
+// 50% full pages, so 33% avoids merge/split oscillation. Shared by the mutator's delete
+// planning and splice policy (plan_leaf_delete, replace_leaf_children,
+// build_replacement_leaves) and the cursor's decision to coalesce sparse leaves into a run,
+// which must agree.
+pub(super) fn leaf_below_merge_threshold(
+    num_pairs: usize,
+    keys_values_bytes: usize,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> bool {
+    let required = RawLeafBuilder::required_bytes(
+        num_pairs,
+        keys_values_bytes,
+        fixed_key_size,
+        fixed_value_size,
+    );
+    required < page_size / 3
+}
+
+// A leaf holding a single pair at least a page in size is never merged with: absorbing it
+// would copy and rewrite the value without making its neighbor any healthier. Shared by the
+// mutator's insert fast path, merge planning, and splice absorption (replace_leaf_children),
+// which must agree.
+pub(super) fn is_single_large_value(accessor: &LeafAccessor<'_>, page_size: usize) -> bool {
+    accessor.num_pairs() == 1 && accessor.total_length() >= page_size
+}
+
+// The pair count and key-value bytes a leaf retains after removing `removed_indexes`. Shared
+// by the mutator's delete planning and the cursor's run-opening decision, which must agree on
+// the resulting disposition.
+pub(super) fn retained_after_removals(
+    accessor: &LeafAccessor<'_>,
+    removed_indexes: &[usize],
+) -> (usize, usize) {
+    let removed_bytes: usize = removed_indexes
+        .iter()
+        .map(|&index| accessor.length_of_pairs(index, index + 1))
+        .sum();
+    let retained_pairs = accessor.num_pairs() - removed_indexes.len();
+    let retained_bytes = accessor.length_of_pairs(0, accessor.num_pairs()) - removed_bytes;
+    (retained_pairs, retained_bytes)
+}
+
+// Note the caller is responsible for ensuring that the buffer is large enough
+// and rewriting all fields if any dynamically sized fields are written
+// Layout is:
+// 1 byte: type
+// 1 byte: reserved (padding to 32bits aligned)
+// 2 bytes: num_entries (number of pairs)
+// (optional) repeating (num_entries times):
+// 4 bytes: key_end
+// (optional) repeating (num_entries times):
+// 4 bytes: value_end
+// repeating (num_entries times):
+// * n bytes: key data
+// repeating (num_entries times):
+// * n bytes: value data
+pub(crate) struct RawLeafBuilder<'a> {
+    page: &'a mut [u8],
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    num_pairs: usize,
+    provisioned_key_bytes: usize,
+    pairs_written: usize, // used for debugging
+}
+
+impl<'a> RawLeafBuilder<'a> {
+    pub(crate) fn required_bytes(
+        num_pairs: usize,
+        keys_values_bytes: usize,
+        key_size: Option<usize>,
+        value_size: Option<usize>,
+    ) -> usize {
+        // Page id & header;
+        let mut result = 4;
+        // key & value lengths
+        if key_size.is_none() {
+            result += num_pairs * size_of::<u32>();
+        }
+        if value_size.is_none() {
+            result += num_pairs * size_of::<u32>();
+        }
+        result += keys_values_bytes;
+
+        result
+    }
+
+    pub(crate) fn new(
+        page: &'a mut [u8],
+        num_pairs: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        key_bytes: usize,
+    ) -> Self {
+        page[0] = LEAF;
+        page[2..4].copy_from_slice(&u16::try_from(num_pairs).unwrap().to_le_bytes());
+        #[cfg(debug_assertions)]
+        {
+            // Poison all the key & value offsets, in case the caller forgets to write them
+            let mut last = 4;
+            if fixed_key_size.is_none() {
+                last += size_of::<u32>() * num_pairs;
+            }
+            if fixed_value_size.is_none() {
+                last += size_of::<u32>() * num_pairs;
+            }
+            for x in &mut page[4..last] {
+                *x = 0xFF;
+            }
+        }
+        RawLeafBuilder {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+            num_pairs,
+            provisioned_key_bytes: key_bytes,
+            pairs_written: 0,
+        }
+    }
+
+    fn value_end(&self, n: usize) -> usize {
+        if let Some(fixed) = self.fixed_value_size {
+            return self.key_section_start() + self.provisioned_key_bytes + fixed * (n + 1);
+        }
+        let mut offset = 4 + size_of::<u32>() * n;
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * self.num_pairs;
+        }
+        u32::from_le_bytes(
+            self.page[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    fn key_section_start(&self) -> usize {
+        let mut offset = 4;
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * self.num_pairs;
+        }
+        if self.fixed_value_size.is_none() {
+            offset += size_of::<u32>() * self.num_pairs;
+        }
+
+        offset
+    }
+
+    fn key_end(&self, n: usize) -> usize {
+        if let Some(fixed) = self.fixed_key_size {
+            return self.key_section_start() + fixed * (n + 1);
+        }
+        let offset = 4 + size_of::<u32>() * n;
+        u32::from_le_bytes(
+            self.page[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    pub(crate) fn append(&mut self, key: &[u8], value: &[u8]) {
+        if let Some(key_width) = self.fixed_key_size {
+            assert_eq!(key_width, key.len());
+        }
+        if let Some(value_width) = self.fixed_value_size {
+            assert_eq!(value_width, value.len());
+        }
+        let key_offset = if self.pairs_written == 0 {
+            self.key_section_start()
+        } else {
+            self.key_end(self.pairs_written - 1)
+        };
+        let value_offset = if self.pairs_written == 0 {
+            self.key_section_start() + self.provisioned_key_bytes
+        } else {
+            self.value_end(self.pairs_written - 1)
+        };
+
+        let n = self.pairs_written;
+        if self.fixed_key_size.is_none() {
+            let offset = 4 + size_of::<u32>() * n;
+            self.page[offset..(offset + size_of::<u32>())]
+                .copy_from_slice(&u32::try_from(key_offset + key.len()).unwrap().to_le_bytes());
+        }
+        self.page[key_offset..(key_offset + key.len())].copy_from_slice(key);
+        let written_key_len = key_offset + key.len() - self.key_section_start();
+        assert!(written_key_len <= self.provisioned_key_bytes);
+
+        if self.fixed_value_size.is_none() {
+            let mut offset = 4 + size_of::<u32>() * n;
+            if self.fixed_key_size.is_none() {
+                offset += size_of::<u32>() * self.num_pairs;
+            }
+            self.page[offset..(offset + size_of::<u32>())].copy_from_slice(
+                &u32::try_from(value_offset + value.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+        }
+        self.page[value_offset..(value_offset + value.len())].copy_from_slice(value);
+        self.pairs_written += 1;
+    }
+}
+
+impl Drop for RawLeafBuilder<'_> {
+    fn drop(&mut self) {
+        if !crate::panicking() {
+            assert_eq!(self.pairs_written, self.num_pairs);
+            assert_eq!(
+                self.key_section_start() + self.provisioned_key_bytes,
+                self.key_end(self.num_pairs - 1)
+            );
+        }
+    }
+}
+
+pub(super) struct LeafMutator<'b> {
+    page: &'b mut [u8],
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+}
+
+struct RemovedLeafRanges<'a> {
+    indices: &'a [usize],
+    key_ranges: &'a [Range<usize>],
+    value_ranges: &'a [Range<usize>],
+    key_bytes: usize,
+    value_bytes: usize,
+    old_total_len: usize,
+    num_pairs: usize,
+}
+
+impl<'b> LeafMutator<'b> {
+    pub(super) fn new(
+        page: &'b mut [u8],
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        assert_eq!(page[0], LEAF);
+        Self {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+        }
+    }
+
+    // Returns true if there is enough space to replace the value at `position` in-place.
+    // The key at `position` is left unchanged.
+    pub(super) fn sufficient_replace_inplace_space(
+        page: &'_ impl Page,
+        position: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        new_value: &[u8],
+    ) -> bool {
+        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        let remaining = page.memory().len() - accessor.total_length();
+        let existing_value_len = accessor
+            .value_range(position)
+            .map(|(s, e)| e - s)
+            .unwrap_or_default();
+        let required_delta = isize::try_from(new_value.len()).unwrap()
+            - isize::try_from(existing_value_len).unwrap();
+        // Same u32 total-length bound as sufficient_insert_inplace_space.
+        let new_total_length =
+            accessor.total_length() as u64 - existing_value_len as u64 + new_value.len() as u64;
+        if new_total_length > u64::from(u32::MAX) {
+            return false;
+        }
+        required_delta <= isize::try_from(remaining).unwrap()
+    }
+
+    pub(super) fn sufficient_insert_inplace_space(
+        page: &'_ impl Page,
+        position: usize,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+        new_key: &[u8],
+        new_value: &[u8],
+    ) -> bool {
+        let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
+        // num_pairs is stored as a u16, so a leaf can never hold more than u16::MAX entries.
+        // This is reachable by appending many small entries to a large page with free space
+        if accessor.num_pairs() >= usize::from(u16::MAX) {
+            return false;
+        }
+        // If this is a large page, only allow in-place appending to avoid write amplification
+        if page.get_page_number().page_order > 0 && position < accessor.num_pairs() {
+            return false;
+        }
+        let remaining = page.memory().len() - accessor.total_length();
+        let mut required_delta = new_key.len() + new_value.len();
+        if fixed_key_size.is_none() {
+            required_delta += size_of::<u32>();
+        }
+        if fixed_value_size.is_none() {
+            required_delta += size_of::<u32>();
+        }
+        // Leaf offsets are u32, so total length must stay under u32::MAX. The in-place append
+        // path bypasses should_split, so guard it here too. (u64 math avoids 32-bit overflow.)
+        if accessor.total_length() as u64 + required_delta as u64 > u64::from(u32::MAX) {
+            return false;
+        }
+        required_delta <= remaining
+    }
+
+    // Replace the value at index `i` with `value`, leaving the key unchanged.
+    pub(super) fn replace(&mut self, i: usize, value: &[u8]) {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let num_pairs = accessor.num_pairs();
+        let last_value_end = accessor.value_end(num_pairs - 1).unwrap();
+        let shift_value_start = accessor.value_start(i + 1).unwrap_or(last_value_end);
+        let existing_value_len = accessor
+            .value_range(i)
+            .map(|(start, end)| end - start)
+            .unwrap_or_default();
+
+        let value_delta =
+            isize::try_from(value.len()).unwrap() - isize::try_from(existing_value_len).unwrap();
+        assert!(
+            isize::try_from(accessor.total_length()).unwrap() + value_delta
+                <= isize::try_from(self.page.len()).unwrap()
+        );
+
+        // Update value end pointers for i..num_pairs
+        for j in i..num_pairs {
+            self.update_value_end(j, value_delta);
+        }
+
+        // Shift trailing values to accommodate the new value size
+        let mut dest: usize = (isize::try_from(shift_value_start).unwrap() + value_delta)
+            .try_into()
+            .unwrap();
+        self.page
+            .copy_within(shift_value_start..last_value_end, dest);
+
+        // Write the new value
+        dest -= value.len();
+        self.page[dest..(dest + value.len())].copy_from_slice(value);
+    }
+
+    // Insert the given key, value pair at index i and shift all following pairs to the right
+    pub(super) fn insert(&mut self, i: usize, key: &[u8], value: &[u8]) {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let required_delta = {
+            let mut delta = key.len() + value.len();
+            if self.fixed_key_size.is_none() {
+                delta += size_of::<u32>();
+            }
+            if self.fixed_value_size.is_none() {
+                delta += size_of::<u32>();
+            }
+            isize::try_from(delta).unwrap()
+        };
+        assert!(
+            isize::try_from(accessor.total_length()).unwrap() + required_delta
+                <= isize::try_from(self.page.len()).unwrap()
+        );
+
+        let num_pairs = accessor.num_pairs();
+        let last_key_end = accessor.key_end(accessor.num_pairs() - 1).unwrap();
+        let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
+        let shift_key_start = accessor.key_start(i).unwrap_or(last_key_end);
+        let shift_value_start = accessor.value_start(i).unwrap_or(last_value_end);
+
+        // Update all the pointers
+        let key_ptr_size: usize = if self.fixed_key_size.is_none() { 4 } else { 0 };
+        let value_ptr_size: usize = if self.fixed_value_size.is_none() {
+            4
+        } else {
+            0
+        };
+        for j in 0..i {
+            self.update_key_end(j, (key_ptr_size + value_ptr_size).try_into().unwrap());
+            let value_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                .try_into()
+                .unwrap();
+            self.update_value_end(j, value_delta);
+        }
+        for j in i..num_pairs {
+            let key_delta: isize = (key_ptr_size + value_ptr_size + key.len())
+                .try_into()
+                .unwrap();
+            self.update_key_end(j, key_delta);
+            let value_delta = key_delta + isize::try_from(value.len()).unwrap();
+            self.update_value_end(j, value_delta);
+        }
+
+        let new_num_pairs = num_pairs + 1;
+        self.page[2..4].copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
+
+        // Right shift the trailing values
+        let mut dest = shift_value_start + key_ptr_size + value_ptr_size + key.len() + value.len();
+        let start = shift_value_start;
+        let end = last_value_end;
+        self.page.copy_within(start..end, dest);
+
+        // Insert the value
+        let inserted_value_end: u32 = dest.try_into().unwrap();
+        dest -= value.len();
+        self.page[dest..(dest + value.len())].copy_from_slice(value);
+
+        // Right shift the trailing key data & preceding value data
+        let start = shift_key_start;
+        let end = shift_value_start;
+        dest -= end - start;
+        self.page.copy_within(start..end, dest);
+
+        // Insert the key
+        let inserted_key_end: u32 = dest.try_into().unwrap();
+        dest -= key.len();
+        self.page[dest..(dest + key.len())].copy_from_slice(key);
+
+        // Right shift the trailing value pointers & preceding key data
+        let start = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        let end = shift_key_start;
+        dest -= end - start;
+        debug_assert_eq!(
+            dest,
+            4 + key_ptr_size * new_num_pairs + value_ptr_size * (i + 1)
+        );
+        self.page.copy_within(start..end, dest);
+
+        // Insert the value pointer
+        if self.fixed_value_size.is_none() {
+            dest -= size_of::<u32>();
+            self.page[dest..(dest + size_of::<u32>())]
+                .copy_from_slice(&inserted_value_end.to_le_bytes());
+        }
+
+        // Right shift the trailing key pointers & preceding value pointers
+        let start = 4 + key_ptr_size * i;
+        let end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        dest -= end - start;
+        debug_assert_eq!(dest, 4 + key_ptr_size * (i + 1));
+        self.page.copy_within(start..end, dest);
+
+        // Insert the key pointer
+        if self.fixed_key_size.is_none() {
+            dest -= size_of::<u32>();
+            self.page[dest..(dest + size_of::<u32>())]
+                .copy_from_slice(&inserted_key_end.to_le_bytes());
+        }
+        debug_assert_eq!(dest, 4 + key_ptr_size * i);
+    }
+
+    pub(super) fn remove(&mut self, i: usize) {
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let num_pairs = accessor.num_pairs();
+        assert!(i < num_pairs);
+        assert!(num_pairs > 1);
+        let key_start = accessor.key_start(i).unwrap();
+        let key_end = accessor.key_end(i).unwrap();
+        let value_start = accessor.value_start(i).unwrap();
+        let value_end = accessor.value_end(i).unwrap();
+        let last_value_end = accessor.value_end(accessor.num_pairs() - 1).unwrap();
+
+        // Update all the pointers
+        let key_ptr_size = if self.fixed_key_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        let value_ptr_size = if self.fixed_value_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        for j in 0..i {
+            self.update_key_end(j, -isize::try_from(key_ptr_size + value_ptr_size).unwrap());
+            let value_delta = -isize::try_from(key_ptr_size + value_ptr_size).unwrap()
+                - isize::try_from(key_end - key_start).unwrap();
+            self.update_value_end(j, value_delta);
+        }
+        for j in (i + 1)..num_pairs {
+            let key_delta = -isize::try_from(key_ptr_size + value_ptr_size).unwrap()
+                - isize::try_from(key_end - key_start).unwrap();
+            self.update_key_end(j, key_delta);
+            let value_delta = key_delta - isize::try_from(value_end - value_start).unwrap();
+            self.update_value_end(j, value_delta);
+        }
+
+        // Left shift all the pointers & data
+
+        let new_num_pairs = num_pairs - 1;
+        self.page[2..4].copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
+        // Left shift the trailing key pointers & preceding value pointers
+        let mut dest = 4 + key_ptr_size * i;
+        // First trailing key pointer
+        let start = 4 + key_ptr_size * (i + 1);
+        // Last preceding value pointer
+        let end = 4 + key_ptr_size * num_pairs + value_ptr_size * i;
+        self.page.copy_within(start..end, dest);
+        dest += end - start;
+        debug_assert_eq!(dest, 4 + key_ptr_size * new_num_pairs + value_ptr_size * i);
+
+        // Left shift the trailing value pointers & preceding key data
+        let start = 4 + key_ptr_size * num_pairs + value_ptr_size * (i + 1);
+        let end = key_start;
+        self.page.copy_within(start..end, dest);
+        dest += end - start;
+
+        let preceding_key_len = key_start - (4 + (key_ptr_size + value_ptr_size) * num_pairs);
+        debug_assert_eq!(
+            dest,
+            4 + (key_ptr_size + value_ptr_size) * new_num_pairs + preceding_key_len
+        );
+
+        // Left shift the trailing key data & preceding value data
+        let start = key_end;
+        let end = value_start;
+        self.page.copy_within(start..end, dest);
+        dest += end - start;
+
+        // Left shift the trailing value data
+        let preceding_data_len =
+            value_start - (4 + (key_ptr_size + value_ptr_size) * num_pairs) - (key_end - key_start);
+        debug_assert_eq!(
+            dest,
+            4 + (key_ptr_size + value_ptr_size) * new_num_pairs + preceding_data_len
+        );
+        let start = value_end;
+        let end = last_value_end;
+        self.page.copy_within(start..end, dest);
+    }
+
+    // `indices` must contain valid leaf indices in strictly ascending order.
+    pub(super) fn remove_indices(&mut self, indices: &[usize]) {
+        let (key_ranges, value_ranges, key_bytes, value_bytes, old_total_len, num_pairs) = {
+            let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+            assert!(!indices.is_empty());
+            assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(*indices.last().unwrap() < accessor.num_pairs());
+            assert!(indices.len() < accessor.num_pairs());
+
+            let mut key_ranges = Vec::with_capacity(indices.len());
+            let mut value_ranges = Vec::with_capacity(indices.len());
+            let mut key_bytes = 0;
+            let mut value_bytes = 0;
+            for &index in indices {
+                let (key, value) = accessor.entry_ranges(index).unwrap();
+                key_bytes += key.len();
+                value_bytes += value.len();
+                key_ranges.push(key);
+                value_ranges.push(value);
+            }
+
+            (
+                key_ranges,
+                value_ranges,
+                key_bytes,
+                value_bytes,
+                accessor.total_length(),
+                accessor.num_pairs(),
+            )
+        };
+
+        self.remove_index_ranges(RemovedLeafRanges {
+            indices,
+            key_ranges: &key_ranges,
+            value_ranges: &value_ranges,
+            key_bytes,
+            value_bytes,
+            old_total_len,
+            num_pairs,
+        });
+    }
+
+    fn remove_index_ranges(&mut self, removed_ranges: RemovedLeafRanges<'_>) {
+        let indices = removed_ranges.indices;
+        debug_assert_eq!(indices.len(), removed_ranges.key_ranges.len());
+        debug_assert_eq!(indices.len(), removed_ranges.value_ranges.len());
+        debug_assert!(indices.windows(2).all(|pair| pair[0] < pair[1]));
+        debug_assert!(*indices.last().unwrap() < removed_ranges.num_pairs);
+        debug_assert!(indices.len() < removed_ranges.num_pairs);
+
+        let key_ptr_size = if self.fixed_key_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        let value_ptr_size = if self.fixed_value_size.is_none() {
+            size_of::<u32>()
+        } else {
+            0
+        };
+        let new_num_pairs = removed_ranges.num_pairs - indices.len();
+        let removed_pointer_bytes = (key_ptr_size + value_ptr_size) * indices.len();
+
+        self.update_removed_indices(removed_pointer_bytes, &removed_ranges);
+
+        let mut source = 4;
+        let mut dest = 4;
+        if key_ptr_size != 0 {
+            for &index in indices {
+                let start = 4 + key_ptr_size * index;
+                Self::compact_before_hole(
+                    self.page,
+                    &mut source,
+                    &mut dest,
+                    start..start + key_ptr_size,
+                );
+            }
+        }
+        if value_ptr_size != 0 {
+            let value_pointers_start = 4 + key_ptr_size * removed_ranges.num_pairs;
+            for &index in indices {
+                let start = value_pointers_start + value_ptr_size * index;
+                Self::compact_before_hole(
+                    self.page,
+                    &mut source,
+                    &mut dest,
+                    start..start + value_ptr_size,
+                );
+            }
+        }
+        for range in removed_ranges.key_ranges {
+            Self::compact_before_hole(self.page, &mut source, &mut dest, range.clone());
+        }
+        for range in removed_ranges.value_ranges {
+            Self::compact_before_hole(self.page, &mut source, &mut dest, range.clone());
+        }
+        Self::compact_tail(
+            self.page,
+            &mut source,
+            &mut dest,
+            removed_ranges.old_total_len,
+        );
+        debug_assert_eq!(
+            dest,
+            removed_ranges.old_total_len
+                - removed_pointer_bytes
+                - removed_ranges.key_bytes
+                - removed_ranges.value_bytes
+        );
+        self.page[2..4].copy_from_slice(&u16::try_from(new_num_pairs).unwrap().to_le_bytes());
+    }
+
+    fn update_removed_indices(
+        &mut self,
+        removed_pointer_bytes: usize,
+        removed_ranges: &RemovedLeafRanges<'_>,
+    ) {
+        let mut removed = 0;
+        let mut removed_key_bytes_before = 0;
+        let mut removed_value_bytes_before = 0;
+        for i in 0..removed_ranges.num_pairs {
+            if removed < removed_ranges.indices.len() && removed_ranges.indices[removed] == i {
+                removed_key_bytes_before += removed_ranges.key_ranges[removed].len();
+                removed_value_bytes_before += removed_ranges.value_ranges[removed].len();
+                removed += 1;
+                continue;
+            }
+
+            if self.fixed_key_size.is_none() {
+                let delta =
+                    -isize::try_from(removed_pointer_bytes + removed_key_bytes_before).unwrap();
+                self.update_key_end(i, delta);
+            }
+            if self.fixed_value_size.is_none() {
+                let delta = -isize::try_from(
+                    removed_pointer_bytes + removed_ranges.key_bytes + removed_value_bytes_before,
+                )
+                .unwrap();
+                self.update_value_end(i, delta);
+            }
+        }
+        debug_assert_eq!(removed, removed_ranges.indices.len());
+    }
+
+    fn compact_before_hole(
+        page: &mut [u8],
+        source: &mut usize,
+        dest: &mut usize,
+        hole: Range<usize>,
+    ) {
+        debug_assert!(*source <= hole.start);
+        if *source < hole.start {
+            if *source != *dest {
+                page.copy_within(*source..hole.start, *dest);
+            }
+            *dest += hole.start - *source;
+        }
+        *source = hole.end;
+    }
+
+    fn compact_tail(page: &mut [u8], source: &mut usize, dest: &mut usize, end: usize) {
+        if *source < end {
+            if *source != *dest {
+                page.copy_within(*source..end, *dest);
+            }
+            *dest += end - *source;
+        }
+    }
+
+    fn update_key_end(&mut self, i: usize, delta: isize) {
+        if self.fixed_key_size.is_some() {
+            return;
+        }
+        let offset = 4 + size_of::<u32>() * i;
+        let mut ptr = u32::from_le_bytes(
+            self.page[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        );
+        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
+        self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+    }
+
+    fn update_value_end(&mut self, i: usize, delta: isize) {
+        if self.fixed_value_size.is_some() {
+            return;
+        }
+        let accessor = LeafAccessor::new(self.page, self.fixed_key_size, self.fixed_value_size);
+        let num_pairs = accessor.num_pairs();
+        let mut offset = 4 + size_of::<u32>() * i;
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * num_pairs;
+        }
+        let mut ptr = u32::from_le_bytes(
+            self.page[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        );
+        ptr = (isize::try_from(ptr).unwrap() + delta).try_into().unwrap();
+        self.page[offset..(offset + size_of::<u32>())].copy_from_slice(&ptr.to_le_bytes());
+    }
+}
+
+// Encapsulates mutation of a leaf page: owns the PageMut along with the key/value
+// widths needed to interpret it, and exposes only the safe operations that callers
+// outside this module need (read access via `accessor`, in-place value replacement via
+// `replace_value`). This keeps the `LeafMutator` construction details from leaking into
+// callers that operate on dynamic-collection leaf pages (e.g., multimap maintenance).
+pub(super) struct LeafPageMut<'a> {
+    page: PageMut<'a>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+}
+
+impl<'a> LeafPageMut<'a> {
+    pub(crate) fn new(
+        page: PageMut<'a>,
+        fixed_key_size: Option<usize>,
+        fixed_value_size: Option<usize>,
+    ) -> Self {
+        debug_assert_eq!(page.memory()[0], LEAF);
+        Self {
+            page,
+            fixed_key_size,
+            fixed_value_size,
+        }
+    }
+
+    pub(crate) fn accessor(&self) -> LeafAccessor<'_> {
+        LeafAccessor::new(
+            self.page.memory(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        )
+    }
+
+    // Replace the value at index `i` in-place, leaving the key unchanged.
+    pub(crate) fn replace_value(&mut self, i: usize, value: &[u8]) {
+        let mut mutator = LeafMutator::new(
+            self.page.memory_mut(),
+            self.fixed_key_size,
+            self.fixed_value_size,
+        );
+        mutator.replace(i, value);
+    }
+}
+
+// Provides a simple zero-copy way to access a branch page
+pub(super) struct BranchAccessor<'b, T: Page> {
+    page: &'b T,
+    num_keys: usize,
+    fixed_key_size: Option<usize>,
+}
+
+impl<'b, T: Page> BranchAccessor<'b, T> {
+    pub(crate) fn new(page: &'b T, fixed_key_size: Option<usize>) -> Self {
+        debug_assert_eq!(page.memory()[0], BRANCH);
+        let num_keys = u16::from_le_bytes(page.memory()[2..4].try_into().unwrap()) as usize;
+        BranchAccessor {
+            page,
+            num_keys,
+            fixed_key_size,
+        }
+    }
+
+    #[cfg(not(redb_no_std))]
+    pub(super) fn print_node(&self) {
+        eprint!(
+            "Internal[ (page={:?}), child_0={:?}",
+            self.page.get_page_number(),
+            self.child_page(0).unwrap()
+        );
+        for i in 0..(self.count_children() - 1) {
+            if let Some(child) = self.child_page(i + 1) {
+                // Branch keys are separators, which are shortened encodings of the key type
+                let key = self.key(i).unwrap();
+                eprint!(" key_{i}={key:?}");
+                eprint!(" child_{}={child:?}", i + 1);
+            }
+        }
+        eprint!("]");
+    }
+
+    pub(crate) fn total_length(&self) -> usize {
+        // Keys are stored at the end
+        self.key_end(self.num_keys() - 1).unwrap()
+    }
+
+    pub(super) fn child_for_key<K: Key>(&self, query: &[u8]) -> (usize, PageNumber) {
+        let mut min_child = 0; // inclusive
+        let mut max_child = self.num_keys(); // inclusive
+        while min_child < max_child {
+            let mid = min_child.midpoint(max_child);
+            match K::compare(query, self.key(mid).unwrap()) {
+                Ordering::Less => {
+                    max_child = mid;
+                }
+                Ordering::Equal => {
+                    return (mid, self.child_page(mid).unwrap());
+                }
+                Ordering::Greater => {
+                    min_child = mid + 1;
+                }
+            }
+        }
+        debug_assert_eq!(min_child, max_child);
+
+        (min_child, self.child_page(min_child).unwrap())
+    }
+
+    fn key_section_start(&self) -> usize {
+        if self.fixed_key_size.is_none() {
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+                + size_of::<u32>() * self.num_keys()
+        } else {
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+        }
+    }
+
+    fn key_offset(&self, n: usize) -> usize {
+        if n == 0 {
+            self.key_section_start()
+        } else {
+            self.key_end(n - 1).unwrap()
+        }
+    }
+
+    fn key_end(&self, n: usize) -> Option<usize> {
+        if let Some(fixed) = self.fixed_key_size {
+            return Some(self.key_section_start() + fixed * (n + 1));
+        }
+        let offset = 8
+            + (PageNumber::serialized_size() + size_of::<Checksum>()) * self.count_children()
+            + size_of::<u32>() * n;
+        Some(u32::from_le_bytes(
+            self.page
+                .memory()
+                .get(offset..(offset + size_of::<u32>()))?
+                .try_into()
+                .unwrap(),
+        ) as usize)
+    }
+
+    pub(super) fn key(&self, n: usize) -> Option<&[u8]> {
+        if n >= self.num_keys() {
+            return None;
+        }
+        let offset = self.key_offset(n);
+        let end = self.key_end(n)?;
+        Some(&self.page.memory()[offset..end])
+    }
+
+    pub(crate) fn count_children(&self) -> usize {
+        self.num_keys() + 1
+    }
+
+    pub(crate) fn child_checksum(&self, n: usize) -> Option<Checksum> {
+        if n >= self.count_children() {
+            return None;
+        }
+
+        let offset = 8 + size_of::<Checksum>() * n;
+        Some(Checksum::from_le_bytes(
+            self.page.memory()[offset..(offset + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        ))
+    }
+
+    pub(crate) fn child_page(&self, n: usize) -> Option<PageNumber> {
+        if n >= self.count_children() {
+            return None;
+        }
+
+        let offset =
+            8 + size_of::<Checksum>() * self.count_children() + PageNumber::serialized_size() * n;
+        Some(PageNumber::from_le_bytes(
+            self.page.memory()[offset..(offset + PageNumber::serialized_size())]
+                .try_into()
+                .unwrap(),
+        ))
+    }
+
+    fn num_keys(&self) -> usize {
+        self.num_keys
+    }
+}
+
+pub(super) struct BranchBuilder<'a, 'b> {
+    children: Vec<(PageNumber, Checksum)>,
+    keys: Vec<Cow<'a, [u8]>>,
+    total_key_bytes: usize,
+    fixed_key_size: Option<usize>,
+    page_allocator: &'b PageAllocator,
+    allocated_pages: &'b PageTracker,
+}
+
+impl<'a, 'b> BranchBuilder<'a, 'b> {
+    pub(super) fn new(
+        page_allocator: &'b PageAllocator,
+        allocated_pages: &'b PageTracker,
+        child_capacity: usize,
+        fixed_key_size: Option<usize>,
+    ) -> Self {
+        Self {
+            children: Vec::with_capacity(child_capacity),
+            keys: Vec::with_capacity(child_capacity - 1),
+            total_key_bytes: 0,
+            fixed_key_size,
+            page_allocator,
+            allocated_pages,
+        }
+    }
+
+    pub(super) fn replace_child(&mut self, index: usize, child: PageNumber, checksum: Checksum) {
+        self.children[index] = (child, checksum);
+    }
+
+    pub(super) fn push_child(&mut self, child: PageNumber, checksum: Checksum) {
+        self.children.push((child, checksum));
+    }
+
+    pub(super) fn push_key(&mut self, key: impl Into<Cow<'a, [u8]>>) {
+        let key = key.into();
+        self.total_key_bytes += key.len();
+        self.keys.push(key);
+    }
+
+    pub(super) fn push_all<T: Page>(&mut self, accessor: &'a BranchAccessor<'_, T>) {
+        for i in 0..accessor.count_children() {
+            let child = accessor.child_page(i).unwrap();
+            let checksum = accessor.child_checksum(i).unwrap();
+            self.push_child(child, checksum);
+        }
+        for i in 0..(accessor.count_children() - 1) {
+            self.push_key(accessor.key(i).unwrap());
+        }
+    }
+
+    pub(super) fn to_single_child(&self) -> Option<(PageNumber, Checksum)> {
+        if self.children.len() > 1 {
+            None
+        } else {
+            Some(self.children[0])
+        }
+    }
+
+    pub(super) fn required_bytes(&self) -> usize {
+        RawBranchBuilder::required_bytes(self.keys.len(), self.total_key_bytes, self.fixed_key_size)
+    }
+
+    pub(super) fn into_parts(self) -> (Vec<(PageNumber, Checksum)>, Vec<Vec<u8>>) {
+        let owned_keys = self.keys.into_iter().map(Cow::into_owned).collect();
+        (self.children, owned_keys)
+    }
+
+    pub(super) fn build<'txn>(self) -> Result<PageMut<'txn>> {
+        assert_eq!(self.children.len(), self.keys.len() + 1);
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len(),
+            self.total_key_bytes,
+            self.fixed_key_size,
+        );
+        let mut page = self.page_allocator.allocate(size, self.allocated_pages)?;
+        let mut builder =
+            RawBranchBuilder::new(page.memory_mut(), self.keys.len(), self.fixed_key_size);
+        builder.write_first_page(self.children[0].0, self.children[0].1);
+        for i in 1..self.children.len() {
+            let key = &self.keys[i - 1];
+            builder.write_nth_key(key.as_ref(), self.children[i].0, self.children[i].1, i - 1);
+        }
+        drop(builder);
+
+        Ok(page)
+    }
+
+    pub(super) fn should_split(&self) -> bool {
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len(),
+            self.total_key_bytes,
+            self.fixed_key_size,
+        );
+        // num_keys is stored as a u16, so a branch must split once it would exceed u16::MAX keys
+        // even if it still fits in a page; otherwise build() would panic in RawBranchBuilder::new.
+        let too_many_keys = self.keys.len() > usize::from(u16::MAX);
+        (size > self.page_allocator.get_page_size() || too_many_keys) && self.keys.len() >= 3
+    }
+
+    pub(super) fn build_split<'txn>(self) -> Result<(PageMut<'txn>, Cow<'a, [u8]>, PageMut<'txn>)> {
+        assert_eq!(self.children.len(), self.keys.len() + 1);
+        assert!(self.keys.len() >= 3);
+        let division = self.keys.len() / 2;
+        let first_split_key_len: usize = self.keys.iter().take(division).map(|k| k.len()).sum();
+        let division_key = self.keys[division].clone();
+        let second_split_key_len = self.total_key_bytes - first_split_key_len - division_key.len();
+
+        let size =
+            RawBranchBuilder::required_bytes(division, first_split_key_len, self.fixed_key_size);
+        let mut page1 = self.page_allocator.allocate(size, self.allocated_pages)?;
+        let mut builder = RawBranchBuilder::new(page1.memory_mut(), division, self.fixed_key_size);
+        builder.write_first_page(self.children[0].0, self.children[0].1);
+        for i in 0..division {
+            let key = &self.keys[i];
+            builder.write_nth_key(
+                key.as_ref(),
+                self.children[i + 1].0,
+                self.children[i + 1].1,
+                i,
+            );
+        }
+        drop(builder);
+
+        let size = RawBranchBuilder::required_bytes(
+            self.keys.len() - division - 1,
+            second_split_key_len,
+            self.fixed_key_size,
+        );
+        let mut page2 = self.page_allocator.allocate(size, self.allocated_pages)?;
+        let mut builder = RawBranchBuilder::new(
+            page2.memory_mut(),
+            self.keys.len() - division - 1,
+            self.fixed_key_size,
+        );
+        builder.write_first_page(self.children[division + 1].0, self.children[division + 1].1);
+        for i in (division + 1)..self.keys.len() {
+            let key = &self.keys[i];
+            builder.write_nth_key(
+                key.as_ref(),
+                self.children[i + 1].0,
+                self.children[i + 1].1,
+                i - division - 1,
+            );
+        }
+        drop(builder);
+
+        Ok((page1, division_key, page2))
+    }
+}
+
+// Note the caller is responsible for ensuring that the buffer is large enough
+// and rewriting all fields if any dynamically sized fields are written
+// Layout is:
+// 1 byte: type
+// 1 byte: padding (padding to 16bits aligned)
+// 2 bytes: num_keys (number of keys)
+// 4 byte: padding (padding to 64bits aligned)
+// repeating (num_keys + 1 times):
+// 16 bytes: child page checksum
+// repeating (num_keys + 1 times):
+// 8 bytes: page number
+// (optional) repeating (num_keys times):
+// * 4 bytes: key end. Ending offset of the key, exclusive
+// repeating (num_keys times):
+// * n bytes: key data
+pub(super) struct RawBranchBuilder<'b> {
+    page: &'b mut [u8],
+    fixed_key_size: Option<usize>,
+    num_keys: usize,
+    keys_written: usize, // used for debugging
+}
+
+impl<'b> RawBranchBuilder<'b> {
+    pub(super) fn required_bytes(
+        num_keys: usize,
+        size_of_keys: usize,
+        fixed_key_size: Option<usize>,
+    ) -> usize {
+        if fixed_key_size.is_none() {
+            let fixed_size = 8
+                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1)
+                + size_of::<u32>() * num_keys;
+            size_of_keys + fixed_size
+        } else {
+            let fixed_size =
+                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+            size_of_keys + fixed_size
+        }
+    }
+
+    // Caller MUST write num_keys values
+    pub(super) fn new(page: &'b mut [u8], num_keys: usize, fixed_key_size: Option<usize>) -> Self {
+        assert!(num_keys > 0);
+        page[0] = BRANCH;
+        page[2..4].copy_from_slice(&u16::try_from(num_keys).unwrap().to_le_bytes());
+        #[cfg(debug_assertions)]
+        {
+            // Poison all the child pointers & key offsets, in case the caller forgets to write them
+            let start = 8 + size_of::<Checksum>() * (num_keys + 1);
+            let mut last =
+                8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (num_keys + 1);
+            if fixed_key_size.is_none() {
+                last += size_of::<u32>() * num_keys;
+            }
+            for x in &mut page[start..last] {
+                *x = 0xFF;
+            }
+        }
+        RawBranchBuilder {
+            page,
+            fixed_key_size,
+            num_keys,
+            keys_written: 0,
+        }
+    }
+
+    pub(super) fn write_first_page(&mut self, page_number: PageNumber, checksum: Checksum) {
+        let offset = 8;
+        self.page[offset..(offset + size_of::<Checksum>())]
+            .copy_from_slice(&checksum.to_le_bytes());
+        let offset = 8 + size_of::<Checksum>() * (self.num_keys + 1);
+        self.page[offset..(offset + PageNumber::serialized_size())]
+            .copy_from_slice(&page_number.to_le_bytes());
+    }
+
+    fn key_section_start(&self) -> usize {
+        let mut offset =
+            8 + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1);
+        if self.fixed_key_size.is_none() {
+            offset += size_of::<u32>() * self.num_keys;
+        }
+
+        offset
+    }
+
+    fn key_end(&self, n: usize) -> usize {
+        if let Some(fixed) = self.fixed_key_size {
+            return self.key_section_start() + fixed * (n + 1);
+        }
+        let offset = 8
+            + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
+            + size_of::<u32>() * n;
+        u32::from_le_bytes(
+            self.page[offset..(offset + size_of::<u32>())]
+                .try_into()
+                .unwrap(),
+        ) as usize
+    }
+
+    // Write the nth key and page of values greater than this key, but less than or equal to the next
+    // Caller must write keys & pages in increasing order
+    pub(super) fn write_nth_key(
+        &mut self,
+        key: &[u8],
+        page_number: PageNumber,
+        checksum: Checksum,
+        n: usize,
+    ) {
+        assert!(n < self.num_keys);
+        assert_eq!(n, self.keys_written);
+        self.keys_written += 1;
+        let offset = 8 + size_of::<Checksum>() * (n + 1);
+        self.page[offset..(offset + size_of::<Checksum>())]
+            .copy_from_slice(&checksum.to_le_bytes());
+        let offset = 8
+            + size_of::<Checksum>() * (self.num_keys + 1)
+            + PageNumber::serialized_size() * (n + 1);
+        self.page[offset..(offset + PageNumber::serialized_size())]
+            .copy_from_slice(&page_number.to_le_bytes());
+
+        let data_offset = if n > 0 {
+            self.key_end(n - 1)
+        } else {
+            self.key_section_start()
+        };
+        if self.fixed_key_size.is_none() {
+            let offset = 8
+                + (PageNumber::serialized_size() + size_of::<Checksum>()) * (self.num_keys + 1)
+                + size_of::<u32>() * n;
+            self.page[offset..(offset + size_of::<u32>())].copy_from_slice(
+                &u32::try_from(data_offset + key.len())
+                    .unwrap()
+                    .to_le_bytes(),
+            );
+        }
+
+        debug_assert!(data_offset > offset);
+        self.page[data_offset..(data_offset + key.len())].copy_from_slice(key);
+    }
+}
+
+impl Drop for RawBranchBuilder<'_> {
+    fn drop(&mut self) {
+        if !crate::panicking() {
+            assert_eq!(self.keys_written, self.num_keys);
+        }
+    }
+}
+
+pub(super) struct BranchMutator<'b> {
+    page: &'b mut [u8],
+}
+
+impl<'b> BranchMutator<'b> {
+    pub(crate) fn new(page: &'b mut [u8]) -> Self {
+        assert_eq!(page[0], BRANCH);
+        Self { page }
+    }
+
+    fn num_keys(&self) -> usize {
+        u16::from_le_bytes(self.page[2..4].try_into().unwrap()) as usize
+    }
+
+    pub(crate) fn write_child_page(
+        &mut self,
+        i: usize,
+        page_number: PageNumber,
+        checksum: Checksum,
+    ) {
+        debug_assert!(i <= self.num_keys());
+        let offset = 8 + size_of::<Checksum>() * i;
+        self.page[offset..(offset + size_of::<Checksum>())]
+            .copy_from_slice(&checksum.to_le_bytes());
+        let offset =
+            8 + size_of::<Checksum>() * (self.num_keys() + 1) + PageNumber::serialized_size() * i;
+        self.page[offset..(offset + PageNumber::serialized_size())]
+            .copy_from_slice(&page_number.to_le_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory};
+
+    const MAX_PAIRS: usize = u16::MAX as usize;
+
+    fn make_allocator() -> PageAllocator {
+        make_allocator_with_page_size(PAGE_SIZE)
+    }
+
+    fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
+        let (mem, _writer_lock) = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            None,
+            0,
+            false,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+        PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
+    }
+
+    fn build_leaf(
+        page_allocator: &PageAllocator,
+        allocated_pages: &PageTracker,
+        keys: &[[u8; 8]],
+    ) -> PageMut<'static> {
+        let mut builder = LeafBuilder::new(
+            page_allocator,
+            allocated_pages,
+            keys.len(),
+            u64::fixed_width(),
+            None,
+        );
+        for key in keys {
+            builder.push(key, &[]);
+        }
+        builder.build().unwrap()
+    }
+
+    fn ascending_keys(n: usize) -> Vec<[u8; 8]> {
+        (0..n as u64).map(|i| i.to_le_bytes()).collect()
+    }
+
+    // num_pairs is stored as a u16. A leaf at u16::MAX pairs must reject in-place
+    // inserts even when the page has plenty of free space, since LeafMutator::insert
+    // cannot represent the new pair count
+    #[test]
+    fn leaf_inplace_insert_rejected_at_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let keys = ascending_keys(MAX_PAIRS);
+        let page = build_leaf(&page_allocator, &allocated_pages, &keys);
+
+        let accessor = LeafAccessor::new(page.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor.num_pairs(), MAX_PAIRS);
+        // The page must be a large (order > 0) page with free space remaining, so that
+        // only the pair count limit can cause the append to be rejected
+        assert!(page.get_page_number().page_order > 0);
+        assert!(page.memory().len() - accessor.total_length() > 100);
+
+        assert!(!LeafMutator::sufficient_insert_inplace_space(
+            &page,
+            MAX_PAIRS,
+            u64::fixed_width(),
+            None,
+            &(MAX_PAIRS as u64).to_le_bytes(),
+            &[],
+        ));
+    }
+
+    // In-place appends below the limit are allowed, up to exactly u16::MAX pairs
+    #[test]
+    fn leaf_inplace_append_up_to_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let keys = ascending_keys(MAX_PAIRS - 1);
+        let mut page = build_leaf(&page_allocator, &allocated_pages, &keys);
+        assert!(page.get_page_number().page_order > 0);
+
+        let key = ((MAX_PAIRS - 1) as u64).to_le_bytes();
+        assert!(LeafMutator::sufficient_insert_inplace_space(
+            &page,
+            MAX_PAIRS - 1,
+            u64::fixed_width(),
+            None,
+            &key,
+            &[],
+        ));
+        let mut mutator = LeafMutator::new(page.memory_mut(), u64::fixed_width(), None);
+        mutator.insert(MAX_PAIRS - 1, &key, &[]);
+
+        let accessor = LeafAccessor::new(page.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor.num_pairs(), MAX_PAIRS);
+        assert_eq!(accessor.last_entry().key(), key);
+    }
+
+    // A split promotes a separator, not the left half's greatest key, so the parent stores only
+    // enough of the boundary to route between the halves
+    #[test]
+    fn leaf_split_promotes_separator() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let value = vec![0u8; page_allocator.get_page_size() / 2];
+        let mut builder = LeafBuilder::new(&page_allocator, &allocated_pages, 2, None, None);
+        builder.push(b"abc0-left", &value);
+        builder.push(b"abc1-right", &value);
+        assert!(builder.should_split());
+
+        let (_, separator, _) = builder.build_split::<&[u8]>().unwrap();
+        assert_eq!(separator.as_ref(), b"abc1");
+    }
+
+    // Branch keys of a fixed width type are stored at that stride, so a `Key` implementation that
+    // returns a shorter separator must not be able to corrupt the page
+    #[test]
+    fn fixed_width_keys_ignore_custom_separators() {
+        #[derive(Debug)]
+        struct BadSeparator;
+
+        impl Value for BadSeparator {
+            type SelfType<'a> = u64;
+            type AsBytes<'a> = [u8; 8];
+
+            fn fixed_width() -> Option<usize> {
+                Some(8)
+            }
+
+            // Only the width and the ordering are needed to pick a separator
+            fn from_bytes<'a>(_data: &'a [u8]) -> u64
+            where
+                Self: 'a,
+            {
+                unreachable!()
+            }
+
+            fn as_bytes<'a, 'b: 'a>(_value: &'a u64) -> [u8; 8]
+            where
+                Self: 'b,
+            {
+                unreachable!()
+            }
+
+            fn type_name() -> crate::TypeName {
+                unreachable!()
+            }
+        }
+
+        impl Key for BadSeparator {
+            fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+                data1.cmp(data2)
+            }
+
+            fn separator<'a>(_left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
+                Cow::Borrowed(&right[..1])
+            }
+        }
+
+        let left = [1u8; 8];
+        let right = [2u8; 8];
+        assert_eq!(
+            branch_separator::<BadSeparator>(&left, &right).as_ref(),
+            left
+        );
+    }
+
+    // Splitting divides by total bytes, which can be arbitrarily lopsided when one pair
+    // contains a huge value. Neither half may end up with more than u16::MAX pairs
+    #[test]
+    fn leaf_split_respects_max_pairs() {
+        let page_allocator = make_allocator();
+        let allocated_pages = PageTracker::new_tracking();
+        let num_pairs = MAX_PAIRS + 2;
+        let keys = ascending_keys(num_pairs);
+        let big_value = vec![0u8; 2 * 1024 * 1024];
+        let mut builder = LeafBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_pairs,
+            u64::fixed_width(),
+            None,
+        );
+        // The first pair dominates the total size, so the byte-based division alone
+        // would put more than u16::MAX pairs into the second half
+        builder.push(&keys[0], &big_value);
+        for key in &keys[1..] {
+            builder.push(key, &[]);
+        }
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
+
+        let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
+        let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
+        assert!(accessor1.num_pairs() <= MAX_PAIRS);
+        assert!(accessor2.num_pairs() <= MAX_PAIRS);
+    }
+
+    // With a large page, more than u16::MAX tiny pairs fit in one leaf without the byte-based split
+    // triggering. should_split must still split on the pair count; otherwise build() would panic in
+    // RawLeafBuilder::new (u16::try_from).
+    #[test]
+    fn leaf_split_respects_max_pairs_by_count() {
+        let page_allocator = make_allocator_with_page_size(2 * 1024 * 1024);
+        let allocated_pages = PageTracker::new_tracking();
+        let num_pairs = MAX_PAIRS + 1;
+        let keys = ascending_keys(num_pairs);
+        let mut builder = LeafBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_pairs,
+            u64::fixed_width(),
+            None,
+        );
+        for key in &keys {
+            builder.push(key, &[]);
+        }
+        // The pairs are tiny, so the leaf fits in the page by bytes; only the count forces a split.
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split::<u64>().unwrap();
+
+        let accessor1 = LeafAccessor::new(page1.memory(), u64::fixed_width(), None);
+        let accessor2 = LeafAccessor::new(page2.memory(), u64::fixed_width(), None);
+        assert_eq!(accessor1.num_pairs() + accessor2.num_pairs(), num_pairs);
+        assert!(accessor1.num_pairs() <= MAX_PAIRS);
+        assert!(accessor2.num_pairs() <= MAX_PAIRS);
+    }
+
+    // The same count limit applies to branch nodes (num_keys is also a u16). The page must be large
+    // enough that u16::MAX + 1 children still fit by bytes, so only the count forces the split.
+    #[test]
+    fn branch_split_respects_max_keys_by_count() {
+        let page_allocator = make_allocator_with_page_size(4 * 1024 * 1024);
+        let allocated_pages = PageTracker::new_tracking();
+        // One more key than u16::MAX, i.e. two more children.
+        let num_children = MAX_PAIRS + 2;
+        let keys = ascending_keys(num_children - 1);
+        let mut builder = BranchBuilder::new(
+            &page_allocator,
+            &allocated_pages,
+            num_children,
+            u64::fixed_width(),
+        );
+        for i in 0..num_children {
+            builder.push_child(PageNumber::new(0, u32::try_from(i).unwrap(), 0), 0);
+            if i < keys.len() {
+                builder.push_key(&keys[i]);
+            }
+        }
+        assert!(builder.should_split());
+        let (page1, _, page2) = builder.build_split().unwrap();
+
+        let accessor1 = BranchAccessor::new(&page1, u64::fixed_width());
+        let accessor2 = BranchAccessor::new(&page2, u64::fixed_width());
+        assert_eq!(
+            accessor1.count_children() + accessor2.count_children(),
+            num_children
+        );
+        // num_keys == count_children - 1 must stay within u16.
+        assert!(accessor1.count_children() - 1 <= MAX_PAIRS);
+        assert!(accessor2.count_children() - 1 <= MAX_PAIRS);
+    }
+}

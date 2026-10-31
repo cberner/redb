@@ -1,0 +1,4466 @@
+use rand::random;
+#[cfg(not(target_os = "wasi"))]
+use redb::CommitError;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+use redb::DatabaseError;
+use redb::backends::InMemoryBackend;
+use redb::{
+    Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
+    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
+    TableError, TableHandle, TypeName, Value, WriteTransaction,
+};
+use std::cmp::Ordering;
+use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
+#[cfg(feature = "experimental-api-5")]
+use std::ops::Bound;
+#[cfg(not(target_os = "wasi"))]
+use std::sync;
+
+const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
+const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
+const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
+
+// Bridges the range signature change made by the experimental-api-5 feature, so that these tests
+// cover both configurations. The 5.0 signature infers the key type from the range itself, and an
+// unbounded range has none to infer, so today's signature needs it named.
+macro_rules! range_all {
+    ($table:expr, $key:ty) => {{
+        #[cfg(feature = "experimental-api-5")]
+        let range = $table.range(..);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let range = $table.range::<$key>(..);
+        range
+    }};
+}
+
+macro_rules! range_owned_all {
+    ($table:expr, $key:ty) => {{
+        #[cfg(feature = "experimental-api-5")]
+        let range = $table.range_owned(..);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let range = $table.range_owned::<$key>(..);
+        range
+    }};
+}
+
+fn create_tempfile() -> tempfile::NamedTempFile {
+    if cfg!(target_os = "wasi") {
+        tempfile::NamedTempFile::new_in("/tmp").unwrap()
+    } else {
+        tempfile::NamedTempFile::new().unwrap()
+    }
+}
+
+#[test]
+fn len() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 3);
+    let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
+    assert_eq!(untyped_table.len().unwrap(), 3);
+}
+
+#[test]
+fn read_only() {
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            table.insert("hello", "world").unwrap();
+            table.insert("hello2", "world2").unwrap();
+            table.insert("hi", "world").unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        assert!(matches!(
+            ReadOnlyDatabase::open(tmpfile.path()),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        drop(db);
+    }
+
+    let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 3);
+
+    let db2 = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let read_txn2 = db.begin_read().unwrap();
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert_eq!(table2.len().unwrap(), 3);
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    assert!(matches!(
+        Database::open(tmpfile.path()),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+    drop(db);
+    drop(db2);
+}
+
+#[test]
+fn write_transaction_keeps_database_open() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    // The live write transaction keeps the database open and remains usable
+    drop(db);
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+
+    // The file stays locked until the transaction completes
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    assert!(matches!(
+        Database::open(tmpfile.path()),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    write_txn.commit().unwrap();
+
+    // The deferred close ran when the transaction completed, so re-opening succeeds and
+    // does not require a repair
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn drop_database_then_drop_write_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    drop(db);
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    // Dropping the transaction aborts it and performs the deferred close
+    drop(write_txn);
+
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(STR_TABLE),
+        Err(TableError::TableDoesNotExist(_))
+    ));
+}
+
+#[test]
+fn create_does_not_repair() {
+    let tmpfile = create_tempfile();
+    // A new database has nothing to repair, so a repair callback that refuses every repair is
+    // not consulted, and does not keep the database from being created
+    let repairs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = repairs.clone();
+    let db = Database::builder()
+        .set_repair_callback(move |session| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            session.abort();
+        })
+        .create(tmpfile.path())
+        .unwrap();
+    assert_eq!(repairs.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    // The close recorded the allocator state, so re-opening needs no repair either
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn deferred_close_invalidates_read_transactions() {
+    let tmpfile = create_tempfile();
+    let db = Database::builder()
+        .set_cache_size(0)
+        .create(tmpfile.path())
+        .unwrap();
+    let setup_txn = db.begin_write().unwrap();
+    {
+        let mut table = setup_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    setup_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let read_txn = db.begin_read().unwrap();
+    drop(db);
+    // The database is still open, so the read transaction remains usable
+    assert!(read_txn.list_tables().is_ok());
+    write_txn.commit().unwrap();
+    // The write transaction's completion closed the database
+    assert!(matches!(
+        read_txn.list_tables().err().unwrap(),
+        StorageError::DatabaseClosed
+    ));
+}
+
+// Regression test for https://github.com/cberner/redb/issues/1072
+#[test]
+fn return_write_transaction_from_function() {
+    fn make_txn(path: &std::path::Path) -> WriteTransaction {
+        let db = Database::create(path).unwrap();
+        db.begin_write().unwrap()
+    }
+
+    let tmpfile = create_tempfile();
+    let txn = make_txn(tmpfile.path());
+    txn.commit().unwrap();
+    Database::open(tmpfile.path()).unwrap();
+}
+
+#[test]
+fn table_stats() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    let untyped_table = read_txn.open_untyped_table(STR_TABLE).unwrap();
+    assert_eq!(table.stats().unwrap().tree_height(), 1);
+    assert_eq!(untyped_table.stats().unwrap().tree_height(), 1);
+}
+
+#[test]
+fn in_memory() {
+    let db = Database::builder()
+        .create_with_backend(InMemoryBackend::new())
+        .unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world2").unwrap();
+        table.insert("hi", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 3);
+}
+
+#[test]
+fn first_last() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.first().unwrap().is_none());
+        assert!(table.last().unwrap().is_none());
+        table.insert("a", "world1").unwrap();
+        assert_eq!(table.first().unwrap().unwrap().0.value(), "a");
+        assert_eq!(table.last().unwrap().unwrap().0.value(), "a");
+        table.insert("b", "world2").unwrap();
+        table.insert("c", "world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.first().unwrap().unwrap().0.value(), "a");
+    assert_eq!(table.last().unwrap().unwrap().0.value(), "c");
+}
+
+#[test]
+fn pop() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+
+        assert!(table.pop_first().unwrap().is_none());
+        assert!(table.pop_last().unwrap().is_none());
+
+        table.insert("a", "world").unwrap();
+        table.insert("b", "world2").unwrap();
+        table.insert("c", "world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        {
+            let (key, value) = table.pop_first().unwrap().unwrap();
+            assert_eq!(key.value(), "a");
+            assert_eq!(value.value(), "world");
+        }
+        {
+            let (key, value) = table.pop_last().unwrap().unwrap();
+            assert_eq!(key.value(), "c");
+            assert_eq!(value.value(), "world3");
+        }
+        {
+            let (key, value) = table.pop_last().unwrap().unwrap();
+            assert_eq!(key.value(), "b");
+            assert_eq!(value.value(), "world2");
+        }
+
+        assert!(table.pop_first().unwrap().is_none());
+        assert!(table.pop_last().unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Test retain uncommitted data
+        let mut extracted = table.extract_if(|k, _| k >= 5).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 5);
+        extracted.close().unwrap();
+        assert_eq!(table.len().unwrap(), 9);
+
+        let mut extracted = table.extract_from_if(5.., |k, _| k < 8).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 6);
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 7);
+        assert!(extracted.next().is_none());
+        drop(extracted);
+        assert_eq!(table.len().unwrap(), 7);
+
+        for i in 5..8 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        let mut extracted = table.extract_if(|_, _| true).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().1.value(), 0);
+        drop(extracted);
+        assert_eq!(table.len().unwrap(), 9);
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        for _ in table.extract_if(|x, _| x % 2 != 0).unwrap() {}
+        table.extract_if(|_, _| true).unwrap().next_back();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_write().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 4);
+        let mut iter = table.iter().unwrap();
+        for x in [0, 2, 4, 6] {
+            let (k, v) = iter.next().unwrap().unwrap();
+            assert_eq!(k.value(), x);
+            assert_eq!(k.value(), v.value());
+        }
+    }
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn extract_if_predicate_panic_poisons_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut extracted = table
+                .extract_if(|key, _| {
+                    assert_ne!(key, 2);
+                    key == 0
+                })
+                .unwrap();
+            assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+            let _ = extracted.next();
+        }));
+        assert!(result.is_err());
+    }
+    assert!(matches!(
+        write_txn.commit(),
+        Err(CommitError::TransactionPoisoned)
+    ));
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn extract_if_caller_panic_does_not_poison_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut extracted = table.extract_if(|key, _| key == 0).unwrap();
+            assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+            panic!("caller panic");
+        }));
+        assert!(result.is_err());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if_is_lazy_until_read() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut predicate_calls = 0;
+        drop(
+            table
+                .extract_if(|_, _| {
+                    predicate_calls += 1;
+                    true
+                })
+                .unwrap(),
+        );
+        assert_eq!(predicate_calls, 0);
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if_mixed_direction_removes_only_yielded_entries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut extracted = table.extract_if(|key, _| key % 2 == 0).unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
+        assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 8);
+        drop(extracted);
+
+        assert_eq!(table.len().unwrap(), 8);
+        assert!(table.get(&0).unwrap().is_none());
+        assert!(table.get(&8).unwrap().is_none());
+        for i in [2, 4, 6] {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_mixed_direction_early_drop_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..1000 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let mut extracted = table
+            .extract_from_if(200..800, |key, _| key % 5 == 0)
+            .unwrap();
+        assert_eq!(extracted.next().unwrap().unwrap().0.value(), 200);
+        assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 795);
+        drop(extracted);
+
+        assert_eq!(table.len().unwrap(), 998);
+        assert!(table.get(&200).unwrap().is_none());
+        assert!(table.get(&795).unwrap().is_none());
+        for i in [0, 205, 790, 800] {
+            assert_eq!(table.get(&i).unwrap().unwrap().value(), i);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_next_back_large_range() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    let n = 17_000u64;
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+
+        let expected = (n / 2..n)
+            .filter(|key| key % 7 == 0)
+            .rev()
+            .collect::<Vec<_>>();
+        let mut extracted = table
+            .extract_from_if(n / 2.., |key, _| key % 7 == 0)
+            .unwrap();
+        let mut removed = vec![];
+        while let Some(entry) = extracted.next_back() {
+            removed.push(entry.unwrap().0.value());
+        }
+        drop(extracted);
+
+        assert_eq!(removed, expected);
+        assert_eq!(table.len().unwrap(), n - expected.len() as u64);
+        for key in expected {
+            assert!(table.get(&key).unwrap().is_none());
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_if_returned_guards_survive_finalize() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+
+        let mut extracted = table.extract_if(|key, _| key == 4).unwrap();
+        let (key, value) = extracted.next().unwrap().unwrap();
+        assert!(extracted.next().is_none());
+        assert_eq!(key.value(), 4);
+        assert_eq!(value.value(), 40);
+        drop((key, value, extracted));
+
+        assert_eq!(table.len().unwrap(), 9);
+        assert!(table.get(&4).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut extracted = table.extract_if(|key, _| key == 5).unwrap();
+        let (key, value) = extracted.next().unwrap().unwrap();
+        drop(extracted);
+        assert_eq!(key.value(), 5);
+        assert_eq!(value.value(), 50);
+        drop((key, value));
+
+        assert_eq!(table.len().unwrap(), 8);
+        assert!(table.get(&5).unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+// Guards from many extracted entries must stay readable for the life of the
+// transaction, even after the iterator is gone, for both dirty and committed
+// pages.
+#[test]
+fn extract_if_all_guards_survive_iteration() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // First pass: uncommitted pages, since the inserts are part of the same transaction.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &(i * 10)).unwrap();
+        }
+        let mut guards = vec![];
+        for entry in table.extract_if(|key, _| key % 2 == 0).unwrap() {
+            guards.push(entry.unwrap());
+        }
+        assert_eq!(guards.len() as u64, elements / 2);
+        for (i, (key, value)) in guards.iter().enumerate() {
+            assert_eq!(key.value(), 2 * i as u64);
+            assert_eq!(value.value(), 20 * i as u64);
+        }
+        drop(guards);
+        assert_eq!(table.len().unwrap(), elements / 2);
+    }
+    write_txn.commit().unwrap();
+
+    // Second pass: committed pages.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut guards = vec![];
+        let mut iter = table.extract_if(|_, _| true).unwrap();
+        for entry in &mut iter {
+            guards.push(entry.unwrap());
+        }
+        iter.close().unwrap();
+        assert_eq!(guards.len() as u64, elements / 2);
+        for (i, (key, value)) in guards.iter().enumerate() {
+            assert_eq!(key.value(), 2 * i as u64 + 1);
+            assert_eq!(value.value(), 10 * (2 * i as u64 + 1));
+        }
+        drop(guards);
+        assert_eq!(table.len().unwrap(), 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Draining every entry with alternating calls forces leaf deletions and
+// merges between the converging ends.
+#[test]
+fn extract_from_if_alternating_drain() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut extracted = table.extract_from_if(1000..9000, |_, _| true).unwrap();
+        let mut front_next = 1000;
+        let mut back_next = 8999;
+        let mut front = true;
+        loop {
+            let entry = if front {
+                extracted.next()
+            } else {
+                extracted.next_back()
+            };
+            let Some(entry) = entry else {
+                break;
+            };
+            let (key, value) = entry.unwrap();
+            let expected = if front {
+                front_next += 1;
+                front_next - 1
+            } else {
+                back_next -= 1;
+                back_next + 1
+            };
+            assert_eq!(key.value(), expected);
+            assert_eq!(value.value(), expected);
+            front = !front;
+        }
+        drop(extracted);
+        assert_eq!(front_next, back_next + 1);
+
+        assert_eq!(table.len().unwrap(), 2000);
+        assert!(table.get(&5000).unwrap().is_none());
+        assert_eq!(table.get(&999).unwrap().unwrap().value(), 999);
+        assert_eq!(table.get(&9000).unwrap().unwrap().value(), 9000);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Alternating next()/next_back() converges without yielding any entry twice,
+// even when the cursors meet inside a leaf.
+#[test]
+fn extract_from_if_alternating_directions() {
+    let elements = 10_000u64;
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..elements {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut expected: std::collections::BTreeSet<u64> =
+            (1000..9000).filter(|key| key % 3 == 0).collect();
+        let mut extracted = table
+            .extract_from_if(1000..9000, |key, _| key % 3 == 0)
+            .unwrap();
+        let mut front = true;
+        loop {
+            let entry = if front {
+                extracted.next()
+            } else {
+                extracted.next_back()
+            };
+            let Some(entry) = entry else {
+                break;
+            };
+            let (key, value) = entry.unwrap();
+            let expected_key = if front {
+                expected.pop_first().unwrap()
+            } else {
+                expected.pop_last().unwrap()
+            };
+            assert_eq!(key.value(), expected_key);
+            assert_eq!(value.value(), expected_key);
+            front = !front;
+        }
+        drop(extracted);
+        assert!(expected.is_empty());
+
+        assert_eq!(
+            table.len().unwrap(),
+            elements - (1000..9000).filter(|key| key % 3 == 0).count() as u64
+        );
+        for key in 1000..9000 {
+            assert_eq!(table.get(&key).unwrap().is_none(), key % 3 == 0);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+// Strictly alternating next()/next_back() over a multi-leaf tree with dense
+// removals repeatedly re-parks and resolves each end's pending removal batch.
+// Resolving a batch must not modify a leaf in place while the other end's
+// snapshot still references the same leaf buffer.
+#[test]
+fn extract_if_alternating_directions_dense_removals() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut got: Vec<u64> = vec![];
+        {
+            // Remove everything except key 0, alternating directions.
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            loop {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                match entry {
+                    Some(item) => got.push(item.unwrap().0.value()),
+                    None => break,
+                }
+            }
+        }
+        got.sort_unstable();
+        assert_eq!(got, (1..n).collect::<Vec<_>>());
+        assert_eq!(table.len().unwrap(), 1);
+        assert_eq!(table.get(&0).unwrap().unwrap().value(), 0);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Dropping the iterator partway through a mixed-direction scan applies both
+// ends' pending removal batches from close().
+#[test]
+fn extract_if_alternating_directions_partial_consumption() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            // Consume most of the range, then drop the iterator.
+            for _ in 0..280 {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                if let Some(item) = entry {
+                    item.unwrap();
+                } else {
+                    break;
+                }
+            }
+        }
+        assert_eq!(table.len().unwrap(), n - 280);
+    }
+    write_txn.commit().unwrap();
+}
+
+// Even an occasional direction switch during an otherwise forward scan must
+// hand the pending batch safely between the two ends.
+#[test]
+fn extract_if_mostly_forward_occasional_next_back() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 1000u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut got: Vec<u64> = vec![];
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut i = 0u64;
+            loop {
+                let entry = if i.is_multiple_of(50) {
+                    extracted.next_back()
+                } else {
+                    extracted.next()
+                };
+                i += 1;
+                match entry {
+                    Some(item) => got.push(item.unwrap().0.value()),
+                    None => break,
+                }
+            }
+        }
+        got.sort_unstable();
+        assert_eq!(got, (1..n).collect::<Vec<_>>());
+    }
+    write_txn.commit().unwrap();
+}
+
+// Guards yielded during a mixed-direction scan stay valid after the iterator
+// is dropped, even though they reference leaf buffers that batch resolution
+// later restructures.
+#[test]
+fn extract_if_alternating_directions_held_guards() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let n = 300u64;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..n {
+            table.insert(&i, &(i + 1000)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let mut held = vec![];
+        {
+            let mut extracted = table.extract_if(|k, _| k != 0).unwrap();
+            let mut front = true;
+            loop {
+                let entry = if front {
+                    extracted.next()
+                } else {
+                    extracted.next_back()
+                };
+                front = !front;
+                match entry {
+                    Some(item) => held.push(item.unwrap()),
+                    None => break,
+                }
+            }
+        }
+        held.sort_by_key(|(key, _)| key.value());
+        assert_eq!(held.len() as u64, n - 1);
+        for (i, (key, value)) in held.iter().enumerate() {
+            let expected = i as u64 + 1;
+            assert_eq!(key.value(), expected);
+            assert_eq!(value.value(), expected + 1000);
+        }
+        drop(held);
+
+        assert_eq!(table.len().unwrap(), 1);
+        assert_eq!(table.get(&0).unwrap().unwrap().value(), 1000);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+        // Test retain uncommitted data
+        table.retain(|k, _| k >= 5).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+
+        // Test matching on the value
+        table.retain(|_, v| v >= 5).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+
+        // Test retain_in
+        table.retain_in(..5, |_, _| false).unwrap();
+        for i in 0..5 {
+            assert!(table.insert(&i, &i).unwrap().is_none());
+        }
+        assert_eq!(table.len().unwrap(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 10);
+        table.retain(|x, _| x >= 5).unwrap();
+        assert_eq!(table.len().unwrap(), 5);
+
+        let mut i = 5u64;
+        for item in table.range(0..10).unwrap() {
+            let (k, v) = item.unwrap();
+            assert_eq!(i, k.value());
+            assert_eq!(i, v.value());
+            i += 1;
+        }
+    }
+    write_txn.abort().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.retain(|x, _| x % 2 == 0).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_write().unwrap();
+    {
+        let table = read_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), 5);
+        for entry in table.iter().unwrap() {
+            let (k, v) = entry.unwrap();
+            assert_eq!(k.value() % 2, 0);
+            assert_eq!(k.value(), v.value());
+        }
+    }
+}
+
+#[test]
+fn stored_size() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert_eq!(write_txn.stats().unwrap().stored_bytes(), 10);
+    assert!(write_txn.stats().unwrap().fragmented_bytes() > 0);
+    assert!(write_txn.stats().unwrap().metadata_bytes() > 0);
+    write_txn.abort().unwrap();
+}
+
+#[test]
+fn create_open() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &1).unwrap();
+    }
+    write_txn.commit().unwrap();
+    drop(db);
+
+    let db2 = Database::open(tmpfile.path()).unwrap();
+
+    let read_txn = db2.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(1, table.get(&0).unwrap().unwrap().value());
+}
+
+#[test]
+fn multiple_tables() {
+    let definition1: TableDefinition<&str, &str> = TableDefinition::new("1");
+    let definition2: TableDefinition<&str, &str> = TableDefinition::new("2");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition1).unwrap();
+        let mut table2 = write_txn.open_table(definition2).unwrap();
+
+        table.insert("hello", "world").unwrap();
+        table2.insert("hello", "world2").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition1).unwrap();
+    let table2 = read_txn.open_table(definition2).unwrap();
+    assert_eq!(table.len().unwrap(), 1);
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert_eq!(table2.len().unwrap(), 1);
+    assert_eq!("world2", table2.get("hello").unwrap().unwrap().value());
+}
+
+#[test]
+fn list_tables() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition_x: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+    let definition_y: TableDefinition<&[u8], &[u8]> = TableDefinition::new("y");
+    let definition_mx: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("mx");
+    let definition_my: MultimapTableDefinition<&[u8], &[u8]> = MultimapTableDefinition::new("my");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        write_txn.open_table(definition_x).unwrap();
+        write_txn.open_table(definition_y).unwrap();
+        write_txn.open_multimap_table(definition_mx).unwrap();
+        write_txn.open_multimap_table(definition_my).unwrap();
+    }
+
+    let tables: Vec<String> = write_txn
+        .list_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    let multimap_tables: Vec<String> = write_txn
+        .list_multimap_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    assert_eq!(tables, &["x", "y"]);
+    assert_eq!(multimap_tables, &["mx", "my"]);
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tables: Vec<String> = read_txn
+        .list_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    let multimap_tables: Vec<String> = read_txn
+        .list_multimap_tables()
+        .unwrap()
+        .map(|h| h.name().to_string())
+        .collect();
+    assert_eq!(tables, &["x", "y"]);
+    assert_eq!(multimap_tables, &["mx", "my"]);
+}
+
+#[test]
+// Test that these signatures compile
+fn tuple_type_function_lifetime() {
+    #[allow(dead_code)]
+    fn insert_inferred_lifetime(table: &mut redb::Table<(&str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+
+    #[allow(dead_code)]
+    #[allow(clippy::needless_lifetimes)]
+    fn insert_explicit_lifetime<'a>(table: &mut redb::Table<(&'a str, u8), u64>) {
+        table
+            .insert(&(String::from("hello").as_str(), 8), &1)
+            .unwrap();
+    }
+}
+
+#[test]
+fn tuple_type_lifetime() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&(String::from("hello").as_str(), 5), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap().value(), (0, 123));
+}
+
+#[test]
+fn tuple2_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get(&("hello", 5)).unwrap().unwrap().value(), (0, 123));
+}
+
+#[test]
+fn tuple3_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16), (u16, u32)> = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6)).unwrap().unwrap().value(),
+        (0, 123)
+    );
+}
+
+#[test]
+fn tuple4_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6, 7)).unwrap().unwrap().value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple5_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7, 8), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table.get(&("hello", 5, 6, 7, 8)).unwrap().unwrap().value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple6_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert(&("hello", 5, 6, 7, 8, 9), &(0, 123)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple7_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple8_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple9_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple10_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<(&str, u8, u16, u32, u64, u128, i8, i16, i32, i64), (u16, u32)> =
+        TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple11_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<
+        (&str, u8, u16, u32, u64, u128, i8, i16, i32, i64, i128),
+        (u16, u32),
+    > = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5), &(0, 123))
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, -1, -2, -3, -4, -5))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn tuple12_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def: TableDefinition<
+        (
+            &str,
+            u8,
+            u16,
+            u32,
+            u64,
+            u128,
+            &str,
+            i16,
+            i32,
+            i64,
+            i128,
+            &str,
+        ),
+        (u16, u32),
+    > = TableDefinition::new("table");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table
+            .insert(
+                &("hello", 5, 6, 7, 8, 9, "mid", -2, -3, -4, -5, "end"),
+                &(0, 123),
+            )
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(
+        table
+            .get(&("hello", 5, 6, 7, 8, 9, "mid", -2, -3, -4, -5, "end"))
+            .unwrap()
+            .unwrap()
+            .value(),
+        (0, 123)
+    );
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn generic_array_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let table_def1: TableDefinition<[u8; 3], [u64; 2]> = TableDefinition::new("table1");
+    let table_def2: TableDefinition<[(u8, &str); 2], [Option<&str>; 2]> =
+        TableDefinition::new("table2");
+    let table_def3: TableDefinition<[&[u8]; 2], [f32; 2]> = TableDefinition::new("table3");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table1 = write_txn.open_table(table_def1).unwrap();
+        let mut table2 = write_txn.open_table(table_def2).unwrap();
+        let mut table3 = write_txn.open_table(table_def3).unwrap();
+        table1.insert([0, 1, 2], &[4, 5]).unwrap();
+        table2
+            .insert([(0, "hi"), (1, "world")], [None, Some("test")])
+            .unwrap();
+        table3
+            .insert([b"hi".as_slice(), b"world".as_slice()], [4.0, 5.0])
+            .unwrap();
+        table3
+            .insert([b"longlong".as_slice(), b"longlong".as_slice()], [0.0, 0.0])
+            .unwrap();
+        table3
+            .insert([b"s".as_slice(), b"s".as_slice()], [0.0, 0.0])
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table1 = read_txn.open_table(table_def1).unwrap();
+    let table2 = read_txn.open_table(table_def2).unwrap();
+    let table3 = read_txn.open_table(table_def3).unwrap();
+    assert_eq!(table1.get(&[0, 1, 2]).unwrap().unwrap().value(), [4, 5]);
+    assert_eq!(
+        table2
+            .get(&[(0, "hi"), (1, "world")])
+            .unwrap()
+            .unwrap()
+            .value(),
+        [None, Some("test")]
+    );
+    assert_eq!(
+        table3
+            .get(&[b"hi".as_slice(), b"world".as_slice()])
+            .unwrap()
+            .unwrap()
+            .value(),
+        [4.0, 5.0]
+    );
+}
+
+#[test]
+fn is_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.is_empty().unwrap());
+        table.insert("hello", "world").unwrap();
+        assert!(!table.is_empty().unwrap());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert!(!table.is_empty().unwrap());
+}
+
+#[test]
+fn abort() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "aborted").unwrap();
+        assert_eq!("aborted", table.get("hello").unwrap().unwrap().value());
+    }
+    write_txn.abort().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE);
+    assert!(table.is_err());
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn insert_overwrite() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.insert("hello", "world").unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        let old_value = table.insert("hello", "replaced").unwrap();
+        assert_eq!(old_value.unwrap().value(), "world");
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("replaced", table.get("hello").unwrap().unwrap().value());
+}
+
+#[test]
+fn same_size_overwrite_preserves_snapshot() {
+    const DEFINITION: TableDefinition<u64, [u8; 32]> = TableDefinition::new("x");
+    const ELEMENTS: u64 = 10_000;
+
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(DEFINITION).unwrap();
+        for key in 0..ELEMENTS {
+            table.insert(&key, &[0; 32]).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let old_read = db.begin_read().unwrap();
+    let old_table = old_read.open_table(DEFINITION).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(DEFINITION).unwrap();
+        for key in 0..ELEMENTS {
+            let old_value = table.insert(&key, &[1; 32]).unwrap().unwrap();
+            assert_eq!(old_value.value(), [0; 32]);
+        }
+    }
+    write_txn.commit().unwrap();
+
+    for key in (0..ELEMENTS).step_by(101) {
+        assert_eq!(old_table.get(&key).unwrap().unwrap().value(), [0; 32]);
+    }
+    drop(old_table);
+    drop(old_read);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEFINITION).unwrap();
+    for key in (0..ELEMENTS).step_by(101) {
+        assert_eq!(table.get(&key).unwrap().unwrap().value(), [1; 32]);
+    }
+    drop(table);
+    drop(read_txn);
+    assert!(db.check_integrity().unwrap());
+}
+
+#[test]
+fn insert_reserve() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
+    let value = "world";
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(def).unwrap();
+        let mut reserved = table.insert_reserve("hello", value.len()).unwrap();
+        reserved.as_mut().copy_from_slice(value.as_bytes());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    {
+        let table = read_txn.open_table(def).unwrap();
+        assert_eq!(
+            value.as_bytes(),
+            table.get("hello").unwrap().unwrap().value()
+        );
+    }
+    drop(read_txn);
+
+    // Reserving over an existing key, at the length it already has
+    let replacement = "earth";
+    assert_eq!(replacement.len(), value.len());
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(def).unwrap();
+        let mut reserved = table.insert_reserve("hello", replacement.len()).unwrap();
+        reserved.as_mut().copy_from_slice(replacement.as_bytes());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(def).unwrap();
+    assert_eq!(
+        replacement.as_bytes(),
+        table.get("hello").unwrap().unwrap().value()
+    );
+}
+
+#[test]
+fn get_mut() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(table.insert("hello", "world").unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    }
+
+    let mut very_long_string = String::from("hello");
+    for _ in 0..10_000 {
+        very_long_string.push('x');
+    }
+
+    let mut last_value = "world";
+
+    for new_value in ["earth", "mars", very_long_string.as_str()].iter() {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            let mut value = table.get_mut("hello").unwrap().unwrap();
+            if value.value() == last_value {
+                value.insert(new_value).unwrap();
+            } else {
+                panic!();
+            }
+            assert_eq!(value.value(), *new_value);
+            last_value = new_value;
+        }
+        write_txn.commit().unwrap();
+
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!(*new_value, table.get("hello").unwrap().unwrap().value());
+    }
+}
+
+#[test]
+fn entry_or_insert() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // or_insert on a vacant entry inserts the default and returns an accessor to it.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        assert!(matches!(entry, Entry::Vacant(_)));
+        let value = entry.or_insert(10).unwrap();
+        assert_eq!(value.value(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    // or_insert on an occupied entry returns the existing value, unchanged.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        assert!(matches!(entry, Entry::Occupied(_)));
+        let value = entry.or_insert(999).unwrap();
+        assert_eq!(value.value(), 10);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 10);
+    drop(read_txn);
+
+    // key() returns the key for both variants.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        assert_eq!(*table.entry(1).unwrap().key(), 1);
+        assert_eq!(*table.entry(2).unwrap().key(), 2);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn entry_borrowed_key() {
+    // Exercises the ergonomics of `entry()` with a borrowed key type (`&[u8]`).
+    // The single `'a` lifetime on `entry<'a>(&'a mut self, key: K::SelfType<'a>)`
+    // means the key just needs to live across the `entry()` call; it does not need
+    // to outlive the table.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Key materialized inside the transaction scope, with a lifetime shorter than the table.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        let key_owned: Vec<u8> = vec![1, 2, 3];
+        let value = table
+            .entry(key_owned.as_slice())
+            .unwrap()
+            .or_insert(b"hello".as_slice())
+            .unwrap();
+        assert_eq!(value.value(), b"hello");
+    }
+    write_txn.commit().unwrap();
+
+    // The key Vec is dropped at the end of the previous scope, demonstrating that
+    // the entry guard does not require the key to outlive the table.
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    assert_eq!(
+        table.get([1u8, 2, 3].as_slice()).unwrap().unwrap().value(),
+        b"hello"
+    );
+    drop(read_txn);
+
+    // String literal (`&'static [u8]`) also works: the lifetime is shortened to fit `'a`.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        table
+            .entry(b"static_key".as_slice())
+            .unwrap()
+            .or_insert(b"world".as_slice())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    assert_eq!(
+        table
+            .get(b"static_key".as_slice())
+            .unwrap()
+            .unwrap()
+            .value(),
+        b"world"
+    );
+}
+
+#[test]
+fn entry_borrowed_key_in_loop() {
+    // Each loop iteration constructs a fresh borrowed key whose lifetime is bounded
+    // by the iteration. Without a single-lifetime API, the borrow checker would
+    // complain that the key does not outlive the table.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let inputs: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i, i + 1, i + 2]).collect();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        for (i, key) in inputs.iter().enumerate() {
+            let value = vec![i as u8];
+            table
+                .entry(key.as_slice())
+                .unwrap()
+                .or_insert(value.as_slice())
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+    for (i, key) in inputs.iter().enumerate() {
+        assert_eq!(
+            table.get(key.as_slice()).unwrap().unwrap().value(),
+            &[i as u8]
+        );
+    }
+}
+
+#[test]
+fn entry_or_insert_with() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // or_insert_with is lazy: closure runs only for vacant entries.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.entry(1).unwrap().or_insert_with(|| 42).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 42);
+    drop(read_txn);
+
+    // or_insert_with_key exposes the key to the default function.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let value = table
+            .entry(3)
+            .unwrap()
+            .or_insert_with_key(|k| k * 2)
+            .unwrap();
+        assert_eq!(value.value(), 6);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(3).unwrap().unwrap().value(), 6);
+}
+
+#[test]
+fn entry_and_modify() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 10).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // and_modify updates an occupied entry; or_insert after it is a no-op.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table
+            .entry(1)
+            .unwrap()
+            .and_modify(|guard| guard.insert(guard.value() + 5))
+            .unwrap()
+            .or_insert(0)
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 15);
+    drop(read_txn);
+
+    // and_modify is a no-op on vacant entries; or_insert then provides the default.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let value = table
+            .entry(2)
+            .unwrap()
+            .and_modify(|guard| guard.insert(0))
+            .unwrap()
+            .or_insert(7)
+            .unwrap();
+        assert_eq!(value.value(), 7);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(2).unwrap().unwrap().value(), 7);
+}
+
+#[test]
+fn entry_occupied_methods() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(1, 10).unwrap();
+        table.insert(2, 20).unwrap();
+        table.insert(3, 30).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    // OccupiedEntry::get / get_mut / insert.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        let entry = table.entry(1).unwrap();
+        match entry {
+            Entry::Occupied(mut occupied) => {
+                assert_eq!(*occupied.key(), 1);
+                assert_eq!(occupied.get().unwrap().value(), 10);
+                let mut guard = occupied.get_mut().unwrap();
+                assert_eq!(guard.value(), 10);
+                guard.insert(&11).unwrap();
+                drop(guard);
+                let old = occupied.insert(&100).unwrap();
+                assert_eq!(old.value(), 11);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(1).unwrap().unwrap().value(), 100);
+    drop(read_txn);
+
+    // OccupiedEntry::remove.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(2).unwrap() {
+            Entry::Occupied(occupied) => {
+                let removed = occupied.remove().unwrap();
+                assert_eq!(removed.value(), 20);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    // OccupiedEntry::remove_entry returns key and value.
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(3).unwrap() {
+            Entry::Occupied(occupied) => {
+                let (key, value) = occupied.remove_entry().unwrap();
+                assert_eq!(key, 3);
+                assert_eq!(value.value(), 30);
+            }
+            Entry::Vacant(_) => panic!("expected Occupied"),
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert!(table.get(2).unwrap().is_none());
+    assert!(table.get(3).unwrap().is_none());
+}
+
+#[test]
+fn entry_vacant_into_key() {
+    use redb::Entry;
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        match table.entry(42).unwrap() {
+            Entry::Vacant(vacant) => {
+                let key = vacant.into_key();
+                assert_eq!(key, 42);
+            }
+            Entry::Occupied(_) => panic!("expected Vacant"),
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn delete() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+        table.insert("hello2", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert_eq!(table.len().unwrap(), 2);
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!("world", table.remove("hello").unwrap().unwrap().value());
+        assert!(table.remove("hello").unwrap().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert!(table.get("hello").unwrap().is_none());
+    assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn delete_open_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(matches!(
+            write_txn.delete_table(STR_TABLE).unwrap_err(),
+            TableError::TableAlreadyOpen(_, _)
+        ));
+        drop(table);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn delete_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(write_txn.delete_table(table).unwrap());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn rename_table_to_same_name() {
+    let table_def: TableDefinition<&str, &str> = TableDefinition::new("x");
+    let missing_def: TableDefinition<&str, &str> = TableDefinition::new("missing");
+    let multitable_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("multi");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert("hi", "hi").unwrap();
+        let mut multitable = write_txn.open_multimap_table(multitable_def).unwrap();
+        multitable.insert("a", "b").unwrap();
+    }
+    // Renaming a table to its current name is a no-op
+    write_txn.rename_table(table_def, table_def).unwrap();
+    write_txn
+        .rename_multimap_table(multitable_def, multitable_def)
+        .unwrap();
+    // A table that does not exist still errors
+    assert!(matches!(
+        write_txn
+            .rename_table(missing_def, missing_def)
+            .unwrap_err(),
+        TableError::TableDoesNotExist(_)
+    ));
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(table_def).unwrap();
+    assert_eq!(table.get("hi").unwrap().unwrap().value(), "hi");
+    let multitable = read_txn.open_multimap_table(multitable_def).unwrap();
+    assert_eq!(multitable.len().unwrap(), 1);
+}
+
+#[test]
+fn rename_table() {
+    let table_def: TableDefinition<&str, &str> = TableDefinition::new("x");
+    let table_def2: TableDefinition<&str, &str> = TableDefinition::new("x2");
+    let multitable_def: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x");
+    let multitable_def2: MultimapTableDefinition<&str, &str> = MultimapTableDefinition::new("x2");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(table_def).unwrap();
+        table.insert("hi", "hi").unwrap();
+        write_txn.rename_table(table, table_def2).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(table_def, table_def2).unwrap_err(),
+            TableError::TableDoesNotExist(_)
+        ));
+
+        let table = write_txn.open_table(table_def).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(table, table_def2).unwrap_err(),
+            TableError::TableExists(_)
+        ));
+
+        assert!(matches!(
+            write_txn
+                .rename_multimap_table(multitable_def, multitable_def2)
+                .unwrap_err(),
+            TableError::TableIsNotMultimap(_)
+        ));
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(table_def).unwrap();
+        assert!(table.is_empty().unwrap());
+        let table2 = write_txn.open_table(table_def2).unwrap();
+        assert_eq!(table2.get("hi").unwrap().unwrap().value(), "hi");
+    }
+}
+
+#[test]
+fn rename_open_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let table = write_txn.open_table(STR_TABLE).unwrap();
+        assert!(matches!(
+            write_txn.rename_table(STR_TABLE, STR_TABLE).unwrap_err(),
+            TableError::TableAlreadyOpen(_, _)
+        ));
+        drop(table);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn no_dirty_reads() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE);
+    assert!(table.is_err());
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+}
+
+#[test]
+fn read_isolation() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut write_table = write_txn.open_table(STR_TABLE).unwrap();
+        write_table.remove("hello").unwrap();
+        write_table.insert("hello2", "world2").unwrap();
+        write_table.insert("hello3", "world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn2 = db.begin_read().unwrap();
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert!(table2.get("hello").unwrap().is_none());
+    assert_eq!("world2", table2.get("hello2").unwrap().unwrap().value());
+    assert_eq!("world3", table2.get("hello3").unwrap().unwrap().value());
+    assert_eq!(table2.len().unwrap(), 2);
+
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert!(table.get("hello2").unwrap().is_none());
+    assert!(table.get("hello3").unwrap().is_none());
+    assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn read_isolation2() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    {
+        let mut write_table = write_txn.open_table(STR_TABLE).unwrap();
+        write_table.remove("hello").unwrap();
+        write_table.insert("hello2", "world2").unwrap();
+        write_table.insert("hello3", "world3").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn2 = db.begin_read().unwrap();
+    let table2 = read_txn2.open_table(STR_TABLE).unwrap();
+    assert!(table2.get("hello").unwrap().is_none());
+    assert_eq!("world2", table2.get("hello2").unwrap().unwrap().value());
+    assert_eq!("world3", table2.get("hello3").unwrap().unwrap().value());
+    assert_eq!(table2.len().unwrap(), 2);
+
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+    assert!(table.get("hello2").unwrap().is_none());
+    assert!(table.get("hello3").unwrap().is_none());
+    assert_eq!(table.len().unwrap(), 1);
+}
+
+#[test]
+fn reopen_table() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&1, &1).unwrap();
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn u64_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &1).unwrap();
+        table.insert(&1, &1).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(
+        2u64,
+        table
+            .range(0..2)
+            .unwrap()
+            .map(|item| item.unwrap().1.value())
+            .sum::<u64>()
+    );
+    assert_eq!(1, table.get(&0).unwrap().unwrap().value());
+}
+
+#[test]
+fn i128_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+
+    let definition: TableDefinition<i128, i128> = TableDefinition::new("x");
+
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in -10..=10 {
+            table.insert(&i, &(i - 1)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
+    let mut iter: OwnedRange<i128, i128> = range_owned_all!(table, i128).unwrap();
+    for i in -11..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i);
+    }
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn f32_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, f32> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(&0, &0.3).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(0.3, table.get(&0).unwrap().unwrap().value());
+}
+
+#[test]
+fn str_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!("world", table.get("hello").unwrap().unwrap().value());
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+
+    let mut iter: OwnedRange<&str, &str> = table.range_owned("a".."z").unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn string_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<String, String> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table
+            .insert("hello".to_string(), "world".to_string())
+            .unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        "world",
+        table.get("hello".to_string()).unwrap().unwrap().value()
+    );
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+
+    let mut iter: OwnedRange<String, String> =
+        table.range_owned("a".to_string().."z".to_string()).unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn empty_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, ()> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(&0, &()).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert!(!table.is_empty().unwrap());
+}
+
+#[test]
+#[allow(clippy::bool_assert_comparison)]
+fn bool_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<bool, bool> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(true, &false).unwrap();
+        table.insert(&false, false).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(false, table.get(&true).unwrap().unwrap().value());
+    assert_eq!(false, table.get(&false).unwrap().unwrap().value());
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), false);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), true);
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn option_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<Option<u8>, Option<u32>> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(None, None).unwrap();
+        table.insert(None, Some(0)).unwrap();
+        table.insert(Some(1), Some(1)).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.get(None).unwrap().unwrap().value(), Some(0));
+    assert_eq!(table.get(Some(1)).unwrap().unwrap().value(), Some(1));
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), None);
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), Some(1));
+}
+
+#[test]
+fn array_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&[u8; 5], &[u8; 9]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(b"hello", b"world_123").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let hello = b"hello";
+    assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
+
+    let mut iter: OwnedRange<&[u8; 5], &[u8; 9]> = range_owned_all!(table, &[u8; 5]).unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), b"world_123");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn vec_fixed_width_value_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<u64>> = TableDefinition::new("x");
+
+    let value = vec![0, 1, 2, 3];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn vec_var_width_value_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<&str>> = TableDefinition::new("x");
+
+    let value = vec!["hello", "world"];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn vec_vec_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<Vec<&str>>> = TableDefinition::new("x");
+
+    let value = vec![vec!["hello", "world"], vec!["this", "is", "a", "test"]];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn vec_long_string_element() {
+    // Vec elements with serialized length >= 254 bytes use the multi-byte varint path
+    // in complex_types.rs to encode and decode the element length.
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u8, Vec<&str>> = TableDefinition::new("x");
+    let long_str = "a".repeat(254);
+    let value = vec![long_str.as_str(), "short"];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(0, &value).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(value, table.get(0).unwrap().unwrap().value());
+}
+
+#[test]
+fn range_lifetime() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+
+    let mut iter = {
+        let start = "hello".to_string();
+        table.range(start.as_str()..).unwrap()
+    };
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn range_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        let mut iter = table.range(500..0).unwrap();
+        assert!(iter.next().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn extract_from_if_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        let mut iter = table.extract_from_if(500..0, |_, _| true).unwrap();
+        assert!(iter.next().is_none());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_in_empty() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u128, u128> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+        #[expect(clippy::reversed_empty_ranges)]
+        table.retain_in(500..0, |_, _| false).unwrap();
+        assert_eq!(table.len().unwrap(), 1000);
+
+        let mut called = false;
+        table
+            .retain_in(2000..3000, |_, _| {
+                called = true;
+                false
+            })
+            .unwrap();
+        assert!(!called);
+        assert_eq!(table.len().unwrap(), 1000);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_collapses_to_single_entry() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..10_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table.retain(|key, _| key == 7777).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        assert!(table.get(&7776).unwrap().is_none());
+        assert!(table.get(&7777).unwrap().is_some());
+        assert!(table.get(&7778).unwrap().is_none());
+
+        let mut iter = table.iter().unwrap();
+        let (key, _) = iter.next().unwrap().unwrap();
+        assert_eq!(key.value(), 7777);
+        assert!(iter.next().is_none());
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        assert_eq!(table.len().unwrap(), 1);
+        for i in 0u64..1000 {
+            table.insert(i, &[1u8; 200]).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 1001);
+        for i in 0u64..1000 {
+            assert!(table.remove(i).unwrap().is_some());
+        }
+        assert_eq!(table.len().unwrap(), 1);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_collapses_to_sparse_entries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..20_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table.retain(|key, _| key == 1234 || key == 17_777).unwrap();
+        assert_eq!(table.len().unwrap(), 2);
+        assert!(table.get(&1233).unwrap().is_none());
+        assert!(table.get(&1234).unwrap().is_some());
+        assert!(table.get(&17_777).unwrap().is_some());
+        assert!(table.get(&17_778).unwrap().is_none());
+
+        let keys: Vec<_> = table
+            .iter()
+            .unwrap()
+            .map(|entry| entry.unwrap().0.value())
+            .collect();
+        assert_eq!(keys, [1234, 17_777]);
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_rebuilds_changed_separators() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..30_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table
+            .retain(|key, _| key < 10_000 || key == 15_000 || key >= 20_000)
+            .unwrap();
+        assert_eq!(table.len().unwrap(), 20_001);
+        assert!(table.get(&9999).unwrap().is_some());
+        assert!(table.get(&10_000).unwrap().is_none());
+        assert!(table.get(&14_999).unwrap().is_none());
+        assert!(table.get(&15_000).unwrap().is_some());
+        assert!(table.get(&15_001).unwrap().is_none());
+        assert!(table.get(&20_000).unwrap().is_some());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_in_rebuilds_range_boundaries() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..30_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+        let height_before = table.stats().unwrap().tree_height();
+
+        table
+            .retain_in(10_000..20_000, |key, _| key == 15_000)
+            .unwrap();
+        assert_eq!(table.len().unwrap(), 20_001);
+        let stats = table.stats().unwrap();
+        assert!(stats.tree_height() <= height_before);
+        assert!(stats.leaf_pages() < 2_100);
+        assert!(table.get(&9999).unwrap().is_some());
+        assert!(table.get(&10_000).unwrap().is_none());
+        assert!(table.get(&14_999).unwrap().is_none());
+        assert!(table.get(&15_000).unwrap().is_some());
+        assert!(table.get(&15_001).unwrap().is_none());
+        assert!(table.get(&19_999).unwrap().is_none());
+        assert!(table.get(&20_000).unwrap().is_some());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_in_upper_boundary_does_not_duplicate_subtrees() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..30_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table.retain_in(0..1295, |_, _| false).unwrap();
+        assert_eq!(table.len().unwrap(), 30_000 - 1295);
+        assert!(table.get(&1294).unwrap().is_none());
+        assert!(table.get(&1295).unwrap().is_some());
+
+        let mut count = 0;
+        let mut previous = None;
+        for entry in table.iter().unwrap() {
+            let (key, _) = entry.unwrap();
+            let key = key.value();
+            assert!(key >= 1295);
+            if let Some(previous) = previous {
+                assert!(previous < key);
+            }
+            previous = Some(key);
+            count += 1;
+        }
+        assert_eq!(count, table.len().unwrap());
+    }
+    write_txn.commit().unwrap();
+}
+
+// A leaf left below the merge threshold opens a replacement run, and every
+// following leaf that also has removals extends it, so moderate-density
+// removals (here: a third of each leaf) pack into full leaves instead of
+// leaving one partially-empty leaf per original.
+#[test]
+fn retain_packs_moderate_density_survivors() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    const ELEMENTS: u64 = 20_000;
+    // Scattered key order builds ~70%-full leaves, so dropping a third of a
+    // leaf leaves it above the merge threshold: healthy, but rewritten. An odd
+    // multiplier permutes the key space, keeping all keys distinct.
+    let key = |i: u64| i.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    // In scan order: gut every 16th stripe of 32 entries so each parent branch
+    // sees underfilling leaves that seed runs, and drop a third of everything
+    // else so the remaining leaves stay healthy but dirty.
+    let keeps = |position: u64| (position / 32) % 16 != 15 && position % 3 != 2;
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..ELEMENTS {
+            table.insert(key(i), &[0u8; 200]).unwrap();
+        }
+        let before = table.stats().unwrap().leaf_pages();
+
+        let mut position = 0u64;
+        table
+            .retain(|_, _| {
+                let keep = keeps(position);
+                position += 1;
+                keep
+            })
+            .unwrap();
+
+        assert_eq!(position, ELEMENTS);
+        let expected = (0..ELEMENTS).filter(|i| keeps(*i)).count() as u64;
+        assert_eq!(table.len().unwrap(), expected);
+        let mut iterated = 0u64;
+        for entry in table.iter().unwrap() {
+            entry.unwrap();
+            iterated += 1;
+        }
+        assert_eq!(iterated, expected);
+        // Survivors are 62.5% of the entries. Ending runs at the first healthy
+        // leaf leaves them spread over roughly one leaf per original; chaining
+        // packs them into well under three quarters as many.
+        let after = table.stats().unwrap().leaf_pages();
+        assert!(
+            after < before * 3 / 4,
+            "moderate-density survivors spread over {after} of originally {before} leaves"
+        );
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_coalesces_sparse_survivors() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 200]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..20_000 {
+            table.insert(i, &[0u8; 200]).unwrap();
+        }
+
+        table.retain(|key, _| key % 100 == 0).unwrap();
+        assert_eq!(table.len().unwrap(), 200);
+        assert!(table.stats().unwrap().leaf_pages() < 50);
+        for i in 0u64..20_000 {
+            let value = table.get(&i).unwrap();
+            assert_eq!(value.is_some(), i % 100 == 0);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn retain_variable_sized_sparse_survivors_terminates() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let large = vec![0u8; 3_600];
+    let small = vec![1u8; 600];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..3_000 {
+            let value = if i % 3 == 0 { &large } else { &small };
+            table.insert(i, value.as_slice()).unwrap();
+        }
+
+        table.retain(|key, _| key % 3 != 1).unwrap();
+        assert_eq!(table.len().unwrap(), 2_000);
+        for i in 0u64..3_000 {
+            assert_eq!(table.get(i).unwrap().is_some(), i % 3 != 1);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+// A sparse leaf at the end of a retain's scan must merge into a sibling, the
+// same as single deletes; otherwise repeated retains accumulate permanently
+// under-filled leaves that nothing re-merges.
+#[test]
+fn retain_merges_sparse_boundary_leaf() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 100];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..60 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        assert!(table.stats().unwrap().leaf_pages() >= 2);
+
+        // Keep the low half untouched and gut the tail, so the scan closes on
+        // a leaf left far below the merge threshold.
+        table.retain(|key, _| key < 30 || key == 59).unwrap();
+        assert_eq!(table.len().unwrap(), 31);
+        assert!(table.stats().unwrap().leaf_pages() <= 2);
+        for i in 0u64..60 {
+            assert_eq!(table.get(i).unwrap().is_some(), i < 30 || i == 59);
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+// Removal patterns that never carry a run across a leaf boundary (here:
+// single-key ranges in descending order) must still leave a packed tree.
+#[test]
+fn retain_descending_removals_stay_merged() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 8];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..5_000 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        for key in (0u64..5_000).rev() {
+            if key % 100 != 0 {
+                table.retain_in(key..key + 1, |_, _| false).unwrap();
+            }
+        }
+        assert_eq!(table.len().unwrap(), 50);
+        let leaves = table.stats().unwrap().leaf_pages();
+        assert!(leaves <= 3, "sparse survivors spread over {leaves} leaves");
+    }
+    write_txn.commit().unwrap();
+}
+
+// A run over oversized-value leaves splices early instead of buffering the
+// parent's entire dense tail, so a small removal cannot make the transient
+// buffer grow with fanout x value size.
+#[test]
+fn retain_large_values_bounded_run() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
+    let value = vec![0u8; 256 * 1024];
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..32 {
+            table.insert(i, value.as_slice()).unwrap();
+        }
+        table.retain(|key, _| key != 0).unwrap();
+        assert_eq!(table.len().unwrap(), 31);
+        for i in 1u64..32 {
+            assert_eq!(table.get(i).unwrap().unwrap().value(), value.as_slice());
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn retain_predicate_panic_poisons_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..4 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(4, 4).unwrap();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            table
+                .retain(|key, _| {
+                    assert_ne!(key, 2, "retain predicate panic");
+                    key != 0
+                })
+                .unwrap();
+        }));
+        assert!(result.is_err());
+    }
+
+    assert!(matches!(
+        write_txn.commit(),
+        Err(CommitError::TransactionPoisoned)
+    ));
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.len().unwrap(), 4);
+    for i in 0u64..4 {
+        assert_eq!(table.get(i).unwrap().unwrap().value(), i);
+    }
+    assert!(table.get(4).unwrap().is_none());
+}
+
+// An insert past the table's last key starts a new leaf, instead of splitting the full
+// one evenly. An ascending load never returns to a leaf it has moved past, so an even
+// split would strand half of every leaf behind it.
+#[test]
+fn ascending_inserts_pack_leaves() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0u64..20_000 {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        // 25 of these pairs fit in a page, so 800 packed leaves hold them all, where
+        // splitting evenly leaves each half full and needs over 1,500
+        let leaves = table.stats().unwrap().leaf_pages();
+        assert!(leaves < 900, "{leaves} leaves");
+    }
+    write_txn.commit().unwrap();
+}
+
+// The leaf appended to is committed here, and so cannot be modified in place
+#[test]
+fn ascending_inserts_pack_leaves_across_transactions() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    for chunk in 0u64..20 {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(definition).unwrap();
+            for i in chunk * 1_000..(chunk + 1) * 1_000 {
+                table.insert(i, [0u8; 150]).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+    }
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(table.len().unwrap(), 20_000);
+    let leaves = table.stats().unwrap().leaf_pages();
+    assert!(leaves < 900, "{leaves} leaves");
+}
+
+// Packing only changes the layout: a key that later falls inside a packed leaf must
+// still be accepted, splitting it as usual
+#[test]
+fn packed_leaves_accept_interior_inserts() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in (0u64..20_000).step_by(2) {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        for i in (1u64..20_000).step_by(2) {
+            table.insert(i, [0u8; 150]).unwrap();
+        }
+        assert_eq!(table.len().unwrap(), 20_000);
+        for i in 0u64..20_000 {
+            assert!(table.get(i).unwrap().is_some());
+        }
+    }
+    write_txn.commit().unwrap();
+
+    db.check_integrity().unwrap();
+}
+
+#[test]
+fn range_arc() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let mut iter = {
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(definition).unwrap();
+        let start = "hello".to_string();
+        // The 'static range() does not keep the transaction alive, so experimental-api-5 drops it
+        // in favour of range_owned()
+        #[cfg(feature = "experimental-api-5")]
+        let iter = table.range_owned(start.as_str()..).unwrap();
+        #[cfg(not(feature = "experimental-api-5"))]
+        let iter = table.range(start.as_str()..).unwrap();
+        iter
+    };
+    assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn range_clone() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert("hello", "world").unwrap();
+        let mut iter1 = table.iter().unwrap();
+        let mut iter2 = iter1.clone();
+        let (k1, v1) = iter1.next().unwrap().unwrap();
+        let (k2, v2) = iter2.next().unwrap().unwrap();
+        assert_eq!(k1.value(), k2.value());
+        assert_eq!(v1.value(), v2.value());
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn custom_ordering() {
+    #[derive(Debug)]
+    struct ReverseKey(Vec<u8>);
+
+    impl Value for ReverseKey {
+        type SelfType<'a>
+            = ReverseKey
+        where
+            Self: 'a;
+        type AsBytes<'a>
+            = &'a [u8]
+        where
+            Self: 'a;
+
+        fn fixed_width() -> Option<usize> {
+            None
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> ReverseKey
+        where
+            Self: 'a,
+        {
+            ReverseKey(data.to_vec())
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a Self::SelfType<'b>) -> &'a [u8]
+        where
+            Self: 'a,
+            Self: 'b,
+        {
+            &value.0
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("test::ReverseKey")
+        }
+    }
+
+    impl Key for ReverseKey {
+        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            data2.cmp(data1)
+        }
+    }
+
+    let definition: TableDefinition<ReverseKey, &str> = TableDefinition::new("x");
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..10u8 {
+            let key = vec![i];
+            table.insert(&ReverseKey(key), "value").unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let start = ReverseKey(vec![7u8]); // ReverseKey is used, so 7 < 3
+    let end = ReverseKey(vec![3u8]);
+    let mut iter = table.range(start..=end).unwrap();
+    for i in (3..=7u8).rev() {
+        let (key, value) = iter.next().unwrap().unwrap();
+        assert_eq!(&[i], key.value().0.as_slice());
+        assert_eq!("value", value.value());
+    }
+    assert!(iter.next().is_none());
+}
+
+// Separators cut on a character boundary, so multi-byte keys must still route and round-trip
+#[test]
+fn str_keys_with_multibyte_characters() {
+    const TABLE: TableDefinition<&str, u64> = TableDefinition::new("multibyte");
+    // A shared prefix, then characters of every UTF-8 length for a naive cut to land inside
+    let suffixes = [
+        "a",
+        "\u{7f}",
+        "\u{80}",
+        "\u{e9}",
+        "\u{7ff}",
+        "\u{800}",
+        "\u{ffff}",
+        "\u{1d11e}",
+        "\u{10ffff}",
+    ];
+    let mut keys = vec![];
+    for outer in &suffixes {
+        for inner in &suffixes {
+            keys.push(format!("shared-prefix-{outer}{inner}-{outer}{inner}"));
+        }
+    }
+    keys.sort();
+    keys.dedup();
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        // Enough copies to force several levels of branch nodes
+        for i in 0..200u64 {
+            for (j, key) in keys.iter().enumerate() {
+                table
+                    .insert(format!("{key}-{i:04}").as_str(), &(i * 1000 + j as u64))
+                    .unwrap();
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 2);
+    for i in 0..200u64 {
+        for (j, key) in keys.iter().enumerate() {
+            let value = table
+                .get(format!("{key}-{i:04}").as_str())
+                .unwrap()
+                .unwrap();
+            assert_eq!(value.value(), i * 1000 + j as u64);
+        }
+    }
+    // The iteration order must still match the sorted key order
+    let mut expected: Vec<String> = (0..200u64)
+        .flat_map(|i| keys.iter().map(move |key| format!("{key}-{i:04}")))
+        .collect();
+    expected.sort();
+    let mut iter = table.iter().unwrap();
+    for key in &expected {
+        assert_eq!(iter.next().unwrap().unwrap().0.value(), key.as_str());
+    }
+    assert!(iter.next().is_none());
+}
+
+// An `Option` separator is the payload's, behind the `Some` tag, so it must route and iterate
+// correctly with that cut embedded in the larger encoding
+#[test]
+fn option_keys_with_shortened_separators() {
+    const TABLE: TableDefinition<Option<&str>, u64> = TableDefinition::new("option");
+    const NUM_KEYS: u64 = 2_000;
+    // A long shared suffix, so a separator that cuts at the first difference saves most of the key
+    let key = |i: u64| format!("{i:08}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            table.insert(&Some(key(i).as_str()), &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 1);
+    // The keys are zero padded, so insertion order is also the sorted order
+    let mut iter = table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        let key = key(i);
+        let key = key.as_str();
+        assert_eq!(table.get(&Some(key)).unwrap().unwrap().value(), i);
+        let (actual_key, actual_value) = iter.next().unwrap().unwrap();
+        assert_eq!(actual_key.value(), Some(key));
+        assert_eq!(actual_value.value(), i);
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let removed = table.remove(&Some(key(i).as_str())).unwrap();
+                assert_eq!(removed.unwrap().value(), i);
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..NUM_KEYS {
+        let value = table
+            .get(&Some(key(i).as_str()))
+            .unwrap()
+            .map(|guard| guard.value());
+        assert_eq!(value, (i % 4 == 0).then_some(i));
+    }
+}
+
+// Keys that differ early separate into a few bytes, while keys of the same size that differ only
+// at the very end have no shorter separator than the whole key, and so pack far fewer children
+#[test]
+fn option_separators_shrink_branch_nodes() {
+    const EARLY: TableDefinition<Option<&str>, u64> = TableDefinition::new("early");
+    const LATE: TableDefinition<Option<&str>, u64> = TableDefinition::new("late");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut early = write_txn.open_table(EARLY).unwrap();
+        let mut late = write_txn.open_table(LATE).unwrap();
+        for i in 0..NUM_KEYS {
+            early
+                .insert(&Some(format!("{i:08}{suffix}").as_str()), &i)
+                .unwrap();
+            late.insert(&Some(format!("{suffix}{i:08}").as_str()), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let early = read_txn.open_table(EARLY).unwrap().stats().unwrap();
+    let late = read_txn.open_table(LATE).unwrap().stats().unwrap();
+    assert_eq!(early.leaf_pages(), late.leaf_pages());
+    assert!(
+        early.branch_pages() * 2 < late.branch_pages(),
+        "{} branch pages, against {} without shortening",
+        early.branch_pages(),
+        late.branch_pages()
+    );
+}
+
+// An array separator shortens one element, discards those after it, and shifts every end offset
+// from there on, so it must route and iterate correctly with that rewritten header
+#[test]
+fn array_keys_with_shortened_separators() {
+    const TABLE: TableDefinition<[&str; 2], u64> = TableDefinition::new("array");
+    const NUM_KEYS: u64 = 2_000;
+    // The first element decides the order, and runs past the digits that distinguish adjacent
+    // keys so that its separator can truncate and land strictly above the left key's. The second
+    // is long enough to dominate the key.
+    let head = |i: u64| format!("{i:08}{}", "-head".repeat(8));
+    let tail = |i: u64| format!("{i:04}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            let (head, tail) = (head(i), tail(i));
+            table.insert(&[head.as_str(), tail.as_str()], &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    assert!(table.stats().unwrap().tree_height() > 1);
+    // The heads are zero padded, so insertion order is also the sorted order
+    let mut iter = table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let (head, tail) = (head.as_str(), tail.as_str());
+        assert_eq!(table.get(&[head, tail]).unwrap().unwrap().value(), i);
+        let (actual_key, actual_value) = iter.next().unwrap().unwrap();
+        assert_eq!(actual_key.value(), [head, tail]);
+        assert_eq!(actual_value.value(), i);
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(TABLE).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let (head, tail) = (head(i), tail(i));
+                let removed = table.remove(&[head.as_str(), tail.as_str()]).unwrap();
+                assert_eq!(removed.unwrap().value(), i);
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let value = table
+            .get(&[head.as_str(), tail.as_str()])
+            .unwrap()
+            .map(|guard| guard.value());
+        assert_eq!(value, (i % 4 == 0).then_some(i));
+    }
+}
+
+// The same keys, differing only in whether the trailing element has a smallest encoding to be
+// discarded to. `&str` does; `[&str; 1]` does not, so its bytes have to be carried into the
+// branch node instead.
+#[test]
+fn array_separators_shrink_branch_nodes() {
+    const DISCARDED: TableDefinition<[&str; 2], u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<[[&str; 1]; 2], u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let head = format!("{i:08}{}", "-head".repeat(8));
+            let tail = format!("{i:04}{suffix}");
+            discarded
+                .insert(&[head.as_str(), tail.as_str()], &i)
+                .unwrap();
+            carried
+                .insert(&[[head.as_str()], [tail.as_str()]], &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
+// A tuple separator shortens one element, discards those after it, and rewrites the length
+// varints that head the encoding, so it must route and iterate correctly with that new header
+#[test]
+fn tuple_keys_with_shortened_separators() {
+    const TUPLE: TableDefinition<(&str, &str), u64> = TableDefinition::new("tuple");
+    const OPTION: TableDefinition<(&str, Option<&str>), u64> = TableDefinition::new("option");
+    const NUM_KEYS: u64 = 2_000;
+    // The first element decides the order, and runs past the digits that distinguish adjacent
+    // keys so that its separator can truncate and land strictly above the left key's. The second
+    // is long enough to dominate the key.
+    let head = |i: u64| format!("{i:08}{}", "-head".repeat(8));
+    let tail = |i: u64| format!("{i:04}{}", "-suffix".repeat(16));
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        let mut option_table = write_txn.open_table(OPTION).unwrap();
+        for i in 0..NUM_KEYS {
+            let (head, tail) = (head(i), tail(i));
+            tuple_table
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            option_table
+                .insert(&(head.as_str(), Some(tail.as_str())), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    let option_table = read_txn.open_table(OPTION).unwrap();
+    assert!(tuple_table.stats().unwrap().tree_height() > 1);
+    assert!(option_table.stats().unwrap().tree_height() > 1);
+    // The heads are zero padded, so insertion order is also the sorted order
+    let mut iter = tuple_table.iter().unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let (head, tail) = (head.as_str(), tail.as_str());
+        assert_eq!(tuple_table.get(&(head, tail)).unwrap().unwrap().value(), i);
+        assert_eq!(
+            option_table
+                .get(&(head, Some(tail)))
+                .unwrap()
+                .unwrap()
+                .value(),
+            i
+        );
+        let (actual_key, actual_value) = iter.next().unwrap().unwrap();
+        assert_eq!(actual_key.value(), (head, tail));
+        assert_eq!(actual_value.value(), i);
+    }
+    assert!(iter.next().is_none());
+    drop(read_txn);
+
+    // Removing most of the keys merges and rebalances branch nodes, reshuffling separators
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut tuple_table = write_txn.open_table(TUPLE).unwrap();
+        for i in 0..NUM_KEYS {
+            if i % 4 != 0 {
+                let (head, tail) = (head(i), tail(i));
+                let removed = tuple_table.remove(&(head.as_str(), tail.as_str())).unwrap();
+                assert_eq!(removed.unwrap().value(), i);
+            }
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let tuple_table = read_txn.open_table(TUPLE).unwrap();
+    for i in 0..NUM_KEYS {
+        let (head, tail) = (head(i), tail(i));
+        let value = tuple_table
+            .get(&(head.as_str(), tail.as_str()))
+            .unwrap()
+            .map(|guard| guard.value());
+        assert_eq!(value, (i % 4 == 0).then_some(i));
+    }
+}
+
+// The same keys, differing only in whether the trailing element has a smallest encoding to be
+// discarded to. `&str` does; `[&str; 1]` does not, so its bytes have to be carried into the
+// branch node instead.
+#[test]
+fn tuple_separators_shrink_branch_nodes() {
+    const DISCARDED: TableDefinition<(&str, &str), u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<(&str, [&str; 1]), u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let head = format!("{i:08}{}", "-head".repeat(8));
+            let tail = format!("{i:04}{suffix}");
+            discarded
+                .insert(&(head.as_str(), tail.as_str()), &i)
+                .unwrap();
+            carried
+                .insert(&(head.as_str(), [tail.as_str()]), &i)
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
+// Keys that differ in a fixed width leading element, which cannot shrink. Taking `right`'s element
+// whole still lets the tail collapse, which is where nearly the whole key is.
+#[test]
+fn fixed_width_leading_element_separators_shrink_branch_nodes() {
+    const DISCARDED: TableDefinition<(u64, &str), u64> = TableDefinition::new("discarded");
+    const CARRIED: TableDefinition<(u64, [&str; 1]), u64> = TableDefinition::new("carried");
+    const NUM_KEYS: u64 = 5_000;
+    let suffix = "-suffix".repeat(16);
+
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut discarded = write_txn.open_table(DISCARDED).unwrap();
+        let mut carried = write_txn.open_table(CARRIED).unwrap();
+        for i in 0..NUM_KEYS {
+            let tail = format!("{i:04}{suffix}");
+            discarded.insert(&(i, tail.as_str()), &i).unwrap();
+            carried.insert(&(i, [tail.as_str()]), &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let discarded = read_txn.open_table(DISCARDED).unwrap().stats().unwrap();
+    let carried = read_txn.open_table(CARRIED).unwrap().stats().unwrap();
+    assert!(
+        discarded.branch_pages() * 3 < carried.branch_pages(),
+        "{} branch pages, against {} when the tail cannot be discarded",
+        discarded.branch_pages(),
+        carried.branch_pages()
+    );
+}
+
+// A separator is stored in a branch node and compared against keys, so it has to be an encoding
+// of the key type. Deserializing and re-serializing one reproduces it, as it would any encoding.
+#[test]
+fn separators_are_encodings() {
+    fn check<K: Key>(left: &K::SelfType<'_>, right: &K::SelfType<'_>) {
+        let left = K::as_bytes(left);
+        let right = K::as_bytes(right);
+        let separator = K::separator(left.as_ref(), right.as_ref());
+        let value = K::from_bytes(&separator);
+        assert_eq!(
+            K::as_bytes(&value).as_ref(),
+            separator.as_ref(),
+            "separator is not an encoding: {separator:?}"
+        );
+    }
+
+    check::<&str>(&"abc0suffix", &"abc1suffix");
+    // A cut inside a multi-byte character would leave the separator invalid UTF-8
+    check::<&str>(&"aaaaaa", &"a\u{1d11e}zz");
+    check::<&[u8]>(&b"abc0suffix".as_slice(), &b"abc1suffix".as_slice());
+    check::<String>(&String::from("abc0suffix"), &String::from("abc1suffix"));
+    check::<Option<&str>>(&Some("abc0suffix"), &Some("abc1suffix"));
+    check::<Option<&str>>(&None, &Some("abc"));
+    // Composites assemble their separators, so their headers have to come out consistent
+    check::<(&str, &str)>(&("abc0suffix", "tail"), &("abc1suffix", "other"));
+    check::<(&str, u64)>(&("abc0suffix", 1), &("abc1suffix", 2));
+    check::<(u64, &str)>(&(7, "abc0suffix"), &(7, "abc1suffix"));
+    check::<(&str, Option<&str>)>(&("abc0suffix", Some("tail")), &("abc1suffix", Some("x")));
+    check::<[&str; 2]>(&["abc0suffix", "tail"], &["abc1suffix", "other"]);
+    check::<[&str; 3]>(&["abc0suffix", "a", "b"], &["abc1suffix", "c", "d"]);
+    check::<[Option<&str>; 2]>(&[Some("aaaa"), Some("zzzz")], &[Some("bbbb"), Some("yyyy")]);
+    // A tail discarded down to a `None` encoded as a niche has to come out that wide
+    check::<(&str, Option<NonZeroU64>)>(
+        &("abc0suffix", NonZeroU64::new(7)),
+        &("abc1suffix", NonZeroU64::new(9)),
+    );
+}
+
+#[test]
+fn owned_get_signatures() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &(i + 1)).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+
+    assert_eq!(2, table.get(&1).unwrap().unwrap().value());
+
+    let mut iter: OwnedRange<u32, u32> = range_owned_all!(table, u32).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
+    }
+    assert!(iter.next().is_none());
+    let mut iter: OwnedRange<u32, u32> = table.range_owned(0..10).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
+    }
+    assert!(iter.next().is_none());
+    // Naming the key type is only needed for today's signature: with a `KR` type parameter to
+    // infer, a reference bound is ambiguous.
+    #[cfg(feature = "experimental-api-5")]
+    let mut iter = table.range(&0..&10).unwrap();
+    #[cfg(not(feature = "experimental-api-5"))]
+    let mut iter = table.range::<&u32>(&0..&10).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
+    }
+    assert!(iter.next().is_none());
+}
+
+// Every range shape the range taking methods accept under experimental-api-5, without a type
+// annotation. `..` in particular carries no key type, which is why the methods take a KeyRange
+// rather than a RangeBounds over a key type parameter.
+#[cfg(feature = "experimental-api-5")]
+#[test]
+fn range_signature_inference() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+
+        assert_eq!(table.range(..).unwrap().count(), 10);
+        assert_eq!(table.range(2..8).unwrap().count(), 6);
+        assert_eq!(table.range(2..=8).unwrap().count(), 7);
+        assert_eq!(table.range(8..).unwrap().count(), 2);
+        assert_eq!(table.range(..8).unwrap().count(), 8);
+        assert_eq!(table.range(..=8).unwrap().count(), 9);
+        assert_eq!(table.range(&2..&8).unwrap().count(), 6);
+        assert_eq!(
+            table
+                .range((Bound::Excluded(2), Bound::Unbounded))
+                .unwrap()
+                .count(),
+            7
+        );
+        let range = 2..8;
+        assert_eq!(table.range(&range).unwrap().count(), 6);
+        assert_eq!(table.iter().unwrap().count(), 10);
+
+        table.retain_in(.., |_, _| true).unwrap();
+        table.retain_in(0..1, |_, _| true).unwrap();
+        assert_eq!(table.extract_from_if(.., |_, _| false).unwrap().count(), 0);
+        assert_eq!(
+            table.extract_from_if(2..8, |_, _| false).unwrap().count(),
+            0
+        );
+    }
+    {
+        // A borrowed key type, with bounds that borrow from a temporary
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("a", "1").unwrap();
+        let key = "a".to_string();
+        assert_eq!(table.range(..).unwrap().count(), 1);
+        assert_eq!(table.range(key.as_str()..).unwrap().count(), 1);
+        assert_eq!(table.range("a".."b").unwrap().count(), 1);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.range(..).unwrap().count(), 10);
+    assert_eq!(table.range(2..8).unwrap().count(), 6);
+    assert_eq!(table.range_owned(..).unwrap().count(), 10);
+    assert_eq!(table.range_owned(2..8).unwrap().count(), 6);
+}
+
+#[test]
+fn ref_get_signatures() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(SLICE_TABLE).unwrap();
+        for i in 0..10u8 {
+            table.insert([i].as_slice(), [i + 1].as_slice()).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(SLICE_TABLE).unwrap();
+
+    let zero = vec![0u8];
+    assert_eq!(&[1], table.get([0].as_slice()).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(b"\0".as_slice()).unwrap().unwrap().value());
+    assert_eq!(&[1], table.get(zero.as_slice()).unwrap().unwrap().value());
+
+    let start = vec![0u8];
+    let end = vec![10u8];
+    let mut iter = range_all!(table, &[u8]).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter = table.range(start.as_slice()..&end).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+    drop(iter);
+
+    let mut iter = table.range(start.as_slice()..end.as_slice()).unwrap();
+    for i in 0..10 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
+    }
+    assert!(iter.next().is_none());
+
+    let mut iter = table.range([0u8].as_slice()..[10u8].as_slice()).unwrap();
+    for i in 0..10u8 {
+        assert_eq!(iter.next().unwrap().unwrap().1.value(), [i + 1].as_slice());
+    }
+    assert!(iter.next().is_none());
+}
+
+#[cfg(not(target_os = "wasi"))]
+#[test]
+fn concurrent_write_transactions_block() {
+    let tmpfile = create_tempfile();
+    let db = sync::Arc::new(Database::create(tmpfile.path()).unwrap());
+    let wtx = db.begin_write().unwrap();
+    let (sender, receiver) = sync::mpsc::channel();
+
+    let t = {
+        std::thread::spawn(move || {
+            sender.send(()).unwrap();
+            db.begin_write().unwrap().commit().unwrap();
+        })
+    };
+
+    receiver.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    wtx.commit().unwrap();
+    t.join().unwrap();
+}
+
+#[test]
+fn iter() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(U64_TABLE).unwrap();
+        for i in 0..10 {
+            table.insert(&i, &i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(U64_TABLE).unwrap();
+    let mut iter = table.iter().unwrap();
+    for i in 0..10 {
+        let (k, v) = iter.next().unwrap().unwrap();
+        assert_eq!(i, k.value());
+        assert_eq!(i, v.value());
+    }
+}
+
+#[test]
+fn signature_lifetimes() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+
+        let _ = {
+            let key = "hi".to_string();
+            let value = "1".to_string();
+            table.insert(key.as_str(), value.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.get(key.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.remove(key.as_str()).unwrap()
+        };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.range(key.as_str()..).unwrap()
+        };
+
+        let _ = { table.extract_if(|_, _| true).unwrap() };
+
+        let _ = {
+            let key = "hi".to_string();
+            table.extract_from_if(key.as_str().., |_, _| true).unwrap()
+        };
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn generic_signature_lifetimes() {
+    fn write_key_generic<K: Key>(
+        table: TableDefinition<K, &[u8]>,
+        key: K::SelfType<'_>,
+        db: &Database,
+    ) {
+        let buf = [1, 2, 3];
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(table).unwrap();
+            table.insert(key, buf.as_slice()).unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+
+    fn read_key_generic<K: Key>(
+        table: TableDefinition<K, &[u8]>,
+        key: K::SelfType<'_>,
+        db: &Database,
+    ) {
+        let buf = [1, 2, 3];
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(table).unwrap();
+        assert_eq!(table.get(key).unwrap().unwrap().value(), buf);
+    }
+
+    let tmpfile = create_tempfile();
+    let db = &Database::create(tmpfile.path()).unwrap();
+    {
+        let (table, key) = (TableDefinition::<&str, _>::new("&str"), "key");
+        write_key_generic(table, key, db);
+        read_key_generic(table, key, db);
+    }
+    {
+        let (table, key) = (TableDefinition::<(), _>::new("()"), ());
+        write_key_generic(table, key, db);
+        read_key_generic(table, key, db);
+    }
+}
+
+#[test]
+fn char_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<char, char> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert('a', &'b').unwrap();
+        table.insert(&'b', 'a').unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!('a', table.get(&'b').unwrap().unwrap().value());
+    assert_eq!('b', table.get(&'a').unwrap().unwrap().value());
+
+    let mut iter = table.iter().unwrap();
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), 'a');
+    assert_eq!(iter.next().unwrap().unwrap().0.value(), 'b');
+    assert!(iter.next().is_none());
+}
+
+#[test]
+fn nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<NonZeroI32, NonZeroU64> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        // Inserted out of order, and on both sides of zero
+        for key in [7, -1, i32::MAX, i32::MIN, -300] {
+            let key = NonZeroI32::new(key).unwrap();
+            table
+                .insert(key, NonZeroU64::from(key.unsigned_abs()))
+                .unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    let key = NonZeroI32::new(-300).unwrap();
+    assert_eq!(table.get(key).unwrap().unwrap().value().get(), 300);
+    // Keys order numerically, as the primitive they wrap does
+    let keys: Vec<i32> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().get())
+        .collect();
+    assert_eq!(keys, [i32::MIN, -300, -1, 7, i32::MAX]);
+}
+
+#[test]
+fn option_nonzero_type() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    // Signed, so that `None` has negative values to sort below
+    let definition: TableDefinition<Option<NonZeroI32>, Option<NonZeroU32>> =
+        TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        table.insert(NonZeroI32::new(3), None).unwrap();
+        table.insert(None, NonZeroU32::new(u32::MAX)).unwrap();
+        table
+            .insert(NonZeroI32::new(i32::MIN), NonZeroU32::new(1))
+            .unwrap();
+        table.insert(NonZeroI32::new(-9), None).unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    assert_eq!(
+        table.get(None).unwrap().unwrap().value(),
+        NonZeroU32::new(u32::MAX)
+    );
+    assert_eq!(
+        table.get(NonZeroI32::new(3)).unwrap().unwrap().value(),
+        None
+    );
+    // `None` sorts below every `Some`, including the negative ones
+    let keys: Vec<Option<i32>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value().map(NonZeroI32::get))
+        .collect();
+    assert_eq!(keys, [None, Some(i32::MIN), Some(-9), Some(3)]);
+}
+
+// `Option<NonZero*>` is stored at the width of the bare type, and a table of it reads back after
+// a reopen: the niche decodes as `None`, and the tree's separators are valid encodings
+#[test]
+fn option_nonzero_table_reopens() {
+    const TABLE: TableDefinition<Option<NonZeroI32>, Option<(NonZeroU64,)>> =
+        TableDefinition::new("x");
+
+    fn value_of(key: Option<NonZeroI32>) -> Option<(NonZeroU64,)> {
+        key.map(|key| (NonZeroU64::from(key.unsigned_abs()),))
+    }
+
+    let tmpfile = create_tempfile();
+    // `None` for zero, among the values on either side of it
+    let keys: Vec<Option<NonZeroI32>> = (-1024..=1024).map(NonZeroI32::new).collect();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(TABLE).unwrap();
+            for &key in keys.iter().rev() {
+                table.insert(key, value_of(key)).unwrap();
+            }
+            // Enough entries for branch pages, so that separators are exercised too
+            assert!(table.stats().unwrap().tree_height() > 1);
+            // Every entry is a 4 byte key and an 8 byte value, `None`s included
+            assert_eq!(
+                table.stats().unwrap().stored_bytes(),
+                12 * u64::try_from(keys.len()).unwrap()
+            );
+        }
+        write_txn.commit().unwrap();
+    }
+
+    let mut db = Database::open(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(TABLE).unwrap();
+    for &key in &keys {
+        assert_eq!(table.get(key).unwrap().unwrap().value(), value_of(key));
+    }
+    // Stored in the order the `Option` has in memory: `None` first, then the negative values
+    let stored: Vec<Option<NonZeroI32>> = table
+        .iter()
+        .unwrap()
+        .map(|x| x.unwrap().0.value())
+        .collect();
+    let mut expected = keys;
+    expected.sort_unstable();
+    assert_eq!(stored, expected);
+}
+
+#[test]
+fn nonzero_type_does_not_alias_its_primitive() {
+    // A `u32` table may hold zeros, which `NonZeroU32` cannot, so it must not open as one, in
+    // either position
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let definition: TableDefinition<u32, u32> = TableDefinition::new("x");
+    let nonzero_key: TableDefinition<NonZeroU32, u32> = TableDefinition::new("x");
+    let nonzero_value: TableDefinition<u32, NonZeroU32> = TableDefinition::new("x");
+
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(definition)
+        .unwrap()
+        .insert(0, 0)
+        .unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        write_txn.open_table(nonzero_key),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    assert!(matches!(
+        write_txn.open_table(nonzero_value),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    write_txn.abort().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(nonzero_key),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+    assert!(matches!(
+        read_txn.open_table(nonzero_value),
+        Err(TableError::TableTypeMismatch { .. })
+    ));
+}
+
+// Opening a multimap table via open_table() returns TableIsMultimap for both
+// write and read transactions.
+#[test]
+fn open_multimap_table_as_regular() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let mm_def: MultimapTableDefinition<u32, u32> = MultimapTableDefinition::new("mm");
+    let regular_def: TableDefinition<u32, u32> = TableDefinition::new("mm");
+
+    let write_txn = db.begin_write().unwrap();
+    write_txn.open_multimap_table(mm_def).unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        write_txn.open_table(regular_def),
+        Err(TableError::TableIsMultimap(_))
+    ));
+    write_txn.abort().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    assert!(matches!(
+        read_txn.open_table(regular_def),
+        Err(TableError::TableIsMultimap(_))
+    ));
+}
+
+// Test that &[u8; N] and [u8; N] are effectively the same
+#[test]
+fn u8_array_serialization() {
+    assert_eq!(
+        <&[u8; 7] as Value>::type_name(),
+        <[u8; 7] as Value>::type_name()
+    );
+    let fixed_value: u128 = random();
+    let fixed_serialized = fixed_value.to_le_bytes();
+    for _ in 0..1000 {
+        let x: u128 = random();
+        let x_serialized = x.to_le_bytes();
+        let ref_x_serialized = &x_serialized;
+        let u8_ref_serialized = <&[u8; 16] as Value>::as_bytes(&ref_x_serialized);
+        let u8_generic_serialized = <[u8; 16] as Value>::as_bytes(&x_serialized);
+        assert_eq!(
+            u8_ref_serialized.as_slice(),
+            u8_generic_serialized.as_slice()
+        );
+        assert_eq!(u8_ref_serialized.as_slice(), x_serialized.as_slice());
+        let ref_order = <&[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
+        let generic_order = <[u8; 16] as Key>::compare(&x_serialized, &fixed_serialized);
+        assert_eq!(ref_order, generic_order);
+    }
+}
+
+#[test]
+fn multi_table_commit_writes_are_deterministic() {
+    use redb::StorageBackend;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, PartialEq)]
+    enum BackendEvent {
+        Write { offset: u64, data: Vec<u8> },
+        SetLen(u64),
+        Sync,
+    }
+
+    type EventLog = Arc<Mutex<Vec<BackendEvent>>>;
+
+    #[derive(Debug)]
+    struct RecordingBackend {
+        inner: InMemoryBackend,
+        log: EventLog,
+    }
+
+    impl StorageBackend for RecordingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::SetLen(len));
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::Sync);
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.log.lock().unwrap().push(BackendEvent::Write {
+                offset,
+                data: data.to_vec(),
+            });
+            self.inner.write(offset, data)
+        }
+    }
+
+    // A history rich enough to exercise order-sensitive allocation. Every branch depends only
+    // on loop indices, so two executions perform an identical operation sequence.
+    fn run_workload() -> Vec<BackendEvent> {
+        let log: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let backend = RecordingBackend {
+            inner: InMemoryBackend::new(),
+            log: Arc::clone(&log),
+        };
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        let mut persistent_ids: Vec<u64> = Vec::new();
+        for round in 0..8u32 {
+            let mut txn = db.begin_write().unwrap();
+            let ephemeral = if round % 2 == 0 {
+                Some(txn.ephemeral_savepoint().unwrap())
+            } else {
+                None
+            };
+            if round == 3 || round == 5 {
+                persistent_ids.push(txn.persistent_savepoint().unwrap());
+            }
+            for i in 0..120u32 {
+                if (i + round) % 3 == 0 {
+                    let name = format!("table_{i:0>60}");
+                    let def: TableDefinition<u32, Vec<u8>> = TableDefinition::new(&name);
+                    let mut table = txn.open_table(def).unwrap();
+                    for k in 0..(1 + (i + round) % 7) {
+                        let len = ((i * 37 + k * 101 + round * 13) % 900) as usize;
+                        table.insert(k, vec![(i % 251) as u8; len]).unwrap();
+                    }
+                    if round > 2 && i % 5 == 0 {
+                        table.remove(0u32).unwrap();
+                    }
+                }
+            }
+            if round >= 4 {
+                for i in 0..120u32 {
+                    if (i + round) % 9 == 0 {
+                        let name = format!("table_{i:0>60}");
+                        let def: TableDefinition<u32, Vec<u8>> = TableDefinition::new(&name);
+                        let _ = txn.delete_table(def).unwrap();
+                    }
+                }
+            }
+            if let Some(sp) = ephemeral {
+                if round % 4 == 0 {
+                    txn.restore_savepoint(&sp).unwrap();
+                }
+                drop(sp);
+            }
+            if round == 6 {
+                for id in persistent_ids.drain(..) {
+                    txn.delete_persistent_savepoint(id).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+            if round == 5 {
+                let abort_txn = db.begin_write().unwrap();
+                let _doomed = abort_txn.persistent_savepoint().unwrap();
+                abort_txn.abort().unwrap();
+            }
+        }
+        drop(db);
+        Arc::try_unwrap(log).unwrap().into_inner().unwrap()
+    }
+
+    let first = run_workload();
+    let second = run_workload();
+    assert_eq!(
+        first, second,
+        "identical operation sequences must produce identical backend write sequences"
+    );
+}

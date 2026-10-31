@@ -1,0 +1,48 @@
+[package]
+name = "redb-bench"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# The shared harness is a library, so these have to be regular dependencies. Engines other than redb
+# live in redb-bench-compare, which keeps their native build dependencies out of this crate.
+[dependencies]
+redb = { path = "../..", features = ["experimental-api-5"] }
+walkdir = "2.5.0"
+byte-unit = "5.1.6"
+fastrand = "2.0.0"
+comfy-table = "7.0.1"
+
+# Common test/bench dependencies
+[dev-dependencies]
+rand = "0.10.1"
+tempfile = "3.5.0"
+libc = "0.2.99"
+ctrlc = "3.2.3"
+env_logger = "0.11"
+
+[[bench]]
+name = "atomics_benchmark"
+harness = false
+
+[[bench]]
+name = "multithreaded_insert_benchmark"
+harness = false
+
+[[bench]]
+name = "userspace_cache_benchmark"
+harness = false
+
+[[bench]]
+name = "savepoint_benchmark"
+harness = false
+
+[[bench]]
+name = "redb_benchmark"
+harness = false
+

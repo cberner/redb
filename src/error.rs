@@ -1,0 +1,908 @@
+use crate::io;
+use crate::sync::PoisonError;
+use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
+use crate::{ReadTransaction, TypeName};
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::{String, ToString};
+use core::fmt::{Display, Formatter};
+use core::panic;
+
+/// Errors reported by a [`crate::StorageBackend`] locking operation.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum BackendError {
+    /// The underlying storage operation failed.
+    Io(io::Error),
+    /// The backend does not support the requested operation.
+    Unsupported,
+}
+
+impl From<io::Error> for BackendError {
+    /// Preserves unsupported-operation errors as [`Self::Unsupported`] when std is available.
+    fn from(err: io::Error) -> Self {
+        #[cfg(not(redb_no_std))]
+        if err.kind() == std::io::ErrorKind::Unsupported {
+            return Self::Unsupported;
+        }
+        Self::Io(err)
+    }
+}
+
+impl From<BackendError> for io::Error {
+    fn from(err: BackendError) -> Self {
+        match err {
+            BackendError::Io(err) => err,
+            BackendError::Unsupported => {
+                io::unsupported("the storage backend does not support this operation")
+            }
+        }
+    }
+}
+
+impl From<BackendError> for Error {
+    fn from(err: BackendError) -> Self {
+        StorageError::from(err).into()
+    }
+}
+
+impl Display for BackendError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Unsupported => f.write_str("The storage backend does not support this operation"),
+        }
+    }
+}
+
+impl core::error::Error for BackendError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Unsupported => None,
+        }
+    }
+}
+
+/// General errors directly from the storage layer
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum StorageError {
+    /// The Database is corrupted
+    Corrupted(String),
+    /// The value being inserted exceeds the maximum of 3GiB
+    ValueTooLarge(usize),
+    Io(io::Error),
+    /// The backend does not support a required storage operation.
+    Unsupported,
+    PreviousIo,
+    DatabaseClosed,
+    LockPoisoned(&'static panic::Location<'static>),
+}
+
+impl<T> From<PoisonError<T>> for StorageError {
+    fn from(_: PoisonError<T>) -> StorageError {
+        StorageError::LockPoisoned(panic::Location::caller())
+    }
+}
+
+impl From<io::Error> for StorageError {
+    fn from(err: io::Error) -> StorageError {
+        StorageError::Io(err)
+    }
+}
+
+impl From<BackendError> for StorageError {
+    fn from(err: BackendError) -> Self {
+        match err {
+            BackendError::Io(err) => Self::Io(err),
+            BackendError::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+impl From<StorageError> for Error {
+    fn from(err: StorageError) -> Error {
+        match err {
+            StorageError::Corrupted(msg) => Error::Corrupted(msg),
+            StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+            StorageError::Io(x) => Error::Io(x),
+            StorageError::Unsupported => Error::Unsupported,
+            StorageError::PreviousIo => Error::PreviousIo,
+            StorageError::DatabaseClosed => Error::DatabaseClosed,
+            StorageError::LockPoisoned(location) => Error::LockPoisoned(location),
+        }
+    }
+}
+
+impl Display for StorageError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            StorageError::Corrupted(msg) => {
+                write!(f, "DB corrupted: {msg}")
+            }
+            StorageError::ValueTooLarge(len) => {
+                write!(
+                    f,
+                    "The value (length={len}) being inserted exceeds the maximum of {}GiB",
+                    MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            StorageError::Io(err) => {
+                write!(f, "I/O error: {err}")
+            }
+            StorageError::Unsupported => BackendError::Unsupported.fmt(f),
+            StorageError::DatabaseClosed => {
+                write!(f, "Database has been closed")
+            }
+            StorageError::PreviousIo => {
+                write!(
+                    f,
+                    "Previous I/O error occurred. Please close and re-open the database."
+                )
+            }
+            StorageError::LockPoisoned(location) => {
+                write!(f, "Poisoned internal lock: {location}")
+            }
+        }
+    }
+}
+
+impl core::error::Error for StorageError {}
+
+/// Errors related to opening tables
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TableError {
+    /// Table types didn't match.
+    TableTypeMismatch {
+        table: String,
+        key: TypeName,
+        value: TypeName,
+    },
+    /// The table is a multimap table
+    TableIsMultimap(String),
+    /// The table is not a multimap table
+    TableIsNotMultimap(String),
+    TypeDefinitionChanged {
+        name: TypeName,
+        alignment: usize,
+        width: Option<usize>,
+    },
+    /// Table name does not match any table in database
+    TableDoesNotExist(String),
+    /// Table name already exists in the database
+    TableExists(String),
+    // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
+    // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
+    TableAlreadyOpen(String, &'static panic::Location<'static>),
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl TableError {
+    pub(crate) fn into_storage_error_or_corrupted(self, msg: &str) -> StorageError {
+        match self {
+            TableError::TableTypeMismatch { .. }
+            | TableError::TableIsMultimap(_)
+            | TableError::TableIsNotMultimap(_)
+            | TableError::TypeDefinitionChanged { .. }
+            | TableError::TableDoesNotExist(_)
+            | TableError::TableExists(_)
+            | TableError::TableAlreadyOpen(_, _) => {
+                StorageError::Corrupted(format!("{msg}: {self}"))
+            }
+            TableError::Storage(storage) => storage,
+        }
+    }
+}
+
+impl From<TableError> for Error {
+    fn from(err: TableError) -> Error {
+        match err {
+            TableError::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            } => Error::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            },
+            TableError::TableTypeMismatch { table, key, value } => {
+                Error::TableTypeMismatch { table, key, value }
+            }
+            TableError::TableIsMultimap(table) => Error::TableIsMultimap(table),
+            TableError::TableIsNotMultimap(table) => Error::TableIsNotMultimap(table),
+            TableError::TableDoesNotExist(table) => Error::TableDoesNotExist(table),
+            TableError::TableExists(table) => Error::TableExists(table),
+            TableError::TableAlreadyOpen(name, location) => Error::TableAlreadyOpen(name, location),
+            TableError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<StorageError> for TableError {
+    fn from(err: StorageError) -> TableError {
+        TableError::Storage(err)
+    }
+}
+
+impl Display for TableError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TableError::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            } => {
+                write!(
+                    f,
+                    "Current definition of {} does not match stored definition (width={:?}, alignment={})",
+                    name.name(),
+                    width,
+                    alignment,
+                )
+            }
+            TableError::TableTypeMismatch { table, key, value } => {
+                write!(
+                    f,
+                    "{table} is of type Table<{}, {}>",
+                    key.name(),
+                    value.name(),
+                )
+            }
+            TableError::TableIsMultimap(table) => {
+                write!(f, "{table} is a multimap table")
+            }
+            TableError::TableIsNotMultimap(table) => {
+                write!(f, "{table} is not a multimap table")
+            }
+            TableError::TableDoesNotExist(table) => {
+                write!(f, "Table '{table}' does not exist")
+            }
+            TableError::TableExists(table) => {
+                write!(f, "Table '{table}' already exists")
+            }
+            TableError::TableAlreadyOpen(name, location) => {
+                write!(f, "Table '{name}' already opened at: {location}")
+            }
+            TableError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for TableError {}
+
+/// Errors related to opening a database
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum DatabaseError {
+    /// The Database is already open. Cannot acquire lock.
+    DatabaseAlreadyOpen,
+    /// Another process has the database open with a version of redb that implements a different
+    /// generation of the multi-process locking protocol
+    LockProtocolMismatch,
+    /// [`crate::RepairSession::abort`] was called or repair was aborted for another reason (such as the database being read-only).
+    RepairAborted,
+    /// The database file is in an old file format and must be manually upgraded
+    UpgradeRequired(u8),
+    /// A transaction is still in-progress
+    TransactionInProgress,
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl From<DatabaseError> for Error {
+    fn from(err: DatabaseError) -> Error {
+        match err {
+            DatabaseError::DatabaseAlreadyOpen => Error::DatabaseAlreadyOpen,
+            DatabaseError::LockProtocolMismatch => Error::LockProtocolMismatch,
+            DatabaseError::RepairAborted => Error::RepairAborted,
+            DatabaseError::UpgradeRequired(x) => Error::UpgradeRequired(x),
+            DatabaseError::TransactionInProgress => Error::TransactionInProgress,
+            DatabaseError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<io::Error> for DatabaseError {
+    fn from(err: io::Error) -> DatabaseError {
+        DatabaseError::Storage(StorageError::Io(err))
+    }
+}
+
+impl From<BackendError> for DatabaseError {
+    fn from(err: BackendError) -> Self {
+        Self::Storage(err.into())
+    }
+}
+
+impl DatabaseError {
+    pub(crate) fn into_storage_error_or_corrupted(self) -> StorageError {
+        match self {
+            DatabaseError::Storage(storage) => storage,
+            other => StorageError::Corrupted(other.to_string()),
+        }
+    }
+}
+
+impl From<StorageError> for DatabaseError {
+    fn from(err: StorageError) -> DatabaseError {
+        DatabaseError::Storage(err)
+    }
+}
+
+impl Display for DatabaseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DatabaseError::UpgradeRequired(actual) => {
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION3}, but file is version {actual}"
+                )
+            }
+            DatabaseError::RepairAborted => {
+                write!(f, "Database repair aborted.")
+            }
+            DatabaseError::DatabaseAlreadyOpen => {
+                write!(f, "Database already open. Cannot acquire lock.")
+            }
+            DatabaseError::LockProtocolMismatch => {
+                write!(
+                    f,
+                    "Database already open by a process whose version of redb implements a different multi-process locking protocol."
+                )
+            }
+            DatabaseError::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
+                )
+            }
+            DatabaseError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for DatabaseError {}
+
+/// Errors related to savepoints
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SavepointError {
+    /// This savepoint is invalid or cannot be created.
+    ///
+    /// Savepoints become invalid when an older savepoint is restored after it was created,
+    /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
+    InvalidSavepoint,
+    /// The operation requires the transaction's durability to be [`crate::Durability::Immediate`].
+    ///
+    /// Returned by operations that must be able to modify persistent savepoints, such as
+    /// creating or deleting a persistent savepoint, or restoring an older savepoint while
+    /// newer persistent savepoints exist that would need to be deleted.
+    ImmediateDurabilityRequired,
+    /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
+    /// another process creates could take its id
+    EphemeralSavepointUnsupported,
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl From<SavepointError> for Error {
+    fn from(err: SavepointError) -> Error {
+        match err {
+            SavepointError::InvalidSavepoint => Error::InvalidSavepoint,
+            SavepointError::ImmediateDurabilityRequired => Error::ImmediateDurabilityRequired,
+            SavepointError::EphemeralSavepointUnsupported => Error::EphemeralSavepointUnsupported,
+            SavepointError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<StorageError> for SavepointError {
+    fn from(err: StorageError) -> SavepointError {
+        SavepointError::Storage(err)
+    }
+}
+
+impl Display for SavepointError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SavepointError::InvalidSavepoint => {
+                write!(f, "Savepoint is invalid or cannot be created.")
+            }
+            SavepointError::ImmediateDurabilityRequired => {
+                write!(
+                    f,
+                    "Operation requires Durability::Immediate for the current transaction."
+                )
+            }
+            SavepointError::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported when the database is shared with other writer processes"
+                )
+            }
+            SavepointError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for SavepointError {}
+
+/// Errors related to compaction
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CompactionError {
+    /// A persistent savepoint exists
+    PersistentSavepointExists,
+    /// A ephemeral savepoint exists
+    EphemeralSavepointExists,
+    /// A transaction is still in-progress
+    TransactionInProgress,
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl From<CompactionError> for Error {
+    fn from(err: CompactionError) -> Error {
+        match err {
+            CompactionError::PersistentSavepointExists => Error::PersistentSavepointExists,
+            CompactionError::EphemeralSavepointExists => Error::EphemeralSavepointExists,
+            CompactionError::TransactionInProgress => Error::TransactionInProgress,
+            CompactionError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<StorageError> for CompactionError {
+    fn from(err: StorageError) -> CompactionError {
+        CompactionError::Storage(err)
+    }
+}
+
+impl Display for CompactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CompactionError::PersistentSavepointExists => {
+                write!(
+                    f,
+                    "Persistent savepoint exists. Operation cannot be performed."
+                )
+            }
+            CompactionError::EphemeralSavepointExists => {
+                write!(
+                    f,
+                    "Ephemeral savepoint exists. Operation cannot be performed."
+                )
+            }
+            CompactionError::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
+                )
+            }
+            CompactionError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for CompactionError {}
+
+/// Errors related to setting a transaction's durability
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SetDurabilityError {
+    /// A persistent savepoint was modified
+    PersistentSavepointModified,
+    /// A non-durable commit would be invisible to the other processes sharing the database
+    NonDurableCommitUnsupported,
+}
+
+impl From<SetDurabilityError> for Error {
+    fn from(err: SetDurabilityError) -> Error {
+        match err {
+            SetDurabilityError::PersistentSavepointModified => Error::PersistentSavepointModified,
+            SetDurabilityError::NonDurableCommitUnsupported => Error::NonDurableCommitUnsupported,
+        }
+    }
+}
+
+impl Display for SetDurabilityError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SetDurabilityError::PersistentSavepointModified => {
+                write!(
+                    f,
+                    "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
+            }
+            SetDurabilityError::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when the database is shared with other processes"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for SetDurabilityError {}
+
+/// Errors related to transactions
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TransactionError {
+    /// Error from underlying storage
+    Storage(StorageError),
+    /// The transaction is still referenced by a table or other object
+    ReadTransactionStillInUse(Box<ReadTransaction>),
+}
+
+impl TransactionError {
+    pub(crate) fn into_storage_error(self) -> StorageError {
+        match self {
+            TransactionError::Storage(storage) => storage,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl From<TransactionError> for Error {
+    fn from(err: TransactionError) -> Error {
+        match err {
+            TransactionError::Storage(storage) => storage.into(),
+            TransactionError::ReadTransactionStillInUse(txn) => {
+                Error::ReadTransactionStillInUse(txn)
+            }
+        }
+    }
+}
+
+impl From<StorageError> for TransactionError {
+    fn from(err: StorageError) -> TransactionError {
+        TransactionError::Storage(err)
+    }
+}
+
+impl Display for TransactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TransactionError::Storage(storage) => storage.fmt(f),
+            TransactionError::ReadTransactionStillInUse(_) => {
+                write!(f, "Transaction still in use")
+            }
+        }
+    }
+}
+
+impl core::error::Error for TransactionError {}
+
+/// Errors related to committing transactions
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CommitError {
+    /// Error from underlying storage
+    Storage(StorageError),
+    /// The transaction was poisoned and can no longer be committed: an operation panicked, or
+    /// failed part way through modifying the transaction
+    TransactionPoisoned,
+}
+
+impl CommitError {
+    pub(crate) fn into_storage_error(self) -> StorageError {
+        match self {
+            CommitError::Storage(storage) => storage,
+            CommitError::TransactionPoisoned => unreachable!(),
+        }
+    }
+}
+
+impl From<CommitError> for Error {
+    fn from(err: CommitError) -> Error {
+        match err {
+            CommitError::Storage(storage) => storage.into(),
+            CommitError::TransactionPoisoned => Error::TransactionPoisoned,
+        }
+    }
+}
+
+impl From<StorageError> for CommitError {
+    fn from(err: StorageError) -> CommitError {
+        CommitError::Storage(err)
+    }
+}
+
+impl Display for CommitError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CommitError::Storage(storage) => storage.fmt(f),
+            CommitError::TransactionPoisoned => {
+                write!(
+                    f,
+                    "Transaction was poisoned by a panic or a failed operation"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for CommitError {}
+
+/// Errors related to cursors
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum CursorError {
+    /// The key does not sort strictly between the entries adjacent to the cursor
+    UnorderedKey,
+    /// Error from underlying storage
+    Storage(StorageError),
+}
+
+impl From<CursorError> for Error {
+    fn from(err: CursorError) -> Error {
+        match err {
+            CursorError::UnorderedKey => Error::UnorderedKey,
+            CursorError::Storage(storage) => storage.into(),
+        }
+    }
+}
+
+impl From<StorageError> for CursorError {
+    fn from(err: StorageError) -> CursorError {
+        CursorError::Storage(err)
+    }
+}
+
+impl Display for CursorError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CursorError::UnorderedKey => {
+                write!(
+                    f,
+                    "The key does not sort strictly between the entries adjacent to the cursor"
+                )
+            }
+            CursorError::Storage(storage) => storage.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for CursorError {}
+
+/// Superset of all other errors that can occur. Convenience enum so that users can convert all errors into a single type
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Error {
+    /// The Database is already open. Cannot acquire lock.
+    DatabaseAlreadyOpen,
+    /// Another process has the database open with a version of redb that implements a different
+    /// generation of the multi-process locking protocol
+    LockProtocolMismatch,
+    /// This savepoint is invalid or cannot be created.
+    ///
+    /// Savepoints become invalid when an older savepoint is restored after it was created,
+    /// and savepoints cannot be created if the transaction is "dirty" (any tables have been opened)
+    InvalidSavepoint,
+    /// A savepoint operation requires [`crate::Durability::Immediate`] for the transaction.
+    ImmediateDurabilityRequired,
+    /// [`crate::RepairSession::abort`] was called.
+    RepairAborted,
+    /// A persistent savepoint was modified
+    PersistentSavepointModified,
+    /// A non-durable commit would be invisible to the other processes sharing the database
+    NonDurableCommitUnsupported,
+    /// An ephemeral savepoint would be known to this process alone, and a persistent savepoint
+    /// another process creates could take its id
+    EphemeralSavepointUnsupported,
+    /// A persistent savepoint exists
+    PersistentSavepointExists,
+    /// An Ephemeral savepoint exists
+    EphemeralSavepointExists,
+    /// A transaction is still in-progress
+    TransactionInProgress,
+    /// The transaction was poisoned and can no longer be committed: an operation panicked, or
+    /// failed part way through modifying the transaction
+    TransactionPoisoned,
+    /// The Database is corrupted
+    Corrupted(String),
+    /// The database file is in an old file format and must be manually upgraded
+    UpgradeRequired(u8),
+    /// The value being inserted exceeds the maximum of 3GiB
+    ValueTooLarge(usize),
+    /// The key does not sort strictly between the entries adjacent to the cursor
+    UnorderedKey,
+    /// Table types didn't match.
+    TableTypeMismatch {
+        table: String,
+        key: TypeName,
+        value: TypeName,
+    },
+    /// The table is a multimap table
+    TableIsMultimap(String),
+    /// The table is not a multimap table
+    TableIsNotMultimap(String),
+    TypeDefinitionChanged {
+        name: TypeName,
+        alignment: usize,
+        width: Option<usize>,
+    },
+    /// Table name does not match any table in database
+    TableDoesNotExist(String),
+    /// Table name already exists in the database
+    TableExists(String),
+    // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
+    // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
+    TableAlreadyOpen(String, &'static panic::Location<'static>),
+    Io(io::Error),
+    /// The backend does not support a required storage operation.
+    Unsupported,
+    DatabaseClosed,
+    /// A previous IO error occurred. The database must be closed and re-opened
+    PreviousIo,
+    LockPoisoned(&'static panic::Location<'static>),
+    /// The transaction is still referenced by a table or other object
+    ReadTransactionStillInUse(Box<ReadTransaction>),
+}
+
+impl<T> From<PoisonError<T>> for Error {
+    fn from(_: PoisonError<T>) -> Error {
+        Error::LockPoisoned(panic::Location::caller())
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(err: io::Error) -> Error {
+        Error::Io(err)
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::Unsupported => BackendError::Unsupported.fmt(f),
+            Error::Corrupted(msg) => {
+                write!(f, "DB corrupted: {msg}")
+            }
+            Error::NonDurableCommitUnsupported => {
+                write!(
+                    f,
+                    "Non-durable commits are not supported when the database is shared with other processes"
+                )
+            }
+            Error::EphemeralSavepointUnsupported => {
+                write!(
+                    f,
+                    "Ephemeral savepoints are not supported when the database is shared with other writer processes"
+                )
+            }
+            Error::UpgradeRequired(actual) => {
+                write!(
+                    f,
+                    "Manual upgrade required. Expected file format version {FILE_FORMAT_VERSION3}, but file is version {actual}"
+                )
+            }
+            Error::ValueTooLarge(len) => {
+                write!(
+                    f,
+                    "The value (length={len}) being inserted exceeds the maximum of {}GiB",
+                    MAX_VALUE_LENGTH / 1024 / 1024 / 1024
+                )
+            }
+            Error::UnorderedKey => {
+                write!(
+                    f,
+                    "The key does not sort strictly between the entries adjacent to the cursor"
+                )
+            }
+            Error::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            } => {
+                write!(
+                    f,
+                    "Current definition of {} does not match stored definition (width={:?}, alignment={})",
+                    name.name(),
+                    width,
+                    alignment,
+                )
+            }
+            Error::TableTypeMismatch { table, key, value } => {
+                write!(
+                    f,
+                    "{table} is of type Table<{}, {}>",
+                    key.name(),
+                    value.name(),
+                )
+            }
+            Error::TableIsMultimap(table) => {
+                write!(f, "{table} is a multimap table")
+            }
+            Error::TableIsNotMultimap(table) => {
+                write!(f, "{table} is not a multimap table")
+            }
+            Error::TableDoesNotExist(table) => {
+                write!(f, "Table '{table}' does not exist")
+            }
+            Error::TableExists(table) => {
+                write!(f, "Table '{table}' already exists")
+            }
+            Error::TableAlreadyOpen(name, location) => {
+                write!(f, "Table '{name}' already opened at: {location}")
+            }
+            Error::Io(err) => {
+                write!(f, "I/O error: {err}")
+            }
+            Error::DatabaseClosed => {
+                write!(f, "Database has been closed")
+            }
+            Error::PreviousIo => {
+                write!(
+                    f,
+                    "Previous I/O error occurred. Please close and re-open the database."
+                )
+            }
+            Error::LockPoisoned(location) => {
+                write!(f, "Poisoned internal lock: {location}")
+            }
+            Error::DatabaseAlreadyOpen => {
+                write!(f, "Database already open. Cannot acquire lock.")
+            }
+            Error::LockProtocolMismatch => {
+                write!(
+                    f,
+                    "Database already open by a process whose version of redb implements a different multi-process locking protocol."
+                )
+            }
+            Error::RepairAborted => {
+                write!(f, "Database repair aborted.")
+            }
+            Error::PersistentSavepointModified => {
+                write!(
+                    f,
+                    "Persistent savepoint modified. Cannot reduce transaction durability"
+                )
+            }
+            Error::PersistentSavepointExists => {
+                write!(
+                    f,
+                    "Persistent savepoint exists. Operation cannot be performed."
+                )
+            }
+            Error::EphemeralSavepointExists => {
+                write!(
+                    f,
+                    "Ephemeral savepoint exists. Operation cannot be performed."
+                )
+            }
+            Error::TransactionInProgress => {
+                write!(
+                    f,
+                    "A transaction is still in progress. Operation cannot be performed."
+                )
+            }
+            Error::TransactionPoisoned => {
+                write!(
+                    f,
+                    "Transaction was poisoned by a panic or a failed operation"
+                )
+            }
+            Error::InvalidSavepoint => {
+                write!(f, "Savepoint is invalid or cannot be created.")
+            }
+            Error::ImmediateDurabilityRequired => {
+                write!(
+                    f,
+                    "Operation requires Durability::Immediate for the current transaction."
+                )
+            }
+            Error::ReadTransactionStillInUse(_) => {
+                write!(f, "Transaction still in use")
+            }
+        }
+    }
+}
+
+impl core::error::Error for Error {}

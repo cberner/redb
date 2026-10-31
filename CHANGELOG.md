@@ -1,0 +1,843 @@
+# redb - Changelog
+
+## 5.0.0 - 2026-XX-XX
+* Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
+  `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
+  target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend
+  and everything that opens a database from a path or a `File` are unavailable in that mode, as is
+  `ReadOnlyDatabase`; storage is supplied through `Builder::create_with_backend()`, and
+  `StorageBackend` reports failures as `redb::io::Error`; the `io` module is public whenever
+  `experimental-api-5` is enabled, and with std it re-exports `std::io::Error`. The `cache_metrics`,
+  `chrono_v0_4` and `uuid` features are unavailable there: the first needs 64-bit atomics, and the
+  other two link against the standard library. Leaving `experimental-api-5` off keeps the std build
+  regardless of the `std` feature, as before.
+* Behind the `experimental-api-5` feature flag, the range taking methods --
+  `ReadableTable::range()`, `ReadOnlyTable::range_owned()`, `Table::retain_in()`,
+  `Table::extract_from_if()`, and their multimap equivalents -- take a `KeyRange` instead of a
+  `RangeBounds` over a borrowed key type, so ranges that carry no key type no longer need one
+  named: `table.range(..)` replaces `table.range::<KeyType>(..)`. Calls that named the key type in
+  a turbofish must drop it, and implementations of `ReadableTable` or `ReadableMultimapTable` must
+  update their `range()` signature. The inherent `ReadOnlyTable::range()` and
+  `ReadOnlyMultimapTable::range()`, whose `'static` iterators do not keep the transaction alive,
+  are removed under the flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
+  `range_owned()` variants when the iterator must outlive the table.
+* The inherent `ReadOnlyTable::get()` and `ReadOnlyMultimapTable::get()`, whose `'static` guards
+  and iterators likewise do not keep the transaction alive, are also removed under the
+  `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
+  `get_owned()` variants when the guard must outlive the table.
+* Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
+  `ReadableTable::upper_bound()` have no default implementation, so implementations of
+  `ReadableTable` must provide them.
+* Behind the `experimental-api-5` feature flag, `Range` and `MultimapRange` keep the table
+  borrowed until they are dropped, rather than until their last use. Mutating the table while a
+  range over it is still in scope, which could panic, no longer compiles.
+* Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
+  alone, rather than also with the whole-file lock earlier versions take.
+* Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
+  `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
+  the niche opens as `Option<Legacy<T>>`, however deeply nested.
+* Under `experimental-niches`, `&str` declares a `NICHE`, so `Option<&str>` is stored without a
+  tag byte, and is no longer equivalent to `Option<&str>` without the flag. A table of
+  `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
+  longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
+  it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `String` declares the same `NICHE` as `&str`, so `Option<String>`
+  is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
+  A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
+  migrated by copying it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `bool` declares a `NICHE`, so `Option<bool>` is stored in one byte
+  rather than two, and is no longer equivalent to `Option<bool>` without the flag. A table of
+  `Option<bool>` written without the flag opens as `Option<Legacy<bool>>`, and is migrated by
+  copying it into a new table. The file format is unchanged.
+* Under `experimental-niches`, `char` declares a `NICHE`, so `Option<char>` is stored in three
+  bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
+  of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
+  copying it into a new table. The file format is unchanged.
+
+## 4.5.0 - 2026-XX-XX
+### Multi-process support
+* Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
+  may share the database.
+* `ConcurrencyMode::ExclusiveWriter` (the default) locks the whole file, as earlier versions do.
+* `ConcurrencyMode::SingleWriter`, allows one process to write, and any number of processes may open
+  the database read-only.
+* `ConcurrencyMode::MultiWriter`, allows any number of processes to open the database for
+  writing, one write transaction at a time, and any may number open it read-only.
+
+### Performance
+* Operations on tables with `&str` or `String` keys are faster.
+
+### Bug fixes
+* Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
+  transaction.
+* Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a
+  `write_misses()` near `u64::MAX` in release builds when called while another thread is writing.
+
+## redb-derive 0.2.0 - 2026-10-13
+* Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
+  named `'a` or `'b`; the generated implementations no longer shadow the struct's lifetimes.
+* Fix the derived implementations calling inherent methods named `fixed_width`, `from_bytes`,
+  `as_bytes`, or `type_name` on field types, instead of the `Value` trait methods. The
+  generated code now uses fully qualified paths, and no longer requires the `Value` and `Key`
+  traits to be in scope at the derive site.
+* Add `#[redb(crate = "...")]` to name the crate the implementations are generated for, when
+  redb is renamed or present in several versions. Structs with fields require redb 3.0+.
+* Fix derived structs producing the same `TypeName` when two field types with different
+  definitions share a name, such as a user-defined type named `String` and the built-in
+  `String`. User-defined field types (including the `chrono` types redb provides) are now
+  tagged in the derived `TypeName`, so structs containing them change type identity: their
+  existing tables report `TableTypeMismatch` and must be migrated. Structs whose fields are
+  all built-in types are unaffected.
+* `#[derive(Value)]` on a struct with exactly one field now forwards the field's `Value::NICHE`,
+  so `Option` of such a struct is encoded as `Option` of the field is. The generated code refers
+  to `Value::NICHE`, so such a struct can only be derived against redb 4.4.0 or newer; other
+  structs are unaffected.
+
+## 4.4.0 - 2026-10-13
+### New features
+* Implement `Value` and `Key` for the `NonZero` integer types, `NonZeroU8` to `NonZeroU128` and
+  `NonZeroI8` to `NonZeroI128`.
+* Add `Value::NICHE`, an optional byte string that a type never encodes to. When a type declares
+  one, `Option` of that type encodes `None` as it, in place of a tag byte. Adding a niche to a type
+  changes the encoding of `Option` of it, and its type name with it, so the two are not equivalent
+  types: a table that stores `Option` of the type from before it declared the niche fails to open
+  with `TableTypeMismatch` instead of being misread, and can be read through a copy of the type
+  that declares no niche.
+* Stabilize `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()`, which return a read-only
+  `Cursor`, modeled on the standard library's `BTreeMap` cursors.
+* Stabilize `Table::lower_bound_mut()` and `Table::upper_bound_mut()`, which return a `CursorMut`
+  modeled on the standard library's `BTreeMap` cursors. Inserting sorted data through
+  `insert_before()` can be around 3x faster than `insert()`.
+
+### Bug fixes
+* Fix a bug where `check_integrity()` could report that it repaired corruption, after a transaction
+  that grew the file size was aborted.
+* Fix `Database::create()` repairing the database it had just created, which failed with
+  `RepairAborted` under a repair callback that aborts.
+* Fix unbounded memory growth in the page cache under write workloads, when the cache never
+  reached its configured size limit.
+* Fix `Durability::None` commits being lost on a clean close, after a panic was caught inside
+  an earlier write transaction.
+* Fix `compact()` leaving free regions at the end of the file, when the compaction emptied more
+  of them than it made commits.
+* Fix `compact()` waiting forever when the caller holds a write transaction. It fails with
+  `CompactionError::TransactionInProgress`, as it does for a read transaction.
+
+## 2.6.4 - 2026-10-02
+* Fix unbounded memory growth in the page cache under write workloads, when the cache never
+  reached its configured size limit.
+
+## 4.3.0 - 2026-09-14
+### New features
+* Add optional locking methods to `StorageBackend`. Backends may implement these methods to support
+  locking. Custom backends that wrap `FileBackend` should delegate these methods to the `FileBackend`
+  otherwise file locking functionality will be lost.
+* Add an optional `Key::separator()`, which returns a short byte string that separates two keys.
+  `&[u8]`, `&str`, `String` keys now store minimal prefixes. `Option`, array keys, and tuple keys
+  also store optimized separators when their element type is variable length. Tables with these
+  key types will use slightly less space, and lookups will be faster.
+* Add `Key::min_encoded_key()`, the encoding of a key type's smallest value. Implementing it is
+  optional, and lets container types holding that key store shorter separators.
+* Add experimental support for multi-process read-write access to a single database file, behind
+  the `experimental-multiprocess` feature flag.
+
+### Bug fixes
+* Fix a crash shortly after a commit being able to silently roll that commit back during
+  recovery, if `check_integrity()` had previously repaired the database.
+* Fix `ReadOnlyUntypedTable` and `ReadOnlyUntypedMultimapTable` potentially returning incorrect results
+  if the originating transaction is dropped.
+* Fix iterators silently omitting data when iteration continues after an error. An iterator
+  that yielded `Err(Corrupted)` could yield the rest of the table on later calls, skipping the
+  unreadable entries with no further error. Iterators and read-only cursors now keep returning
+  an error after the first one; re-seeking a cursor resets it.
+* Fix `restore_savepoint()`, `rename_table()`, and `delete_table()` leaving the transaction
+  committable after a storage error. Committing it could corrupt the database or silently lose
+  a table. Such failures now poison the transaction: `commit()` returns an error instead of
+  committing the half-applied state.
+* Fix pages being leaked permanently when a panic unwound through a live write transaction and
+  was caught with `catch_unwind`. The leak survived closing and reopening the database and grew
+  with every such panic; the pages are now reclaimed the next time the database is opened.
+* Fix a Windows-only hang: a write to the database file that reported writing zero bytes made
+  the commit retry it forever. It now fails with a `WriteZero` I/O error.
+* Fix `rename_table()` and `rename_multimap_table()` returning `TableExists` when the new name
+  is the same as the current one. Renaming a table to its own name now succeeds and leaves the
+  table unchanged.
+* Fix `persistent_savepoint()` and `delete_persistent_savepoint()` making the transaction
+  ineligible for further savepoints, so a second savepoint in the same transaction failed with
+  `InvalidSavepoint`. Only opening, renaming, or deleting a data table, or restoring a
+  savepoint, makes a transaction savepoint-ineligible now.
+
+## 4.2.0 - 2026-08-17
+
+### New features
+* Add an experimental cursor API, behind the `experimental_cursor` feature flag:
+  `Table::lower_bound_mut()` and `Table::upper_bound_mut()` return a `CursorMut` pointing at a gap
+  between entries, modeled on the standard library's `BTreeMap` cursors. Inserting sorted data
+  through its `insert_before()` method can be around 3x faster than calling `insert()` with the
+  same data; `insert_after()` inserts through the gap in descending order at the same speed.
+  `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` return a read-only `Cursor`.
+  The feature is unstable and may change incompatibly, or be removed, in any release.
+* Add `ReadOnlyTable::get_owned()`, `ReadOnlyTable::range_owned()`,
+  `ReadOnlyMultimapTable::get_owned()`, and `ReadOnlyMultimapTable::range_owned()`, which
+  return the new `OwnedAccessGuard`, `OwnedRange`, `OwnedMultimapValue`, and
+  `OwnedMultimapRange` types. These keep the read transaction alive until they are dropped,
+  including the guards yielded by the iterators, which may outlive the iterator that produced
+  them.
+* Add `Table::entry()` and the associated `Entry`, `OccupiedEntry`, and `VacantEntry`
+  types, mirroring `std::collections::BTreeMap::entry`. Supports `or_insert`,
+  `or_insert_with`, `or_insert_with_key`, `and_modify`, and the usual `OccupiedEntry`
+  / `VacantEntry` accessors.
+* Add `ExtractIf::close()` to explicitly finalize an extract iterator without removing unread
+  entries.
+
+### Optimizations
+* Improve write performance: `Durability::None` commits are about 2x faster, and writes that do not
+  split a page are about 15% faster for single-key `Durability::None` commits and about 6% faster
+  for batched writes.
+* Improve write performance when tables of a single `WriteTransaction` are modified concurrently
+  from multiple threads. Writes to separate tables previously serialized on internal locks and
+  could be slower than writing from a single thread; they now scale with the number of threads.
+  Up to about 4x faster.
+* Optimize `Table::pop_first()` and `Table::pop_last()` to be about 2x faster.
+* Optimize inserting in ascending key order. A table loaded in key order occupies about half as
+  much space, and loads faster.
+* Optimize `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and
+  `Table::extract_from_if()`. Benchmarks on large tables show a 30-100x speedup for retaining and
+  an 18-65x speedup for extracting, depending on the fraction of entries affected. Iterating an
+  extract iterator from both ends no longer degrades removal batching.
+* Avoid unnecessary write amplification when removing a value that is not present from a multimap
+  table. Such a removal is now a no-op.
+
+### Minor improvements
+* `Table::retain()`, `Table::retain_in()`, `Table::extract_if()`, and `Table::extract_from_if()`
+  now poison the write transaction if their predicate panics or an internal error prevents
+  removals from being applied, causing `WriteTransaction::commit()` to return
+  `CommitError::TransactionPoisoned`. After an extract iterator returns an error, later calls keep
+  returning an error instead of continuing.
+* Enable file space reclamation during non-durable transactions performed while a savepoint exists.
+* Reuse pages freed by a durable write transaction in the next write transaction when no live read
+  transaction or savepoint still needs them. Previously, pages were not reused for one additional
+  transaction.
+* `compact()` now returns `CompactionError::PersistentSavepointExists` or
+  `CompactionError::EphemeralSavepointExists` instead of the misleading
+  `CompactionError::TransactionInProgress` when a savepoint blocks compaction.
+* `StorageBackend::close()` is now called when opening a database fails and when an I/O error occurs
+  while dropping a `Database`, allowing backends to release their resources on both paths.
+
+### Bug fixes
+* Return `StorageError::Corrupted` instead of panicking when opening or repairing a database with a
+  corrupted persistent savepoint record or malformed freed-page record.
+* Return `StorageError::Corrupted` instead of aborting the process when branch pages form a cycle or
+  arbitrarily long chain, or when a corrupted page number could cause a multi-terabyte allocation.
+* Fix `WriteTransaction::stats()` returning garbage statistics, or panicking when debug assertions
+  are enabled, when called while a table is open and modified in the same transaction.
+* Fix a deadlock when a `Database` was dropped while a `WriteTransaction` was live. A live
+  `WriteTransaction` now keeps the database open: the transaction remains usable after the
+  `Database` is dropped, and the database closes when the transaction commits, aborts, or is
+  dropped.
+* Fix a panic, including one raised while dropping a `Database`, after `check_integrity()` returned
+  an error. Such a database now refuses to begin a write transaction or to re-run the check,
+  returning `StorageError::Corrupted`, and is no longer recorded as cleanly shut down.
+* Harden against errors and panics raised part way through `WriteTransaction::commit()`: the
+  database now refuses further write transactions until it is closed and reopened (which
+  repairs it), instead of risking corruption from continued use after the failed commit.
+* Fix a case where `check_integrity()` failed to repair the database when the table length was
+  corrupted. Such a file previously passed the check and then panicked, including from
+  `Database::drop`.
+* Fix a potential deadlock when removing a value from a multimap table causes its value-set to
+  shrink from a subtree back to inline storage, while another table of the same write transaction
+  is used concurrently from a different thread.
+* Fix crashes while growing or resizing the database file that could leave it permanently
+  unopenable or reported as corrupted on subsequent opens, even though every committed transaction
+  was intact and fully recoverable.
+* Fix cases where the database file could grow instead of reusing freed space, and where
+  `compact()` could grow the file or stop before fully shrinking it.
+* Fix `Table::get_mut()` and `Entry::and_modify()` to enforce the maximum value size limit.
+  Previously these paths could bypass the limit that `Table::insert()` and the `entry()` accessors
+  enforce.
+* Fix a panic in `insert()` when a single leaf page accumulated 65536 entries via in-place
+  appends, e.g. by inserting a large value and then many small values in ascending key order
+  within the same transaction.
+* Fix `check_integrity()` incorrectly reporting a healthy database as corrupted (and panicking
+  in debug builds) after a persistent savepoint was deleted or restored, or when an ephemeral
+  `Savepoint` was dropped from another thread while the same write transaction was committing.
+* Fix a leak of database space when an ephemeral `Savepoint` was created from one thread while the
+  same write transaction was first accessing a table from another thread, and that savepoint was
+  later restored. The leaked space was only reclaimed by a full repair.
+* Fix a panic when opening a database file that was externally extended to an invalid size; such
+  files are now rejected with `StorageError::Corrupted`.
+* Fix a hang on Windows when opening a truncated or corrupt database file. Reads past the end of the
+  file now return an error instead of looping forever.
+* Fix `check_integrity()` so that it now returns `DatabaseError::TransactionInProgress` when an
+  ephemeral `Savepoint` is still alive. Previously the check could invalidate the pages such a
+  savepoint referenced while leaving it marked valid, so restoring it afterward could corrupt the
+  database.
+* Fix `Database::check_integrity()` silently discarding transactions committed with
+  `Durability::None` that had not yet been made durable by a later commit; a passing check now
+  preserves them (making them durable) instead of rolling them back.
+* Fix a bug that could silently roll back or corrupt durably committed transactions if a crash
+  occurred while recovering from an earlier crash. Triggering it required two crashes -- one
+  interrupting a commit and another during the subsequent repair on the next open -- and it did
+  not affect transactions committed with two-phase commit.
+* Fix new composite types (`Option`, `Vec`, tuples, and arrays) of a user-defined type sharing a
+  type identity with the same composite of a built-in type when the two happened to have the same
+  name. A table using such a composite of a user type can no longer be silently opened under the
+  built-in composite (and vice versa); the mismatch is now reported as `TableError::TableTypeMismatch`.
+  Existing databases created by older versions remain readable. If an older database already used
+  such a colliding composite name, its stored type identity remains ambiguous and may still open
+  under either spelling.
+
+## 4.1.0 - 2026-04-19
+**This release contains a large number of bug fixes discovered by AI coding agents**
+
+* Fix a bug where `MultimapValue::len()` and `is_empty()` returned stale counts after
+  consuming entries via `next_back()`.
+* Fix a bug where `restore_savepoint()` used in a non-`Immediate` durability transaction and when
+  there are persistent savepoints newer than the one being restored, could fail
+  with `SavepointError::InvalidSavepoint`, but the savepoint would actually be partially applied.
+  The call now fails up front with `SavepointError::ImmediateDurabilityRequired`.
+* Fix a bug in `restore_savepoint()` where modifications made earlier in the transaction might
+  not be reverted.
+* Fix a bug where renaming a table that was already modified in the same transaction could cause
+  the database to become corrupted.
+* Fix a bug where calling `restore_savepoint()` after modifying a table in the same
+  transaction could cause the table to become corrupted in a future transaction.
+* Fix a panic when `delete_table()` was called on a table that had been modified in the same
+  transaction.
+* Fix a panic in `restore_savepoint()` when passed a `Savepoint` from a different `Database`.
+  `SavepointError::InvalidSavepoint` is now returned instead.
+* Fix a bug where a transaction that created a persistent savepoint and was then
+  aborted could cause the database file to grow excessively, until the `Database` was dropped.
+* Fix a panic in `check_integrity()` when called while another transaction is still alive.
+  `DatabaseError::TransactionInProgress` is now returned instead.
+* Fix a bug where aborting a transaction that called `restore_savepoint()` with a savepoint
+  when a newer savepoint existed could cause database space to be leaked.
+* Fix a bug where aborting a transaction that called `restore_savepoint()` would leave more
+  recent savepoints invalid.
+* Improve performance when reading concurrently from multiple threads. Around 15% speedup on some benchmarks.
+* Optimize cache usage, and general write performance. Around 1.5x speedup on some benchmarks.
+* Optimize memory usage.
+* Other performance optimizations.
+
+## 4.0.0 - 2026-04-02
+* Implement `Drop` on `AccessGuardMut` and `AccessGuardMutInPlace`, which requires that these be dropped
+  before the `Table` they borrow from.
+  This fixes a critical bug where the accessor could outlive the `Table`, and be dropped after the
+  transaction had already committed. This could cause data loss due to the data in the accessor
+  being written out after the transaction had already completed.
+* Remove `Legacy` type. To migrate off the `Legacy` type, use the `Legacy` type in the 3.x release
+  and copy the data to a table with plain tuples, before upgrading to the 4.x release.
+
+## 3.1.3 - 2026-04-02
+* Fix a data loss bug which can occur when the guard returned from `Table::get_mut()` is dropped
+  after the transaction has been committed.
+* Add a warning to `Table::insert_reserve()` indicating that it can cause data loss and recommending
+  to upgrade to the 4.0.0 release.
+
+## 3.1.2 - 2026-04-01
+* Reduce memory usage of open databases
+
+## 3.1.1 - 2026-03-08
+* Fix panic which could occur when inserting into a table with fixed size keys when `debug_assertions` are enabled
+* Add additional information to the stats returned by `cache_stats()`
+
+## 3.1.0 - 2025-09-25
+* Implement `std::error::Error` for `SetDurabilityError`
+* Fix compilation error on various non-tier-1 platforms, such as wasm32-unknown
+
+## 3.0.2 - 2025-09-16
+* Fix performance issue where a transaction with a large number of writes would cause
+  `WriteTransaction::abort()` and committing non-durable transactions to become slow.
+
+## 3.0.1 - 2025-08-23
+* Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+* Fix performance regression, from redb 2.x, where `Durability::None` commits could become linearly
+  slower during a series of transactions.
+
+## 2.6.3 - 2025-08-23
+* Fix correctness issue with `range()`, `extract_from_if()`, and `retain_in()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+
+## 1.5.2 - 2025-08-23
+* Fix correctness issue with `range()`, `drain()`, and `drain_filter()`. If a RangeBounds
+  with `start` > `end` was passed as an argument and `start` and `end` keys were stored in different
+  internal pages in the database (i.e. a sufficient condition is that more than 4KiB of key-value
+  pairs were between the two keys) then these methods would perform as if the argument had been
+  `start..`
+
+## 3.0.0 - 2025-08-09
+
+### Removes support for file format v2.
+Use `Database::upgrade()`, in redb 2.6, to migrate to the v3 file format.
+
+### General storage optimizations
+The v3 file format has been further optimized to reduce the size of the database. Databases with only
+a few small keys will see the largest benefit, and the minimum size of a database file has decreased
+from ~2.5MiB to ~50KiB. To achieve the smallest file size call `Database::compact()` before
+dropping the `Database`.
+
+Additionally, performance is ~15% better in bulk load benchmarks. This was achieved by implementing
+a custom hash function for various in-memory `HashSet`s and `HashMap`s, and by optimizing the usage
+of buffers held in `Arc`s to reduce the number of atomic instructions executed.
+
+### Optimize storage of tuple types
+Storage of variable width tuple types with arity greater than 1 is more efficient. The new format
+elides the length of any fixed width fields and uses varint encoding for the lengths of all variable
+width fields.
+
+Note that this encoding is not compatible with the serialization of variable width tuples used in prior versions.
+To load tuple data created prior to version 3.0, wrap them in the `Legacy` type.
+For example, `TableDefinition<u64, (&str, u32)>` becomes `TableDefinition<u64, Legacy<(&str, u32)>>`.
+Fixed width tuples, such as `(u32, u64)` are backwards compatible.
+
+### Derive for Key and Value traits
+`Key` and `Value` can be derived using the `redb-derive` crate. Note that it does not support
+schema migration. The recommended pattern to migrate schema is to create a new table, and then
+perform a migration from the old table to the new table.
+
+### Read-only multi-process support
+Multiple processes may open the same database file for reading by using the new `ReadOnlyDatabase`
+type. On platforms which support file locks, this acquires a shared lock on the database file.
+
+### Enable garbage collection in Durability::None transactions
+Non-durable transactions will now free pages when possible (pages allocated in a preceding
+non-durable transaction which are no longer referenced).
+This resolves an issue where a long sequence of non-durable transactions led to significant growth
+in the size of the database file.
+This change increases the RAM required for a sequence of non-durable transactions, such that RAM
+proportional to the net change in the database is now used. However, it will never use more than
+about 0.2% of the database file size.
+
+### Other changes
+
+* Add `ReadOnlyDatabase`
+* Add `Builder::open_read_only()`
+* Add `StorageBackend::close()`
+* Add `Table::get_mut()`
+* Add `chrono_v0_4` feature flag which enables serialization of the `NaiveDate`, `NaiveTime`,
+  `NaiveDatetime`, `DateTime<FixedOffset>`, and `FixedOffset` types in the `chrono` crate
+* Add `uuid` feature flag which enables serialization of the `Uuid` type in the `uuid` crate
+* Change `StorageBackend::read()` to accept a `&mut [u8]` output argument instead of returning
+  a `Vec<u8>`
+* Change `Table::insert_reserve()` to take `usize` instead of `u32` as the argument type
+* Change `TypeName::name()` to be public
+* Change `ReadTransactionStillInUse` to contain a `Box`
+* Change `set_durability()` to return a `Result`
+* Move `Database::cache_stats()` and `Database::begin_read()` to `ReadableDatabase` trait
+* Rename `AccessGuardMut` to `AccessGuardMutInPlace`. Note that a new `AccessGuardMut` struct has
+  been added; it serves a different purpose
+* Remove `Durability::Paranoid`
+* Fix a rare case where `check_integrity()` returned `Ok(false)` even though no repair was required,
+  when called on a database that was not shutdown cleanly and was automatically repaired when opened
+* Disallow access to the database from read transactions after the `Database` as been
+  dropped. Access will now return `DatabaseClosed`
+
+## 2.6.2 - 2025-08-02
+* Forward compatibility improvement which makes the file format more flexible to support a potential
+  future optimization
+
+## 2.6.1 - 2025-07-24
+* Fix a forward compatibility issue which caused a crash when opening databases created with redb
+  3.x. Note that opening 3.x databases with redb 2.x is not generally supported and only works
+  in certain situations.
+
+## 2.6.0 - 2025-05-22
+
+### Add support for the v3 file format.
+This file format improves savepoints.
+Savepoints in the v3 format have constant, and small, overhead. Creating
+and restoring them is also much faster. The v3 file format also supports
+savepoints on large databases (v2 has a limit around 32TB). This release
+creates v2 databases by default. Use `Builder::create_with_file_format_v3()`
+and `Database::upgrade()`, respectively, to enable and migrate to v3.
+
+**The upcoming 3.0 release will only support the v3 file format.**
+
+* Add `Builder::create_with_file_format_v3()`
+* Add `Database::upgrade()`
+
+## 2.5.0 - 2025-04-21
+* Add `rename_table()` and `rename_multimap_table()`
+* Add `Key` and `Value` implementations for the unary tuple type (i.e. `(T,)`)
+* Fix an issue which could cause a panic when concurrently performing read and write transactions,
+  when `debug_assertions` were enabled
+* Optimize `retain()` and `retain_in()` to use less space in the database file
+* Improve handling of some internal errors to return `LockPoisoned` instead of panicking
+
+## 2.4.0 - 2024-12-30
+* Add `Database::cache_stats()`
+* Fix `open()` and `create()` to return `InvalidData` when they are called on a database file
+  that is not a valid redb database
+* Significantly speed up `restore_savepoint()`. The time is takes now scales with the change delta
+  since the savepoint was captured, rather than the size of the database file
+* `DatabaseStats::fragmented_bytes()` is now more accurate
+
+## 2.3.0 - 2024-12-10
+* Add `WriteTransaction::set_two_phase_commit()`
+* Add `WriteTransaction::set_quick_repair()` which enables a faster repair mechanism at the cost of
+  slower transaction commits
+* `Durability::Paranoid` is now deprecated. Use `set_two_phase_commit(true)` instead
+* Fix various bugs when repairing the database after an unclean shutdown. These could result in
+  panics, leaked space in the database file, or database corruption
+
+## 2.2.0 - 2024-10-27
+* Implement `TableHandle` for `ReadOnlyTable`
+* Fix bug in write cache, which caused pages to be evicted randomly. Pages are now evicted based on
+  how recently they have been accessed
+
+## 2.1.4 - 2024-10-10
+* Optimize `first()` and `last()` to be almost 2x faster
+* Improve in-memory cache algorithm to resolve edge cases where certain pages could become
+  uncacheable under cache pressure
+* Fix bug in read cache where the read cache could become disabled. This was likely to occur in
+  multithreaded workloads when the read cache was smaller than the database file. This bug lead to
+  5-10x performance degradations for some workloads
+
+## 2.1.3 - 2024-09-14
+* Significant performance optimizations to `compact()`
+* Fix some additional cases where `compact()` did not fully compact the database
+* Fix a panic that could occur in `commit()` or `abort()` after an IO error. `StorageError::PreviousIo` is now returned
+* Fix a potential panic that could occur when repairing the database after a crash
+
+## 2.1.2 - 2024-08-25
+### Major fixes:
+* Fix leak of database space that could occur when calling `restore_savepoint()`
+* Fix leak of database space when calling `delete_multimap_table()`
+* Fix database corruption which could occur when restoring a savepoint. This edge case is rare,
+  and could only occur if the database was less than approximately 4TiB when the savepoint was
+  created, and greater than 4TiB when the savepoint was restored
+* Fix edge case where a transient I/O error that occurred during transaction commit, but then did
+  not reoccur when the `Database` was dropped, could cause database corruption
+
+**Important: If your application has called `restore_savepoint()`, `delete_multimap_table()`,
+or you suspect it may have experienced a transient I/O error during transaction commit.
+It is recommended that you run `check_integrity()` after upgrading to this version.
+This will both detect corruption and clean up any leaked space.**
+
+### Other changes and fixes:
+* Optimize page freeing to reduce the size of the database file
+* Fix several cases where `check_integrity()` would return `Ok(false)` instead of `Ok(true)`
+* Fix some cases where `compact()` did not fully compact the database
+* Make the metadata overhead returned by `WriteTransaction::stats()` more accurate
+* Return `StorageError::ValueTooLarge` when a key-value pair exceeds a total of 3.75GiB.
+  Previously, a panic would occur for key-value pairs that were approximately 4GiB.
+* Downgrade several `info!` log messages to `debug!`
+* Improve documentation
+
+## 2.1.1 - 2024-06-09
+* Fix panic that occurred when calling `compact()` when a read transaction was in progress
+* Fix `ReadTransaction::close()` to return `Ok` when it succeeds
+* Performance optimizations
+
+## 2.1.0 - 2024-04-20
+* Implement `Key` and `Value` for `String`
+* Allow users to implement `ReadableTableMetadata`, `ReadableTable`, and `ReadableMultimapTable`
+
+## 2.0.0 - 2024-03-22
+
+### Major file format change
+2.0.0 uses a new file format that optimizes `len()` to be constant time. This means that it is not
+backwards compatible with 1.x. To upgrade, consider using a pattern like that shown in the
+[upgrade_v1_to_v2](https://github.com/cberner/redb/blob/222a37f4600588261b0983eebcd074bb69d6e5a0/tests/backward_compatibility.rs#L282-L299) test.
+
+### Other changes
+* `check_integrity()` now returns a `DatabaseError` instead of a `StorageError`
+* Table metadata methods have moved to a new `ReadableTableMetadata` trait
+* Rename `RedbKey` to `Key`
+* Rename `RedbValue` to `Value`
+* Remove lifetimes from read-only tables
+* Remove lifetime from `WriteTransaction` and `ReadTransaction`
+* Remove `drain()` and `drain_filter()` from `Table`. Use `retain`, `retain_in`, `extract_if` or `extract_from_if` instead
+* impl `Clone` for `Range`
+* Add support for `[T;N]` as a `Value` or `Key` as appropriate for the type `T`
+* Add `len()` and `is_empty()` to `MultimapValue`
+* Add `retain()` and `retain_in()` to `Table`
+* Add `extract_if()` and `extract_from_if()` to `Table`
+* Add `range()` returning a `Range` with the `'static` lifetime to read-only tables
+* Add `get()` returning a range with the `'static` lifetime to read-only tables
+* Add `close()` method to `ReadTransaction`
+
+## 1.5.1 - 2024-03-16
+* Fix `check_integrity()` so that it returns `Ok(true)` when no repairs were preformed. Previously,
+  it returned `Ok(false)`
+
+## 1.5.0 - 2024-01-15
+* Export `TableStats` type
+* Export `MutInPlaceValue` which allows custom types to support `insert_reserve()`
+* Add untyped table API which allows metadata, such as table stats, to be retrieved for at table
+  without knowing its type at compile time
+* Fix compilation on uncommon platforms (those other than Unix and Windows)
+
+## 1.4.0 - 2023-11-21
+* Add `Builder::set_repair_callback()` which can be used to set a callback function that will be invoked if the database needs repair while opening it.
+* Add support for custom storage backends. This is done by implementing the `StorageBackend` trait and
+  using the `Builder::create_with_backend` function. This allows the database to be stored in a location other
+  than the filesystem
+* Implement `RedbKey` and `RedbValue` for `char`
+* Implement `RedbKey` and `RedbValue` for `bool`
+* Implement `TableHandle` for `Table`
+* Implement `MultimapTableHandle` for `MultimapTable`
+* Fix panic that could occur when inserting a large number of fixed width values into a table within a single transaction
+* Fix panic when calling `delete_table()` on a table that is already open
+* Improve performance for fixed width types
+* Support additional platforms
+
+## 1.3.0 - 2023-10-22
+* Implement `RedbKey` for `Option<T>`
+* Implement `RedbValue` for `Vec<T>`
+* Implement `Debug` for tables
+* Add `ReadableTable::first()` and `last()` which retrieve the first and last key-value pairs, respectively`
+* Reduce lock contention for mixed read-write workloads
+* Documentation improvements
+
+## 1.2.0 - 2023-09-24
+* Add `Builder::create_file()` which does the same thing as `create()` but
+  takes a `File` instead of a path
+* Add `stats()` to tables which provides informational statistics on the table's storage
+* Fix `WriteTransaction::stats()` to correctly count the storage used by multi-map tables
+* Fix panics that could occur when operating on savepoints concurrently from multiple threads
+  on the same `WriteTransaction`
+* Implement `Send` for `WriteTransaction`
+* Change MSRV to 1.66
+* Performance optimizations
+
+## 1.1.0 - 2023-08-20
+* Fix panic when calling `compact()` on certain databases
+* Fix panic when calling `compact()` when an ephemeral `Savepoint` existed
+* Improve performance of `compact()`
+* Relax lifetime requirements on arguments to `insert()`
+
+## 1.0.5 - 2023-07-16
+* Fix a rare panic when recovering a database file after a crash
+* Minor performance improvement to write heavy workloads
+
+## 1.0.4 - 2023-07-01
+* Fix serious data corruption issue when calling `drain()` or `drain_filter()` on a `Table` that had
+  uncommitted data
+
+## 1.0.3 - 2023-06-30
+* Fix panic when re-opening databases of certain, small, sizes
+
+## 1.0.2 - 2023-06-29
+* Fix panic when recovering some databases after a forceful shutdown
+* Fix panic when recovering databases with multimaps that have fixed width values after a forceful shutdown
+
+## 1.0.1 - 2023-06-26
+* Fix panic that could occur after an IO error when reopening a database
+* Fix panic that could occur after an IO error when opening a table
+* Improve error message when opening a table twice to include a more meaningful line number
+* Performance improvements
+
+## 1.0.0 - 2023-06-16
+### Announcement
+redb has reached its first stable release! The file format is now gauranteed to be backward compatible,
+and the API is stable. I've run pretty extensive fuzz testing, but please report any bugs you encounter.
+
+The following features are complete:
+* MVCC with a single `WriteTransaction` and multiple `ReadTransaction`s
+* Zero-copy reads
+* ACID semantics, including non-durable transactions which only sacrifice Durability
+* Savepoints which allow the state of the database to be captured and restored later
+
+#### Changes from 0.22.0:
+* Stabilize file format
+* Improve performance of `restore_savepoint()`
+
+## 0.22.0 - 2023-06-12
+* Fix panic while repairing a database file after crash
+* Fix rare panic in `restore_savepoint()`
+
+## 0.21.0 - 2023-06-09
+* Improve cache heuristic. This asymptotically improves performance on large databases. Benchmarks show 30% to 5x+
+* Fix rare crash that could occur under certain conditions when inserting values > 2GiB
+* Fix crash when growing database beyond 4TiB
+* Fix panic when repairing a database containing a multimap table with fixed width values
+* Performance optimizations
+* File format simplifications
+
+## 0.20.0 - 2023-05-30
+* Export `TransactionError` and `CommitError`. These were unintentionally private
+* Implement `std::error::Error` for all error enums
+
+## 0.19.0 - 2023-05-29
+* Remove `Clone` bound from range argument type on `drain()` and `drain_filter()`
+* File format changes to improve future extensibility
+
+## 0.18.0 - 2023-05-28
+* Improve errors to be more granular. `Error` has been split into multiple different `enum`s, which
+  can all be implicitly converted back to `Error` for convenience
+* Rename `savepoint()` to `ephemeral_savepoint()`
+* Add support for persistent savepoints. These persist across database restarts and must be explicitly
+  released
+* Optimize `restore_savepoint()` to be ~30x faster
+* Add experimental support for WASI. This requires nightly
+* Implement `RedbKey` for `()`
+* Fix some rare crash and data corruption bugs
+
+## 0.17.0 - 2023-05-09
+* Enforce a limit of 3GiB on keys & values
+* Fix database corruption bug that could occur if a `Durability::None` commit was made,
+  followed by a durable commit and the durable commit crashed or encountered an I/O error during `commit()`
+* Fix panic when re-openning a database file, when the process that last had it open had crashed
+* Fix several bugs where an I/O error during `commit()` could cause a panic instead of returning an `Err`
+* Change `length` argument to `insert_reserve()` to `u32`
+* Change `Table::len()` to return `u64`
+* Change width of most fields in `DatabaseStats` to `u64`
+* Remove `K` type parameter from `AccessGuardMut`
+* Add `Database::compact()` which compacts the database file
+* Performance optimizations
+
+## 0.16.0 - 2023-04-28
+* Combine `Builder::set_read_cache_size()` and `Builder::set_write_cache_size()` into a single,
+  `Builder::set_cache_size()` setting
+* Relax lifetime constraints on read methods on tables
+* Optimizations to `Savepoint`
+
+## 0.15.0 - 2023-04-09
+* Add `Database::check_integrity()` to explicitly run repair process (it is still always run if needed on db open)
+* Change `list_tables()` to return a `TableHandle`
+* Change `delete_table()` to take a `TableHandle`
+* Make `insert_reserve()` API signature type safe
+* Change all iterators to return `Result` and propagate I/O errors
+* Replace `WriteStrategy` with `Durability::Paranoid`
+* Remove `Builder::set_initial_size()`
+* Enable db file shrinking on Windows
+* Performance optimizations
+
+## 0.14.0 - 2023-03-26
+* Remove `Builder::create_mmapped()` and `Builder::open_mmapped()`. The mmap backend has been removed
+  because it was infeasible to prove that it was sound. This makes the redb API entirely safe,
+  and the remaining `File` based backed is within a factor of ~2x on all workloads that I've benchmarked
+* Make `Table` implement `Send`. It is now possible to insert into multiple `Table`s concurrently
+* Expose `AccessGuardMut`, `Drain` and `DrainFilter` in the public API
+* Rename `RangeIter` to `Range`
+* Rename`MultimapRangeIter` to `MultimapRange`
+* Rename `MultimapValueIter` to `MultimapValue`
+* Performance optimizations
+
+## 0.13.0 - 2023-02-05
+* Fix a major data corruption issue that was introduced in version 0.12.0. It caused databases
+  greater than ~4GB to become irrecoverably corrupted due to an integer overflow in `PageNumber::address_range`
+  that was introduced by commit `b2c44a824d1ba69f526a1a75c56ae8484bae7248`
+* Add `drain_filter()` to `Table`
+* Make key and value type bounds more clear for tables
+
+## 0.12.1 - 2023-01-22
+* Fix `open()` on platforms with OS page size != 4KiB
+* Relax lifetime requirements on argument to `range()` and `drain()`
+
+## 0.12.0 - 2023-01-21
+* Add `pop_first()` and `pop_last()` to `Table`
+* Add `drain()` to `Table`
+* Add support for `Option<T>` as a value type
+* Add support for user defined key and value types. Users must implement `RedbKey` and/or `RedbValue`
+* Change `get()`, `insert()`, `remove()`...etc to take arguments of type `impl Borrow<SelfType>`
+* Return `Error::UpgradeRequired` when opening a file with an outdated file format
+* Improve support for 32bit platforms
+* Performance optimizations
+
+## 0.11.0 - 2022-12-26
+* Remove `[u8]` and `str` type support. Use `&[u8]` and `&str` instead.
+* Change `get()`, `range()` and several other methods to return `AccessGuard`.
+* Rename `AccessGuard::to_value()` to `value()`
+* Add a non-mmap based backend which is now the default. This makes `Database::create()` and
+  `Database::open()` safe, but has worse performance in some cases. The mmap backend is available
+  via `create_mmapped()`/`open_mmapped()`. There is no difference in the file format, so applications
+  can switch from one backend to the other.
+* Better handling of fsync failures
+
+## 0.10.0 - 2022-11-23
+* Remove maximum database size argument from `create()`. Databases are now unbounded in size
+* Reduce address space usage on Windows
+* Remove `set_dynamic_growth()`
+* Add `set_initial_size()` to `Builder`
+* Optimize cleanup of deleted pages. This resolves a performance issue where openning a Database
+  or performing a small transaction, could be slow if the last committed transaction deleted a large
+  number of pages
+* Remove `set_page_size()`. 4kB pages are always used now
+* Add `iter()` method to `Table` and `MultimapTable`
+* Fix various lifetime issues with type that had a lifetime, such as `&str` and `(&[u8], u64)`
+
+## 0.9.0 - 2022-11-05
+* Add support for dynamic file growth on Windows
+* Add support for tuple types as keys and values
+* Remove `Builder::set_region_size`
+* Save lifetime from `Savepoint`
+* Fix crash when using `create()` to open an existing database created with `WriteStrategy::TwoPhase`
+* Fix rare crash when writing a mix of small and very large values into the same table
+* Performance optimizations
+
+## 0.8.0 - 2022-10-18
+* Performance improvements for database files that are too large to fit in RAM
+* Fix deadlock in concurrent calls to `savepoint()` and `restore_savepoint()`
+* Fix crash if `restore_savepoint()` failed
+* Move `savepoint()` and `restore_savepoint()` methods to `WriteTransaction`
+* Implement `Iterator` for the types returned from `range()` and `remove_all()`
+
+## 0.7.0 - 2022-09-25
+* Add support for Windows
+* Add `Database::set_write_strategy` which allows the `WriteStrategy` of the database to be changed after creation
+* Make `Database::begin_write` block, instead of panic'ing, if there is another write already in progress
+* Add `Database::savepoint` and `Database::restore_savepoint` which can be used to snapshot and rollback the database
+* Rename `DatabaseBuilder` to `Builder`
+* Performance optimizations for large databases
+
+## 0.6.1 - 2022-09-11
+* Fix crash when `Database::open()` was called on a database that had been created with `WriteStrategy::TwoPhase`
+* Change default region size on 32bit platforms to 4GiB
+
+## 0.6.0 - 2022-09-10
+* Return `Err` instead of panic'ing when opening a database file with an incompatible file format version
+* Many optimizations to the file format, and progress toward stabilizing it
+* Fix race between read & write transactions, which could cause reads to return corrupted data
+* Better document the different `WriteStrategy`s
+* Fix panic when recovering a database that was uncleanly shutdown, which had been created with `WriteStrategy::Checksum` (which is the default)
+* Fix panic when using `insert_reserve()` in certain cases
+
+## 0.5.0 - 2022-08-06
+* Optimize `MultimapTable` storage format to use `O(k * log(n_k) + v * log(n_v / n_k))` space instead of `O(k * log(n_k + n_v) + v * log(n_k + n_v))` space,
+  where k is the size of the stored keys, v is the size of the stored values, n_k is the number of stored keys,
+  n_v is the number of stored values
+* Fix compilation errors for 32bit x86 targets
+* Add support for the unit type, `()`, as a value
+* Return an error when attempting to open the same database file for writing in multiple locations, concurrently
+* More robust handling of fsync failures
+* Change `MultimapTable::range` to return an iterator of key-value-collection pairs, instead of key-value pairs
+* Automatically abort `WriteTransaction` on drop
+
+## 0.4.0 - 2022-07-26
+* Add single phase with checksum commit strategy. This is now the default and reduces commit latency by ~2x. For more details,
+  see the [design doc](docs/design.md#1-phase--checksum-durable-commits) and
+  [blog post](https://www.redb.org/post/2022/07/26/faster-commits-with-1pcc-instead-of-2pc/). The previous behavior is available
+  via `WriteStrategy::Throughput`, and can have better performance when writing a large number of bytes per transaction.
+
+## 0.3.1 - 2022-07-20
+* Fix a bug where re-opening a `Table` during a `WriteTransaction` lead to stale results being read
+
+## 0.3.0 - 2022-07-19
+* Fix a serious data corruption issue that caused many write operations to corrupt the database
+* Make redb region size configurable
+* Implement garbage collection of empty regions
+* Fixes and optimizations to make the file format more efficient
+
+## 0.2.0 - 2022-06-10
+* Add information log messages which can be enabled with the `logging` feature
+* Add support for `[u8; N]` type
+* Optimize storage of fixed width types. The value length is no longer stored, which reduces storage space by ~50% for `u64`,
+  2x for `u32`, and also improves performance.
+
+## 0.1.2 - 2022-05-08
+* Change `insert()` to return an `Option<V>` with the previous value, instead of `()`
+
+## 0.1.1 - 2022-04-24
+* Improved documentation
+
+## 0.1.0 - 2022-04-23
+* Initial beta release

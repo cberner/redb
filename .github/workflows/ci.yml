@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  pull_request:
+  push: # required for actions/cache to work
+    branches:
+      - master
+
+jobs:
+  commit-authors:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Ban AI-authored commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --no-recurse-submodules origin "$BASE_SHA"
+          failed=0
+          offenders=$(git log --no-merges --pretty=format:'%H %an <%ae> committed by %cn <%ce>' "$BASE_SHA".."$HEAD_SHA" \
+            | grep -iE '(claude|codex)' || true)
+          if [ -n "$offenders" ]; then
+            echo "Commits authored or committed by Claude or Codex are not allowed:"
+            echo "$offenders"
+            failed=1
+          fi
+          for sha in $(git log --format=%H "$BASE_SHA".."$HEAD_SHA"); do
+            coauthors=$(git log -1 --format=%B "$sha" \
+              | grep -iE '^[[:space:]]*co[- ]?authored[- ]?by:.*(claude|codex)' || true)
+            if [ -n "$coauthors" ]; then
+              echo "Commit $sha has a co-author trailer referencing Claude or Codex:"
+              echo "$coauthors"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+  ci:
+    strategy:
+      matrix:
+        os: ["ubuntu-latest", "macos-latest", "windows-latest", "ubuntu-24.04-arm"]
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      RUSTFLAGS: --deny warnings
+      # Nothing reuses the incremental compilation caches: they are not saved between runs, so
+      # producing them is pure overhead
+      CARGO_INCREMENTAL: 0
+      CARGO_DENY_VERSION: "0.20.2"
+      CARGO_FUZZ_VERSION: "0.12.0"
+      JUST_VERSION: "1.36.0"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+            rustup component add rustfmt
+            rustup component add clippy
+
+      # Cargo.lock is not checked in, so resolve it before computing the cache key. Otherwise the key
+      # does not change when a dependency publishes a release, and the stale cache is never replaced
+      - name: Generate lockfiles
+        run: |
+            cargo generate-lockfile
+            cargo generate-lockfile --manifest-path fuzz/Cargo.toml
+
+      # Kept out of the build cache below, and keyed on the pinned versions alone, so that a
+      # dependency change does not rebuild all three from source
+      - name: Cache tools
+        id: tool-cache
+        uses: actions/cache@v5
+        with:
+            path: |
+                ~/.cargo/bin/cargo-deny
+                ~/.cargo/bin/cargo-deny.exe
+                ~/.cargo/bin/cargo-fuzz
+                ~/.cargo/bin/cargo-fuzz.exe
+                ~/.cargo/bin/just
+                ~/.cargo/bin/just.exe
+            key: ${{ runner.os }}-${{ runner.arch }}-tools-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_FUZZ_VERSION }}-${{ env.JUST_VERSION }}
+
+      - name: Cache
+        id: rust-cache
+        uses: actions/cache@v5
+        with:
+            path: |
+                ~/.cargo/registry/index/
+                ~/.cargo/registry/cache/
+                ~/.cargo/git/db/
+                target/.rustc_info.json
+                target/debug/.fingerprint/
+                target/debug/build/
+                target/debug/deps/
+                fuzz/target/
+            # No restore-keys fallback: restoring an older cache would carry its stale artifacts
+            # forward into every cache saved after it
+            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'fuzz/Cargo.lock', '.github/workflows/*.yml', 'rust-toolchain') }}
+
+      - name: Non ASCII characters
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+            if grep -P -n "[^\x00-\x7F]" -r --include="*.rs" --include="*.toml" .; then
+            echo "Non-ASCII characters detected"
+            exit 1
+            fi
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: OSX x86 rust
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          # For some reason this is required to run the fuzzer on OSX
+          rustup target add x86_64-apple-darwin
+
+      - name: Setup wasmtime
+        if: runner.os != 'Windows'
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+            version: "24.0.0"
+
+      - name: Install cargo-deny
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.CARGO_DENY_VERSION }} cargo-deny --locked
+
+      - name: Install cargo-fuzz
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
+
+      - name: Install just
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.JUST_VERSION }} just --locked
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Compile (`wasm32-unknown-unknown`)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+            rustup target add wasm32-unknown-unknown
+            # Not possible to set default members for specific a target:
+            # https://github.com/rust-lang/cargo/issues/6179
+            command="cargo check -p $(cargo pkgid) -p redb-derive --target wasm32-unknown-unknown"
+            $command
+            $command --all-features
+            $command --no-default-features
+            rustup target remove wasm32-unknown-unknown
+
+      - name: Compile (`no_std`, `thumbv7em-none-eabihf`)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+            rustup target add thumbv7em-none-eabihf
+            # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
+            cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
+            # The features that are supported alongside no_std. cache_metrics needs 64-bit atomics,
+            # and chrono_v0_4/uuid need std, so all three are refused at compile time instead.
+            cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5,logging
+            rustup target remove thumbv7em-none-eabihf
+
+      - name: Run no_std backend regression
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo run --manifest-path crates/redb-no-std-test/Cargo.toml
+
+      - name: Clippy (default features)
+        run: cargo clippy --all --all-targets -- -Dwarnings
+
+      - name: Run 32-bit locking tests
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes gcc-multilib
+          rustup target add i686-unknown-linux-gnu
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --lib range_lock_tests
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --all-features --lib range_lock_tests
+          cargo test -p $(cargo pkgid) --target i686-unknown-linux-gnu --all-features --test multiprocess_tests
+
+      - name: Fuzzer
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        run: just fuzz_ci
+
+      - name: Run tests
+        run: just test_all_no_sandbox
+
+      - name: Run CPython wrapper tests
+        if: runner.os != 'Windows'
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          pip3 install --upgrade pip
+          pip3 install maturin
+          just test_py
+
+      - name: Run CPython wrapper tests
+        if: runner.os == 'Windows'
+        run: |
+          python3 -m venv venv
+          venv\Scripts\activate
+          pip3 install --upgrade pip
+          pip3 install maturin
+          just test_py
+
+      - name: Run WASI tests
+        if: runner.os != 'Windows'
+        run: |
+          RUSTFLAGS="" just test_wasi

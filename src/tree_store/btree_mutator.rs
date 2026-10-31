@@ -1,0 +1,1918 @@
+use crate::tree_store::btree_base::{
+    BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
+    LeafBuilder, LeafMutator, OwnedEntryBuffer, RawBranchBuilder, branch_separator,
+    is_single_large_value, leaf_below_merge_threshold, leaf_split_required,
+    retained_after_removals,
+};
+use crate::tree_store::btree_mutator::DeletionResult::{
+    DeletedBranch, DeletedSubtree, PartialBranch, PartialLeaf, Subtree,
+};
+use crate::tree_store::page_store::{Page, PageImpl, PageMut, ScopedBorrow};
+use crate::tree_store::{
+    AccessGuardMutInPlace, BtreeHeader, PageAllocator, PageHint, PageNumber, PageTracker,
+};
+use crate::types::{Key, Value};
+use crate::{AccessGuard, Result};
+use alloc::borrow::Cow;
+use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
+use core::cmp::{max, min};
+use core::marker::PhantomData;
+use core::ops::Range;
+
+#[derive(Debug)]
+enum DeletionResult {
+    // A proper subtree
+    Subtree(PageNumber),
+    // A child subtree was removed completely and should be removed from its parent.
+    // If this reaches the root, the tree becomes empty.
+    DeletedSubtree,
+    // A leaf with fewer entries than desired
+    PartialLeaf {
+        page: Arc<[u8]>,
+        deleted_pairs: DeletedPairs,
+    },
+    // A branch page subtree with fewer children than desired.
+    // Held in unbuilt form: the caller will merge it with a sibling and build a new page,
+    // so allocating a page here just to free it again would be wasteful.
+    // Checksums are retained because preserved children may be clean pages whose real
+    // checksums must be propagated (finalize only recomputes uncommitted pages).
+    PartialBranch {
+        children: Vec<(PageNumber, Checksum)>,
+        keys: Vec<Vec<u8>>,
+    },
+    // Indicates that the branch node was deleted, and includes the only remaining child.
+    // Checksum is retained for the same reason as `PartialBranch`.
+    DeletedBranch(PageNumber, Checksum),
+}
+
+#[derive(Debug)]
+enum DeletedPairs {
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl DeletedPairs {
+    fn len(&self) -> usize {
+        match self {
+            Self::One(_) => 1,
+            Self::Many(indexes) => indexes.len(),
+        }
+    }
+}
+
+// A page produced while splicing an insert run into the tree, with a bound on
+// its subtree: a separator no less than the subtree's greatest key. The bound
+// is None when the parent's stored separator still covers the subtree, which
+// includes the node holding the tree's original last entry.
+type SplicedNode = (PageNumber, Checksum, Option<Vec<u8>>);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum LeafDeleteDisposition {
+    Delete,
+    Merge,
+    Rebuild,
+}
+
+struct LeafDeletePlan {
+    retained_pairs: usize,
+    disposition: LeafDeleteDisposition,
+}
+
+struct InsertionResult<'a, V: Value + 'static> {
+    // the new root page
+    new_root: PageNumber,
+    // checksum of the root page
+    root_checksum: Checksum,
+    // Following sibling, if the root had to be split
+    additional_sibling: Option<(Vec<u8>, PageNumber, Checksum)>,
+    // The inserted value for .insert_reserve() to use
+    inserted_value: AccessGuardMutInPlace<'a, V>,
+    // The previous value, if any
+    old_value: Option<AccessGuard<'a, V>>,
+}
+
+pub(crate) struct MutateHelper<'a, 'b, K: Key, V: Value> {
+    root: &'b mut Option<BtreeHeader>,
+    page_allocator: &'b PageAllocator,
+    freed: &'b mut Vec<PageNumber>,
+    allocated: &'b Arc<PageTracker>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+    _lifetime: ScopedBorrow<'a>,
+}
+
+impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
+    pub(crate) fn new(
+        root: &'b mut Option<BtreeHeader>,
+        page_allocator: &'b PageAllocator,
+        freed: &'b mut Vec<PageNumber>,
+        allocated: &'b Arc<PageTracker>,
+    ) -> Self {
+        Self {
+            root,
+            page_allocator,
+            freed,
+            allocated,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+            _lifetime: ScopedBorrow::default(),
+        }
+    }
+
+    fn conditional_free(&mut self, page_number: PageNumber) {
+        self.page_allocator
+            .conditional_free(page_number, self.allocated, self.freed);
+    }
+
+    pub(crate) fn delete(&mut self, key: &K::SelfType<'_>) -> Result<Option<AccessGuard<'a, V>>> {
+        self.delete_key(K::as_bytes(key).as_ref(), true)
+    }
+
+    // If `allow_in_place` is false, leaf memory is never modified in place, so guards and
+    // snapshots backed by leaf buffers remain valid after the deletion.
+    pub(super) fn delete_key(
+        &mut self,
+        key: &[u8],
+        allow_in_place: bool,
+    ) -> Result<Option<AccessGuard<'a, V>>> {
+        if let Some(BtreeHeader {
+            root: p, length, ..
+        }) = *self.root
+        {
+            let (deletion_result, found) = self.delete_helper(
+                self.page_allocator.get_page(p, PageHint::None)?,
+                key,
+                allow_in_place,
+            )?;
+            if found.is_none() {
+                // The tree was not modified; leave *self.root untouched so that any clean
+                // root page keeps its already-valid checksum.
+                return Ok(None);
+            }
+            self.finish_deletion(deletion_result, length - 1)?;
+            Ok(found)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn finish_deletion(&mut self, deletion_result: DeletionResult, new_length: u64) -> Result {
+        let new_root = match deletion_result {
+            Subtree(page) => Some(BtreeHeader::new(page, DEFERRED, new_length)),
+            DeletedSubtree => None,
+            PartialLeaf {
+                page,
+                deleted_pairs,
+            } => {
+                let accessor = LeafAccessor::new(&page, K::fixed_width(), V::fixed_width());
+                let mut builder = LeafBuilder::new(
+                    self.page_allocator,
+                    self.allocated,
+                    accessor.num_pairs() - deleted_pairs.len(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                Self::push_all_except_deleted(&mut builder, &accessor, &deleted_pairs);
+                let page = builder.build()?;
+                assert_eq!(
+                    new_length,
+                    accessor.num_pairs() as u64 - deleted_pairs.len() as u64
+                );
+                Some(BtreeHeader::new(
+                    page.get_page_number(),
+                    DEFERRED,
+                    new_length,
+                ))
+            }
+            PartialBranch { children, keys } => {
+                let mut builder = BranchBuilder::new(
+                    self.page_allocator,
+                    self.allocated,
+                    children.len(),
+                    K::fixed_width(),
+                );
+                for (child, child_checksum) in children {
+                    builder.push_child(child, child_checksum);
+                }
+                for key in &keys {
+                    builder.push_key(key);
+                }
+                let page = builder.build()?;
+                Some(BtreeHeader::new(
+                    page.get_page_number(),
+                    DEFERRED,
+                    new_length,
+                ))
+            }
+            DeletedBranch(remaining_child, checksum) => {
+                Some(BtreeHeader::new(remaining_child, checksum, new_length))
+            }
+        };
+        *self.root = new_root;
+        Ok(())
+    }
+
+    // The returned guards must be dropped before mutating the tree again.
+    pub(super) fn pop_leaf_entry(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        position: usize,
+    ) -> Result<(AccessGuard<'a, K>, AccessGuard<'a, V>)> {
+        let length = self.root.expect("pop requires a root").length;
+        let (mut result, key, value) = self.delete_leaf_at_position(leaf, position, true, true)?;
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+        self.finish_deletion(result, length - 1)?;
+        Ok((
+            key.expect("deleted key must be returned when requested"),
+            value,
+        ))
+    }
+
+    // If `allow_in_place` is false, the leaf's memory is left untouched so that guards backed by
+    // it remain valid after the deletion.
+    pub(super) fn delete_leaf_entries(
+        &mut self,
+        leaf: PageImpl,
+        path: Vec<(PageImpl, usize)>,
+        indexes: &[usize],
+        allow_in_place: bool,
+    ) -> Result {
+        if indexes.is_empty() {
+            return Ok(());
+        }
+        let length = self.root.expect("delete requires a root").length;
+        let mut result = self.delete_leaf_indexes(leaf, indexes, allow_in_place)?;
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+        self.finish_deletion(result, length - indexes.len() as u64)
+    }
+
+    // Replaces the contiguous `replaced_children` range of the leaf path's
+    // parent branch with packed leaves built from `entries`, then rebuilds the
+    // rest of the path. Separators for preserved children are reused from the
+    // original branch.
+    pub(super) fn replace_leaf_children(
+        &mut self,
+        mut path: Vec<(PageImpl, usize)>,
+        mut replaced_children: Range<usize>,
+        mut entries: OwnedEntryBuffer,
+        removed_pairs: u64,
+    ) -> Result {
+        assert!(!replaced_children.is_empty());
+        let length = self.root.expect("replace requires a root").length;
+        let (parent_page, _) = path
+            .pop()
+            .expect("leaf child replacement requires a parent branch");
+        let parent_page_number = parent_page.get_page_number();
+        let (mut result, removed_leaf_pages) = {
+            let accessor = BranchAccessor::new(&parent_page, K::fixed_width());
+            let old_children = accessor.count_children();
+            assert!(replaced_children.end <= old_children);
+
+            // Entries that pack below the merge threshold would strand a
+            // sparse leaf that nothing later re-merges (inserts only split),
+            // so absorb the adjacent preserved child `plan_leaf_delete` would
+            // merge with, unless it holds a single large value. Empty entries
+            // just remove their children.
+            if entries.num_pairs() > 0
+                && leaf_below_merge_threshold(
+                    entries.num_pairs(),
+                    entries.total_bytes(),
+                    K::fixed_width(),
+                    V::fixed_width(),
+                    self.page_allocator.get_page_size(),
+                )
+            {
+                let neighbor_index = if replaced_children.start == 0 {
+                    replaced_children.end
+                } else {
+                    replaced_children.start - 1
+                };
+                if neighbor_index < old_children {
+                    let page = self
+                        .page_allocator
+                        .get_page(accessor.child_page(neighbor_index).unwrap(), PageHint::None)?;
+                    let neighbor =
+                        LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                    if !is_single_large_value(&neighbor, self.page_allocator.get_page_size()) {
+                        let at_back = neighbor_index == replaced_children.end;
+                        entries.extend_from_leaf(&neighbor, &[], at_back);
+                        if at_back {
+                            replaced_children.end += 1;
+                        } else {
+                            replaced_children.start -= 1;
+                        }
+                    }
+                }
+            }
+            let replacement_leaves = self.build_replacement_leaves(&entries)?;
+
+            let removed_leaf_pages = replaced_children
+                .clone()
+                .map(|i| accessor.child_page(i).unwrap())
+                .collect::<Vec<_>>();
+            let new_children = old_children - replaced_children.len() + replacement_leaves.len();
+            let result = if new_children == 0 {
+                DeletedSubtree
+            } else {
+                let mut builder = BranchBuilder::new(
+                    self.page_allocator,
+                    self.allocated,
+                    new_children,
+                    K::fixed_width(),
+                );
+                // Preserved children reuse their original checksum and
+                // separator; freshly built replacements have a deferred
+                // checksum and the separators computed above.
+                let preserved = |i: usize| {
+                    (
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                        accessor.key(i),
+                    )
+                };
+                let children = (0..replaced_children.start)
+                    .map(&preserved)
+                    .chain(
+                        replacement_leaves
+                            .iter()
+                            .map(|(page, upper_key)| (*page, DEFERRED, Some(upper_key.as_slice()))),
+                    )
+                    .chain((replaced_children.end..old_children).map(&preserved));
+                let mut pushed = 0;
+                for (page, checksum, key) in children {
+                    builder.push_child(page, checksum);
+                    pushed += 1;
+                    // Branches store one separator key after every child
+                    // except the last. The only child whose key is None is the
+                    // branch's original last child, which can only appear here
+                    // as the final pushed child, so the unwrap never runs dry.
+                    if pushed < new_children {
+                        builder.push_key(key.unwrap());
+                    }
+                }
+                debug_assert_eq!(pushed, new_children);
+                Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?
+            };
+            (result, removed_leaf_pages)
+        };
+        drop(parent_page);
+
+        for (page, child_index) in path.into_iter().rev() {
+            result = self.apply_child_deletion_result(page, child_index, result)?;
+        }
+
+        let new_length = length
+            .checked_sub(removed_pairs)
+            .expect("cursor removed more entries than the tree contains");
+        self.finish_deletion(result, new_length)?;
+        // Freed only after every fallible step, so an error never leaves the
+        // surviving root referencing a freed page.
+        self.conditional_free(parent_page_number);
+        for page_number in removed_leaf_pages {
+            self.conditional_free(page_number);
+        }
+        Ok(())
+    }
+
+    // Packs the buffered entries into full leaves, in key order, returning
+    // each page with its separator. No cleanup on error: any failure here has
+    // latched the storage layer's io_failed flag, which blocks every later
+    // commit, so pages already built are transient in-memory state reclaimed
+    // on rollback.
+    fn build_replacement_leaves(
+        &self,
+        buffer: &OwnedEntryBuffer,
+    ) -> Result<Vec<(PageNumber, Vec<u8>)>> {
+        let fixed_key = K::fixed_width();
+        let fixed_value = V::fixed_width();
+        let page_size = self.page_allocator.get_page_size();
+        let entries: Vec<(&[u8], &[u8])> = buffer.entries().collect();
+        let pair_bytes = |(key, value): &(&[u8], &[u8])| key.len() + value.len();
+
+        // Greedy packing: cut a page whenever the next entry would require a
+        // split. Every page is packed as full as the entry stream allows;
+        // like the ordinary merge path, a page can still end up sparse when
+        // the next entry is close to a page in size.
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        let mut bytes = 0;
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_bytes = pair_bytes(entry);
+            if leaf_split_required(
+                index - start + 1,
+                bytes + entry_bytes,
+                fixed_key,
+                fixed_value,
+                page_size,
+            ) {
+                plan.push(start..index);
+                start = index;
+                bytes = 0;
+            }
+            bytes += entry_bytes;
+        }
+        if start < entries.len() {
+            plan.push(start..entries.len());
+        }
+
+        // Greedy packing can strand a sparse trailing page, which nothing
+        // would ever re-merge; rebuild the last two pages with build_split's
+        // balanced division instead. The combined range cannot fit one page,
+        // or greedy would not have cut it.
+        let mut balance_tail = None;
+        if plan.len() >= 2 {
+            let last = plan.last().unwrap();
+            let last_bytes = entries[last.clone()].iter().map(pair_bytes).sum();
+            if leaf_below_merge_threshold(last.len(), last_bytes, fixed_key, fixed_value, page_size)
+            {
+                let last = plan.pop().unwrap();
+                let prev = plan.pop().unwrap();
+                balance_tail = Some(prev.start..last.end);
+            }
+        }
+
+        let fill = |range: &Range<usize>| {
+            let mut builder = LeafBuilder::new(
+                self.page_allocator,
+                self.allocated,
+                range.len(),
+                fixed_key,
+                fixed_value,
+            );
+            for (key, value) in &entries[range.clone()] {
+                builder.push(key, value);
+            }
+            builder
+        };
+        // Build the planned pages. Every page but the last is separated from the one that follows
+        // it; the last has no successor here, so it falls back to its greatest key, which
+        // separates it from whatever the caller places after it.
+        let mut leaves = vec![];
+        for (index, range) in plan.iter().enumerate() {
+            let page = fill(range).build()?;
+            let last_key = entries[range.end - 1].0;
+            let separator = match plan.get(index + 1).or(balance_tail.as_ref()) {
+                Some(next) => branch_separator::<K>(last_key, entries[next.start].0),
+                None => Cow::Borrowed(last_key),
+            };
+            leaves.push((page.get_page_number(), separator.into_owned()));
+        }
+        if let Some(range) = balance_tail {
+            let (page1, split_key, page2) = fill(&range).build_split::<K>()?;
+            leaves.push((page1.get_page_number(), split_key.into_owned()));
+            leaves.push((page2.get_page_number(), entries[range.end - 1].0.to_vec()));
+        }
+        Ok(leaves)
+    }
+
+    // Replaces the leaf at the end of `path` (all of the tree when `replaced`
+    // is None) with packed leaves built from `entries`, rebuilding the
+    // ancestor branches bottom-up. Unlike `replace_leaf_children`, the
+    // replacements can outnumber what they replace, so branches split on the
+    // way up and the root grows new levels; the separator for the replaced
+    // slot is refreshed at every level, since inserting can raise a subtree's
+    // greatest key. Ancestors above the level where the replacements collapse
+    // back to a single node take the deletion path's child-pointer swap
+    // instead of a rebuild.
+    pub(super) fn splice_insert_run(
+        &mut self,
+        replaced: Option<(Vec<(PageImpl, usize)>, PageNumber)>,
+        entries: &OwnedEntryBuffer,
+        inserted_pairs: u64,
+    ) -> Result {
+        assert!(entries.num_pairs() > 0);
+        assert_eq!(replaced.is_some(), self.root.is_some());
+        let length = self.root.map_or(0, |header| header.length);
+        let leaves = self.build_replacement_leaves(entries)?;
+        let mut nodes: Vec<SplicedNode> = leaves
+            .into_iter()
+            .map(|(page, bound)| (page, DEFERRED, Some(bound)))
+            .collect();
+        // Freed only after every fallible step, so an error never leaves the
+        // surviving root referencing a freed page.
+        let mut removed_pages = vec![];
+        if let Some((path, replaced_leaf)) = replaced {
+            removed_pages.push(replaced_leaf);
+            for (page, child_index) in path.into_iter().rev() {
+                // Once the replacement has collapsed to a single node that the
+                // stored separator still routes to, the remaining ancestors
+                // need only their child pointer replaced. This shares the
+                // deletion path's pointer swap, whose in-place write for
+                // uncommitted pages keeps repeated flushes from rebuilding
+                // the whole spine.
+                if nodes.len() == 1 {
+                    let accessor = BranchAccessor::new(&page, K::fixed_width());
+                    let stored = accessor.key(child_index);
+                    let bound = nodes[0].2.as_deref();
+                    // Still routing when the node kept its subtree's original
+                    // bound (None), when the slot is the branch's last child
+                    // and stores no separator at all, or when the new bound
+                    // has not risen above the stored separator.
+                    let routes = match (stored, bound) {
+                        (None, _) | (_, None) => true,
+                        (Some(stored), Some(bound)) => K::compare(bound, stored).is_le(),
+                    };
+                    if routes {
+                        // With no stored separator, a raised bound must keep
+                        // propagating; a stored separator that still routes
+                        // leaves this subtree's bound unchanged as its parent
+                        // sees it, which None expresses upward.
+                        let carried = if stored.is_none() {
+                            core::mem::take(&mut nodes[0].2)
+                        } else {
+                            None
+                        };
+                        let original = page.get_page_number();
+                        let (new_page, replaced_page) =
+                            self.replace_branch_child(page, child_index, nodes[0].0)?;
+                        if replaced_page {
+                            removed_pages.push(original);
+                        }
+                        nodes[0] = (new_page, DEFERRED, carried);
+                        continue;
+                    }
+                }
+                nodes = self.rebuild_branch_level(&page, child_index, nodes)?;
+                removed_pages.push(page.get_page_number());
+                drop(page);
+            }
+        }
+        while nodes.len() > 1 {
+            nodes = self.build_branch_nodes(&nodes)?;
+        }
+        let (root, _, _) = nodes.pop().unwrap();
+        *self.root = Some(BtreeHeader::new(root, DEFERRED, length + inserted_pairs));
+        for page_number in removed_pages {
+            self.conditional_free(page_number);
+        }
+        Ok(())
+    }
+
+    // Rebuilds one branch of the path, with `replacement` in place of
+    // `child_index`. Returns the built pages, more than one if the level had
+    // to split.
+    fn rebuild_branch_level(
+        &mut self,
+        parent: &PageImpl,
+        child_index: usize,
+        mut replacement: Vec<SplicedNode>,
+    ) -> Result<Vec<SplicedNode>> {
+        let accessor = BranchAccessor::new(parent, K::fixed_width());
+        let count = accessor.count_children();
+        assert!(child_index < count);
+        // A replacement ending in None is still covered by what this level
+        // stores for the slot, so that separator is its bound. It stays None
+        // only for the parent's own last child, so after this, None appears
+        // only at the end of the level.
+        if let Some(last) = replacement.last_mut()
+            && last.2.is_none()
+        {
+            last.2 = accessor.key(child_index).map(<[u8]>::to_vec);
+        }
+        // Preserved children keep their checksum, and reuse the original
+        // separator as their bound; only the original last child's is unknown
+        // (None), and it stays last through every rebuild above.
+        let preserved = |i: usize| {
+            (
+                accessor.child_page(i).unwrap(),
+                accessor.child_checksum(i).unwrap(),
+                accessor.key(i).map(<[u8]>::to_vec),
+            )
+        };
+        let mut children = Vec::with_capacity(count - 1 + replacement.len());
+        children.extend((0..child_index).map(preserved));
+        children.extend(replacement);
+        children.extend(((child_index + 1)..count).map(preserved));
+        self.build_branch_nodes(&children)
+    }
+
+    // Packs `children` into as many branch pages as they require, in order.
+    // Mirrors `build_replacement_leaves`: cut a page whenever the next child
+    // would not fit, except that a page must keep at least two children, so
+    // the tail is merged into its neighbor instead of rebalanced.
+    fn build_branch_nodes(&mut self, children: &[SplicedNode]) -> Result<Vec<SplicedNode>> {
+        fn separator(node: &SplicedNode) -> &[u8] {
+            node.2
+                .as_deref()
+                .expect("only the last child of a level may lack a separator")
+        }
+
+        assert!(children.len() >= 2);
+        let page_size = self.page_allocator.get_page_size();
+
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        let mut key_bytes = 0;
+        for index in 1..children.len() {
+            // Extending the page to `children[index]` stores the separator of
+            // the previously-last child.
+            let separator_bytes = separator(&children[index - 1]).len();
+            let required = RawBranchBuilder::required_bytes(
+                index - start,
+                key_bytes + separator_bytes,
+                K::fixed_width(),
+            );
+            // num_keys is stored as a u16, so the page must also be cut before
+            // it would exceed u16::MAX keys, even when the bytes still fit
+            // (possible with large pages); otherwise build() would panic in
+            // RawBranchBuilder::new.
+            let too_many_keys = index - start > usize::from(u16::MAX);
+            if (required > page_size || too_many_keys) && index - start >= 2 {
+                plan.push(start..index);
+                start = index;
+                key_bytes = 0;
+            } else {
+                key_bytes += separator_bytes;
+            }
+        }
+        plan.push(start..children.len());
+        // A single child cannot form a branch page; put it back with its
+        // neighbor, slightly overfilling that page. If the neighbor is at the
+        // u16::MAX key limit, take its last child instead, so both pages stay
+        // within the limit.
+        if plan.last().unwrap().len() == 1 && plan.len() >= 2 {
+            let last = plan.pop().unwrap();
+            let previous = plan.last_mut().unwrap();
+            if previous.len() > usize::from(u16::MAX) {
+                previous.end -= 1;
+                let tail = previous.end..last.end;
+                plan.push(tail);
+            } else {
+                previous.end = last.end;
+            }
+        }
+
+        let mut nodes = Vec::with_capacity(plan.len());
+        for range in plan {
+            let chunk = &children[range];
+            let mut builder = BranchBuilder::new(
+                self.page_allocator,
+                self.allocated,
+                chunk.len(),
+                K::fixed_width(),
+            );
+            for (page, checksum, _) in chunk {
+                builder.push_child(*page, *checksum);
+            }
+            for node in &chunk[..chunk.len() - 1] {
+                builder.push_key(separator(node));
+            }
+            let page = builder.build()?;
+            nodes.push((
+                page.get_page_number(),
+                DEFERRED,
+                chunk.last().unwrap().2.clone(),
+            ));
+        }
+        Ok(nodes)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn insert(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
+    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
+        let (new_root, old_value, guard) = if let Some(BtreeHeader {
+            root: p,
+            checksum,
+            length,
+        }) = *self.root
+        {
+            let result = self.insert_helper(
+                self.page_allocator.get_page(p, PageHint::None)?,
+                checksum,
+                K::as_bytes(key).as_ref(),
+                V::as_bytes(value).as_ref(),
+                true,
+            )?;
+
+            let new_length = if result.old_value.is_some() {
+                length
+            } else {
+                length + 1
+            };
+
+            let new_root = if let Some((key, page2, page2_checksum)) = result.additional_sibling {
+                let mut builder =
+                    BranchBuilder::new(self.page_allocator, self.allocated, 2, K::fixed_width());
+                builder.push_child(result.new_root, result.root_checksum);
+                builder.push_key(&key);
+                builder.push_child(page2, page2_checksum);
+                let new_page = builder.build()?;
+                BtreeHeader::new(new_page.get_page_number(), DEFERRED, new_length)
+            } else {
+                BtreeHeader::new(result.new_root, result.root_checksum, new_length)
+            };
+            (new_root, result.old_value, result.inserted_value)
+        } else {
+            let key_bytes = K::as_bytes(key);
+            let value_bytes = V::as_bytes(value);
+            let key_bytes = key_bytes.as_ref();
+            let value_bytes = value_bytes.as_ref();
+            let mut builder = LeafBuilder::new(
+                self.page_allocator,
+                self.allocated,
+                1,
+                K::fixed_width(),
+                V::fixed_width(),
+            );
+            builder.push(key_bytes, value_bytes);
+            let page = builder.build()?;
+
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            let offset = accessor.offset_of_first_value();
+            let page_num = page.get_page_number();
+            let guard = AccessGuardMutInPlace::new(page, offset, value_bytes.len());
+
+            (BtreeHeader::new(page_num, DEFERRED, 1), None, guard)
+        };
+        *self.root = Some(new_root);
+        Ok((old_value, guard))
+    }
+
+    // `rightmost` is true when every branch above descended into its last child, so the
+    // greatest key in this subtree is also the greatest in the tree
+    fn insert_helper(
+        &mut self,
+        page: PageImpl,
+        page_checksum: Checksum,
+        key: &[u8],
+        value: &[u8],
+        rightmost: bool,
+    ) -> Result<InsertionResult<'a, V>> {
+        let node_mem = page.memory();
+        Ok(match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let (position, found) = accessor.position::<K>(key);
+
+                // Fast-path to avoid re-building and splitting pages with a single large value
+                if !found && is_single_large_value(&accessor, self.page_allocator.get_page_size()) {
+                    let mut builder = LeafBuilder::new(
+                        self.page_allocator,
+                        self.allocated,
+                        1,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    builder.push(key, value);
+                    let new_page = builder.build()?;
+                    let new_page_number = new_page.get_page_number();
+                    let new_page_accessor =
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
+                    let offset = new_page_accessor.offset_of_first_value();
+                    let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
+                    return if position == 0 {
+                        let split_key =
+                            branch_separator::<K>(key, accessor.entry(0).unwrap().key())
+                                .into_owned();
+                        Ok(InsertionResult {
+                            new_root: new_page_number,
+                            root_checksum: DEFERRED,
+                            additional_sibling: Some((
+                                split_key,
+                                page.get_page_number(),
+                                page_checksum,
+                            )),
+                            inserted_value: guard,
+                            old_value: None,
+                        })
+                    } else {
+                        let split_key =
+                            branch_separator::<K>(accessor.last_entry().key(), key).into_owned();
+                        Ok(InsertionResult {
+                            new_root: page.get_page_number(),
+                            root_checksum: page_checksum,
+                            additional_sibling: Some((split_key, new_page_number, DEFERRED)),
+                            inserted_value: guard,
+                            old_value: None,
+                        })
+                    };
+                }
+
+                // Fast-path for uncommitted pages, that can be modified in-place
+                let has_inplace_space = || -> bool {
+                    if found {
+                        LeafMutator::sufficient_replace_inplace_space(
+                            &page,
+                            position,
+                            K::fixed_width(),
+                            V::fixed_width(),
+                            value,
+                        )
+                    } else {
+                        LeafMutator::sufficient_insert_inplace_space(
+                            &page,
+                            position,
+                            K::fixed_width(),
+                            V::fixed_width(),
+                            key,
+                            value,
+                        )
+                    }
+                };
+                if self.page_allocator.uncommitted(page.get_page_number()) && has_inplace_space() {
+                    let page_number = page.get_page_number();
+                    let existing_value = if found {
+                        let copied_value = accessor.entry(position).unwrap().value().to_vec();
+                        Some(AccessGuard::with_owned_value(copied_value))
+                    } else {
+                        None
+                    };
+                    drop(page);
+                    let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
+                    let mut mutator =
+                        LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+                    if found {
+                        mutator.replace(position, value);
+                    } else {
+                        mutator.insert(position, key, value);
+                    }
+                    let new_page_accessor =
+                        LeafAccessor::new(page_mut.memory(), K::fixed_width(), V::fixed_width());
+                    let offset = new_page_accessor.offset_of_value(position).unwrap();
+                    let guard = AccessGuardMutInPlace::new(page_mut, offset, value.len());
+                    return Ok(InsertionResult {
+                        new_root: page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    });
+                }
+
+                // A same-size replacement leaves every leaf offset unchanged. Preserve copy-on-
+                // write by cloning the committed page, then patch only the value bytes.
+                if found && accessor.entry(position).unwrap().value().len() == value.len() {
+                    let page_number = page.get_page_number();
+                    // Only committed pages reach here: sufficient_replace_inplace_space() is
+                    // always satisfied when the value length is unchanged, so an uncommitted
+                    // page took the in-place path above.
+                    debug_assert!(!self.page_allocator.uncommitted(page_number));
+                    let (value_start, value_end) = accessor.value_range(position).unwrap();
+                    let mut new_page = self
+                        .page_allocator
+                        .allocate(page.memory().len(), self.allocated)?;
+                    new_page.memory_mut().copy_from_slice(page.memory());
+                    new_page.memory_mut()[value_start..value_end].copy_from_slice(value);
+                    let new_page_number = new_page.get_page_number();
+                    let inserted_value =
+                        AccessGuardMutInPlace::new(new_page, value_start, value.len());
+                    // Deferred, not conditional_free()'d: the old value returned below borrows
+                    // this page, and releasing it now would let the allocator hand it out again
+                    // while that guard is still reading it.
+                    self.freed.push(page_number);
+                    let old_value = AccessGuard::with_page(page, value_start..value_end);
+                    return Ok(InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value,
+                        old_value: Some(old_value),
+                    });
+                }
+
+                // Fast-path for a key greater than every key in the tree, when the rightmost
+                // leaf is too full to take it: leave that leaf packed and start a new one
+                // holding only the new pair. Splitting evenly instead would strand half of a
+                // leaf that an ascending load, having moved past it, never returns to.
+                if rightmost
+                    && position == accessor.num_pairs()
+                    && leaf_split_required(
+                        accessor.num_pairs() + 1,
+                        accessor.length_of_pairs(0, accessor.num_pairs()) + key.len() + value.len(),
+                        K::fixed_width(),
+                        V::fixed_width(),
+                        self.page_allocator.get_page_size(),
+                    )
+                {
+                    let split_key =
+                        branch_separator::<K>(accessor.last_entry().key(), key).into_owned();
+                    let mut builder = LeafBuilder::new(
+                        self.page_allocator,
+                        self.allocated,
+                        1,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    builder.push(key, value);
+                    let new_page = builder.build()?;
+                    let new_page_number = new_page.get_page_number();
+                    let new_page_accessor =
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
+                    let offset = new_page_accessor.offset_of_first_value();
+                    let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
+                    return Ok(InsertionResult {
+                        new_root: page.get_page_number(),
+                        root_checksum: page_checksum,
+                        additional_sibling: Some((split_key, new_page_number, DEFERRED)),
+                        inserted_value: guard,
+                        old_value: None,
+                    });
+                }
+
+                let mut builder = LeafBuilder::new(
+                    self.page_allocator,
+                    self.allocated,
+                    accessor.num_pairs() + 1,
+                    K::fixed_width(),
+                    V::fixed_width(),
+                );
+                for i in 0..accessor.num_pairs() {
+                    if i == position {
+                        builder.push(key, value);
+                    }
+                    if !found || i != position {
+                        let entry = accessor.entry(i).unwrap();
+                        builder.push(entry.key(), entry.value());
+                    }
+                }
+                if accessor.num_pairs() == position {
+                    builder.push(key, value);
+                }
+                if !builder.should_split() {
+                    let new_page = builder.build()?;
+
+                    let page_number = page.get_page_number();
+                    let existing_value = if found {
+                        let (start, end) = accessor.value_range(position).unwrap();
+                        if self.page_allocator.uncommitted(page_number) {
+                            let arc = page.to_arc();
+                            drop(page);
+                            self.page_allocator.free(page_number, self.allocated);
+                            Some(AccessGuard::with_arc_page(arc, start..end))
+                        } else {
+                            self.freed.push(page_number);
+                            Some(AccessGuard::with_page(page, start..end))
+                        }
+                    } else {
+                        drop(page);
+                        self.conditional_free(page_number);
+                        None
+                    };
+
+                    let new_page_number = new_page.get_page_number();
+                    let accessor =
+                        LeafAccessor::new(new_page.memory(), K::fixed_width(), V::fixed_width());
+                    let offset = accessor.offset_of_value(position).unwrap();
+                    let guard = AccessGuardMutInPlace::new(new_page, offset, value.len());
+
+                    InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    }
+                } else {
+                    let (new_page1, split_key, new_page2) = builder.build_split::<K>()?;
+                    let split_key = split_key.to_vec();
+                    let page_number = page.get_page_number();
+                    let existing_value = if found {
+                        let (start, end) = accessor.value_range(position).unwrap();
+                        if self.page_allocator.uncommitted(page_number) {
+                            let arc = page.to_arc();
+                            drop(page);
+                            self.page_allocator.free(page_number, self.allocated);
+                            Some(AccessGuard::with_arc_page(arc, start..end))
+                        } else {
+                            self.freed.push(page_number);
+                            Some(AccessGuard::with_page(page, start..end))
+                        }
+                    } else {
+                        drop(page);
+                        self.conditional_free(page_number);
+                        None
+                    };
+
+                    let new_page_number = new_page1.get_page_number();
+                    let new_page_number2 = new_page2.get_page_number();
+                    let accessor =
+                        LeafAccessor::new(new_page1.memory(), K::fixed_width(), V::fixed_width());
+                    let division = accessor.num_pairs();
+                    let guard = if position < division {
+                        let accessor = LeafAccessor::new(
+                            new_page1.memory(),
+                            K::fixed_width(),
+                            V::fixed_width(),
+                        );
+                        let offset = accessor.offset_of_value(position).unwrap();
+                        AccessGuardMutInPlace::new(new_page1, offset, value.len())
+                    } else {
+                        let accessor = LeafAccessor::new(
+                            new_page2.memory(),
+                            K::fixed_width(),
+                            V::fixed_width(),
+                        );
+                        let offset = accessor.offset_of_value(position - division).unwrap();
+                        AccessGuardMutInPlace::new(new_page2, offset, value.len())
+                    };
+
+                    InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: Some((split_key, new_page_number2, DEFERRED)),
+                        inserted_value: guard,
+                        old_value: existing_value,
+                    }
+                }
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                let child_checksum = accessor.child_checksum(child_index).unwrap();
+                let sub_result = self.insert_helper(
+                    self.page_allocator.get_page(child_page, PageHint::None)?,
+                    child_checksum,
+                    key,
+                    value,
+                    rightmost && child_index == accessor.count_children() - 1,
+                )?;
+
+                // Skip-path: if child page number and checksum haven't changed,
+                // no branch update is needed. This avoids redundant get_page_mut +
+                // write_child_page calls on repeat visits to the same subtree
+                // within a transaction.
+                if sub_result.additional_sibling.is_none()
+                    && sub_result.new_root == child_page
+                    && sub_result.root_checksum == child_checksum
+                {
+                    return Ok(InsertionResult {
+                        new_root: page.get_page_number(),
+                        root_checksum: page_checksum,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    });
+                }
+
+                if sub_result.additional_sibling.is_none()
+                    && self.page_allocator.uncommitted(page.get_page_number())
+                {
+                    let page_number = page.get_page_number();
+                    drop(page);
+                    let mut mutpage = self.page_allocator.get_page_mut(page_number)?;
+                    let mut mutator = BranchMutator::new(mutpage.memory_mut());
+                    mutator.write_child_page(
+                        child_index,
+                        sub_result.new_root,
+                        sub_result.root_checksum,
+                    );
+                    return Ok(InsertionResult {
+                        new_root: mutpage.get_page_number(),
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    });
+                }
+
+                // Without a split, only one child pointer and checksum changed. Preserve copy-on-
+                // write by cloning the committed branch, then patch those fields.
+                if sub_result.additional_sibling.is_none() {
+                    let page_number = page.get_page_number();
+                    let mut new_page = self
+                        .page_allocator
+                        .allocate(page.memory().len(), self.allocated)?;
+                    new_page.memory_mut().copy_from_slice(page.memory());
+                    BranchMutator::new(new_page.memory_mut()).write_child_page(
+                        child_index,
+                        sub_result.new_root,
+                        sub_result.root_checksum,
+                    );
+                    let new_page_number = new_page.get_page_number();
+                    drop(page);
+                    self.conditional_free(page_number);
+                    return Ok(InsertionResult {
+                        new_root: new_page_number,
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    });
+                }
+
+                // A child was added, so rebuild the branch and split it if necessary.
+                let mut builder = BranchBuilder::new(
+                    self.page_allocator,
+                    self.allocated,
+                    accessor.count_children() + 1,
+                    K::fixed_width(),
+                );
+                if child_index == 0 {
+                    builder.push_child(sub_result.new_root, sub_result.root_checksum);
+                    if let Some((ref index_key2, page2, page2_checksum)) =
+                        sub_result.additional_sibling
+                    {
+                        builder.push_key(index_key2);
+                        builder.push_child(page2, page2_checksum);
+                    }
+                } else {
+                    builder.push_child(
+                        accessor.child_page(0).unwrap(),
+                        accessor.child_checksum(0).unwrap(),
+                    );
+                }
+                for i in 1..accessor.count_children() {
+                    if let Some(key) = accessor.key(i - 1) {
+                        builder.push_key(key);
+                        if i == child_index {
+                            builder.push_child(sub_result.new_root, sub_result.root_checksum);
+                            if let Some((ref index_key2, page2, page2_checksum)) =
+                                sub_result.additional_sibling
+                            {
+                                builder.push_key(index_key2);
+                                builder.push_child(page2, page2_checksum);
+                            }
+                        } else {
+                            builder.push_child(
+                                accessor.child_page(i).unwrap(),
+                                accessor.child_checksum(i).unwrap(),
+                            );
+                        }
+                    } else {
+                        unreachable!();
+                    }
+                }
+
+                let result = if builder.should_split() {
+                    let (new_page1, split_key, new_page2) = builder.build_split()?;
+                    InsertionResult {
+                        new_root: new_page1.get_page_number(),
+                        root_checksum: DEFERRED,
+                        additional_sibling: Some((
+                            split_key.to_vec(),
+                            new_page2.get_page_number(),
+                            DEFERRED,
+                        )),
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    }
+                } else {
+                    let new_page = builder.build()?;
+                    InsertionResult {
+                        new_root: new_page.get_page_number(),
+                        root_checksum: DEFERRED,
+                        additional_sibling: None,
+                        inserted_value: sub_result.inserted_value,
+                        old_value: sub_result.old_value,
+                    }
+                };
+                // Free the original page, since we've replaced it
+                let page_number = page.get_page_number();
+                drop(page);
+                self.conditional_free(page_number);
+
+                result
+            }
+            _ => unreachable!(),
+        })
+    }
+
+    pub(crate) fn insert_inplace(
+        &mut self,
+        key: &K::SelfType<'_>,
+        value: &V::SelfType<'_>,
+    ) -> Result<()> {
+        let header = self.root.expect("Key not found (tree is empty)");
+        self.insert_inplace_helper(
+            self.page_allocator.get_page_mut(header.root)?,
+            K::as_bytes(key).as_ref(),
+            V::as_bytes(value).as_ref(),
+        )?;
+        *self.root = Some(BtreeHeader::new(header.root, DEFERRED, header.length));
+        Ok(())
+    }
+
+    fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
+        assert!(self.page_allocator.uncommitted(page.get_page_number()));
+
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => {
+                let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+                let (position, found) = accessor.position::<K>(key);
+                assert!(found);
+                let old_len = accessor.entry(position).unwrap().value().len();
+                assert!(value.len() <= old_len);
+                let mut mutator =
+                    LeafMutator::new(page.memory_mut(), K::fixed_width(), V::fixed_width());
+                mutator.replace(position, value);
+            }
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, K::fixed_width());
+                let (child_index, child_page) = accessor.child_for_key::<K>(key);
+                self.insert_inplace_helper(
+                    self.page_allocator.get_page_mut(child_page)?,
+                    key,
+                    value,
+                )?;
+                let mut mutator = BranchMutator::new(page.memory_mut());
+                mutator.write_child_page(child_index, child_page, DEFERRED);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    fn delete_leaf_at_position(
+        &mut self,
+        page: PageImpl,
+        position: usize,
+        want_key: bool,
+        allow_in_place: bool,
+    ) -> Result<(
+        DeletionResult,
+        Option<AccessGuard<'a, K>>,
+        AccessGuard<'a, V>,
+    )> {
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        assert!(position < accessor.num_pairs());
+        let plan = self.plan_leaf_delete(&accessor, &[position]);
+        let uncommitted = self.page_allocator.uncommitted(page.get_page_number());
+
+        // Fast-path for dirty pages: perform in-place removal without allocating a new page.
+        // The threshold matches the merge threshold (page_size/3) so that we use in-place
+        // removal for all cases where the page won't need merging with a sibling.
+        if allow_in_place && uncommitted && plan.disposition == LeafDeleteDisposition::Rebuild {
+            let (start, end) = accessor.value_range(position).unwrap();
+            let key_guard = if want_key {
+                // The returned value guard owns the mutable page and removes the entry on drop,
+                // so we can't hand the key back as a borrow into the same page. Copy it instead.
+                Some(AccessGuard::with_owned_value(
+                    accessor.entry(position).unwrap().key().to_vec(),
+                ))
+            } else {
+                None
+            };
+            let page_number = page.get_page_number();
+            drop(page);
+            let page_mut = self.page_allocator.get_page_mut(page_number)?;
+
+            let guard = AccessGuard::remove_on_drop(
+                page_mut,
+                start,
+                end - start,
+                position,
+                K::fixed_width(),
+            );
+            return Ok((Subtree(page_number), key_guard, guard));
+        }
+
+        let result = match plan.disposition {
+            LeafDeleteDisposition::Delete => DeletedSubtree,
+            LeafDeleteDisposition::Merge => PartialLeaf {
+                page: page.to_arc(),
+                deleted_pairs: DeletedPairs::One(position),
+            },
+            LeafDeleteDisposition::Rebuild => Subtree(self.build_leaf_except_indexes(
+                &accessor,
+                plan.retained_pairs,
+                &[position],
+            )?),
+        };
+        let (key_range, value_range) = accessor.entry_ranges(position).unwrap();
+        let (key_guard, value_guard) = if uncommitted {
+            let page_number = page.get_page_number();
+            let arc = page.to_arc();
+            drop(page);
+            self.page_allocator.free(page_number, self.allocated);
+            let key_guard = want_key.then(|| AccessGuard::with_arc_page(arc.clone(), key_range));
+            (key_guard, AccessGuard::with_arc_page(arc, value_range))
+        } else {
+            // Won't be freed until the end of the transaction, so returning the page
+            // in the AccessGuard below is still safe
+            let key_guard = want_key.then(|| AccessGuard::with_page(page.clone(), key_range));
+            self.freed.push(page.get_page_number());
+            (key_guard, AccessGuard::with_page(page, value_range))
+        };
+        Ok((result, key_guard, value_guard))
+    }
+
+    fn delete_leaf_helper(
+        &mut self,
+        page: PageImpl,
+        key: &[u8],
+        allow_in_place: bool,
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let (position, found) = {
+            let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+            accessor.position::<K>(key)
+        };
+        if !found {
+            // Leaf is unchanged; caller short-circuits via `found.is_none()`.
+            return Ok((Subtree(page.get_page_number()), None));
+        }
+        let (result, key_guard, value_guard) =
+            self.delete_leaf_at_position(page, position, false, allow_in_place)?;
+        assert!(key_guard.is_none());
+        Ok((result, Some(value_guard)))
+    }
+
+    fn delete_leaf_indexes(
+        &mut self,
+        page: PageImpl,
+        indexes: &[usize],
+        allow_in_place: bool,
+    ) -> Result<DeletionResult> {
+        debug_assert!(!indexes.is_empty());
+        debug_assert!(indexes.windows(2).all(|pair| pair[0] < pair[1]));
+
+        let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
+        assert!(*indexes.last().unwrap() < accessor.num_pairs());
+
+        let plan = self.plan_leaf_delete(&accessor, indexes);
+        let page_number = page.get_page_number();
+
+        if allow_in_place
+            && self.page_allocator.uncommitted(page_number)
+            && plan.disposition == LeafDeleteDisposition::Rebuild
+        {
+            drop(page);
+            let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
+            let mut mutator =
+                LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+            mutator.remove_indices(indexes);
+            return Ok(Subtree(page_number));
+        }
+
+        let result = match plan.disposition {
+            LeafDeleteDisposition::Delete => DeletedSubtree,
+            LeafDeleteDisposition::Merge => PartialLeaf {
+                page: page.to_arc(),
+                deleted_pairs: DeletedPairs::Many(indexes.to_vec()),
+            },
+            LeafDeleteDisposition::Rebuild => {
+                Subtree(self.build_leaf_except_indexes(&accessor, plan.retained_pairs, indexes)?)
+            }
+        };
+
+        drop(page);
+        self.conditional_free(page_number);
+        Ok(result)
+    }
+
+    fn plan_leaf_delete(&self, accessor: &LeafAccessor<'_>, indexes: &[usize]) -> LeafDeletePlan {
+        let (retained_pairs, retained_bytes) = retained_after_removals(accessor, indexes);
+
+        let disposition = if retained_pairs == 0 {
+            LeafDeleteDisposition::Delete
+        } else if leaf_below_merge_threshold(
+            retained_pairs,
+            retained_bytes,
+            K::fixed_width(),
+            V::fixed_width(),
+            self.page_allocator.get_page_size(),
+        ) {
+            LeafDeleteDisposition::Merge
+        } else {
+            LeafDeleteDisposition::Rebuild
+        };
+
+        LeafDeletePlan {
+            retained_pairs,
+            disposition,
+        }
+    }
+
+    fn build_leaf_except_indexes(
+        &mut self,
+        accessor: &LeafAccessor<'_>,
+        retained_pairs: usize,
+        indexes: &[usize],
+    ) -> Result<PageNumber> {
+        let mut builder = LeafBuilder::new(
+            self.page_allocator,
+            self.allocated,
+            retained_pairs,
+            K::fixed_width(),
+            V::fixed_width(),
+        );
+        builder.push_all_except_indexes(accessor, indexes);
+        let new_page = builder.build()?;
+        Ok(new_page.get_page_number())
+    }
+
+    fn push_all_except_deleted<'leaf>(
+        builder: &mut LeafBuilder<'leaf, '_>,
+        accessor: &'leaf LeafAccessor<'_>,
+        deleted_pairs: &DeletedPairs,
+    ) {
+        match deleted_pairs {
+            DeletedPairs::One(index) => builder.push_all_except(accessor, Some(*index)),
+            DeletedPairs::Many(indexes) => builder.push_all_except_indexes(accessor, indexes),
+        }
+    }
+
+    fn finalize_branch_builder(
+        builder: BranchBuilder<'_, '_>,
+        page_size: usize,
+    ) -> Result<DeletionResult> {
+        let result = if let Some((only_child, checksum)) = builder.to_single_child() {
+            DeletedBranch(only_child, checksum)
+        } else if builder.required_bytes() < page_size / 3 {
+            // Merge when less than 33% full. Splits occur when a page is full and produce two 50%
+            // full pages, so we use 33% instead of 50% to avoid oscillating.
+            // Skip the page allocation: the caller will immediately merge this with a sibling.
+            let (children, keys) = builder.into_parts();
+            PartialBranch { children, keys }
+        } else {
+            let new_page = builder.build()?;
+            Subtree(new_page.get_page_number())
+        };
+        Ok(result)
+    }
+
+    fn delete_branch_helper(
+        &mut self,
+        page: PageImpl,
+        key: &[u8],
+        allow_in_place: bool,
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let original_page_number = page.get_page_number();
+        let (child_index, child_page_number) = {
+            let accessor = BranchAccessor::new(&page, K::fixed_width());
+            accessor.child_for_key::<K>(key)
+        };
+        let (result, found) = self.delete_helper(
+            self.page_allocator
+                .get_page(child_page_number, PageHint::None)?,
+            key,
+            allow_in_place,
+        )?;
+        if found.is_none() {
+            // Subtree unchanged; caller identifies this via `found.is_none()`.
+            return Ok((Subtree(original_page_number), None));
+        }
+        let final_result = self.apply_child_deletion_result(page, child_index, result)?;
+        Ok((final_result, found))
+    }
+
+    // Replaces the child pointer at `child_index` with `new_child` (checksum
+    // DEFERRED), leaving every other entry -- including the slot's separator
+    // key -- untouched; the caller must know the stored separator is still
+    // exact. Writes in place when the branch page is uncommitted. Returns the
+    // branch's resulting page number, and whether it is a new page whose
+    // predecessor the caller must free.
+    fn replace_branch_child(
+        &mut self,
+        page: PageImpl,
+        child_index: usize,
+        new_child: PageNumber,
+    ) -> Result<(PageNumber, bool)> {
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        let original_page_number = page.get_page_number();
+        let child_page_number = accessor.child_page(child_index).unwrap();
+        let child_checksum = accessor.child_checksum(child_index).unwrap();
+        // Skip-path: the child's in-parent entry is already (child_page_number, DEFERRED)
+        // and the mutated child kept its page number, so no write to this branch is needed.
+        // This preserves the optimization from f8ccc39 without carrying a checksum on
+        // `Subtree` (a modified `Subtree` always has checksum DEFERRED).
+        if new_child == child_page_number && child_checksum == DEFERRED {
+            return Ok((original_page_number, false));
+        }
+
+        if self.page_allocator.uncommitted(original_page_number) {
+            drop(page);
+            let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
+            let mut mutator = BranchMutator::new(mutpage.memory_mut());
+            mutator.write_child_page(child_index, new_child, DEFERRED);
+            Ok((original_page_number, false))
+        } else {
+            let mut builder = BranchBuilder::new(
+                self.page_allocator,
+                self.allocated,
+                accessor.count_children(),
+                K::fixed_width(),
+            );
+            builder.push_all(&accessor);
+            builder.replace_child(child_index, new_child, DEFERRED);
+            let new_page = builder.build()?;
+            Ok((new_page.get_page_number(), true))
+        }
+    }
+
+    fn apply_child_deletion_result(
+        &mut self,
+        page: PageImpl,
+        child_index: usize,
+        result: DeletionResult,
+    ) -> Result<DeletionResult> {
+        let original_page_number = page.get_page_number();
+        if let Subtree(new_child) = result {
+            let (result_page, replaced) =
+                self.replace_branch_child(page, child_index, new_child)?;
+            if replaced {
+                self.conditional_free(original_page_number);
+            }
+            return Ok(Subtree(result_page));
+        }
+
+        let accessor = BranchAccessor::new(&page, K::fixed_width());
+        // Child is requesting to be merged with a sibling
+        let mut builder = BranchBuilder::new(
+            self.page_allocator,
+            self.allocated,
+            accessor.count_children(),
+            K::fixed_width(),
+        );
+
+        let final_result = match result {
+            Subtree(_) => {
+                // Handled in the if above
+                unreachable!();
+            }
+            DeletedSubtree => {
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    builder.push_child(
+                        accessor.child_page(i).unwrap(),
+                        accessor.child_checksum(i).unwrap(),
+                    );
+                }
+                let end = if child_index == accessor.count_children() - 1 {
+                    // Skip the last key, which precedes the child
+                    accessor.count_children() - 2
+                } else {
+                    accessor.count_children() - 1
+                };
+                for i in 0..end {
+                    if i == child_index {
+                        continue;
+                    }
+                    builder.push_key(accessor.key(i).unwrap());
+                }
+                Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?
+            }
+            PartialLeaf {
+                page: partial_child_page,
+                deleted_pairs,
+            } => {
+                let partial_child_accessor =
+                    LeafAccessor::new(&partial_child_page, K::fixed_width(), V::fixed_width());
+                assert!(partial_child_accessor.num_pairs() > 1);
+                let retained_pairs = partial_child_accessor.num_pairs() - deleted_pairs.len();
+
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                assert!(merge_with < accessor.count_children());
+                let merge_with_page = self
+                    .page_allocator
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
+                let merge_with_accessor =
+                    LeafAccessor::new(merge_with_page.memory(), K::fixed_width(), V::fixed_width());
+
+                // Don't try to merge or rebalance, if the sibling contains a single large value
+                if is_single_large_value(&merge_with_accessor, self.page_allocator.get_page_size())
+                {
+                    let mut child_builder = LeafBuilder::new(
+                        self.page_allocator,
+                        self.allocated,
+                        retained_pairs,
+                        K::fixed_width(),
+                        V::fixed_width(),
+                    );
+                    Self::push_all_except_deleted(
+                        &mut child_builder,
+                        &partial_child_accessor,
+                        &deleted_pairs,
+                    );
+                    let new_page = child_builder.build()?;
+                    builder.push_all(&accessor);
+                    builder.replace_child(child_index, new_page.get_page_number(), DEFERRED);
+
+                    let result = Self::finalize_branch_builder(
+                        builder,
+                        self.page_allocator.get_page_size(),
+                    )?;
+
+                    drop(page);
+                    self.conditional_free(original_page_number);
+                    // The leaf helper already handled the original child page lifetime.
+
+                    return Ok(result);
+                }
+
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    let page_checksum = accessor.child_checksum(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder = LeafBuilder::new(
+                            self.page_allocator,
+                            self.allocated,
+                            retained_pairs + merge_with_accessor.num_pairs(),
+                            K::fixed_width(),
+                            V::fixed_width(),
+                        );
+                        if child_index < merge_with {
+                            Self::push_all_except_deleted(
+                                &mut child_builder,
+                                &partial_child_accessor,
+                                &deleted_pairs,
+                            );
+                        }
+                        child_builder.push_all_except(&merge_with_accessor, None);
+                        if child_index > merge_with {
+                            Self::push_all_except_deleted(
+                                &mut child_builder,
+                                &partial_child_accessor,
+                                &deleted_pairs,
+                            );
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, split_key, new_page2) =
+                                child_builder.build_split::<K>()?;
+                            builder.push_key(split_key);
+                            builder.push_child(new_page1.get_page_number(), DEFERRED);
+                            builder.push_child(new_page2.get_page_number(), DEFERRED);
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number(), DEFERRED);
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number, page_checksum);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.conditional_free(page_number);
+                // The leaf helper already handled the original child page lifetime.
+
+                result
+            }
+            DeletedBranch(only_grandchild, grandchild_checksum) => {
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                let merge_with_page = self
+                    .page_allocator
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
+                assert!(merge_with < accessor.count_children());
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    let page_checksum = accessor.child_checksum(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder = BranchBuilder::new(
+                            self.page_allocator,
+                            self.allocated,
+                            merge_with_accessor.count_children() + 1,
+                            K::fixed_width(),
+                        );
+                        let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
+                        if child_index < merge_with {
+                            child_builder.push_child(only_grandchild, grandchild_checksum);
+                            child_builder.push_key(separator_key);
+                        }
+                        child_builder.push_all(&merge_with_accessor);
+                        if child_index > merge_with {
+                            child_builder.push_key(separator_key);
+                            child_builder.push_child(only_grandchild, grandchild_checksum);
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
+                            builder.push_child(new_page1.get_page_number(), DEFERRED);
+                            builder.push_key(separator);
+                            builder.push_child(new_page2.get_page_number(), DEFERRED);
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number(), DEFERRED);
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number, page_checksum);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.conditional_free(page_number);
+
+                result
+            }
+            PartialBranch {
+                children: partial_children,
+                keys: partial_keys,
+            } => {
+                let merge_with = if child_index == 0 { 1 } else { child_index - 1 };
+                let merge_with_page = self
+                    .page_allocator
+                    .get_page(accessor.child_page(merge_with).unwrap(), PageHint::None)?;
+                let merge_with_accessor = BranchAccessor::new(&merge_with_page, K::fixed_width());
+                assert!(merge_with < accessor.count_children());
+                for i in 0..accessor.count_children() {
+                    if i == child_index {
+                        continue;
+                    }
+                    let page_number = accessor.child_page(i).unwrap();
+                    let page_checksum = accessor.child_checksum(i).unwrap();
+                    if i == merge_with {
+                        let mut child_builder = BranchBuilder::new(
+                            self.page_allocator,
+                            self.allocated,
+                            merge_with_accessor.count_children() + partial_children.len(),
+                            K::fixed_width(),
+                        );
+                        let separator_key = accessor.key(min(child_index, merge_with)).unwrap();
+                        if child_index < merge_with {
+                            for &(child, child_checksum) in &partial_children {
+                                child_builder.push_child(child, child_checksum);
+                            }
+                            for key in &partial_keys {
+                                child_builder.push_key(key);
+                            }
+                            child_builder.push_key(separator_key);
+                        }
+                        child_builder.push_all(&merge_with_accessor);
+                        if child_index > merge_with {
+                            child_builder.push_key(separator_key);
+                            for &(child, child_checksum) in &partial_children {
+                                child_builder.push_child(child, child_checksum);
+                            }
+                            for key in &partial_keys {
+                                child_builder.push_key(key);
+                            }
+                        }
+                        if child_builder.should_split() {
+                            let (new_page1, separator, new_page2) = child_builder.build_split()?;
+                            builder.push_child(new_page1.get_page_number(), DEFERRED);
+                            builder.push_key(separator);
+                            builder.push_child(new_page2.get_page_number(), DEFERRED);
+                        } else {
+                            let new_page = child_builder.build()?;
+                            builder.push_child(new_page.get_page_number(), DEFERRED);
+                        }
+
+                        let merged_key_index = max(child_index, merge_with);
+                        if merged_key_index < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(merged_key_index).unwrap());
+                        }
+                    } else {
+                        builder.push_child(page_number, page_checksum);
+                        if i < accessor.count_children() - 1 {
+                            builder.push_key(accessor.key(i).unwrap());
+                        }
+                    }
+                }
+                let result =
+                    Self::finalize_branch_builder(builder, self.page_allocator.get_page_size())?;
+
+                let page_number = merge_with_page.get_page_number();
+                drop(merge_with_page);
+                self.conditional_free(page_number);
+
+                result
+            }
+        };
+
+        drop(page);
+        self.conditional_free(original_page_number);
+
+        Ok(final_result)
+    }
+
+    // Returns the page number of the sub-tree with this key deleted, or None if the sub-tree is empty.
+    // If key is not found, guaranteed not to modify the tree.
+    fn delete_helper(
+        &mut self,
+        page: PageImpl,
+        key: &[u8],
+        allow_in_place: bool,
+    ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
+        let node_mem = page.memory();
+        match node_mem[0] {
+            LEAF => self.delete_leaf_helper(page, key, allow_in_place),
+            BRANCH => self.delete_branch_helper(page, key, allow_in_place),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tree_store::{AllocationPolicy, InMemoryBackend, TransactionalMemory};
+
+    const MAX_KEYS: usize = u16::MAX as usize;
+
+    // Large enough that MAX_KEYS + 2 children with 8-byte keys fit in one
+    // page by bytes, so only the key count can force a cut.
+    const HUGE_PAGE: usize = 4 * 1024 * 1024;
+
+    fn make_allocator_with_page_size(page_size: usize) -> PageAllocator {
+        let (mem, _writer_lock) = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            page_size,
+            None,
+            0,
+            false,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+        PageAllocator::new(Arc::new(mem), AllocationPolicy::Default)
+    }
+
+    // Children as build_branch_nodes receives them: ascending separators,
+    // with only the level's last child lacking one.
+    fn synthetic_children(count: u32) -> Vec<SplicedNode> {
+        (0..count)
+            .map(|i| {
+                let separator = (i != count - 1).then(|| u64::from(i).to_le_bytes().to_vec());
+                (PageNumber::new(0, i, 0), DEFERRED, separator)
+            })
+            .collect()
+    }
+
+    fn pack_branches(children: &[SplicedNode], page_allocator: &PageAllocator) -> Vec<SplicedNode> {
+        let mut root = None;
+        let mut freed = vec![];
+        let allocated = Arc::new(PageTracker::new_tracking());
+        let mut helper: MutateHelper<'_, '_, u64, u64> =
+            MutateHelper::new(&mut root, page_allocator, &mut freed, &allocated);
+        helper.build_branch_nodes(children).unwrap()
+    }
+
+    fn count_children(page_allocator: &PageAllocator, node: &SplicedNode) -> usize {
+        let page = page_allocator.get_page(node.0, PageHint::None).unwrap();
+        BranchAccessor::new(&page, u64::fixed_width()).count_children()
+    }
+
+    // num_keys is stored as a u16. With a page large enough that the byte
+    // condition never cuts, the packer must cut on the key count instead of
+    // building a branch that RawBranchBuilder::new cannot represent. The cut
+    // leaves a single-child tail here, whose neighbor is already at the
+    // limit: merging would overflow it, so the tail takes the neighbor's
+    // last child instead.
+    #[test]
+    fn branch_packing_splits_at_max_keys() {
+        let page_allocator = make_allocator_with_page_size(HUGE_PAGE);
+        let children = synthetic_children(u32::try_from(MAX_KEYS).unwrap() + 2);
+        let nodes = pack_branches(&children, &page_allocator);
+
+        assert_eq!(nodes.len(), 2);
+        let first = count_children(&page_allocator, &nodes[0]);
+        let second = count_children(&page_allocator, &nodes[1]);
+        assert_eq!(first, MAX_KEYS);
+        assert_eq!(second, 2);
+        // Each node's separator is its last child's; the level's last child
+        // keeps None.
+        assert_eq!(nodes[0].2, children[first - 1].2);
+        assert!(nodes[1].2.is_none());
+        // The second page holds the stolen child and the orphan, with the
+        // stolen child's separator between them.
+        let page = page_allocator.get_page(nodes[1].0, PageHint::None).unwrap();
+        let accessor = BranchAccessor::new(&page, u64::fixed_width());
+        assert_eq!(accessor.child_page(0).unwrap(), children[first].0);
+        assert_eq!(accessor.child_page(1).unwrap(), children[first + 1].0);
+        assert_eq!(accessor.key(0), children[first].2.as_deref());
+    }
+
+    // The boundary case: exactly u16::MAX keys still packs into one page.
+    #[test]
+    fn branch_packing_fills_page_to_max_keys() {
+        let page_allocator = make_allocator_with_page_size(HUGE_PAGE);
+        let children = synthetic_children(u32::try_from(MAX_KEYS).unwrap() + 1);
+        let nodes = pack_branches(&children, &page_allocator);
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(count_children(&page_allocator, &nodes[0]), children.len());
+        assert!(nodes[0].2.is_none());
+    }
+}

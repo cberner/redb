@@ -1,0 +1,1708 @@
+use crate::transaction_tracker::TransactionId;
+use crate::tree_store::btree_base::{BtreeHeader, Checksum};
+use crate::tree_store::page_store::base::{MAX_PAGE_INDEX, MAX_REGIONS};
+use crate::tree_store::page_store::layout::{DatabaseLayout, RegionLayout};
+use crate::tree_store::page_store::page_manager::{
+    FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
+};
+use crate::{DatabaseError, Result, StorageError};
+use alloc::format;
+use alloc::string::ToString;
+use core::mem::size_of;
+
+// Database layout:
+//
+// Super-header (header + commit slots)
+// The super-header length is rounded up to the nearest full page size
+//
+// Header (first 64 bytes):
+// 9 bytes: magic number
+// 1 byte: god byte
+// 2 byte: padding
+// 4 bytes: page size
+// Definition of region
+// 4 bytes: region header pages
+// 4 bytes: region max data pages
+//
+// Commit slot 0 (next 128 bytes):
+// 1 byte: version
+// 1 byte: != 0 if root page is non-null
+// 1 byte: != 0 if freed table root page is non-null
+// 5 bytes: padding
+// 8 bytes: root page
+// 16 bytes: root checksum
+// 8 bytes: unused: formerly freed table root page
+// 16 bytes: unused: formerly freed table root checksum
+// 8 bytes: last committed transaction id
+// 4 bytes: number of full regions
+// 4 bytes: data pages in partial trailing region
+// 8 bytes: unused: formerly region tracker page number
+// 16 bytes: slot checksum
+//
+// Commit slot 1 (next 128 bytes):
+// Same layout as slot 0
+
+// Inspired by PNG's magic number
+pub(super) const MAGICNUMBER: [u8; 9] = [b'r', b'e', b'd', b'b', 0x1A, 0x0A, 0xA9, 0x0D, 0x0A];
+const GOD_BYTE_OFFSET: usize = MAGICNUMBER.len();
+const PAGE_SIZE_OFFSET: usize = GOD_BYTE_OFFSET + size_of::<u8>() + 2; // +2 for padding
+const REGION_HEADER_PAGES_OFFSET: usize = PAGE_SIZE_OFFSET + size_of::<u32>();
+const REGION_MAX_DATA_PAGES_OFFSET: usize = REGION_HEADER_PAGES_OFFSET + size_of::<u32>();
+const NUM_FULL_REGIONS_OFFSET: usize = REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>();
+const TRAILING_REGION_DATA_PAGES_OFFSET: usize = NUM_FULL_REGIONS_OFFSET + size_of::<u32>();
+// Formerly the region tracker page
+const _UNUSED3_OFFSET: usize = TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>();
+const TRANSACTION_SIZE: usize = 128;
+const TRANSACTION_0_OFFSET: usize = 64;
+const TRANSACTION_1_OFFSET: usize = TRANSACTION_0_OFFSET + TRANSACTION_SIZE;
+pub(super) const DB_HEADER_SIZE: usize = TRANSACTION_1_OFFSET + TRANSACTION_SIZE;
+
+// God byte flags
+const PRIMARY_BIT: u8 = 1;
+const RECOVERY_REQUIRED: u8 = 2;
+const TWO_PHASE_COMMIT: u8 = 4;
+// Set by the write that makes a commit the primary in the multi-process modes, and cleared by a
+// second write once the first has been flushed. Another process that finds it set serves the
+// secondary slot, the previous commit, so no process serves a commit a power loss could still
+// lose. It outlives a writer that crashes in that window; the next writer's recovery clears it.
+const PRIMARY_UNFLUSHED: u8 = 8;
+
+// Structure of each commit slot
+const VERSION_OFFSET: usize = 0;
+const USER_ROOT_NON_NULL_OFFSET: usize = size_of::<u8>();
+const SYSTEM_ROOT_NON_NULL_OFFSET: usize = USER_ROOT_NON_NULL_OFFSET + size_of::<u8>();
+const _UNUSED_OFFSET: usize = SYSTEM_ROOT_NON_NULL_OFFSET + size_of::<u8>();
+const PADDING: usize = 4;
+
+const USER_ROOT_OFFSET: usize = _UNUSED_OFFSET + size_of::<u8>() + PADDING;
+const SYSTEM_ROOT_OFFSET: usize = USER_ROOT_OFFSET + BtreeHeader::serialized_size();
+const _UNUSED2_OFFSET: usize = SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size();
+const TRANSACTION_ID_OFFSET: usize = _UNUSED2_OFFSET + BtreeHeader::serialized_size();
+const TRANSACTION_LAST_FIELD: usize = TRANSACTION_ID_OFFSET + size_of::<u64>();
+
+const SLOT_CHECKSUM_OFFSET: usize = TRANSACTION_SIZE - size_of::<Checksum>();
+
+pub(crate) const PAGE_SIZE: usize = 4096;
+
+/// Whether the primary is marked unflushed in `header`, the first bytes of a database file
+pub(crate) fn is_primary_unflushed(header: &[u8]) -> bool {
+    header[GOD_BYTE_OFFSET] & PRIMARY_UNFLUSHED != 0
+}
+
+fn get_u32(data: &[u8]) -> u32 {
+    u32::from_le_bytes(data[..size_of::<u32>()].try_into().unwrap())
+}
+
+fn get_u64(data: &[u8]) -> u64 {
+    u64::from_le_bytes(data[..size_of::<u64>()].try_into().unwrap())
+}
+
+// A header parsed from disk that has not yet committed to a primary slot.
+pub(super) struct UnrepairedDatabaseHeader {
+    inner: DatabaseHeader,
+    primary_corrupted: bool,
+    secondary_corrupted: bool,
+}
+
+#[derive(Clone)]
+pub(super) struct DatabaseHeader {
+    primary_slot: usize,
+    pub(super) recovery_required: bool,
+    pub(super) two_phase_commit: bool,
+    pub(super) primary_unflushed: bool,
+    page_size: u32,
+    region_header_pages: u32,
+    region_max_data_pages: u32,
+    full_regions: u32,
+    trailing_partial_region_pages: u32,
+    transaction_slots: [TransactionHeader; 2],
+}
+
+impl UnrepairedDatabaseHeader {
+    // `expected_page_size` is the page size this database was opened with.
+    pub(super) fn from_bytes(data: &[u8], expected_page_size: u32) -> Result<Self, DatabaseError> {
+        if data[..MAGICNUMBER.len()] != MAGICNUMBER {
+            return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
+        }
+
+        let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
+        let recovery_required = (data[GOD_BYTE_OFFSET] & RECOVERY_REQUIRED) != 0;
+        let two_phase_commit = (data[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT) != 0;
+        let primary_unflushed = is_primary_unflushed(data);
+        let page_size = get_u32(&data[PAGE_SIZE_OFFSET..]);
+        let region_header_pages = get_u32(&data[REGION_HEADER_PAGES_OFFSET..]);
+        let region_max_data_pages = get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..]);
+        let full_regions = get_u32(&data[NUM_FULL_REGIONS_OFFSET..]);
+        let trailing_data_pages = get_u32(&data[TRAILING_REGION_DATA_PAGES_OFFSET..]);
+
+        // The region geometry (page size and region sizes) is fixed at creation and never
+        // rewritten, so a partial write can't tear it. Validate it unconditionally, before the
+        // layout math below divides by / asserts on it; the page_size check also bounds every later
+        // region-size product so none of that arithmetic can overflow.
+        if page_size != expected_page_size {
+            return Err(StorageError::Corrupted(format!(
+                "Database page size {page_size} does not match expected {expected_page_size}"
+            ))
+            .into());
+        }
+        // A region holds 1..=MAX_PAGE_INDEX + 1 pages (the page index is 20 bits); a larger count
+        // would alias high pages onto low ones.
+        if region_max_data_pages == 0 || region_max_data_pages > MAX_PAGE_INDEX + 1 {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid region data page count: {region_max_data_pages}"
+            ))
+            .into());
+        }
+        // 0 is valid (v3 has no region header); cap it to keep the region-size math from overflowing.
+        if region_header_pages > MAX_PAGE_INDEX + 1 {
+            return Err(StorageError::Corrupted(format!(
+                "Invalid region header page count: {region_header_pages}"
+            ))
+            .into());
+        }
+        // The region counts are rewritten on every resize and aren't checksummed, so a crash
+        // mid-resize can tear them. finalize() recomputes them from the file length when recovery
+        // is required, so only validate them for a cleanly shut down database -- otherwise a torn
+        // value would reject a database that is still fully recoverable from its length.
+        if !recovery_required {
+            if trailing_data_pages > region_max_data_pages {
+                return Err(StorageError::Corrupted(format!(
+                    "Trailing region data pages {trailing_data_pages} exceed region max {region_max_data_pages}"
+                ))
+                .into());
+            }
+            // A database has 1..=MAX_REGIONS regions (the region index is 20 bits); computed in u64
+            // so the +1 can't overflow. Zero would underflow num_regions() - 1 in
+            // DatabaseLayout::len().
+            let num_regions = u64::from(full_regions) + u64::from(trailing_data_pages > 0);
+            if num_regions == 0 || num_regions > u64::from(MAX_REGIONS) {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid region count: full_regions={full_regions}, trailing_data_pages={trailing_data_pages}"
+                ))
+                .into());
+            }
+        }
+        let (slot0, slot0_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + TRANSACTION_SIZE)],
+        )?;
+        let (slot1, slot1_corrupted) = TransactionHeader::from_bytes(
+            &data[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + TRANSACTION_SIZE)],
+        )?;
+        let (primary_corrupted, secondary_corrupted) = if primary_slot == 0 {
+            (slot0_corrupted, slot1_corrupted)
+        } else {
+            (slot1_corrupted, slot0_corrupted)
+        };
+
+        Ok(Self {
+            inner: DatabaseHeader {
+                primary_slot,
+                recovery_required,
+                two_phase_commit,
+                primary_unflushed,
+                page_size,
+                region_header_pages,
+                region_max_data_pages,
+                full_regions,
+                trailing_partial_region_pages: trailing_data_pages,
+                transaction_slots: [slot0, slot1],
+            },
+            primary_corrupted,
+            secondary_corrupted,
+        })
+    }
+
+    // True if the on-disk primary slot did not verify (its checksum is corrupt). The in-memory
+    // copy of a clean primary slot wouldn't reveal this, so it must be read from disk.
+    pub(super) fn primary_corrupted(&self) -> bool {
+        self.primary_corrupted
+    }
+
+    // Returns true if the header needs to be repaired before use: either the recovery_required
+    // flag is set on disk, or the stored layout no longer matches the current file length (e.g.
+    // the file was truncated or extended externally). Callers must pass the actual file length
+    // so both conditions are always checked together.
+    pub(super) fn recovery_required(&self, file_len: u64) -> bool {
+        self.inner.recovery_required || self.inner.layout().len() != file_len
+    }
+
+    // The last writer did not shut down cleanly
+    pub(super) fn unclean(&self) -> bool {
+        self.inner.recovery_required
+    }
+
+    // The last writer marked the primary unflushed, so it may have died before flushing it
+    pub(super) fn primary_unflushed(&self) -> bool {
+        self.inner.primary_unflushed
+    }
+
+    // Consume self, reconcile the layout against the actual file length, and select a primary slot
+    // (repairing if necessary). Returns the usable DatabaseHeader along with a `clean` flag that is
+    // true only when nothing had to be reconciled: the primary was kept and the stored layout
+    // already matched `file_len`.
+    pub(super) fn finalize(mut self, file_len: u64) -> Result<(DatabaseHeader, bool)> {
+        if self.inner.recovery_required {
+            // The region counts are unchecksummed and rewritten on every resize, so a crash
+            // mid-resize can tear them. Recovery is required, so rebuild the layout from the file
+            // length and the immutable region geometry (which can't tear) rather than trusting the
+            // stored counts. The file length is set by a single truncate or extend, so it maps onto
+            // a real layout even when a resize was interrupted; a mangled length is rejected below.
+            let recalculated = self.layout_from_file_len(file_len)?;
+            // Report clean only if the stored counts already matched the file; a corrected value
+            // means the on-disk header must be rewritten before use.
+            let trailing_pages = recalculated
+                .trailing_region_layout()
+                .map(RegionLayout::num_pages)
+                .unwrap_or_default();
+            let layout_matched = recalculated.num_full_regions() == self.inner.full_regions
+                && trailing_pages == self.inner.trailing_partial_region_pages;
+            self.inner.set_layout(recalculated);
+            let kept_primary = self.select_primary_slot()?;
+            return Ok((self.inner, kept_primary && layout_matched));
+        }
+
+        // Recovery isn't required, so the stored layout was written by a clean shutdown and is
+        // trustworthy. The file may still have been truncated or extended out from under us (e.g.
+        // externally, or by a copy/backup tool). Truncation below the stored layout is always
+        // corruption -- redb shrinks the file only after writing a smaller layout.
+        let stored_len = self.inner.layout().len();
+        if file_len < stored_len {
+            return Err(StorageError::Corrupted(format!(
+                "File truncated below stored layout: file_len={file_len}, layout_len={stored_len}"
+            )));
+        }
+        let layout_stale = stored_len != file_len;
+        if layout_stale {
+            let recalculated = self.layout_from_file_len(file_len)?;
+            self.inner.set_layout(recalculated);
+        }
+        let kept_primary = self.select_primary_slot()?;
+        Ok((self.inner, kept_primary && !layout_stale))
+    }
+
+    // Rebuild the database layout from the actual file length, trusting only the immutable region
+    // geometry. Rejects any length no valid layout can produce: too short to hold a region, more
+    // regions than the 20-bit region index can address, or a length that doesn't fall on a region
+    // boundary (e.g. a file padded or truncated by an external tool).
+    fn layout_from_file_len(&self, file_len: u64) -> Result<DatabaseLayout> {
+        let page_size = self.inner.page_size;
+        let region_header_pages = self.inner.region_header_pages;
+        let region_max_pages = self.inner.region_max_data_pages;
+        let full_region_size =
+            (u64::from(region_header_pages) + u64::from(region_max_pages)) * u64::from(page_size);
+        // At most MAX_REGIONS regions are addressable; a longer file would alias high regions onto
+        // low ones or overflow the u32 region count.
+        let max_addressable_len = u64::from(page_size) + u64::from(MAX_REGIONS) * full_region_size;
+        if file_len > max_addressable_len {
+            return Err(StorageError::Corrupted(format!(
+                "File length requires more regions than are addressable: file_len={file_len}"
+            )));
+        }
+        // The smallest layout is the super-header page plus a trailing region holding its header and
+        // one data page; a shorter file maps to zero regions, which no layout can represent and
+        // which underflows recalculate()'s arithmetic.
+        let min_len = u64::from(page_size) * (u64::from(region_header_pages) + 2);
+        if file_len < min_len {
+            return Err(StorageError::Corrupted(format!(
+                "File truncated below the minimum layout: file_len={file_len}"
+            )));
+        }
+        let recalculated =
+            DatabaseLayout::recalculate(file_len, region_header_pages, region_max_pages, page_size);
+        // redb only ever resizes the file to a length that maps exactly onto a region layout, so a
+        // length recalculate() cannot reproduce means the file was extended or padded externally.
+        // Reject it rather than letting the `layout.len() == file_len` assertion in
+        // `TransactionalMemory::new` panic.
+        if recalculated.len() != file_len {
+            return Err(StorageError::Corrupted(format!(
+                "File length does not correspond to a valid region layout: file_len={file_len}"
+            )));
+        }
+        Ok(recalculated)
+    }
+
+    fn select_primary_slot(&mut self) -> Result<bool> {
+        // If the primary was written using 2-phase commit, it's guaranteed to be valid. Don't look
+        // at the secondary; even if it happens to have a valid checksum, Durability::Paranoid means
+        // we can't trust it
+        if self.inner.two_phase_commit {
+            if self.primary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Primary is corrupted despite 2-phase commit".to_string(),
+                ));
+            }
+            return Ok(true);
+        }
+
+        // Pick whichever slot is newer, assuming it has a valid checksum. This handles an edge case
+        // where we crash during fsync(), and the only data that got written to disk was the god byte
+        // update swapping the primary -- in that case, the primary contains a valid but out-of-date
+        // transaction, so we need to load from the secondary instead
+        if self.primary_corrupted {
+            if self.secondary_corrupted {
+                return Err(StorageError::Corrupted(
+                    "Both commit slots are corrupted".to_string(),
+                ));
+            }
+            self.inner.swap_primary_slot();
+            return Ok(false);
+        }
+
+        let secondary_newer =
+            self.inner.secondary_slot().transaction_id > self.inner.primary_slot().transaction_id;
+        if secondary_newer && !self.secondary_corrupted {
+            self.inner.swap_primary_slot();
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    // Keeps the primary as recorded. Choosing between the slots is a repairing writer's job: a
+    // newer secondary is a commit whose pages may not be in the file yet, or one a repair has
+    // rolled back.
+    pub(super) fn finalize_transaction_slots(self) -> Result<DatabaseHeader> {
+        if self.primary_corrupted {
+            return Err(StorageError::Corrupted(
+                "Primary commit slot is corrupted".to_string(),
+            ));
+        }
+        Ok(self.inner)
+    }
+}
+
+impl DatabaseHeader {
+    pub(super) fn new(layout: DatabaseLayout, transaction_id: TransactionId) -> Self {
+        #[allow(clippy::assertions_on_constants)]
+        {
+            assert!(TRANSACTION_LAST_FIELD <= SLOT_CHECKSUM_OFFSET);
+        }
+
+        let slot = TransactionHeader::new(transaction_id);
+        Self {
+            primary_slot: 0,
+            recovery_required: true,
+            two_phase_commit: false,
+            primary_unflushed: false,
+            page_size: layout.full_region_layout().page_size(),
+            region_header_pages: layout.full_region_layout().get_header_pages(),
+            region_max_data_pages: layout.full_region_layout().num_pages(),
+            full_regions: layout.num_full_regions(),
+            trailing_partial_region_pages: layout
+                .trailing_region_layout()
+                .map(|x| x.num_pages())
+                .unwrap_or_default(),
+            transaction_slots: [slot.clone(), slot],
+        }
+    }
+
+    pub(super) fn page_size(&self) -> u32 {
+        self.page_size
+    }
+
+    pub(super) fn layout(&self) -> DatabaseLayout {
+        let full_layout = RegionLayout::new(
+            self.region_max_data_pages,
+            self.region_header_pages,
+            self.page_size,
+        );
+        let trailing = if self.trailing_partial_region_pages > 0 {
+            Some(RegionLayout::new(
+                self.trailing_partial_region_pages,
+                self.region_header_pages,
+                self.page_size,
+            ))
+        } else {
+            None
+        };
+        DatabaseLayout::new(self.full_regions, full_layout, trailing)
+    }
+
+    pub(super) fn set_layout(&mut self, layout: DatabaseLayout) {
+        assert_eq!(
+            self.layout().full_region_layout(),
+            layout.full_region_layout()
+        );
+        if let Some(trailing) = layout.trailing_region_layout() {
+            assert_eq!(trailing.get_header_pages(), self.region_header_pages);
+            assert_eq!(trailing.page_size(), self.page_size);
+            self.trailing_partial_region_pages = trailing.num_pages();
+        } else {
+            self.trailing_partial_region_pages = 0;
+        }
+        self.full_regions = layout.num_full_regions();
+    }
+
+    // Whether both slots still hold what initialization wrote: no transaction has ever committed
+    // to this file. A slot a commit reached, torn or not, counts, so that recovery falling back to
+    // the initial slot is a repair
+    pub(super) fn never_committed(&self) -> bool {
+        self.transaction_slots.iter().all(|slot| {
+            slot.transaction_id.raw_id() == 0
+                && slot.user_root.is_none()
+                && slot.system_root.is_none()
+                && slot.corrupt_bytes.is_none()
+        })
+    }
+
+    pub(super) fn primary_slot(&self) -> &TransactionHeader {
+        &self.transaction_slots[self.primary_slot]
+    }
+
+    pub(super) fn secondary_slot(&self) -> &TransactionHeader {
+        &self.transaction_slots[self.primary_slot ^ 1]
+    }
+
+    // The slot another process may serve: the primary once its writer has flushed it, and the
+    // previous commit, in the secondary slot, until then.
+    pub(super) fn published_slot(&self) -> &TransactionHeader {
+        if self.primary_unflushed {
+            self.secondary_slot()
+        } else {
+            self.primary_slot()
+        }
+    }
+
+    // Overwrite the secondary slot with a newly committed transaction.
+    pub(super) fn write_secondary_slot(
+        &mut self,
+        transaction_id: TransactionId,
+        user_root: Option<BtreeHeader>,
+        system_root: Option<BtreeHeader>,
+    ) {
+        let slot = &mut self.transaction_slots[self.primary_slot ^ 1];
+        slot.transaction_id = transaction_id;
+        slot.user_root = user_root;
+        slot.system_root = system_root;
+        slot.corrupt_bytes = None;
+    }
+
+    pub(super) fn swap_primary_slot(&mut self) {
+        self.primary_slot ^= 1;
+    }
+
+    pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
+        let mut result = [0; DB_HEADER_SIZE];
+        if include_magic_number {
+            result[..MAGICNUMBER.len()].copy_from_slice(&MAGICNUMBER);
+        }
+        result[GOD_BYTE_OFFSET] = self.primary_slot.try_into().unwrap();
+        if self.recovery_required {
+            result[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        }
+        if self.two_phase_commit {
+            result[GOD_BYTE_OFFSET] |= TWO_PHASE_COMMIT;
+        }
+        if self.primary_unflushed {
+            result[GOD_BYTE_OFFSET] |= PRIMARY_UNFLUSHED;
+        }
+        result[PAGE_SIZE_OFFSET..(PAGE_SIZE_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.page_size.to_le_bytes());
+        result[REGION_HEADER_PAGES_OFFSET..(REGION_HEADER_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.region_header_pages.to_le_bytes());
+        result[REGION_MAX_DATA_PAGES_OFFSET..(REGION_MAX_DATA_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.region_max_data_pages.to_le_bytes());
+        result[NUM_FULL_REGIONS_OFFSET..(NUM_FULL_REGIONS_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.full_regions.to_le_bytes());
+        result[TRAILING_REGION_DATA_PAGES_OFFSET
+            ..(TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>())]
+            .copy_from_slice(&self.trailing_partial_region_pages.to_le_bytes());
+        let slot0 = self.transaction_slots[0].to_bytes();
+        result[TRANSACTION_0_OFFSET..(TRANSACTION_0_OFFSET + slot0.len())].copy_from_slice(&slot0);
+        let slot1 = self.transaction_slots[1].to_bytes();
+        result[TRANSACTION_1_OFFSET..(TRANSACTION_1_OFFSET + slot1.len())].copy_from_slice(&slot1);
+
+        result
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct TransactionHeader {
+    pub(super) version: u8,
+    pub(super) user_root: Option<BtreeHeader>,
+    pub(super) system_root: Option<BtreeHeader>,
+    pub(super) transaction_id: TransactionId,
+    // When present, the original on-disk bytes of a slot whose checksum did not verify. They are
+    // written back verbatim, so a slot that failed verification keeps its invalid checksum instead
+    // of being re-serialized as if it were valid. `None` once the slot holds a new commit.
+    corrupt_bytes: Option<[u8; TRANSACTION_SIZE]>,
+}
+
+impl TransactionHeader {
+    fn new(transaction_id: TransactionId) -> Self {
+        Self {
+            version: FILE_FORMAT_VERSION3,
+            user_root: None,
+            system_root: None,
+            transaction_id,
+            corrupt_bytes: None,
+        }
+    }
+
+    // Returned bool indicates whether the checksum was corrupted
+    pub(super) fn from_bytes(data: &[u8]) -> Result<(Self, bool), DatabaseError> {
+        let version = data[VERSION_OFFSET];
+        match version {
+            FILE_FORMAT_VERSION1 | FILE_FORMAT_VERSION2 => {
+                return Err(DatabaseError::UpgradeRequired(version));
+            }
+            FILE_FORMAT_VERSION3 => {}
+            _ => {
+                return Err(StorageError::Corrupted(format!(
+                    "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
+                ))
+                .into());
+            }
+        }
+        let checksum = Checksum::from_le_bytes(
+            data[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+                .try_into()
+                .unwrap(),
+        );
+        let corrupted = checksum != xxh3_checksum(&data[..SLOT_CHECKSUM_OFFSET]);
+
+        let user_root = if data[USER_ROOT_NON_NULL_OFFSET] != 0 {
+            Some(BtreeHeader::from_le_bytes(
+                data[USER_ROOT_OFFSET..(USER_ROOT_OFFSET + BtreeHeader::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
+        let system_root = if data[SYSTEM_ROOT_NON_NULL_OFFSET] != 0 {
+            Some(BtreeHeader::from_le_bytes(
+                data[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
+                    .try_into()
+                    .unwrap(),
+            ))
+        } else {
+            None
+        };
+        let transaction_id = TransactionId::new(get_u64(&data[TRANSACTION_ID_OFFSET..]));
+
+        let result = Self {
+            version,
+            user_root,
+            system_root,
+            transaction_id,
+            corrupt_bytes: if corrupted {
+                Some(data[..TRANSACTION_SIZE].try_into().unwrap())
+            } else {
+                None
+            },
+        };
+
+        Ok((result, corrupted))
+    }
+
+    pub(super) fn to_bytes(&self) -> [u8; TRANSACTION_SIZE] {
+        // A slot that failed checksum verification is written back verbatim (see `corrupt_bytes`).
+        if let Some(bytes) = self.corrupt_bytes {
+            return bytes;
+        }
+        assert_eq!(self.version, FILE_FORMAT_VERSION3);
+        let mut result = [0; TRANSACTION_SIZE];
+        result[VERSION_OFFSET] = self.version;
+        if let Some(header) = self.user_root {
+            result[USER_ROOT_NON_NULL_OFFSET] = 1;
+            result[USER_ROOT_OFFSET..(USER_ROOT_OFFSET + BtreeHeader::serialized_size())]
+                .copy_from_slice(&header.to_le_bytes());
+        }
+        if let Some(header) = self.system_root {
+            result[SYSTEM_ROOT_NON_NULL_OFFSET] = 1;
+            result[SYSTEM_ROOT_OFFSET..(SYSTEM_ROOT_OFFSET + BtreeHeader::serialized_size())]
+                .copy_from_slice(&header.to_le_bytes());
+        }
+        result[TRANSACTION_ID_OFFSET..(TRANSACTION_ID_OFFSET + size_of::<u64>())]
+            .copy_from_slice(&self.transaction_id.raw_id().to_le_bytes());
+        let checksum = xxh3_checksum(&result[..SLOT_CHECKSUM_OFFSET]);
+        result[SLOT_CHECKSUM_OFFSET..(SLOT_CHECKSUM_OFFSET + size_of::<Checksum>())]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        result
+    }
+}
+
+#[cfg(test)]
+mod test {
+    #[cfg(feature = "experimental-api-5")]
+    use crate::ReadableTable;
+    use crate::backends::FileBackend;
+    use crate::db::TableDefinition;
+    use crate::tree_store::page_store::base::MAX_REGIONS;
+    use crate::tree_store::page_store::header::{
+        DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
+        PRIMARY_BIT, RECOVERY_REQUIRED, REGION_HEADER_PAGES_OFFSET, REGION_MAX_DATA_PAGES_OFFSET,
+        TRAILING_REGION_DATA_PAGES_OFFSET, TRANSACTION_0_OFFSET, TRANSACTION_1_OFFSET,
+        TWO_PHASE_COMMIT, get_u32,
+    };
+    use crate::{Database, DatabaseError, StorageBackend};
+    use crate::{ReadableDatabase, StorageError};
+    use alloc::sync::Arc;
+    use core::mem::size_of;
+    use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::fs::OpenOptions;
+    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+
+    const X: TableDefinition<&str, &str> = TableDefinition::new("x");
+
+    fn primary_slot_offset(god_byte: u8) -> usize {
+        if god_byte & PRIMARY_BIT == 0 {
+            TRANSACTION_0_OFFSET
+        } else {
+            TRANSACTION_1_OFFSET
+        }
+    }
+
+    fn corrupt_slot_checksum(header: &mut [u8; DB_HEADER_SIZE], slot_offset: usize) {
+        let checksum_offset = slot_offset + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset] ^= 0xFF;
+    }
+
+    fn corrupt_primary_slot_checksum(header: &mut [u8; DB_HEADER_SIZE]) {
+        corrupt_slot_checksum(header, primary_slot_offset(header[GOD_BYTE_OFFSET]));
+    }
+
+    #[derive(Clone, Debug)]
+    struct FailingBackend {
+        inner: Arc<FileBackend>,
+        operations_until_failure: Arc<AtomicU64>,
+        primary_bit_before_failure: Arc<AtomicU8>,
+    }
+
+    impl FailingBackend {
+        const DISABLED: u64 = u64::MAX;
+        const PRIMARY_BIT_DISABLED: u8 = 2;
+
+        fn new(backend: FileBackend) -> Self {
+            Self {
+                inner: Arc::new(backend),
+                operations_until_failure: Arc::new(AtomicU64::new(Self::DISABLED)),
+                primary_bit_before_failure: Arc::new(AtomicU8::new(Self::PRIMARY_BIT_DISABLED)),
+            }
+        }
+
+        fn read_header_directly(&self) -> Result<[u8; DB_HEADER_SIZE], std::io::Error> {
+            let mut header = [0; DB_HEADER_SIZE];
+            self.inner.read(0, &mut header)?;
+            Ok(header)
+        }
+
+        fn write_header_directly(
+            &self,
+            header: &[u8; DB_HEADER_SIZE],
+        ) -> Result<(), std::io::Error> {
+            self.inner.write(0, header)
+        }
+
+        fn fail_after_primary_swap(&self) -> Result<(), std::io::Error> {
+            let header = self.read_header_directly()?;
+            let primary_bit = header[GOD_BYTE_OFFSET] & PRIMARY_BIT;
+            assert_eq!(header[GOD_BYTE_OFFSET] & TWO_PHASE_COMMIT, 0);
+            self.primary_bit_before_failure
+                .store(primary_bit, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn arm_failure_if_primary_swapped(&self, offset: u64, data: &[u8]) {
+            if offset != 0 || data.len() < DB_HEADER_SIZE {
+                return;
+            }
+
+            let primary_bit_before = self.primary_bit_before_failure.load(Ordering::SeqCst);
+            if primary_bit_before == Self::PRIMARY_BIT_DISABLED {
+                return;
+            }
+
+            if data[GOD_BYTE_OFFSET] & PRIMARY_BIT != primary_bit_before {
+                self.primary_bit_before_failure
+                    .store(Self::PRIMARY_BIT_DISABLED, Ordering::SeqCst);
+                // Fail before the next mutating operation or sync, so no cleanup
+                // writes can run after the primary switch reaches storage.
+                self.operations_until_failure.store(1, Ordering::SeqCst);
+            }
+        }
+
+        fn fail_if_armed(&self) -> Result<(), std::io::Error> {
+            let previous = self.operations_until_failure.fetch_update(
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+                |x| {
+                    if x == Self::DISABLED {
+                        None
+                    } else {
+                        Some(x.saturating_sub(1))
+                    }
+                },
+            );
+
+            match previous {
+                Ok(1) => {
+                    self.corrupt_primary_slot_checksum()?;
+                    Err(std::io::Error::from(ErrorKind::Other))
+                }
+                Ok(0) => Err(std::io::Error::from(ErrorKind::Other)),
+                _ => Ok(()),
+            }
+        }
+
+        fn corrupt_primary_slot_checksum(&self) -> Result<(), std::io::Error> {
+            let mut header = self.read_header_directly()?;
+            header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+            corrupt_primary_slot_checksum(&mut header);
+            self.write_header_directly(&header)?;
+
+            Ok(())
+        }
+
+        fn corrupt_all_slot_checksums(&self) -> Result<(), std::io::Error> {
+            let mut header = self.read_header_directly()?;
+            corrupt_slot_checksum(&mut header, TRANSACTION_0_OFFSET);
+            corrupt_slot_checksum(&mut header, TRANSACTION_1_OFFSET);
+            self.write_header_directly(&header)?;
+
+            Ok(())
+        }
+    }
+
+    impl StorageBackend for FailingBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.fail_if_armed()?;
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            self.fail_if_armed()?;
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+            self.fail_if_armed()?;
+            self.inner.write(offset, data)?;
+            self.arm_failure_if_primary_swapped(offset, data);
+            Ok(())
+        }
+
+        fn close(&self) -> Result<(), Error> {
+            self.inner.close()
+        }
+    }
+
+    /// The mark round-trips through the god byte, moves the published slot to the previous commit
+    /// while it is set, and survives finalization by a reader and by a writer alike: clearing it
+    /// takes a flush and a header write, which a writer does separately, not a repair
+    #[test]
+    fn the_unflushed_mark_publishes_the_secondary_until_a_writer_clears_it() {
+        use super::{PRIMARY_UNFLUSHED, UnrepairedDatabaseHeader};
+
+        let tmpfile = crate::create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write = db.begin_write().unwrap();
+        write.open_table(X).unwrap().insert("k", "v").unwrap();
+        write.commit().unwrap();
+        drop(db);
+        let file_len = std::fs::metadata(tmpfile.path()).unwrap().len();
+        let mut bytes: [u8; DB_HEADER_SIZE] = std::fs::read(tmpfile.path()).unwrap()
+            [..DB_HEADER_SIZE]
+            .try_into()
+            .unwrap();
+        let page_size = u32::try_from(super::PAGE_SIZE).unwrap();
+        let parse = |bytes: &[u8; DB_HEADER_SIZE]| {
+            UnrepairedDatabaseHeader::from_bytes(bytes, page_size).unwrap()
+        };
+
+        let unmarked = parse(&bytes);
+        let primary = unmarked.inner.primary_slot().transaction_id;
+        let secondary = unmarked.inner.secondary_slot().transaction_id;
+        assert!(primary > secondary);
+        assert_eq!(unmarked.inner.published_slot().transaction_id, primary);
+        assert!(unmarked.finalize(file_len).unwrap().1);
+
+        bytes[GOD_BYTE_OFFSET] |= PRIMARY_UNFLUSHED;
+        let marked = parse(&bytes);
+        assert_eq!(marked.inner.primary_slot().transaction_id, primary);
+        assert_eq!(marked.inner.published_slot().transaction_id, secondary);
+        assert_eq!(marked.inner.to_bytes(true), bytes);
+        // A reader keeps the mark
+        let kept = parse(&bytes).finalize_transaction_slots().unwrap();
+        assert_eq!(kept.published_slot().transaction_id, secondary);
+        assert_eq!(kept.to_bytes(true), bytes);
+        // So does a writer, and the mark alone does not make the header need a repair
+        let (mut kept, clean) = parse(&bytes).finalize(file_len).unwrap();
+        assert!(clean);
+        assert_eq!(kept.published_slot().transaction_id, secondary);
+        assert_eq!(kept.to_bytes(true), bytes);
+        // Cleared, it publishes the primary
+        kept.primary_unflushed = false;
+        assert_eq!(kept.published_slot().transaction_id, primary);
+        bytes[GOD_BYTE_OFFSET] &= !PRIMARY_UNFLUSHED;
+        assert_eq!(kept.to_bytes(true), bytes);
+    }
+
+    #[test]
+    fn repair_allocator_checksums() {
+        let tmpfile = crate::create_tempfile();
+        let cloned = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let backend_control = backend.clone();
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert("hello", "world").unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        // Start a read to be sure the previous write isn't garbage collected
+        let read_txn = db.begin_read().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert("hello", "world2").unwrap();
+        }
+
+        backend_control.fail_after_primary_swap().unwrap();
+        write_txn.commit().unwrap_err();
+        drop(read_txn);
+        drop(db);
+
+        let cloned = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let db2_backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let db2_backend_control = db2_backend.clone();
+        let mut db2 = Database::builder()
+            .create_with_backend(db2_backend)
+            .unwrap();
+        {
+            let read_txn = db2.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get_owned("hello").unwrap().unwrap().value(), "world");
+        }
+        let write_txn = db2.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(X).unwrap();
+            table.insert("hello2", "world2").unwrap();
+        }
+        write_txn.commit().unwrap();
+
+        let mut header = db2_backend_control.read_header_directly().unwrap();
+        // Simulate a failed non-2PC commit where the primary bit reached disk, but
+        // the new primary slot did not. The old primary is now the valid secondary.
+        header[GOD_BYTE_OFFSET] ^= PRIMARY_BIT;
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+        corrupt_primary_slot_checksum(&mut header);
+        db2_backend_control.write_header_directly(&header).unwrap();
+
+        assert!(!db2.check_integrity().unwrap());
+        {
+            let read_txn = db2.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get_owned("hello").unwrap().unwrap().value(), "world");
+            assert_eq!(
+                table.get_owned("hello2").unwrap().unwrap().value(),
+                "world2"
+            );
+        }
+
+        db2_backend_control.corrupt_all_slot_checksums().unwrap();
+        assert!(matches!(
+            db2.check_integrity().unwrap_err(),
+            DatabaseError::Storage(StorageError::Corrupted(_))
+        ));
+    }
+
+    // A commit slot with an invalid checksum must survive the recovery header rewrite with its
+    // checksum still invalid. Recomputing a valid checksum for it would let a later open promote a
+    // partially written transaction as if it were a genuine commit.
+    #[test]
+    fn recovery_does_not_launder_torn_slot() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        {
+            let write_txn = db.begin_write().unwrap();
+            write_txn.open_table(X).unwrap().insert("k", "v").unwrap();
+            write_txn.commit().unwrap();
+        }
+        drop(db);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let primary_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let secondary_offset = if primary_offset == TRANSACTION_0_OFFSET {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+
+        // Fabricate a torn 1-phase commit in the secondary slot: copy the valid primary slot, give
+        // it a newer transaction id, then corrupt its checksum so it fails verification.
+        let primary_slot: [u8; super::TRANSACTION_SIZE] = header
+            [primary_offset..primary_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+        header[secondary_offset..secondary_offset + super::TRANSACTION_SIZE]
+            .copy_from_slice(&primary_slot);
+        let primary_txn_id =
+            super::get_u64(&header[primary_offset + super::TRANSACTION_ID_OFFSET..]);
+        let id_offset = secondary_offset + super::TRANSACTION_ID_OFFSET;
+        header[id_offset..id_offset + core::mem::size_of::<u64>()]
+            .copy_from_slice(&(primary_txn_id + 1).to_le_bytes());
+        corrupt_slot_checksum(&mut header, secondary_offset);
+
+        // Require recovery, and mark it non-2PC so the full repair path (not quick-repair) runs.
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+
+        let torn_secondary: [u8; super::TRANSACTION_SIZE] = header
+            [secondary_offset..secondary_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        // Open, but abort the repair before it commits a fresh secondary slot. This freezes the
+        // header in the exact state recovery leaves it in: after the header rewrite, but before any
+        // genuine commit could overwrite the torn slot.
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
+
+        // The torn secondary must be byte-for-byte unchanged -- in particular its checksum must not
+        // have been recomputed into a valid one.
+        let mut file = OpenOptions::new().read(true).open(tmpfile.path()).unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        assert_eq!(
+            &header[secondary_offset..secondary_offset + super::TRANSACTION_SIZE],
+            &torn_secondary,
+            "recovery laundered the torn secondary slot into a valid one"
+        );
+    }
+
+    // A torn first commit: recovery falls back to the slot initialization wrote, which is a
+    // repair, callback and all, and not a database nothing was ever committed to
+    #[test]
+    fn a_torn_first_commit_is_repaired() {
+        let tmpfile = crate::create_tempfile();
+        // The close commits once, into the slot initialization left free
+        drop(Database::builder().create(tmpfile.path()).unwrap());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        // Tear that commit, as a crash during a 1-phase commit's flush would
+        let committed_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        corrupt_slot_checksum(&mut header, committed_offset);
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        header[GOD_BYTE_OFFSET] &= !TWO_PHASE_COMMIT;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
+
+        // Repaired, the database is the empty one the initial slot describes
+        let db = Database::open(tmpfile.path()).unwrap();
+        let read_txn = db.begin_read().unwrap();
+        assert_eq!(read_txn.list_tables().unwrap().count(), 0);
+    }
+
+    // A crash right after the create leaves the recovery flag set over the header initialization
+    // wrote. Nothing was committed, so there is nothing to repair
+    #[test]
+    fn a_crash_after_the_create_needs_no_repair() {
+        let tmpfile = crate::create_tempfile();
+        drop(Database::builder().create(tmpfile.path()).unwrap());
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        // Undo the close's commit: copy the initial slot back over it, and require recovery as
+        // an open leaves the header while it lasts
+        let committed_offset = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let initial_offset = if committed_offset == TRANSACTION_0_OFFSET {
+            TRANSACTION_1_OFFSET
+        } else {
+            TRANSACTION_0_OFFSET
+        };
+        let initial: [u8; super::TRANSACTION_SIZE] = header
+            [initial_offset..initial_offset + super::TRANSACTION_SIZE]
+            .try_into()
+            .unwrap();
+        header[committed_offset..committed_offset + super::TRANSACTION_SIZE]
+            .copy_from_slice(&initial);
+        header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let db = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap();
+        let write_txn = db.begin_write().unwrap();
+        write_txn.open_table(X).unwrap().insert("k", "v").unwrap();
+        write_txn.commit().unwrap();
+    }
+
+    // If the file is externally truncated below the stored layout, both open and check_integrity
+    // should report corruption rather than panicking in the layout recalculation.
+    #[test]
+    fn truncated_file_is_rejected() {
+        let tmpfile = crate::create_tempfile();
+        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        assert!(db.check_integrity().unwrap());
+        drop(db);
+
+        let file = OpenOptions::new().write(true).open(tmpfile.path()).unwrap();
+        // Truncate to just the header (no page data) -- this is less than one page on any
+        // supported page size, so recalculate() would underflow without the guard.
+        file.set_len(crate::tree_store::page_store::header::DB_HEADER_SIZE as u64)
+            .unwrap();
+
+        let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn externally_extended_file_is_rejected() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+            txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+            txn.commit().unwrap();
+        }
+        let original_len = tmpfile.as_file().metadata().unwrap().len();
+        drop(db);
+
+        // Pad the file by less than a page, as an external tool (copy/backup/transfer) might.
+        // The resulting length maps onto no valid region layout. Previously this panicked on the
+        // `layout.len() == file_len` assertion when opening; it must be a clean Corrupted error.
+        let file = OpenOptions::new().write(true).open(tmpfile.path()).unwrap();
+        file.set_len(original_len + 100).unwrap();
+
+        let err = Database::open(tmpfile.path()).unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    fn read_root_length(path: &std::path::Path, root_offset: usize) -> u64 {
+        let mut header = [0u8; DB_HEADER_SIZE];
+        OpenOptions::new()
+            .read(true)
+            .open(path)
+            .unwrap()
+            .read_exact(&mut header)
+            .unwrap();
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        // The count is the last field of the serialized BtreeHeader
+        super::get_u64(
+            &header
+                [slot + root_offset + super::BtreeHeader::serialized_size() - size_of::<u64>()..],
+        )
+    }
+
+    // Re-checksums the slot, so the count is indistinguishable from one redb wrote itself
+    fn overwrite_root_length(path: &std::path::Path, root_offset: usize, length: u64) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        let offset = slot + root_offset + super::BtreeHeader::serialized_size() - size_of::<u64>();
+        header[offset..offset + size_of::<u64>()].copy_from_slice(&length.to_le_bytes());
+        let checksum = super::xxh3_checksum(&header[slot..slot + super::SLOT_CHECKSUM_OFFSET]);
+        let checksum_offset = slot + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset..checksum_offset + size_of::<super::Checksum>()]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    fn create_database_with_one_table(path: &std::path::Path) {
+        let db = Database::create(path).unwrap();
+        let txn = db.begin_write().unwrap();
+        txn.open_table(X).unwrap().insert("k", "v").unwrap();
+        txn.commit().unwrap();
+    }
+
+    // A root's table count is not covered by any page checksum, so repair has to recount it. Left
+    // wrong, it reaches the assertion in MutateHelper::finish_deletion -- for the system root, via
+    // the commit every Database::drop makes. See https://github.com/cberner/redb/issues/1303
+    #[test]
+    fn check_integrity_recomputes_root_lengths() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        let data_length = read_root_length(tmpfile.path(), super::USER_ROOT_OFFSET);
+        let system_length = read_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET);
+        overwrite_root_length(tmpfile.path(), super::USER_ROOT_OFFSET, u64::MAX);
+        overwrite_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, u64::MAX);
+
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        // Repaired, so not clean, even though every checksum in the file verifies
+        assert!(!db.check_integrity().unwrap());
+        {
+            let txn = db.begin_read().unwrap();
+            let table = txn.open_table(X).unwrap();
+            assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
+        }
+        // Deletes the allocator state table from the system tree, which asserts on a bad count
+        drop(db);
+
+        assert_eq!(
+            read_root_length(tmpfile.path(), super::USER_ROOT_OFFSET),
+            data_length
+        );
+        assert_eq!(
+            read_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET),
+            system_length
+        );
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        assert_eq!(
+            txn.open_table(X)
+                .unwrap()
+                .get("k")
+                .unwrap()
+                .unwrap()
+                .value(),
+            "v"
+        );
+    }
+
+    // Re-checksums the slot, so the page number is indistinguishable from one redb wrote itself
+    fn overwrite_root_page_order(path: &std::path::Path, root_offset: usize, order: u8) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+
+        let slot = primary_slot_offset(header[GOD_BYTE_OFFSET]);
+        // The page number is the first field of the serialized BtreeHeader
+        let offset = slot + root_offset;
+        let root = super::get_u64(&header[offset..]);
+        let root = (root & !(0b1_1111 << 59)) | (u64::from(order) << 59);
+        header[offset..offset + size_of::<u64>()].copy_from_slice(&root.to_le_bytes());
+        let checksum = super::xxh3_checksum(&header[slot..slot + super::SLOT_CHECKSUM_OFFSET]);
+        let checksum_offset = slot + super::SLOT_CHECKSUM_OFFSET;
+        header[checksum_offset..checksum_offset + size_of::<super::Checksum>()]
+            .copy_from_slice(&checksum.to_le_bytes());
+
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // An oversized page order sizes a multi-terabyte read buffer, whose failed allocation aborts
+    // the process. See https://github.com/cberner/redb/issues/1331
+    #[test]
+    fn oversized_root_page_order_is_reported_as_corruption() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, 31);
+
+        // Debug builds walk the data tree while opening; release builds reach it via the check
+        let err = match Database::create(tmpfile.path()) {
+            Ok(mut db) => db.check_integrity().unwrap_err(),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    fn patch_god_byte(path: &std::path::Path, patch: impl FnOnce(&mut u8)) {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let mut header = [0u8; DB_HEADER_SIZE];
+        file.read_exact(&mut header).unwrap();
+        patch(&mut header[GOD_BYTE_OFFSET]);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&header).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // A torn commit slot can carry an invalid page number. Repair must treat that as a bad primary
+    // and fall back to the secondary, as it does for a checksum mismatch.
+    #[test]
+    fn repair_falls_back_to_secondary_on_invalid_primary_root() {
+        let tmpfile = crate::create_tempfile();
+        {
+            let db = Database::create(tmpfile.path()).unwrap();
+            for (key, value) in [("k", "v"), ("k2", "v2")] {
+                let txn = db.begin_write().unwrap();
+                txn.open_table(X).unwrap().insert(key, value).unwrap();
+                txn.commit().unwrap();
+            }
+        }
+        // Give the primary slot a root with an impossible order, leaving its checksum valid, then
+        // mark the file as a crashed 1-phase commit so that a full repair runs
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, 31);
+        patch_god_byte(tmpfile.path(), |god_byte| {
+            *god_byte |= RECOVERY_REQUIRED;
+            *god_byte &= !TWO_PHASE_COMMIT;
+        });
+
+        let db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(X).unwrap();
+        assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
+        assert_eq!(table.get("k2").unwrap().unwrap().value(), "v2");
+    }
+
+    // The read-only open walks the system tree to load the allocator state
+    #[test]
+    fn oversized_system_root_page_order_is_reported_as_corruption_read_only() {
+        let tmpfile = crate::create_tempfile();
+        create_database_with_one_table(tmpfile.path());
+        overwrite_root_page_order(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, 31);
+
+        let Err(err) = crate::ReadOnlyDatabase::open(tmpfile.path()) else {
+            panic!("expected the open to fail");
+        };
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    // A backend that can report a `len()` larger than the data it actually holds, without
+    // allocating it -- used to simulate an externally created (e.g. sparse) file.
+    #[derive(Clone, Debug, Default)]
+    struct LenOverrideBackend {
+        data: alloc::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        fake_len: alloc::sync::Arc<core::sync::atomic::AtomicU64>,
+    }
+
+    impl LenOverrideBackend {
+        fn set_fake_len(&self, len: u64) {
+            self.fake_len
+                .store(len, core::sync::atomic::Ordering::Release);
+        }
+    }
+
+    impl StorageBackend for LenOverrideBackend {
+        fn len(&self) -> Result<u64, std::io::Error> {
+            let fake = self.fake_len.load(core::sync::atomic::Ordering::Acquire);
+            if fake == 0 {
+                Ok(self.data.lock().unwrap().len() as u64)
+            } else {
+                Ok(fake)
+            }
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+            let data = self.data.lock().unwrap();
+            let offset = usize::try_from(offset).unwrap();
+            for (i, b) in out.iter_mut().enumerate() {
+                *b = data.get(offset + i).copied().unwrap_or(0);
+            }
+            Ok(())
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+            self.data
+                .lock()
+                .unwrap()
+                .resize(usize::try_from(len).unwrap(), 0);
+            Ok(())
+        }
+
+        fn sync_data(&self) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn write(&self, offset: u64, src: &[u8]) -> Result<(), std::io::Error> {
+            let mut data = self.data.lock().unwrap();
+            let offset = usize::try_from(offset).unwrap();
+            if offset + src.len() > data.len() {
+                data.resize(offset + src.len(), 0);
+            }
+            data[offset..offset + src.len()].copy_from_slice(src);
+            Ok(())
+        }
+    }
+
+    // A file whose length is valid arithmetically but implies more regions than the 20-bit region
+    // index can address must be rejected as corruption, not accepted (which would alias the high
+    // regions onto low ones). Uses a fake oversized length so no petabyte allocation is needed.
+    #[test]
+    fn oversized_region_count_file_is_rejected() {
+        let backend = LenOverrideBackend::default();
+        let db = Database::builder()
+            .create_with_backend(backend.clone())
+            .unwrap();
+        {
+            let txn = db.begin_write().unwrap();
+            let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+            txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+            txn.commit().unwrap();
+        }
+        drop(db);
+
+        // Compute an *exact* region-aligned length that needs MAX_REGIONS + 1 regions, so the
+        // length itself maps onto a valid layout (the existing length-mismatch guard would not
+        // reject it) -- it must be rejected specifically for exceeding the addressable region
+        // count. Only len() reports this; no memory is actually allocated.
+        let (page_size, region_header_pages, region_max_data_pages) = {
+            let data = backend.data.lock().unwrap();
+            (
+                u64::from(get_u32(&data[PAGE_SIZE_OFFSET..])),
+                u64::from(get_u32(&data[REGION_HEADER_PAGES_OFFSET..])),
+                u64::from(get_u32(&data[REGION_MAX_DATA_PAGES_OFFSET..])),
+            )
+        };
+        let full_region_size = (region_header_pages + region_max_data_pages) * page_size;
+        let fake_len = page_size + (u64::from(MAX_REGIONS) + 1) * full_region_size;
+        backend.set_fake_len(fake_len);
+        let err = Database::builder()
+            .create_with_backend(backend)
+            .unwrap_err();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
+    }
+
+    // A corrupted (but magic-valid) header layout field must open as Corrupted, not panic.
+    #[test]
+    fn corrupt_header_layout_fields_are_rejected() {
+        fn corrupt_field_and_open(offset: usize, value: u32) -> DatabaseError {
+            let tmpfile = crate::create_tempfile();
+            let db = Database::builder().create(tmpfile.path()).unwrap();
+            {
+                let txn = db.begin_write().unwrap();
+                let table: crate::TableDefinition<u64, u64> = crate::TableDefinition::new("x");
+                txn.open_table(table).unwrap().insert(&1, &1).unwrap();
+                txn.commit().unwrap();
+            }
+            drop(db);
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            file.write_all(&value.to_le_bytes()).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            Database::open(tmpfile.path()).unwrap_err()
+        }
+
+        // A different-but-structurally-valid page size (mismatch with this build).
+        let err = corrupt_field_and_open(PAGE_SIZE_OFFSET, 8192);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for mismatched page size, got {err:?}"
+        );
+
+        // Structurally invalid page sizes.
+        for bad_page_size in [0, 1, 3] {
+            let err = corrupt_field_and_open(PAGE_SIZE_OFFSET, bad_page_size);
+            assert!(
+                matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+                "expected Corrupted for page size {bad_page_size}, got {err:?}"
+            );
+        }
+
+        // A zero-page region would otherwise panic in RegionLayout::new.
+        let err = corrupt_field_and_open(REGION_MAX_DATA_PAGES_OFFSET, 0);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for zero region data pages, got {err:?}"
+        );
+
+        // Region larger than the 20-bit page index can address.
+        let err = corrupt_field_and_open(REGION_MAX_DATA_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region data pages, got {err:?}"
+        );
+
+        // A trailing region larger than a full region is structurally impossible.
+        let err = corrupt_field_and_open(TRAILING_REGION_DATA_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized trailing region, got {err:?}"
+        );
+
+        // Zero trailing count on a small db (full_regions == 0) describes zero regions.
+        let err = corrupt_field_and_open(TRAILING_REGION_DATA_PAGES_OFFSET, 0);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for zero-region layout, got {err:?}"
+        );
+
+        // Region count above MAX_REGIONS.
+        let err = corrupt_field_and_open(NUM_FULL_REGIONS_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region count, got {err:?}"
+        );
+
+        // An oversized region header page count overflows the region-size arithmetic.
+        let err = corrupt_field_and_open(REGION_HEADER_PAGES_OFFSET, u32::MAX);
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted for oversized region header pages, got {err:?}"
+        );
+    }
+
+    // A resize rewrites the unchecksummed region-count fields, so a crash mid-resize can tear them
+    // while both commit slots stay intact. When recovery is required the layout is recomputed from
+    // the file length, so a torn count must not make a database that is otherwise fully recoverable
+    // from its length permanently unopenable.
+    #[test]
+    fn torn_layout_fields_recover_from_file_length() {
+        fn recover_after_tearing(torn: impl Fn(u32, u32) -> (u32, u32)) {
+            let tmpfile = crate::create_tempfile();
+            let db = Database::builder().create(tmpfile.path()).unwrap();
+            {
+                let write_txn = db.begin_write().unwrap();
+                {
+                    let mut table = write_txn.open_table(X).unwrap();
+                    table.insert("hello", "world").unwrap();
+                }
+                write_txn.commit().unwrap();
+            }
+            drop(db);
+
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let mut header = [0u8; DB_HEADER_SIZE];
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.read_exact(&mut header).unwrap();
+
+            let (full_regions, trailing_pages) = torn(
+                get_u32(&header[NUM_FULL_REGIONS_OFFSET..]),
+                get_u32(&header[TRAILING_REGION_DATA_PAGES_OFFSET..]),
+            );
+            // Flag recovery required and overwrite the region counts with the torn values, leaving
+            // the commit slots (and their checksums) untouched so both slots still verify.
+            header[GOD_BYTE_OFFSET] |= RECOVERY_REQUIRED;
+            header[NUM_FULL_REGIONS_OFFSET..NUM_FULL_REGIONS_OFFSET + size_of::<u32>()]
+                .copy_from_slice(&full_regions.to_le_bytes());
+            header[TRAILING_REGION_DATA_PAGES_OFFSET
+                ..TRAILING_REGION_DATA_PAGES_OFFSET + size_of::<u32>()]
+                .copy_from_slice(&trailing_pages.to_le_bytes());
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&header).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            // The database must open and preserve the committed data.
+            let db = Database::open(tmpfile.path()).unwrap();
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(X).unwrap();
+            assert_eq!(table.get_owned("hello").unwrap().unwrap().value(), "world");
+        }
+
+        // Both counts torn to zero describes zero regions: previously rejected as
+        // "Invalid region count" before recovery could run.
+        recover_after_tearing(|_full, _trailing| (0, 0));
+        // A trailing count torn above the true file length: previously rejected as
+        // "File truncated below stored layout".
+        recover_after_tearing(|full, trailing| (full, trailing + 8));
+    }
+
+    #[test]
+    fn repair_empty() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        drop(db);
+
+        let mut file = tmpfile.as_file();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
+    fn close_on_drop() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder()
+            .set_cache_size(0)
+            .create(tmpfile.path())
+            .unwrap();
+        let table_def: TableDefinition<u64, u64> = TableDefinition::new("x");
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_def).unwrap();
+            table.insert(0, 0).unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_read().unwrap();
+        drop(db);
+        assert!(matches!(
+            txn.list_tables().err().unwrap(),
+            StorageError::DatabaseClosed
+        ));
+
+        let mut file = tmpfile.as_file();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        assert_eq!(buffer[0] & RECOVERY_REQUIRED, 0);
+        drop(txn);
+    }
+
+    #[test]
+    fn abort_repair() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+        drop(db);
+
+        let mut file = tmpfile.as_file();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        buffer[0] &= !TWO_PHASE_COMMIT;
+        file.write_all(&buffer).unwrap();
+
+        let err = Database::builder()
+            .set_repair_callback(|handle| handle.abort())
+            .open(tmpfile.path())
+            .unwrap_err();
+        assert!(matches!(err, DatabaseError::RepairAborted));
+    }
+
+    #[test]
+    fn repair_insert_reserve_regression() {
+        let tmpfile = crate::create_tempfile();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
+
+        let def: TableDefinition<&str, &[u8]> = TableDefinition::new("x");
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(def).unwrap();
+            let mut value = table.insert_reserve("hello", 5).unwrap();
+            value.as_mut().copy_from_slice(b"world");
+        }
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(def).unwrap();
+            let mut value = table.insert_reserve("hello2", 5).unwrap();
+            value.as_mut().copy_from_slice(b"world");
+        }
+        write_txn.commit().unwrap();
+
+        drop(db);
+
+        let mut file = tmpfile.as_file();
+
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        let mut buffer = [0u8; 1];
+        file.read_exact(&mut buffer).unwrap();
+        file.seek(SeekFrom::Start(GOD_BYTE_OFFSET as u64)).unwrap();
+        buffer[0] |= RECOVERY_REQUIRED;
+        file.write_all(&buffer).unwrap();
+
+        Database::open(tmpfile.path()).unwrap();
+    }
+
+    #[test]
+    fn magic_number() {
+        // Test compliance with some, but not all, provisions recommended by
+        // IETF Memo "Care and Feeding of Magic Numbers"
+
+        // Test that magic number is not valid utf-8
+        #[allow(invalid_from_utf8)]
+        {
+            assert!(core::str::from_utf8(&MAGICNUMBER).is_err());
+        }
+        // Test there is a octet with high-bit set
+        assert!(MAGICNUMBER.iter().any(|x| *x & 0x80 != 0));
+        // Test there is a non-printable ASCII character
+        assert!(MAGICNUMBER.iter().any(|x| *x < 0x20 || *x > 0x7E));
+        // Test there is a printable ASCII character
+        assert!(MAGICNUMBER.iter().any(|x| *x >= 0x20 && *x <= 0x7E));
+        // Test there is a printable ISO-8859 that's non-ASCII printable
+        assert!(MAGICNUMBER.iter().any(|x| *x >= 0xA0));
+        // Test there is a ISO-8859 control character other than 0x09, 0x0A, 0x0C, 0x0D
+        assert!(MAGICNUMBER.iter().any(|x| *x < 0x09
+            || *x == 0x0B
+            || (0x0E <= *x && *x <= 0x1F)
+            || (0x7F <= *x && *x <= 0x9F)));
+    }
+}

@@ -1,0 +1,128 @@
+use crate::Result;
+use crate::tree_store::btree_base::BranchAccessor;
+use crate::tree_store::btree_base::{BRANCH, LEAF};
+use crate::tree_store::page_store::{Page, PageHint, PageImpl};
+use crate::tree_store::{PageNumber, PageResolver};
+use crate::types::{Key, Value};
+use Bound::{Excluded, Included, Unbounded};
+use alloc::vec;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+use core::ops::Bound;
+use core::ops::{Range, RangeBounds};
+
+pub(crate) struct EntryGuard<K: Key, V: Value> {
+    page: PageImpl,
+    key_range: Range<usize>,
+    value_range: Range<usize>,
+    _key_type: PhantomData<K>,
+    _value_type: PhantomData<V>,
+}
+
+impl<K: Key, V: Value> EntryGuard<K, V> {
+    pub(super) fn new(page: PageImpl, key_range: Range<usize>, value_range: Range<usize>) -> Self {
+        Self {
+            page,
+            key_range,
+            value_range,
+            _key_type: PhantomData,
+            _value_type: PhantomData,
+        }
+    }
+
+    pub(super) fn key_bytes(&self) -> &[u8] {
+        &self.page.memory()[self.key_range.clone()]
+    }
+
+    pub(crate) fn key_data(&self) -> Vec<u8> {
+        self.page.memory()[self.key_range.clone()].to_vec()
+    }
+
+    pub(crate) fn key(&self) -> K::SelfType<'_> {
+        K::from_bytes(&self.page.memory()[self.key_range.clone()])
+    }
+
+    pub(crate) fn value(&self) -> V::SelfType<'_> {
+        V::from_bytes(&self.page.memory()[self.value_range.clone()])
+    }
+
+    pub(crate) fn into_raw(self) -> (PageImpl, Range<usize>, Range<usize>) {
+        (self.page, self.key_range, self.value_range)
+    }
+}
+
+pub(crate) struct AllPageNumbersBtreeIter {
+    pending: Vec<PageNumber>,
+    fixed_key_size: Option<usize>,
+    manager: PageResolver,
+    hint: PageHint,
+}
+
+impl AllPageNumbersBtreeIter {
+    pub(crate) fn new(
+        root: PageNumber,
+        fixed_key_size: Option<usize>,
+        manager: PageResolver,
+        hint: PageHint,
+    ) -> Self {
+        Self {
+            pending: vec![root],
+            fixed_key_size,
+            manager,
+            hint,
+        }
+    }
+}
+
+impl Iterator for AllPageNumbersBtreeIter {
+    type Item = Result<PageNumber>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let page_number = self.pending.pop()?;
+        let page = match self.manager.get_page(page_number, self.hint) {
+            Ok(page) => page,
+            Err(err) => return Some(Err(err)),
+        };
+        match page.memory()[0] {
+            LEAF => {}
+            BRANCH => {
+                let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                // Push in reverse so children are popped left-to-right.
+                for child in (0..accessor.count_children()).rev() {
+                    self.pending.push(accessor.child_page(child).unwrap());
+                }
+            }
+            _ => unreachable!(),
+        }
+        Some(Ok(page_number))
+    }
+}
+
+// Encodes a range's bounds with Key::as_bytes
+pub(crate) fn encode_bounds<'a, K, KR, R>(range: &R) -> (Bound<Vec<u8>>, Bound<Vec<u8>>)
+where
+    K: Key + 'a,
+    KR: Borrow<K::SelfType<'a>>,
+    R: RangeBounds<KR>,
+{
+    let encode = |key: &KR| K::as_bytes(key.borrow()).as_ref().to_vec();
+    (
+        range.start_bound().map(encode),
+        range.end_bound().map(encode),
+    )
+}
+
+// Whether the encoded bounds select no keys, i.e. the range is reversed or empty
+pub(crate) fn bounds_are_empty<K: Key + 'static>(
+    lower: &Bound<Vec<u8>>,
+    upper: &Bound<Vec<u8>>,
+) -> bool {
+    match (lower, upper) {
+        (Unbounded, _) | (_, Unbounded) => false,
+        (Included(start), Excluded(end)) | (Excluded(start), Included(end) | Excluded(end)) => {
+            K::compare(start, end).is_ge()
+        }
+        (Included(start), Included(end)) => K::compare(start, end).is_gt(),
+    }
+}
