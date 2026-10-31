@@ -18,6 +18,45 @@ use core::ops::Range;
 pub(crate) const LEAF: u8 = 1;
 pub(crate) const BRANCH: u8 = 2;
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[repr(u8)]
+pub(crate) enum PageType {
+    Leaf = LEAF,
+    Branch = BRANCH,
+}
+
+impl PageType {
+    pub(crate) fn from_page(page: &impl Page) -> Result<Self> {
+        Self::parse(page.memory()[0], page.get_page_number(), None)
+    }
+
+    pub(crate) fn from_page_at(page: &impl Page, file_offset: u64) -> Result<Self> {
+        Self::parse(page.memory()[0], page.get_page_number(), Some(file_offset))
+    }
+
+    pub(crate) fn from_byte(page_type: u8) -> Result<Self> {
+        match page_type {
+            LEAF => Ok(Self::Leaf),
+            BRANCH => Ok(Self::Branch),
+            page_type => Err(StorageError::Corrupted(format!(
+                "Invalid page type byte {page_type}"
+            ))),
+        }
+    }
+
+    fn parse(page_type: u8, page_number: PageNumber, file_offset: Option<u64>) -> Result<Self> {
+        Self::from_byte(page_type).map_err(|_| {
+            let message = match file_offset {
+                Some(offset) => format!(
+                    "Invalid page type byte {page_type} for page {page_number:?} at file offset {offset}"
+                ),
+                None => format!("Invalid page type byte {page_type} for page {page_number:?}"),
+            };
+            StorageError::Corrupted(message)
+        })
+    }
+}
+
 // Descending a btree recurses once per level, so a corrupted file whose branch pages form a cycle,
 // or a crafted chain of them, overflows the stack -- which aborts rather than unwinding. No real
 // tree comes close to this depth: the page format addresses 4PiB, and branches hold enough children
@@ -243,8 +282,19 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
         len: usize,
         position: usize,
         fixed_key_size: Option<usize>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        // Drop cannot return Result, so validate the leaf type here where Corrupted can propagate.
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {}
+            PageType::Branch => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} for page {:?}",
+                    BRANCH,
+                    page.get_page_number(),
+                )));
+            }
+        }
+        Ok(Self {
             page: EitherPage::Mutable(page),
             offset,
             len,
@@ -253,7 +303,7 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
                 fixed_key_size,
             },
             _value_type: PhantomData,
-        }
+        })
     }
 
     /// Access the stored value
@@ -286,8 +336,9 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
                 fixed_key_size,
             } => {
                 if let EitherPage::Mutable(ref mut mut_page) = self.page {
-                    let mut mutator =
-                        LeafMutator::new(mut_page.memory_mut(), fixed_key_size, V::fixed_width());
+                    // Drop cannot return Result; `remove_on_drop` already rejected non-leaf pages.
+                    let mut mutator = LeafMutator::new(mut_page, fixed_key_size, V::fixed_width())
+                        .expect("remove_on_drop page must be a leaf");
                     mutator.remove(position);
                 } else if !crate::panicking() {
                     unreachable!();
@@ -371,8 +422,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
             V::fixed_width(),
             value_bytes.as_ref(),
         ) {
-            let mut mutator =
-                LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
+            let mut mutator = LeafMutator::new(&mut self.page, self.key_width, V::fixed_width())?;
             mutator.replace(self.entry_index, value_bytes.as_ref());
         } else {
             let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
@@ -397,7 +447,7 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
 
             // Update parent branch page if it exists, otherwise update root
             if let Some((ref mut parent_page, parent_entry_index)) = self.parent {
-                let mut mutator = BranchMutator::new(parent_page.memory_mut());
+                let mut mutator = BranchMutator::new(parent_page)?;
                 mutator.write_child_page(parent_entry_index, new_page.get_page_number(), DEFERRED);
             } else {
                 self.root_ref.root = new_page.get_page_number();
@@ -1260,16 +1310,25 @@ struct RemovedLeafRanges<'a> {
 
 impl<'b> LeafMutator<'b> {
     pub(super) fn new(
-        page: &'b mut [u8],
+        page: &'b mut PageMut<'_>,
         fixed_key_size: Option<usize>,
         fixed_value_size: Option<usize>,
-    ) -> Self {
-        assert_eq!(page[0], LEAF);
-        Self {
-            page,
+    ) -> Result<Self> {
+        match PageType::from_page(page)? {
+            PageType::Leaf => {}
+            PageType::Branch => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} for page {:?}",
+                    BRANCH,
+                    page.get_page_number(),
+                )));
+            }
+        }
+        Ok(Self {
+            page: page.memory_mut(),
             fixed_key_size,
             fixed_value_size,
-        }
+        })
     }
 
     // Returns true if there is enough space to replace the value at `position` in-place.
@@ -1789,13 +1848,11 @@ impl<'a> LeafPageMut<'a> {
     }
 
     // Replace the value at index `i` in-place, leaving the key unchanged.
-    pub(crate) fn replace_value(&mut self, i: usize, value: &[u8]) {
-        let mut mutator = LeafMutator::new(
-            self.page.memory_mut(),
-            self.fixed_key_size,
-            self.fixed_value_size,
-        );
+    pub(crate) fn replace_value(&mut self, i: usize, value: &[u8]) -> Result {
+        let mut mutator =
+            LeafMutator::new(&mut self.page, self.fixed_key_size, self.fixed_value_size)?;
         mutator.replace(i, value);
+        Ok(())
     }
 }
 
@@ -2245,9 +2302,20 @@ pub(super) struct BranchMutator<'b> {
 }
 
 impl<'b> BranchMutator<'b> {
-    pub(crate) fn new(page: &'b mut [u8]) -> Self {
-        assert_eq!(page[0], BRANCH);
-        Self { page }
+    pub(crate) fn new(page: &'b mut PageMut<'_>) -> Result<Self> {
+        match PageType::from_page(page)? {
+            PageType::Branch => {}
+            PageType::Leaf => {
+                return Err(StorageError::Corrupted(format!(
+                    "Invalid page type byte {} for page {:?}",
+                    LEAF,
+                    page.get_page_number(),
+                )));
+            }
+        }
+        Ok(Self {
+            page: page.memory_mut(),
+        })
     }
 
     fn num_keys(&self) -> usize {
@@ -2364,7 +2432,7 @@ mod tests {
             &key,
             &[],
         ));
-        let mut mutator = LeafMutator::new(page.memory_mut(), u64::fixed_width(), None);
+        let mut mutator = LeafMutator::new(&mut page, u64::fixed_width(), None).unwrap();
         mutator.insert(MAX_PAIRS - 1, &key, &[]);
 
         let accessor = LeafAccessor::new(page.memory(), u64::fixed_width(), None);

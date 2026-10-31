@@ -8,10 +8,10 @@ use crate::table::{CompatBorrow, OwnedAccessGuard, ReadableTableMetadata, TableS
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::tree_store::encode_bounds;
 use crate::tree_store::{
-    AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
-    DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
-    MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTracker,
-    RawBtree, RawLeafBuilder, multimap_btree_stats,
+    AllPageNumbersBtreeIter, Btree, BtreeCursorRange, BtreeHeader, BtreeMut, DynamicCollection,
+    DynamicCollectionType, LeafAccessor, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageAllocator,
+    PageHint, PageNumber, PageResolver, PageTracker, PageType, RawBtree, RawLeafBuilder,
+    multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -835,8 +835,8 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 }) = subtree.get_root()
                 {
                     let page = self.page_allocator.get_page(new_root, PageHint::None)?;
-                    match page.memory()[0] {
-                        LEAF => {
+                    match PageType::from_page(&page)? {
+                        PageType::Leaf => {
                             let accessor = LeafAccessor::new(
                                 page.memory(),
                                 V::fixed_width(),
@@ -870,14 +870,13 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                                     .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                             }
                         }
-                        BRANCH => {
+                        PageType::Branch => {
                             let subtree_data = DynamicCollection::<V>::make_subtree_data(
                                 BtreeHeader::new(new_root, new_checksum, new_length),
                             );
                             self.tree
                                 .insert(key.borrow(), &DynamicCollection::new(&subtree_data))?;
                         }
-                        _ => unreachable!(),
                     }
                 } else {
                     self.tree.remove(key.borrow())?;

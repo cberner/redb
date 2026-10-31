@@ -113,6 +113,11 @@ impl PageResolver {
         self.mem.get_page(page_number, hint)
     }
 
+    /// Byte offset of `page_number` from the start of the database file.
+    pub(crate) fn page_address(&self, page_number: PageNumber) -> u64 {
+        self.mem.page_address(page_number)
+    }
+
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         self.mem.count_allocated_pages()
     }
@@ -1917,6 +1922,18 @@ impl TransactionalMemory {
         state.read_from_secondary = true;
 
         Ok(())
+    }
+
+    /// Byte offset of `page_number` from the start of the database file.
+    pub(crate) fn page_address(&self, page_number: PageNumber) -> u64 {
+        page_number
+            .address_range(
+                self.page_size.into(),
+                self.region_size,
+                self.region_header_with_padding_size,
+                self.page_size,
+            )
+            .start
     }
 
     pub(crate) fn get_page(&self, page_number: PageNumber, hint: PageHint) -> Result<PageImpl> {

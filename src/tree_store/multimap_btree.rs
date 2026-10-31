@@ -2,7 +2,7 @@ use crate::Result;
 use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
+    BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut, PageType,
 };
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::tree_store::{
@@ -47,9 +47,8 @@ fn multimap_stats_helper(
     hint: PageHint,
 ) -> Result<BtreeStats> {
     let page = mem.get_page(page_number, hint)?;
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
+    match PageType::from_page(&page)? {
+        PageType::Leaf => {
             let accessor = LeafAccessor::new(
                 page.memory(),
                 fixed_key_size,
@@ -117,7 +116,7 @@ fn multimap_stats_helper(
                 fragmented_bytes,
             })
         }
-        BRANCH => {
+        PageType::Branch => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
             let mut max_child_height = 0;
             let mut leaf_pages = 0;
@@ -147,7 +146,6 @@ fn multimap_stats_helper(
                 fragmented_bytes,
             })
         }
-        _ => unreachable!(),
     }
 }
 
@@ -176,7 +174,7 @@ pub(super) fn verify_tree_and_subtree_checksums(
             AllPageNumbersBtreeIter::new(header.root, key_size, mem.clone(), hint);
         for table_page in table_pages_iter {
             let page = mem.get_page(table_page?, hint)?;
-            let subtree_roots = parse_subtree_roots(&page, key_size, value_size);
+            let subtree_roots = parse_subtree_roots(&page, key_size, value_size)?;
             for header in subtree_roots {
                 if !RawBtree::new(
                     Some(header),
@@ -214,8 +212,8 @@ pub(super) fn relocate_subtrees(
     let new_page_number = new_page.get_page_number();
     new_page.memory_mut().copy_from_slice(old_page.memory());
 
-    match old_page.memory()[0] {
-        LEAF => {
+    match PageType::from_page(&old_page)? {
+        PageType::Leaf => {
             let mut leaf_page = LeafPageMut::new(
                 new_page,
                 key_size,
@@ -242,14 +240,14 @@ pub(super) fn relocate_subtrees(
                     if sub_root != tree.get_root().unwrap() {
                         let new_collection =
                             UntypedDynamicCollection::make_subtree_data(tree.get_root().unwrap());
-                        leaf_page.replace_value(i, &new_collection);
+                        leaf_page.replace_value(i, &new_collection)?;
                     }
                 }
             }
         }
-        BRANCH => {
+        PageType::Branch => {
             let accessor = BranchAccessor::new(&old_page, key_size);
-            let mut mutator = BranchMutator::new(new_page.memory_mut());
+            let mut mutator = BranchMutator::new(&mut new_page)?;
             for i in 0..accessor.count_children() {
                 if let Some(child) = accessor.child_page(i) {
                     let child_checksum = accessor.child_checksum(i).unwrap();
@@ -265,7 +263,6 @@ pub(super) fn relocate_subtrees(
                 }
             }
         }
-        _ => unreachable!(),
     }
 
     let old_page_number = old_page.get_page_number();
@@ -318,7 +315,7 @@ pub(super) fn finalize_tree_and_subtree_checksums(
         }
         for (i, sub_root) in sub_root_updates {
             let collection = DynamicCollection::<()>::make_subtree_data(sub_root);
-            leaf_page.replace_value(i, &collection);
+            leaf_page.replace_value(i, &collection)?;
         }
 
         Ok(())
@@ -334,12 +331,10 @@ fn parse_subtree_roots<T: Page>(
     page: &T,
     fixed_key_size: Option<usize>,
     fixed_value_size: Option<usize>,
-) -> Vec<BtreeHeader> {
-    match page.memory()[0] {
-        BRANCH => {
-            vec![]
-        }
-        LEAF => {
+) -> Result<Vec<BtreeHeader>> {
+    match PageType::from_page(page)? {
+        PageType::Branch => Ok(vec![]),
+        PageType::Leaf => {
             let mut result = vec![];
             let accessor = LeafAccessor::new(
                 page.memory(),
@@ -354,9 +349,8 @@ fn parse_subtree_roots<T: Page>(
                 }
             }
 
-            result
+            Ok(result)
         }
-        _ => unreachable!(),
     }
 }
 
@@ -400,9 +394,9 @@ impl UntypedMultiBtree {
         tree.visit_all_pages(|path| {
             visitor(path)?;
             let page = self.mem.get_page(path.page_number(), self.hint)?;
-            match page.memory()[0] {
-                LEAF => {
-                    for header in parse_subtree_roots(&page, self.key_width, self.value_width) {
+            match PageType::from_page(&page)? {
+                PageType::Leaf => {
+                    for header in parse_subtree_roots(&page, self.key_width, self.value_width)? {
                         let subtree = UntypedBtree::new(
                             Some(header),
                             self.mem.clone(),
@@ -416,10 +410,9 @@ impl UntypedMultiBtree {
                         })?;
                     }
                 }
-                BRANCH => {
+                PageType::Branch => {
                     // No-op. The tree.visit_pages() call will process this sub-tree
                 }
-                _ => unreachable!(),
             }
             Ok(())
         })?;
