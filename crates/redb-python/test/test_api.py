@@ -401,3 +401,31 @@ def test_removal(tmp_db_path: Path) -> None:
         assert len(users) == 0
         with pytest.raises(TypeError):
             users.remove(b"1")
+
+
+def test_retain(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        users[5] = b"5"
+        for key in range(10, 20):
+            users[key] = b"x"
+        users.retain(lambda key, value: key >= 10 or value == b"never")
+        assert [key for key, _ in users] == list(range(10, 20))
+
+        # A predicate's exception propagates once redb is done: the entries rejected before it
+        # are gone, the rest stayed
+        def picky(key: int, _: bytes) -> bool:
+            if key == 15:
+                raise ValueError("no")
+            return key > 15
+
+        with pytest.raises(ValueError, match="no"):
+            users.retain(picky)
+        assert [key for key, _ in users] == [15, 16, 17, 18, 19]
+        # A predicate cannot use the table it is filtering, which would wait for itself
+        with pytest.raises(RuntimeError, match="in use"):
+            users.retain(lambda key, _: key in users)
+        assert [key for key, _ in users] == [15, 16, 17, 18, 19]
+        users.retain(lambda key, value: False)
+        assert len(users) == 0
