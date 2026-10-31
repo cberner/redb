@@ -182,14 +182,14 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         guard: Arc<TransactionGuard>,
         mem: PageResolver,
     ) -> Result<Self> {
-        Ok(match collection.value().collection_type() {
+        Ok(match collection.value().collection_type()? {
             Inline => {
                 let leaf_iter =
                     LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
                 Self::new_inline(leaf_iter, guard)
             }
             SubtreeV2 => {
-                let root = collection.value().as_subtree().root;
+                let root = collection.value().as_subtree()?.root;
                 Self::new_subtree(
                     BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                         &(..),
@@ -197,7 +197,7 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
                         mem,
                         PageHint::None,
                     )?,
-                    collection.value().get_num_values(),
+                    collection.value().get_num_values()?,
                     guard,
                 )
             }
@@ -212,15 +212,15 @@ impl<'a, V: Key + 'static> MultimapValue<'a, V> {
         guard: Arc<TransactionGuard>,
         page_allocator: PageAllocator,
     ) -> Result<Self> {
-        let num_values = collection.value().get_num_values();
-        Ok(match collection.value().collection_type() {
+        let num_values = collection.value().get_num_values()?;
+        Ok(match collection.value().collection_type()? {
             Inline => {
                 let leaf_iter =
                     LeafKeyIter::new(collection, V::fixed_width(), <() as Value>::fixed_width());
                 Self::new_inline(leaf_iter, guard)
             }
             SubtreeV2 => {
-                let root = collection.value().as_subtree().root;
+                let root = collection.value().as_subtree()?.root;
                 let inner = BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     Some(root),
@@ -600,7 +600,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         let existed = if get_result.is_some() {
             #[allow(clippy::unnecessary_unwrap)]
             let guard = get_result.unwrap();
-            let collection_type = guard.value().collection_type();
+            let collection_type = guard.value().collection_type()?;
             match collection_type {
                 Inline => {
                     let leaf_data = guard.value().as_inline();
@@ -687,7 +687,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 }
                 SubtreeV2 => {
                     let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
-                        Some(guard.value().as_subtree()),
+                        Some(guard.value().as_subtree()?),
                         self.transaction.transaction_guard(),
                         self.page_allocator.clone(),
                         self.freed_pages.clone(),
@@ -763,7 +763,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         }
         let guard = get_result.unwrap();
         let v = guard.value();
-        let existed = match v.collection_type() {
+        let existed = match v.collection_type()? {
             Inline => {
                 let leaf_data = v.as_inline();
                 let accessor =
@@ -814,7 +814,7 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
             }
             SubtreeV2 => {
                 let mut subtree: BtreeMut<V, ()> = BtreeMut::new(
-                    Some(v.as_subtree()),
+                    Some(v.as_subtree()?),
                     self.transaction.transaction_guard(),
                     self.page_allocator.clone(),
                     self.freed_pages.clone(),
@@ -901,36 +901,10 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         &mut self,
         key: impl Borrow<K::SelfType<'a>>,
     ) -> Result<MultimapValue<'_, V>> {
-        let iter = if let Some(collection) = self.tree.remove(key.borrow())? {
-            let mut pages = vec![];
-            if matches!(
-                collection.value().collection_type(),
-                DynamicCollectionType::SubtreeV2
-            ) {
-                let root = collection.value().as_subtree().root;
-                let all_pages = AllPageNumbersBtreeIter::new(
-                    root,
-                    V::fixed_width(),
-                    self.page_allocator.resolver(),
-                    PageHint::None,
-                );
-                for page in all_pages {
-                    pages.push(page?);
-                }
-            }
-
-            self.num_values -= collection.value().get_num_values();
-
-            MultimapValue::from_collection_free_on_drop(
-                collection,
-                pages,
-                self.freed_pages.clone(),
-                self.allocated_pages.clone(),
-                self.transaction.transaction_guard(),
-                self.page_allocator.clone(),
-            )?
-        } else {
-            MultimapValue::new_subtree(
+        // Check the stored tag before deleting. A corrupt collection must
+        // report Corrupted without removing the key or leaving num_values stale.
+        let Some(guard) = self.tree.get(key.borrow())? else {
+            return Ok(MultimapValue::new_subtree(
                 BtreeCursorRange::new::<RangeFull, &V::SelfType<'_>>(
                     &(..),
                     None,
@@ -939,10 +913,37 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
                 )?,
                 0,
                 self.transaction.transaction_guard(),
-            )
+            ));
         };
+        let value = guard.value();
+        let is_subtree = matches!(value.collection_type()?, DynamicCollectionType::SubtreeV2);
+        let num_values = value.get_num_values()?;
+        let mut pages = vec![];
+        if is_subtree {
+            let root = value.as_subtree()?.root;
+            let all_pages = AllPageNumbersBtreeIter::new(
+                root,
+                V::fixed_width(),
+                self.page_allocator.resolver(),
+                PageHint::None,
+            );
+            for page in all_pages {
+                pages.push(page?);
+            }
+        }
+        drop(guard);
 
-        Ok(iter)
+        let collection = self.tree.remove(key.borrow())?.expect("key was present");
+        self.num_values -= num_values;
+
+        MultimapValue::from_collection_free_on_drop(
+            collection,
+            pages,
+            self.freed_pages.clone(),
+            self.allocated_pages.clone(),
+            self.transaction.transaction_guard(),
+            self.page_allocator.clone(),
+        )
     }
 }
 
