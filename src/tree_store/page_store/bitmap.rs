@@ -1,4 +1,6 @@
 use crate::tree_store::page_store::xxh3_checksum;
+use crate::{Result, StorageError};
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -92,29 +94,64 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self> {
+        // The range is one `u32`, so `try_into` succeeds whenever `get` does.
         let height = u32::from_le_bytes(
-            data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
+            data.get(HEIGHT_OFFSET..END_OFFSETS)
+                .ok_or_else(|| {
+                    StorageError::Corrupted(format!(
+                        "Btree bitmap is {} bytes, shorter than the {END_OFFSETS} byte height header",
+                        data.len(),
+                    ))
+                })?
                 .try_into()
                 .unwrap(),
         );
 
-        let mut metadata = END_OFFSETS;
-        let mut data_start = END_OFFSETS + (height as usize) * size_of::<u32>();
+        let Some(offsets_bytes) = (height as usize).checked_mul(size_of::<u32>()) else {
+            return Err(StorageError::Corrupted(format!(
+                "Btree bitmap height {height} overflows the offset table"
+            )));
+        };
+        let Some(table_end) = END_OFFSETS.checked_add(offsets_bytes) else {
+            return Err(StorageError::Corrupted(format!(
+                "Btree bitmap height {height} overflows the offset table"
+            )));
+        };
+        if data.get(END_OFFSETS..table_end).is_none() {
+            return Err(StorageError::Corrupted(format!(
+                "Btree bitmap height {height} needs a {table_end} byte header, but the bitmap is {} bytes",
+                data.len(),
+            )));
+        }
 
-        let mut heights = vec![];
+        let mut metadata = END_OFFSETS;
+        let mut data_start = table_end;
+        let mut heights = Vec::with_capacity(height as usize);
         for _ in 0..height {
             let data_end = u32::from_le_bytes(
-                data[metadata..(metadata + size_of::<u32>())]
+                data.get(metadata..(metadata + size_of::<u32>()))
+                    .ok_or_else(|| {
+                        StorageError::Corrupted(format!(
+                            "Btree bitmap height {height} offset table is truncated at byte {metadata}, bitmap is {} bytes",
+                            data.len(),
+                        ))
+                    })?
                     .try_into()
                     .unwrap(),
             ) as usize;
-            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end]));
+            let Some(layer) = data.get(data_start..data_end) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Btree bitmap layer end offset {data_end} is outside {data_start}..={}",
+                    data.len(),
+                )));
+            };
+            heights.push(U64GroupedBitmap::from_bytes(layer));
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self { heights }
+        Ok(Self { heights })
     }
 
     // Initializes a new allocator, with no ids free
