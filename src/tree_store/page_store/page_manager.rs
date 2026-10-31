@@ -1762,7 +1762,7 @@ impl TransactionalMemory {
             tree.get(&AllocatorStateKey::RegionTracker)?
                 .unwrap()
                 .value(),
-        );
+        )?;
 
         let mut state = self.state.lock().unwrap();
         state.allocators = AllocatorState::Loaded(Allocators {
