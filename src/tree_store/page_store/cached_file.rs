@@ -418,6 +418,8 @@ impl PagedCachedFile {
 
         #[cfg(feature = "cache_metrics")]
         {
+            // hits is loaded before total, and read()/write() increment total before hits, so a
+            // snapshot never sees hits > total and the subtractions cannot underflow.
             let read_hits = self.reads_hits.load(Ordering::Acquire);
             let read_total = self.reads_total.load(Ordering::Acquire);
             let write_hits = self.writes_hits.load(Ordering::Acquire);
@@ -648,6 +650,7 @@ impl PagedCachedFile {
     // Doing so will not cause UB, but is a logic error.
     pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
         debug_assert_eq!(0, offset % self.page_size);
+        // Before the hit counter: see cache_stats()
         #[cfg(feature = "cache_metrics")]
         self.reads_total.fetch_add(1, Ordering::AcqRel);
 
@@ -877,6 +880,9 @@ impl PagedCachedFile {
     // cache_policy takes the existing data as an argument and returns the priority. The priority should be stable and not change after WritablePage is dropped
     pub(super) fn write(&self, offset: u64, len: usize, overwrite: bool) -> Result<WritablePage> {
         assert_eq!(0, offset % self.page_size);
+        // Before the hit counter: see cache_stats()
+        #[cfg(feature = "cache_metrics")]
+        self.writes_total.fetch_add(1, Ordering::AcqRel);
         let stripe = self.write_buffer_stripe(offset);
         let mut lock = stripe.lock().unwrap();
 
@@ -965,8 +971,6 @@ impl PagedCachedFile {
             lock.insert(offset, result);
             lock.take_value(offset).unwrap()
         };
-        #[cfg(feature = "cache_metrics")]
-        self.writes_total.fetch_add(1, Ordering::AcqRel);
         Ok(WritablePage {
             buffer: stripe.clone(),
             offset,
@@ -1031,6 +1035,36 @@ mod test {
             self.writes.fetch_add(1, Ordering::SeqCst);
             self.inner.write(offset, data)
         }
+    }
+
+    // A cache_stats() snapshot taken mid-write must never see more hits than total writes.
+    #[cfg(feature = "cache_metrics")]
+    #[test]
+    fn cache_stats_consistent_during_writes() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(4096).unwrap();
+        let cached_file = Arc::new(PagedCachedFile::new(Box::new(backend), 128, 4096));
+        let writes: u64 = 200_000;
+
+        let writer = {
+            let cached_file = cached_file.clone();
+            std::thread::spawn(move || {
+                // Every write is a hit: zero-filled, or found still buffered.
+                for i in 0..writes {
+                    drop(cached_file.write((i % 8) * 128, 128, true).unwrap());
+                }
+            })
+        };
+
+        while !writer.is_finished() {
+            let stats = cached_file.cache_stats();
+            assert!(stats.write_hits() <= writes);
+            assert!(stats.write_misses() <= writes);
+        }
+        writer.join().unwrap();
+        let stats = cached_file.cache_stats();
+        assert_eq!(stats.write_hits(), writes);
+        assert_eq!(stats.write_misses(), 0);
     }
 
     #[test]

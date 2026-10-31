@@ -70,6 +70,8 @@
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
+* Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a
+  `write_misses()` near `u64::MAX` in release builds when called while another thread is writing.
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
