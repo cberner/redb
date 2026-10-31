@@ -14,7 +14,6 @@ use crate::{
 };
 use crate::{ReadTransaction, Result, WriteTransaction};
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
 use core::fmt::{Debug, Display, Formatter};
@@ -878,9 +877,9 @@ impl Database {
         // Once the allocator state has been discarded (by a failed commit or integrity check),
         // the database must be reopened to rebuild it; this check requires one to compare against
         if self.mem.allocator_state_invalidated() {
-            return Err(StorageError::Corrupted(
-                "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
-            )
+            return Err(StorageError::corrupted(format_args!(
+                "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it"
+            ))
             .into());
         }
 
@@ -1320,7 +1319,7 @@ impl Database {
                 return Ok(());
             }
             Err(_) => {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::corrupted(format_args!(
                     "Unable to open {table_name}"
                 )));
             }
@@ -1411,8 +1410,8 @@ impl Database {
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
         if !Self::primary_verifies(mem)? {
             if mem.used_two_phase_commit() {
-                return Err(DatabaseError::Storage(StorageError::Corrupted(
-                    "Primary is corrupted despite 2-phase commit".to_string(),
+                return Err(DatabaseError::Storage(StorageError::corrupted(
+                    format_args!("Primary is corrupted despite 2-phase commit"),
                 )));
             }
 
@@ -1429,8 +1428,8 @@ impl Database {
             // that rolls back a partially committed transaction.
             mem.clear_read_cache();
             if !Self::primary_verifies(mem)? {
-                return Err(DatabaseError::Storage(StorageError::Corrupted(
-                    "Failed to repair database. All roots are corrupted".to_string(),
+                return Err(DatabaseError::Storage(StorageError::corrupted(
+                    format_args!("Failed to repair database. All roots are corrupted"),
                 )));
             }
         }
@@ -1537,18 +1536,18 @@ impl Database {
             Self::mark_allocated_page_for_debug(mem)?;
         } else {
             if !Self::verify_primary_checksums(mem.clone())? {
-                return Err(StorageError::Corrupted(
-                    "Cannot rebuild allocator state: committed trees are corrupted".to_string(),
-                ));
+                return Err(StorageError::corrupted(format_args!(
+                    "Cannot rebuild allocator state: committed trees are corrupted"
+                )));
             }
             // Freed-page tables retain the pages that readers and persistent savepoints still
             // reference. Rebuilding must keep those allocated as well as the current trees.
             let roots = Self::rebuild_allocator_state(mem, &|_| {})
                 .map_err(DatabaseError::into_storage_error_or_corrupted)?;
             if roots != [mem.get_data_root(), mem.get_system_root()] {
-                return Err(StorageError::Corrupted(
-                    "Committed table counts do not match the database trees".to_string(),
-                ));
+                return Err(StorageError::corrupted(format_args!(
+                    "Committed table counts do not match the database trees"
+                )));
             }
         }
         // Loaded or rebuilt, this state holds none of the pages leaked by a transaction that
@@ -1810,9 +1809,9 @@ fn begin_write_with_allocation_policy(
     // first so a backend failure is not misreported as corruption
     mem.check_io_errors()?;
     if mem.allocator_state_invalidated() {
-        return Err(StorageError::Corrupted(
-            "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it".to_string(),
-        )
+        return Err(StorageError::corrupted(format_args!(
+            "Allocator state was discarded by a failed integrity check or commit; reopen the database to repair it"
+        ))
         .into());
     }
     // Issued once the sync is done, so that the id follows the file's latest commit
