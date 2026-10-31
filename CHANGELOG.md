@@ -67,6 +67,7 @@
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
+- Certain operations now return an error instead of panicking on database corruption
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
