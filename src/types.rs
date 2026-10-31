@@ -826,9 +826,10 @@ fn round_up_to_char_boundary(utf8: &[u8], mut index: usize) -> usize {
 
 impl Key for &str {
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = Self::from_bytes(data1);
-        let str2 = Self::from_bytes(data2);
-        str1.cmp(str2)
+        // `Ord for str` is documented as ordering strings lexicographically by their byte
+        // values, so comparing the encodings directly gives the same order without validating
+        // both as UTF-8 on every comparison
+        data1.cmp(data2)
     }
 
     fn separator<'a>(left: &'a [u8], right: &'a [u8]) -> Cow<'a, [u8]> {
@@ -886,10 +887,9 @@ impl Value for String {
 }
 
 impl Key for String {
+    // Encoded the same way as `&str`, so it orders the same way
     fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
-        let str1 = core::str::from_utf8(data1).unwrap();
-        let str2 = core::str::from_utf8(data2).unwrap();
-        str1.cmp(str2)
+        <&str as Key>::compare(data1, data2)
     }
 
     // Encoded the same way as `&str`, so it separates the same way
@@ -1177,6 +1177,42 @@ mod tests {
                 <String as Key>::separator(left.as_bytes(), right.as_bytes()),
                 separator
             );
+        }
+    }
+
+    #[test]
+    fn str_compare_matches_str_ord() {
+        // Prefixes, and characters of every UTF-8 length, including a pair whose UTF-16 order
+        // differs from code point order
+        let strings: &[&str] = &[
+            "",
+            "\u{0}",
+            "a",
+            "ab",
+            "abc",
+            "ab\u{e9}",
+            "ab\u{20ac}",
+            "ab\u{1d11e}",
+            "\u{7f}",
+            "\u{80}",
+            "\u{ffff}",
+            "\u{10000}",
+            "\u{10ffff}",
+        ];
+        for a in strings {
+            for b in strings {
+                let expected = a.cmp(b);
+                assert_eq!(
+                    <&str as Key>::compare(a.as_bytes(), b.as_bytes()),
+                    expected,
+                    "{a:?} <=> {b:?}"
+                );
+                assert_eq!(
+                    <String as Key>::compare(a.as_bytes(), b.as_bytes()),
+                    expected,
+                    "{a:?} <=> {b:?}"
+                );
+            }
         }
     }
 

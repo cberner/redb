@@ -64,6 +64,9 @@
 * `ConcurrencyMode::MultiWriter`, allows any number of processes to open the database for
   writing, one write transaction at a time, and any may number open it read-only.
 
+### Performance
+* Operations on tables with `&str` or `String` keys are faster.
+
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
