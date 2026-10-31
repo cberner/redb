@@ -200,6 +200,28 @@ class RedbMachine(RuleBasedStateMachine):
             with pytest.raises(RuntimeError):
                 next(entries)
 
+    @rule(name=names, data=st.data(), delitem=st.booleans())
+    def remove(self, name: str, data: st.DataObject, delitem: bool) -> None:
+        table, model = self._table(name)
+        key = data.draw(KEYS[TABLES[name].key_type])
+        if not delitem:
+            assert table.remove(key) == model.get(key)
+        elif key in model:
+            del table[key]
+        else:
+            with pytest.raises(KeyError):
+                del table[key]
+        model.pop(key, None)
+
+    @rule(name=names, last=st.booleans())
+    def pop_end(self, name: str, last: bool) -> None:
+        table, model = self._table(name)
+        entries = sorted(model.items())
+        expected = (entries[-1] if last else entries[0]) if entries else None
+        assert (table.pop_last() if last else table.pop_first()) == expected
+        if expected is not None:
+            del model[expected[0]]
+
     @precondition(lambda self: self.stale is not None)
     @rule()
     def stale_handle(self) -> None:
