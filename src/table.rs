@@ -1378,18 +1378,18 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
     /// Returns a view of this entry's value.
     pub fn get(&self) -> Result<AccessGuard<'_, V>> {
         self.tree.get(&self.key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })
     }
 
     /// Returns a mutable accessor to the value in the entry.
     pub fn get_mut(&mut self) -> Result<AccessGuardMut<'_, V>> {
         self.tree.get_mut(&self.key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })
     }
 
@@ -1397,9 +1397,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
     /// bound to the table itself.
     pub fn into_mut(self) -> Result<AccessGuardMut<'a, V>> {
         self.tree.get_mut(&self.key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })
     }
 
@@ -1417,18 +1417,18 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
         self.tree.insert(&self.key, value.borrow())?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })
     }
 
     /// Takes the value out of the entry, and returns it.
     pub fn remove(self) -> Result<AccessGuard<'a, V>> {
         self.tree.remove(&self.key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })
     }
 
@@ -1436,9 +1436,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
     pub fn remove_entry(self) -> Result<(K::SelfType<'a>, AccessGuard<'a, V>)> {
         let OccupiedEntry { tree, key } = self;
         let value = tree.remove(&key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "entry for key disappeared while OccupiedEntry was live".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "entry for key disappeared while OccupiedEntry was live"
+            ))
         })?;
         Ok((key, value))
     }
@@ -1473,9 +1473,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
         }
         self.tree.insert(&self.key, value.borrow())?;
         self.tree.get_mut(&self.key)?.ok_or_else(|| {
-            StorageError::Corrupted(
-                "inserted entry not found after VacantEntry::insert".to_string(),
-            )
+            StorageError::corrupted(format_args!(
+                "inserted entry not found after VacantEntry::insert"
+            ))
         })
     }
 }

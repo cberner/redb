@@ -6,8 +6,6 @@ use crate::tree_store::page_store::page_manager::{
     FILE_FORMAT_VERSION1, FILE_FORMAT_VERSION2, FILE_FORMAT_VERSION3, xxh3_checksum,
 };
 use crate::{DatabaseError, Result, StorageError};
-use alloc::format;
-use alloc::string::ToString;
 use core::mem::size_of;
 
 // Database layout:
@@ -122,7 +120,7 @@ impl UnrepairedDatabaseHeader {
     // `expected_page_size` is the page size this database was opened with.
     pub(super) fn from_bytes(data: &[u8], expected_page_size: u32) -> Result<Self, DatabaseError> {
         if data[..MAGICNUMBER.len()] != MAGICNUMBER {
-            return Err(StorageError::Corrupted("Invalid magic number".to_string()).into());
+            return Err(StorageError::corrupted(format_args!("Invalid magic number")).into());
         }
 
         let primary_slot = usize::from(data[GOD_BYTE_OFFSET] & PRIMARY_BIT != 0);
@@ -140,7 +138,7 @@ impl UnrepairedDatabaseHeader {
         // layout math below divides by / asserts on it; the page_size check also bounds every later
         // region-size product so none of that arithmetic can overflow.
         if page_size != expected_page_size {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Database page size {page_size} does not match expected {expected_page_size}"
             ))
             .into());
@@ -148,14 +146,14 @@ impl UnrepairedDatabaseHeader {
         // A region holds 1..=MAX_PAGE_INDEX + 1 pages (the page index is 20 bits); a larger count
         // would alias high pages onto low ones.
         if region_max_data_pages == 0 || region_max_data_pages > MAX_PAGE_INDEX + 1 {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Invalid region data page count: {region_max_data_pages}"
             ))
             .into());
         }
         // 0 is valid (v3 has no region header); cap it to keep the region-size math from overflowing.
         if region_header_pages > MAX_PAGE_INDEX + 1 {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Invalid region header page count: {region_header_pages}"
             ))
             .into());
@@ -166,7 +164,7 @@ impl UnrepairedDatabaseHeader {
         // value would reject a database that is still fully recoverable from its length.
         if !recovery_required {
             if trailing_data_pages > region_max_data_pages {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::corrupted(format_args!(
                     "Trailing region data pages {trailing_data_pages} exceed region max {region_max_data_pages}"
                 ))
                 .into());
@@ -176,7 +174,7 @@ impl UnrepairedDatabaseHeader {
             // DatabaseLayout::len().
             let num_regions = u64::from(full_regions) + u64::from(trailing_data_pages > 0);
             if num_regions == 0 || num_regions > u64::from(MAX_REGIONS) {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::corrupted(format_args!(
                     "Invalid region count: full_regions={full_regions}, trailing_data_pages={trailing_data_pages}"
                 ))
                 .into());
@@ -267,7 +265,7 @@ impl UnrepairedDatabaseHeader {
         // corruption -- redb shrinks the file only after writing a smaller layout.
         let stored_len = self.inner.layout().len();
         if file_len < stored_len {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "File truncated below stored layout: file_len={file_len}, layout_len={stored_len}"
             )));
         }
@@ -294,7 +292,7 @@ impl UnrepairedDatabaseHeader {
         // low ones or overflow the u32 region count.
         let max_addressable_len = u64::from(page_size) + u64::from(MAX_REGIONS) * full_region_size;
         if file_len > max_addressable_len {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "File length requires more regions than are addressable: file_len={file_len}"
             )));
         }
@@ -303,7 +301,7 @@ impl UnrepairedDatabaseHeader {
         // which underflows recalculate()'s arithmetic.
         let min_len = u64::from(page_size) * (u64::from(region_header_pages) + 2);
         if file_len < min_len {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "File truncated below the minimum layout: file_len={file_len}"
             )));
         }
@@ -314,7 +312,7 @@ impl UnrepairedDatabaseHeader {
         // Reject it rather than letting the `layout.len() == file_len` assertion in
         // `TransactionalMemory::new` panic.
         if recalculated.len() != file_len {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "File length does not correspond to a valid region layout: file_len={file_len}"
             )));
         }
@@ -327,9 +325,9 @@ impl UnrepairedDatabaseHeader {
         // we can't trust it
         if self.inner.two_phase_commit {
             if self.primary_corrupted {
-                return Err(StorageError::Corrupted(
-                    "Primary is corrupted despite 2-phase commit".to_string(),
-                ));
+                return Err(StorageError::corrupted(format_args!(
+                    "Primary is corrupted despite 2-phase commit"
+                )));
             }
             return Ok(true);
         }
@@ -340,9 +338,9 @@ impl UnrepairedDatabaseHeader {
         // transaction, so we need to load from the secondary instead
         if self.primary_corrupted {
             if self.secondary_corrupted {
-                return Err(StorageError::Corrupted(
-                    "Both commit slots are corrupted".to_string(),
-                ));
+                return Err(StorageError::corrupted(format_args!(
+                    "Both commit slots are corrupted"
+                )));
             }
             self.inner.swap_primary_slot();
             return Ok(false);
@@ -363,9 +361,9 @@ impl UnrepairedDatabaseHeader {
     // rolled back.
     pub(super) fn finalize_transaction_slots(self) -> Result<DatabaseHeader> {
         if self.primary_corrupted {
-            return Err(StorageError::Corrupted(
-                "Primary commit slot is corrupted".to_string(),
-            ));
+            return Err(StorageError::corrupted(format_args!(
+                "Primary commit slot is corrupted"
+            )));
         }
         Ok(self.inner)
     }
@@ -548,7 +546,7 @@ impl TransactionHeader {
             }
             FILE_FORMAT_VERSION3 => {}
             _ => {
-                return Err(StorageError::Corrupted(format!(
+                return Err(StorageError::corrupted(format_args!(
                     "Expected file format version <= {FILE_FORMAT_VERSION3}, found {version}",
                 ))
                 .into());

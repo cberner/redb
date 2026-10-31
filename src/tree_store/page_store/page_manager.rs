@@ -24,8 +24,6 @@ use crate::tree_store::{Page, PageNumber, PageTracker};
 use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -982,7 +980,7 @@ impl TransactionalMemory {
     fn active_transaction_byte(id: TransactionId) -> Result<u64> {
         match TXN_BASE.checked_add(id.raw_id()) {
             Some(offset) if offset < 1 << 63 => Ok(offset),
-            _ => Err(StorageError::Corrupted(format!(
+            _ => Err(StorageError::corrupted(format_args!(
                 "transaction id {} is outside the multi-process lock range",
                 id.raw_id()
             ))),
@@ -1080,9 +1078,9 @@ impl TransactionalMemory {
         let byte = Self::active_transaction_byte(id)?;
         // Refused only by an exclusive holder, which the caller's shared header hold excludes
         if !self.storage.try_lock_shared_range(byte_range(byte))? {
-            return Err(StorageError::Corrupted(
-                "another process holds an active transaction byte exclusively".to_string(),
-            ));
+            return Err(StorageError::corrupted(format_args!(
+                "another process holds an active transaction byte exclusively"
+            )));
         }
 
         Ok(())
@@ -1265,7 +1263,7 @@ impl TransactionalMemory {
     // failed allocation aborts the process instead of returning an error.
     fn check_page_order(page: PageNumber) -> Result<()> {
         if page.page_order > MAX_MAX_PAGE_ORDER {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Page {page:?} has order greater than the maximum of {MAX_MAX_PAGE_ORDER}"
             )));
         }
@@ -1585,7 +1583,7 @@ impl TransactionalMemory {
         // state lock is already held, so validating against the layout costs nothing here
         let layout = state.header.layout();
         if page_number.region >= layout.num_regions() {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Page {page_number:?} is in region {}, but the database has {} region(s)",
                 page_number.region,
                 layout.num_regions()
@@ -1595,14 +1593,14 @@ impl TransactionalMemory {
         // Cannot overflow: page_index is at most 2^32, and the order was bounded above
         let end_page = (u64::from(page_number.page_index) + 1) << page_number.page_order;
         if end_page > region_pages {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Page {page_number:?} extends past the end of its region, which has {region_pages} pages"
             )));
         }
 
         let allocator = state.get_region_mut(page_number.region);
         if !allocator.record_alloc(page_number.page_index, page_number.page_order) {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(format_args!(
                 "Page {page_number:?} overlaps a page that is already allocated"
             )));
         }

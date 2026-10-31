@@ -3,9 +3,8 @@ use crate::sync::PoisonError;
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
 use alloc::boxed::Box;
-use alloc::format;
 use alloc::string::{String, ToString};
-use core::fmt::{Display, Formatter};
+use core::fmt::{Arguments, Display, Formatter};
 use core::panic;
 
 /// Errors reported by a [`crate::StorageBackend`] locking operation.
@@ -78,6 +77,14 @@ pub enum StorageError {
     PreviousIo,
     DatabaseClosed,
     LockPoisoned(&'static panic::Location<'static>),
+}
+
+impl StorageError {
+    // Cold so the branch predictor treats a corruption return as unlikely, as with `assert!`.
+    #[cold]
+    pub(crate) fn corrupted(message: Arguments<'_>) -> Self {
+        Self::Corrupted(message.to_string())
+    }
 }
 
 impl<T> From<PoisonError<T>> for StorageError {
@@ -190,7 +197,7 @@ impl TableError {
             | TableError::TableDoesNotExist(_)
             | TableError::TableExists(_)
             | TableError::TableAlreadyOpen(_, _) => {
-                StorageError::Corrupted(format!("{msg}: {self}"))
+                StorageError::corrupted(format_args!("{msg}: {self}"))
             }
             TableError::Storage(storage) => storage,
         }
@@ -322,7 +329,7 @@ impl DatabaseError {
     pub(crate) fn into_storage_error_or_corrupted(self) -> StorageError {
         match self {
             DatabaseError::Storage(storage) => storage,
-            other => StorageError::Corrupted(other.to_string()),
+            other => StorageError::corrupted(format_args!("{other}")),
         }
     }
 }
