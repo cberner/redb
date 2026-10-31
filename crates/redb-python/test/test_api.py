@@ -283,3 +283,18 @@ def test_read_transaction(tmp_db_path: Path) -> None:
     del users
     gc.collect()
     redb.Database.open(str(tmp_db_path))
+
+
+def test_first_and_last(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        assert users.first() is None
+        assert users.last() is None
+        for key in (3, 1, 2):
+            users[key] = str(key).encode()
+        assert users.first() == (1, b"1")
+        assert users.last() == (3, b"3")
+    users = db.begin_read().open_table(USERS)
+    assert users.first() == (1, b"1")
+    assert users.last() == (3, b"3")
