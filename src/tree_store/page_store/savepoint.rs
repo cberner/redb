@@ -6,7 +6,6 @@ use crate::tree_store::page_store::page_manager::FILE_FORMAT_VERSION3;
 use crate::tree_store::{BtreeHeader, TransactionalMemory};
 use crate::{Result, StorageError, TypeName, Value};
 use alloc::format;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -140,9 +139,7 @@ impl SerializedSavepoint<'_> {
         let savepoint = self.parse()?;
         let local_id = transaction_tracker
             .savepoint_local_id(savepoint.id)
-            .ok_or_else(|| {
-                StorageError::Corrupted("Unregistered persistent savepoint".to_string())
-            })?;
+            .ok_or_else(|| StorageError::corrupted("Unregistered persistent savepoint"))?;
         Ok(Savepoint {
             version: savepoint.version,
             id: savepoint.id,
@@ -165,14 +162,12 @@ impl SerializedSavepoint<'_> {
         let serialized_len =
             2 * size_of::<u8>() + 2 * size_of::<u64>() + BtreeHeader::serialized_size();
         if data.len() != serialized_len {
-            return Err(StorageError::Corrupted(
-                "Corrupted savepoint record".to_string(),
-            ));
+            return Err(StorageError::corrupted("Corrupted savepoint record"));
         }
         let mut offset = 0;
         let version = data[offset];
         if version != FILE_FORMAT_VERSION3 {
-            return Err(StorageError::Corrupted(format!(
+            return Err(StorageError::corrupted(&format!(
                 "Unsupported savepoint version: {version}"
             )));
         }
@@ -194,9 +189,7 @@ impl SerializedSavepoint<'_> {
 
         let not_null = data[offset];
         if not_null > 1 {
-            return Err(StorageError::Corrupted(
-                "Corrupted savepoint record".to_string(),
-            ));
+            return Err(StorageError::corrupted("Corrupted savepoint record"));
         }
         offset += 1;
         let user_root = if not_null == 1 {

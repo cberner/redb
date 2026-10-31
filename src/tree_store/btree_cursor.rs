@@ -11,7 +11,6 @@ use crate::tree_store::{BtreeHeader, PageAllocator, PageNumber, PageResolver, Pa
 use crate::types::{Key, Value};
 use crate::{Result, StorageError};
 use alloc::boxed::Box;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -167,9 +166,7 @@ where
             _ => unreachable!(),
         };
         if path.len() >= MAX_BTREE_DEPTH {
-            return Err(StorageError::Corrupted(
-                "Btree exceeded maximum depth".to_string(),
-            ));
+            return Err(StorageError::corrupted("Btree exceeded maximum depth"));
         }
         path.push(Branch::new(page, child_index));
         page = get_page(child_page)?;

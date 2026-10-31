@@ -202,7 +202,7 @@ impl TableError {
             | TableError::TableDoesNotExist(_)
             | TableError::TableExists(_)
             | TableError::TableAlreadyOpen(_, _) => {
-                StorageError::Corrupted(format!("{msg}: {self}"))
+                StorageError::corrupted(&format!("{msg}: {self}"))
             }
             TableError::Storage(storage) => storage,
         }
@@ -334,7 +334,7 @@ impl DatabaseError {
     pub(crate) fn into_storage_error_or_corrupted(self) -> StorageError {
         match self {
             DatabaseError::Storage(storage) => storage,
-            other => StorageError::Corrupted(other.to_string()),
+            other => StorageError::corrupted(&other.to_string()),
         }
     }
 }
