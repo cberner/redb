@@ -298,3 +298,29 @@ def test_first_and_last(tmp_db_path: Path) -> None:
     users = db.begin_read().open_table(USERS)
     assert users.first() == (1, b"1")
     assert users.last() == (3, b"3")
+
+
+def test_ranges(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        for key in (3, 1, 2):
+            users[key] = str(key).encode()
+    users = db.begin_read().open_table(USERS)
+    assert list(users) == [(1, b"1"), (2, b"2"), (3, b"3")]
+    assert list(users.range(2)) == [(2, b"2"), (3, b"3")]
+    assert list(users.range(None, 2)) == [(1, b"1")]
+    assert list(users.range(1, 3, reverse=True)) == [(2, b"2"), (1, b"1")]
+    assert list(users.range(5, 1)) == []
+    with pytest.raises(TypeError):
+        users.range(b"1")
+    entries = iter(users)
+    del users, db
+    gc.collect()
+    # The iterator keeps the snapshot alive, and the Database open, until it goes
+    assert next(entries) == (1, b"1")
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(str(tmp_db_path))
+    del entries
+    gc.collect()
+    redb.Database.open(str(tmp_db_path))

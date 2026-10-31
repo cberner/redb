@@ -3,12 +3,14 @@ use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
 use crate::types::{PyValue, Type, with_types};
 use ::redb::{
-    AccessGuard, Key, ReadOnlyTable, ReadTransaction, ReadableTable, ReadableTableMetadata, Table,
-    TableDefinition, Value, WriteTransaction,
+    AccessGuard, Key, OwnedRange, ReadOnlyTable, ReadTransaction, ReadableTable,
+    ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction,
 };
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use std::any::Any;
+use std::borrow::Borrow;
+use std::ops::Bound as Limit;
 
 /// The name and types of a table
 #[pyclass(module = "redb", name = "TableDefinition", frozen)]
@@ -120,6 +122,30 @@ fn last_entry<K: Key + PyValue + 'static, V: PyValue + 'static>(
     table: &impl ReadableTable<K, V>,
 ) -> PyResult<Option<Pair>> {
     py_entry::<K, V>(py, table.last().pyerr()?)
+}
+
+/// A key lent to redb as a range bound. The wrapper gives a tuple of bounds exactly one
+/// `RangeBounds` impl, where bounds over a bare `&[u8]` would have two, which redb's range
+/// methods cannot infer through.
+struct Lent<T>(T);
+
+impl<T> Borrow<T> for Lent<T> {
+    fn borrow(&self) -> &T {
+        &self.0
+    }
+}
+
+/// A Python range's bounds for redb: `start` inclusive and `end` exclusive, as in `range()`
+type Limits<T> = (Limit<Lent<T>>, Limit<Lent<T>>);
+
+fn limits<'a, K: PyValue>(
+    start: Option<&'a K::Owned>,
+    end: Option<&'a K::Owned>,
+) -> Limits<K::SelfType<'a>> {
+    (
+        start.map_or(Limit::Unbounded, |key| Limit::Included(Lent(K::lend(key)))),
+        end.map_or(Limit::Unbounded, |key| Limit::Excluded(Lent(K::lend(key)))),
+    )
 }
 
 /// A write transaction's handle on one of its tables.
@@ -243,7 +269,7 @@ pub(crate) struct PyReadOnlyTable {
     value: Type,
     table: Box<dyn Any + Send + Sync>,
     // Dropped after `table`, whose snapshot needs the Database's storage open
-    _db: Py<PyDatabase>,
+    db: Py<PyDatabase>,
 }
 
 impl PyReadOnlyTable {
@@ -264,7 +290,7 @@ impl PyReadOnlyTable {
             key: definition.key,
             value: definition.value,
             table,
-            _db: db,
+            db,
         })
     }
 
@@ -319,11 +345,89 @@ impl PyReadOnlyTable {
             last_entry::<K, V>(py, self.table::<K, V>())
         })
     }
+
+    /// Iterates the `(key, value)` entries with `start <= key < end` in key order, or in
+    /// reverse; either bound may be None
+    #[pyo3(signature = (start=None, end=None, *, reverse=false))]
+    fn range(
+        &self,
+        py: Python<'_>,
+        start: Option<&Bound<'_, PyAny>>,
+        end: Option<&Bound<'_, PyAny>>,
+        reverse: bool,
+    ) -> PyResult<PyRangeIter> {
+        with_types!(self.key, self.value, K, V, {
+            let start = start.map(K::from_py).transpose()?;
+            let end = end.map(K::from_py).transpose()?;
+            let range = self
+                .table::<K, V>()
+                .range_owned(limits::<K>(start.as_ref(), end.as_ref()))
+                .pyerr()?;
+            Ok(PyRangeIter {
+                range: Box::new(range),
+                reverse,
+                _db: self.db.clone_ref(py),
+            })
+        })
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<PyRangeIter> {
+        self.range(py, None, None, false)
+    }
+}
+
+/// A range of a read-only table, streamed from the snapshot it keeps alive
+trait Snapshot: Send + Sync {
+    fn advance(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>>;
+}
+
+impl<K, V> Snapshot for OwnedRange<K, V>
+where
+    K: Key + PyValue + Send + Sync + 'static,
+    V: PyValue + Send + Sync + 'static,
+{
+    fn advance(&mut self, py: Python<'_>, reverse: bool) -> PyResult<Option<Pair>> {
+        let entry = if reverse {
+            self.next_back()
+        } else {
+            self.next()
+        };
+        entry
+            .map(|entry| {
+                let (key, value) = entry.pyerr()?;
+                Ok((
+                    K::to_py(py, key.value())?.unbind(),
+                    V::to_py(py, value.value())?.unbind(),
+                ))
+            })
+            .transpose()
+    }
+}
+
+/// Iterates the entries of a range of a read-only table
+#[pyclass(module = "redb", name = "RangeIter")]
+pub(crate) struct PyRangeIter {
+    range: Box<dyn Snapshot>,
+    reverse: bool,
+    // Dropped after `range`, whose snapshot needs the Database's storage open
+    _db: Py<PyDatabase>,
+}
+
+#[pymethods]
+impl PyRangeIter {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        self.range.advance(py, self.reverse)
+    }
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyTableDefinition>()?;
     m.add_class::<PyTable>()?;
     m.add_class::<PyReadOnlyTable>()?;
+    m.add_class::<PyRangeIter>()?;
     Ok(())
 }

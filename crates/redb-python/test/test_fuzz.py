@@ -55,6 +55,10 @@ def writing(machine: RedbMachine) -> bool:
     return machine.write is not None
 
 
+def in_range(key: Any, start: Any, end: Any) -> bool:
+    return (start is None or key >= start) and (end is None or key < end)
+
+
 class RedbMachine(RuleBasedStateMachine):
     names = st.sampled_from(sorted(TABLES))
     reads = Bundle("reads")
@@ -97,6 +101,11 @@ class RedbMachine(RuleBasedStateMachine):
         entries = sorted(model.items())
         assert table.first() == (entries[0] if entries else None)
         assert table.last() == (entries[-1] if entries else None)
+
+    def _bounds(self, name: str, data: st.DataObject) -> tuple[Any, Any]:
+        """Optional start and end keys for a range over `name`"""
+        keys = KEYS[TABLES[name].key_type]
+        return data.draw(st.none() | keys), data.draw(st.none() | keys)
 
     def _end_write(self, finished: bool) -> None:
         # A handle keeps its transaction alive, so one is kept only once it has been finished
@@ -195,6 +204,26 @@ class RedbMachine(RuleBasedStateMachine):
         key = data.draw(KEYS[TABLES[name].key_type])
         assert table.get(key) == model.get(key)
         self._check_size(table, model)
+
+    @rule(read=reads, name=names, data=st.data(), reverse=st.booleans())
+    def read_range(
+        self,
+        read: tuple[redb.ReadTransaction, Model],
+        name: str,
+        data: st.DataObject,
+        reverse: bool,
+    ) -> None:
+        txn, snapshot = read
+        if name not in snapshot:
+            return
+        table, model = txn.open_table(TABLES[name]), snapshot[name]
+        start, end = self._bounds(name, data)
+        expected = [(k, v) for k, v in sorted(model.items()) if in_range(k, start, end)]
+        if reverse:
+            expected.reverse()
+        assert list(table.range(start, end, reverse=reverse)) == expected
+        if start is None and end is None and not reverse:
+            assert list(table) == expected
 
     @rule(read=consumes(reads))
     def close_read(self, read: tuple[redb.ReadTransaction, Model]) -> None:
