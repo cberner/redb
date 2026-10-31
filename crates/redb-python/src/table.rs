@@ -91,6 +91,37 @@ fn length(table: &impl ReadableTableMetadata) -> PyResult<usize> {
     Ok(usize::try_from(table.len().pyerr()?).unwrap_or(usize::MAX))
 }
 
+/// A `(key, value)` entry as Python objects
+type Pair = (Py<PyAny>, Py<PyAny>);
+
+fn py_entry<K: PyValue, V: PyValue>(
+    py: Python<'_>,
+    entry: Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>,
+) -> PyResult<Option<Pair>> {
+    entry
+        .map(|(key, value)| {
+            Ok((
+                K::to_py(py, key.value())?.unbind(),
+                V::to_py(py, value.value())?.unbind(),
+            ))
+        })
+        .transpose()
+}
+
+fn first_entry<K: Key + PyValue + 'static, V: PyValue + 'static>(
+    py: Python<'_>,
+    table: &impl ReadableTable<K, V>,
+) -> PyResult<Option<Pair>> {
+    py_entry::<K, V>(py, table.first().pyerr()?)
+}
+
+fn last_entry<K: Key + PyValue + 'static, V: PyValue + 'static>(
+    py: Python<'_>,
+    table: &impl ReadableTable<K, V>,
+) -> PyResult<Option<Pair>> {
+    py_entry::<K, V>(py, table.last().pyerr()?)
+}
+
 /// A write transaction's handle on one of its tables.
 ///
 /// Each operation opens the redb table, runs, and closes it again, so this is only the name's
@@ -163,6 +194,20 @@ impl PyTable {
 
     fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         Ok(!self.get(py, key)?.is_none(py))
+    }
+
+    /// The entry with the smallest key, as a `(key, value)` pair, or None if the table is empty
+    fn first(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            self.with_table::<K, V, _>(|table| first_entry::<K, V>(py, table))
+        })
+    }
+
+    /// The entry with the largest key, as a `(key, value)` pair, or None if the table is empty
+    fn last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            self.with_table::<K, V, _>(|table| last_entry::<K, V>(py, table))
+        })
     }
 
     /// Stores `value` at `key`; returns the value it replaced, or None
@@ -259,6 +304,20 @@ impl PyReadOnlyTable {
 
     fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         Ok(!self.get(py, key)?.is_none(py))
+    }
+
+    /// The entry with the smallest key, as a `(key, value)` pair, or None if the table is empty
+    fn first(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            first_entry::<K, V>(py, self.table::<K, V>())
+        })
+    }
+
+    /// The entry with the largest key, as a `(key, value)` pair, or None if the table is empty
+    fn last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
+        with_types!(self.key, self.value, K, V, {
+            last_entry::<K, V>(py, self.table::<K, V>())
+        })
     }
 }
 

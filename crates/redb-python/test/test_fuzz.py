@@ -91,6 +91,13 @@ class RedbMachine(RuleBasedStateMachine):
             self.handles[name] = self.write.open_table(TABLES[name])
         return self.handles[name], self.pending.setdefault(name, {})
 
+    def _check_size(self, table: Any, model: dict[Any, Any]) -> None:
+        """The length and the ends of `table` against the model"""
+        assert len(table) == len(model)
+        entries = sorted(model.items())
+        assert table.first() == (entries[0] if entries else None)
+        assert table.last() == (entries[-1] if entries else None)
+
     def _end_write(self, finished: bool) -> None:
         # A handle keeps its transaction alive, so one is kept only once it has been finished
         self.stale = next(iter(self.handles.values()), None) if finished else None
@@ -148,7 +155,7 @@ class RedbMachine(RuleBasedStateMachine):
     @rule(name=names)
     def length(self, name: str) -> None:
         table, model = self._table(name)
-        assert len(table) == len(model)
+        self._check_size(table, model)
 
     @precondition(lambda self: self.stale is not None)
     @rule()
@@ -187,7 +194,7 @@ class RedbMachine(RuleBasedStateMachine):
         table, model = txn.open_table(TABLES[name]), snapshot[name]
         key = data.draw(KEYS[TABLES[name].key_type])
         assert table.get(key) == model.get(key)
-        assert len(table) == len(model)
+        self._check_size(table, model)
 
     @rule(read=consumes(reads))
     def close_read(self, read: tuple[redb.ReadTransaction, Model]) -> None:
