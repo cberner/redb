@@ -52,6 +52,14 @@ impl RegionTracker {
     pub(super) fn from_bytes(page: &[u8]) -> Result<Self> {
         let count_len = size_of::<u32>();
         let orders = Self::read_u32(page, 0)?;
+        // A live tracker always has one bitmap per page order through MAX_MAX_PAGE_ORDER.
+        // Zero/short counts leave find_free / len indexing order_trackers[0] and panic.
+        let expected_orders = u32::from(MAX_MAX_PAGE_ORDER) + 1;
+        if orders != expected_orders {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker order count {orders} is invalid; expected {expected_orders}"
+            )));
+        }
         // Reject an order count whose length table cannot fit before walking it.
         let Some(table_bytes) = (orders as usize).checked_mul(count_len) else {
             return Err(StorageError::Corrupted(format!(
