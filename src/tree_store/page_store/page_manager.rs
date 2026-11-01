@@ -1755,14 +1755,14 @@ impl TransactionalMemory {
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
         {
-            region_allocators.push(BuddyAllocator::from_bytes(region?.value()));
+            region_allocators.push(BuddyAllocator::from_bytes(region?.value())?);
         }
 
         let region_tracker = RegionTracker::from_bytes(
             tree.get(&AllocatorStateKey::RegionTracker)?
                 .unwrap()
                 .value(),
-        );
+        )?;
 
         let mut state = self.state.lock().unwrap();
         state.allocators = AllocatorState::Loaded(Allocators {
