@@ -34,6 +34,11 @@ TABLES = {
         redb.TableDefinition("bytes_u64", redb.bytes, redb.u64),
         redb.TableDefinition("u64_bytes", redb.u64, redb.bytes),
         redb.TableDefinition("u64_u64", redb.u64, redb.u64),
+        redb.TableDefinition("str_str", redb.str, redb.str),
+        redb.TableDefinition("i64_bool", redb.i64, redb.bool),
+        redb.TableDefinition("bool_i64", redb.bool, redb.i64),
+        redb.TableDefinition("u128_i128", redb.u128, redb.i128),
+        redb.TableDefinition("i128_f64", redb.i128, redb.f64),
     ]
 }
 
@@ -42,10 +47,21 @@ TABLES = {
 KEYS = {
     redb.bytes: st.binary(max_size=3),
     redb.u64: st.integers(0, 12) | st.integers(0, 2**64 - 1),
+    redb.str: st.text(max_size=3),
+    redb.i64: st.integers(-6, 6) | st.integers(-(2**63), 2**63 - 1),
+    redb.bool: st.booleans(),
+    redb.u128: st.integers(0, 12) | st.integers(0, 2**128 - 1),
+    redb.i128: st.integers(-6, 6) | st.integers(-(2**127), 2**127 - 1),
 }
 VALUES = {
     redb.bytes: st.binary(max_size=8) | st.binary(min_size=4096, max_size=12000),
     redb.u64: st.integers(0, 2**64 - 1),
+    redb.str: st.text(max_size=8),
+    redb.i64: st.integers(-(2**63), 2**63 - 1),
+    redb.bool: st.booleans(),
+    redb.u128: st.integers(0, 2**128 - 1),
+    redb.i128: st.integers(-(2**127), 2**127 - 1),
+    redb.f64: st.floats(allow_nan=False),  # NaN is not equal to itself, which the model needs
 }
 
 Model = dict[str, dict[Any, Any]]
