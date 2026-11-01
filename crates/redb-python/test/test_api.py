@@ -632,3 +632,33 @@ def test_maintenance(tmp_db_path: Path) -> None:
     assert db.compact() is False
     reader = redb.Database.open_read_only(str(tmp_db_path), cache_size=1024 * 1024)
     assert reader.begin_read().list_tables() == []
+
+
+def test_savepoints(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    with db.begin_write() as txn:
+        first = txn.persistent_savepoint()
+        txn.open_table(USERS)[2] = b"bob"
+        with pytest.raises(redb.InvalidSavepoint):
+            txn.persistent_savepoint()  # too late once a table has been opened
+    with db.begin_write() as txn:
+        second = txn.persistent_savepoint()
+        assert txn.list_persistent_savepoints() == [first, second]
+        users = txn.open_table(USERS)
+        del users[1]
+        entries = iter(users)
+        txn.restore_savepoint(first)
+        # Every table is as it was then, the ranges over them end, and later savepoints are gone
+        with pytest.raises(RuntimeError):
+            next(entries)
+        assert dict(users) == {1: b"alice"}
+        assert txn.list_persistent_savepoints() == [first]
+    assert dict(db.begin_read().open_table(USERS)) == {1: b"alice"}
+    with db.begin_write() as txn:
+        with pytest.raises(redb.InvalidSavepoint):
+            txn.restore_savepoint(second)
+        assert txn.delete_persistent_savepoint(first) is True
+        assert txn.delete_persistent_savepoint(first) is False
+        assert txn.list_persistent_savepoints() == []
