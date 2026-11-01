@@ -1357,8 +1357,8 @@ impl Database {
             )?;
             for result in ReadableTable::iter(&table)? {
                 let (_, pages) = result?;
-                for i in 0..pages.value().len() {
-                    assert!(mem.is_allocated(pages.value().get(i)));
+                for page in pages.value().pages()? {
+                    assert!(mem.is_allocated(page));
                 }
             }
         }
@@ -1414,8 +1414,8 @@ impl Database {
                 )?;
             for result in ReadableTable::iter(&table)? {
                 let (_, page_list) = result?;
-                for i in 0..page_list.value().len() {
-                    visitor(page_list.value().get(i))?;
+                for page in page_list.value().pages()? {
+                    visitor(page)?;
                 }
             }
         }
