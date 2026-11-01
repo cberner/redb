@@ -198,9 +198,9 @@ impl UntypedBtreeMut {
         assert!(self.page_allocator.uncommitted(page_number));
         let mut page = self.page_allocator.get_page_mut(page_number)?;
 
-        match page.memory()[0] {
-            LEAF => leaf_checksum(&page, self.key_width, self.value_width),
-            BRANCH => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => leaf_checksum(&page, self.key_width, self.value_width),
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 let mut new_children = vec![];
                 for i in 0..accessor.count_children() {
@@ -214,7 +214,7 @@ impl UntypedBtreeMut {
                     }
                 }
 
-                let mut mutator = BranchMutator::new(page.memory_mut());
+                let mut mutator = BranchMutator::new(&mut page)?;
                 for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
                 {
                     mutator.write_child_page(child_index, child_page, child_checksum);
@@ -222,7 +222,6 @@ impl UntypedBtreeMut {
 
                 branch_checksum(&page, self.key_width)
             }
-            _ => unreachable!(),
         }
     }
 
@@ -238,15 +237,14 @@ impl UntypedBtreeMut {
             }
 
             let page = self.page_allocator.get_page_mut(page_number)?;
-            match page.memory()[0] {
-                LEAF => {
+            match PageType::from_page(&page)? {
+                PageType::Leaf => {
                     visitor(LeafPageMut::new(page, self.key_width, self.value_width))?;
                 }
-                BRANCH => {
+                PageType::Branch => {
                     drop(page);
                     self.dirty_leaf_visitor_helper(page_number, &visitor)?;
                 }
-                _ => unreachable!(),
             }
         }
 
@@ -260,11 +258,11 @@ impl UntypedBtreeMut {
         assert!(self.page_allocator.uncommitted(page_number));
         let page = self.page_allocator.get_page_mut(page_number)?;
 
-        match page.memory()[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 visitor(LeafPageMut::new(page, self.key_width, self.value_width))?;
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
@@ -273,7 +271,6 @@ impl UntypedBtreeMut {
                     }
                 }
             }
-            _ => unreachable!(),
         }
 
         Ok(())
@@ -307,14 +304,13 @@ impl UntypedBtreeMut {
         };
         new_page.memory_mut().copy_from_slice(old_page.memory());
 
-        let node_mem = old_page.memory();
-        match node_mem[0] {
-            LEAF => {
+        match PageType::from_page(&old_page)? {
+            PageType::Leaf => {
                 // No-op
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&old_page, self.key_width);
-                let mut mutator = BranchMutator::new(new_page.memory_mut());
+                let mut mutator = BranchMutator::new(&mut new_page)?;
                 for i in 0..accessor.count_children() {
                     let child = accessor.child_page(i).unwrap();
                     if let Some((new_child, new_checksum)) =
@@ -324,7 +320,6 @@ impl UntypedBtreeMut {
                     }
                 }
             }
-            _ => unreachable!(),
         }
 
         let mut freed_pages = self.freed_pages.lock().unwrap();
@@ -624,9 +619,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
         mut page: PageMut<'txn>,
         query: &[u8],
     ) -> Result<Option<AccessGuardMut<'txn, V>>> {
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
@@ -646,7 +640,7 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                     Ok(None)
                 }
             }
-            BRANCH => {
+            PageType::Branch => {
                 let (child_index, child_page) = {
                     let accessor = BranchAccessor::new(&page, K::fixed_width());
                     accessor.child_for_key::<K>(query)
@@ -670,13 +664,12 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                     drop(old_child_page);
                     freed_pages.push(child_page);
 
-                    let mut mutator = BranchMutator::new(page.memory_mut());
+                    let mut mutator = BranchMutator::new(&mut page)?;
                     mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
                     new_page
                 };
                 self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1088,8 +1081,8 @@ impl<K: Key, V: Value> Btree<K, V> {
         let mut descended: Option<PageImpl> = None;
         for _ in 0..MAX_BTREE_DEPTH {
             let page = descended.as_ref().unwrap_or(page);
-            let child_page = match page.memory()[0] {
-                LEAF => {
+            let child_page = match PageType::from_page(page)? {
+                PageType::Leaf => {
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                     return Ok(accessor.find_key::<K>(query).map(|entry_index| {
@@ -1097,11 +1090,10 @@ impl<K: Key, V: Value> Btree<K, V> {
                         AccessGuard::with_page(page.clone(), start..end)
                     }));
                 }
-                BRANCH => {
+                PageType::Branch => {
                     let accessor = BranchAccessor::new(page, K::fixed_width());
                     accessor.child_for_key::<K>(query).1
                 }
-                _ => unreachable!(),
             };
             descended = Some(self.mem.get_page(child_page, self.hint)?);
         }
@@ -1133,21 +1125,19 @@ impl<K: Key, V: Value> Btree<K, V> {
                 "Btree exceeded maximum depth".to_string(),
             ));
         }
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let (key_range, value_range) = accessor.entry_ranges(0).unwrap();
                 let key_guard = AccessGuard::with_page(page.clone(), key_range);
                 let value_guard = AccessGuard::with_page(page, value_range);
                 Ok(Some((key_guard, value_guard)))
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(0).unwrap();
                 self.first_helper(self.mem.get_page(child_page, self.hint)?, depth + 1)
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1172,9 +1162,8 @@ impl<K: Key, V: Value> Btree<K, V> {
                 "Btree exceeded maximum depth".to_string(),
             ));
         }
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let (key_range, value_range) =
                     accessor.entry_ranges(accessor.num_pairs() - 1).unwrap();
@@ -1182,12 +1171,11 @@ impl<K: Key, V: Value> Btree<K, V> {
                 let value_guard = AccessGuard::with_page(page, value_range);
                 Ok(Some((key_guard, value_guard)))
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_page = accessor.child_page(accessor.count_children() - 1).unwrap();
                 self.last_helper(self.mem.get_page(child_page, self.hint)?, depth + 1)
             }
-            _ => unreachable!(),
         }
     }
 
@@ -1239,15 +1227,14 @@ impl<K: Key, V: Value> Btree<K, V> {
             while !pages.is_empty() {
                 let mut next_children = vec![];
                 for page in pages.drain(..) {
-                    let node_mem = page.memory();
-                    match node_mem[0] {
-                        LEAF => {
+                    match PageType::from_page(&page)? {
+                        PageType::Leaf => {
                             eprint!("Leaf[ (page={:?})", page.get_page_number());
                             LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width())
                                 .print_node::<K, V>(include_values);
                             eprint!("]");
                         }
-                        BRANCH => {
+                        PageType::Branch => {
                             let accessor = BranchAccessor::new(&page, K::fixed_width());
                             for i in 0..accessor.count_children() {
                                 let child = accessor.child_page(i).unwrap();
@@ -1255,7 +1242,6 @@ impl<K: Key, V: Value> Btree<K, V> {
                             }
                             accessor.print_node();
                         }
-                        _ => unreachable!(),
                     }
                     eprint!("  ");
                 }
@@ -1305,9 +1291,8 @@ fn stats_helper(
     hint: PageHint,
 ) -> Result<BtreeStats> {
     let page = mem.get_page(page_number, hint)?;
-    let node_mem = page.memory();
-    match node_mem[0] {
-        LEAF => {
+    match PageType::from_page(&page)? {
+        PageType::Leaf => {
             let accessor = LeafAccessor::new(page.memory(), fixed_key_size, fixed_value_size);
             let leaf_bytes = accessor.length_of_pairs(0, accessor.num_pairs());
             let overhead_bytes = accessor.total_length() - leaf_bytes;
@@ -1321,7 +1306,7 @@ fn stats_helper(
                 fragmented_bytes,
             })
         }
-        BRANCH => {
+        PageType::Branch => {
             let accessor = BranchAccessor::new(&page, fixed_key_size);
             let mut max_child_height = 0;
             let mut leaf_pages = 0;
@@ -1350,7 +1335,6 @@ fn stats_helper(
                 fragmented_bytes,
             })
         }
-        _ => unreachable!(),
     }
 }
 
