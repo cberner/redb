@@ -3,6 +3,8 @@ use crate::tree_store::page_store::bitmap::BtreeBitmap;
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
+use crate::{Result, StorageError};
+use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::{self, max};
@@ -47,28 +49,88 @@ impl RegionTracker {
         result
     }
 
-    pub(super) fn from_bytes(page: &[u8]) -> Self {
-        let orders = u32::from_le_bytes(page[..size_of::<u32>()].try_into().unwrap());
-        let mut start = size_of::<u32>();
-        let mut allocator_lens = vec![];
-        for _ in 0..orders {
-            let allocator_len =
-                u32::from_le_bytes(page[start..start + size_of::<u32>()].try_into().unwrap())
-                    as usize;
-            allocator_lens.push(allocator_len);
-            start += size_of::<u32>();
+    pub(super) fn from_bytes(page: &[u8]) -> Result<Self> {
+        let count_len = size_of::<u32>();
+        let orders = Self::read_u32(page, 0)?;
+        // A live tracker always has one bitmap per page order through MAX_MAX_PAGE_ORDER.
+        // Zero/short counts leave find_free / len indexing order_trackers[0] and panic.
+        let expected_orders = u32::from(MAX_MAX_PAGE_ORDER) + 1;
+        if orders != expected_orders {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker order count {orders} is invalid; expected {expected_orders}"
+            )));
         }
-        let mut data = vec![];
-        for allocator_len in allocator_lens {
-            data.push(BtreeBitmap::from_bytes(
-                &page[start..(start + allocator_len)],
-            ));
-            start += allocator_len;
+        // Reject an order count whose length table cannot fit before walking it.
+        let Some(table_bytes) = (orders as usize).checked_mul(count_len) else {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker order count {orders} does not fit in the {}-byte record",
+                page.len(),
+            )));
+        };
+        let Some(data_offset) = count_len.checked_add(table_bytes) else {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker order count {orders} does not fit in the {}-byte record",
+                page.len(),
+            )));
+        };
+        let Some(_) = page.get(..data_offset) else {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker order count {orders} needs {table_bytes} bytes of lengths, but the record is {} bytes",
+                page.len(),
+            )));
+        };
+
+        let mut allocator_lens = Vec::with_capacity(orders as usize);
+        let mut offset = count_len;
+        for _ in 0..orders {
+            allocator_lens.push(Self::read_u32(page, offset)? as usize);
+            let Some(next) = offset.checked_add(count_len) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Region tracker order count {orders} does not fit in the {}-byte record",
+                    page.len(),
+                )));
+            };
+            offset = next;
         }
 
-        Self {
-            order_trackers: data,
+        let mut data = Vec::with_capacity(allocator_lens.len());
+        for allocator_len in allocator_lens {
+            let Some(end) = offset.checked_add(allocator_len) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Region tracker allocator length {allocator_len} at offset {offset} overflows the {}-byte record",
+                    page.len(),
+                )));
+            };
+            let Some(bitmap) = page.get(offset..end) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Region tracker allocator length {allocator_len} at offset {offset} exceeds the {}-byte record",
+                    page.len(),
+                )));
+            };
+            data.push(BtreeBitmap::from_bytes(bitmap));
+            offset = end;
         }
+
+        Ok(Self {
+            order_trackers: data,
+        })
+    }
+
+    fn read_u32(page: &[u8], offset: usize) -> Result<u32> {
+        let Some(end) = offset.checked_add(size_of::<u32>()) else {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker offset {offset} overflows the {}-byte record",
+                page.len(),
+            )));
+        };
+        let Some(bytes) = page.get(offset..end) else {
+            return Err(StorageError::Corrupted(format!(
+                "Region tracker offset {offset} exceeds the {}-byte record",
+                page.len(),
+            )));
+        };
+        // `get` returned `end - offset` bytes, which is `size_of::<u32>()`.
+        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
     }
 
     pub(crate) fn find_free(&self, order: u8) -> Option<u32> {
