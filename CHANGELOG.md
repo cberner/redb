@@ -70,6 +70,7 @@
 ### Bug fixes
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
+- Certain operations now return an error instead of panicking on database corruption
 * Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a
   `write_misses()` near `u64::MAX` in release builds when called while another thread is writing.
 * Repair and `check_integrity()` report a page with an invalid type byte as `StorageError::Corrupted`
