@@ -82,11 +82,13 @@ pub enum StorageError {
 
 impl StorageError {
     // Corruption that redb detected in the file. Release builds return the error so the caller can
-    // report it. Debug builds panic instead, so a test or fuzzer run gets a backtrace to the site
-    // that detected it.
+    // report it. Debug builds panic instead, so a test gets a backtrace to the site that detected
+    // it. Fuzz builds keep debug assertions on but feed redb corrupt files on purpose, so they
+    // return the error as release builds do.
     #[cold]
     #[track_caller]
     pub(crate) fn corrupted(message: &str) -> Self {
+        #[cfg(not(fuzzing))]
         debug_assert!(false, "{message}");
         Self::Corrupted(message.to_string())
     }
