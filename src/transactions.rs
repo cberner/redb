@@ -76,22 +76,24 @@ pub(crate) struct PageList<'a> {
     data: &'a [u8],
 }
 
-impl PageList<'_> {
+impl<'a> PageList<'a> {
     fn required_bytes(len: usize) -> usize {
         2 + PageNumber::serialized_size() * len
     }
 
-    pub(crate) fn len(&self) -> usize {
-        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
-    }
-
-    pub(crate) fn get(&self, index: usize) -> PageNumber {
-        let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        PageNumber::from_le_bytes(
-            self.data[start..(start + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
+    // Errors if the record is shorter than its length claims
+    pub(crate) fn pages(&self) -> Result<impl ExactSizeIterator<Item = PageNumber> + 'a> {
+        let data: &'a [u8] = self.data;
+        let entries = data
+            .get(..size_of::<u16>())
+            .map(|bytes| usize::from(u16::from_le_bytes(bytes.try_into().unwrap())))
+            .and_then(|len| data.get(size_of::<u16>()..Self::required_bytes(len)));
+        let Some(entries) = entries else {
+            return Err(StorageError::corrupted("Truncated free page list"));
+        };
+        Ok(entries
+            .chunks_exact(PageNumber::serialized_size())
+            .map(|entry| PageNumber::from_le_bytes(entry.try_into().unwrap())))
     }
 }
 
@@ -1086,9 +1088,7 @@ impl WriteTransaction {
             let data_freed = system_tables.open_system_table(DATA_FREED_TABLE).unwrap();
             for entry in data_freed.range::<TransactionIdWithPagination>(..).unwrap() {
                 let (_, entry) = entry.unwrap();
-                let value = entry.value();
-                for i in 0..value.len() {
-                    let p = value.get(i);
+                for p in entry.value().pages().unwrap() {
                     assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
@@ -1103,9 +1103,7 @@ impl WriteTransaction {
                 .unwrap()
             {
                 let (_, entry) = entry.unwrap();
-                let value = entry.value();
-                for i in 0..value.len() {
-                    let p = value.get(i);
+                for p in entry.value().pages().unwrap() {
                     assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
@@ -1452,9 +1450,7 @@ impl WriteTransaction {
             };
             for entry in data_allocated.range(lower..)? {
                 let (_, value) = entry?;
-                for i in 0..value.value().len() {
-                    data_freed_pages.push(value.value().get(i));
-                }
+                data_freed_pages.extend(value.value().pages()?);
             }
             // Also queue unpersisted allocations from non-durable commits after the savepoint.
             // These are tracked in memory rather than in DATA_ALLOCATED_TABLE. We don't remove
@@ -2453,9 +2449,8 @@ impl WriteTransaction {
             if extracted_transactions.last().copied() != Some(transaction_id) {
                 extracted_transactions.push(transaction_id);
             }
-            let page_list = page_list.value();
-            for i in 0..page_list.len() {
-                process_page(page_list.get(i));
+            for page in page_list.value().pages()? {
+                process_page(page);
             }
         }
 
@@ -2505,15 +2500,15 @@ impl WriteTransaction {
                 let Some(entry) = data_freed.get(&key)? else {
                     break;
                 };
-                let pages = entry.value();
+                let pages = entry.value().pages()?;
+                let page_count = pages.len();
                 let mut new_pages = vec![];
-                for i in 0..pages.len() {
-                    let page = pages.get(i);
+                for page in pages {
                     if !self.mem.free_if_unpersisted(page, &PageTracker::ignore()) {
                         new_pages.push(page);
                     }
                 }
-                if new_pages.len() != pages.len() {
+                if new_pages.len() != page_count {
                     drop(entry);
                     if new_pages.is_empty() {
                         data_freed.remove(&key)?;
