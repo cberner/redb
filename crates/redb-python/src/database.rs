@@ -180,9 +180,34 @@ impl PyReadOnlyDatabase {
     }
 }
 
+/// `Database.open`
+#[pyfunction]
+#[pyo3(signature = (path, *, concurrency = ConcurrencyMode::SingleWriter, cache_size = None))]
+fn open(
+    py: Python<'_>,
+    path: PathBuf,
+    concurrency: ConcurrencyMode,
+    cache_size: Option<usize>,
+) -> PyResult<PyDatabase> {
+    PyDatabase::open(py, path, concurrency, cache_size)
+}
+
+/// `Database.open_read_only`
+#[pyfunction]
+#[pyo3(signature = (path, *, cache_size = None))]
+fn open_read_only(
+    py: Python<'_>,
+    path: PathBuf,
+    cache_size: Option<usize>,
+) -> PyResult<PyReadOnlyDatabase> {
+    PyDatabase::open_read_only(py, path, cache_size)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDatabase>()?;
     m.add_class::<PyReadOnlyDatabase>()?;
+    m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add_function(wrap_pyfunction!(open_read_only, m)?)?;
     m.add_class::<ConcurrencyMode>()?;
     // Each mode is a module attribute too: `redb.SingleWriter` is `redb.ConcurrencyMode.SingleWriter`
     let class = m.py().get_type::<ConcurrencyMode>();
