@@ -452,3 +452,31 @@ def test_concurrency_modes(tmp_db_path: Path) -> None:
         redb.Database.open(str(tmp_db_path))  # a single writer cannot join them
     with pytest.raises(TypeError):
         redb.Database.open(str(tmp_db_path), concurrency="MultiWriter")
+
+
+def test_open_read_only(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    # A reader opens alongside the writer and follows its commits
+    reader = redb.Database.open_read_only(str(tmp_db_path))
+    assert isinstance(reader, redb.ReadOnlyDatabase)
+    assert reader.begin_read().open_table(USERS)[1] == b"alice"
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[2] = b"bob"
+    assert reader.begin_read().open_table(USERS)[2] == b"bob"
+    with pytest.raises(AttributeError):
+        reader.begin_write()
+    # The read transaction keeps the reader's database alive, as with a Database
+    users = reader.begin_read().open_table(USERS)
+    del reader, db
+    gc.collect()
+    assert users[1] == b"alice"
+    del users
+    gc.collect()
+    # A reader follows a writer in either mode
+    writer = redb.Database.open(str(tmp_db_path), concurrency=redb.MultiWriter)
+    reader = redb.Database.open_read_only(str(tmp_db_path))
+    with writer.begin_write() as txn:
+        txn.open_table(USERS)[3] = b"carol"
+    assert reader.begin_read().open_table(USERS)[3] == b"carol"

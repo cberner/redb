@@ -78,12 +78,39 @@ impl PyDatabase {
     /// Begins a read transaction: a snapshot of the data committed so far
     fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
         let txn = py.detach(|| slf.get().inner.begin_read()).pyerr()?;
-        Ok(PyReadTransaction::new(slf, txn))
+        Ok(PyReadTransaction::new(slf.into_any(), txn))
+    }
+
+    /// Opens an existing database for reading only, alongside the process writing to it in
+    /// either mode
+    #[staticmethod]
+    fn open_read_only(py: Python<'_>, path: PathBuf) -> PyResult<PyReadOnlyDatabase> {
+        // A reader locks and reads the file the same way in both modes
+        let inner = py
+            .detach(|| ConcurrencyMode::SingleWriter.builder().open_read_only(path))
+            .pyerr()?;
+        Ok(PyReadOnlyDatabase { inner })
+    }
+}
+
+/// A database open for reading only, which follows the commits of the process writing to it
+#[pyclass(module = "redb", name = "ReadOnlyDatabase", frozen)]
+pub(crate) struct PyReadOnlyDatabase {
+    inner: ::redb::ReadOnlyDatabase,
+}
+
+#[pymethods]
+impl PyReadOnlyDatabase {
+    /// Begins a read transaction: a snapshot of the data committed so far
+    fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
+        let txn = py.detach(|| slf.get().inner.begin_read()).pyerr()?;
+        Ok(PyReadTransaction::new(slf.into_any(), txn))
     }
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDatabase>()?;
+    m.add_class::<PyReadOnlyDatabase>()?;
     m.add_class::<ConcurrencyMode>()?;
     // Each mode is a module attribute too: `redb.SingleWriter` is `redb.ConcurrencyMode.SingleWriter`
     let class = m.py().get_type::<ConcurrencyMode>();
