@@ -64,6 +64,10 @@
 * `ConcurrencyMode::MultiWriter`, allows any number of processes to open the database for
   writing, one write transaction at a time, and any may number open it read-only.
 
+### New features
+* Add `Builder::set_check_integrity_on_open()`, which verifies the whole file on every `open()`
+  instead of trusting the state recorded by a clean shutdown.
+
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.
 
