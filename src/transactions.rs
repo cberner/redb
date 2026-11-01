@@ -81,17 +81,34 @@ impl PageList<'_> {
         2 + PageNumber::serialized_size() * len
     }
 
-    pub(crate) fn len(&self) -> usize {
-        u16::from_le_bytes(self.data[..size_of::<u16>()].try_into().unwrap()).into()
+    pub(crate) fn len(&self) -> Result<usize> {
+        let Some(bytes) = self.data.get(..size_of::<u16>()) else {
+            return Err(StorageError::corrupted(&format!(
+                "PageList length header is past the end of a {} byte freelist record",
+                self.data.len()
+            )));
+        };
+        let len: usize = u16::from_le_bytes(bytes.try_into().unwrap()).into();
+        let required = Self::required_bytes(len);
+        if self.data.len() < required {
+            return Err(StorageError::corrupted(&format!(
+                "PageList claims {len} entries ({required} bytes) but freelist record is {} bytes",
+                self.data.len()
+            )));
+        }
+        Ok(len)
     }
 
-    pub(crate) fn get(&self, index: usize) -> PageNumber {
+    pub(crate) fn get(&self, index: usize) -> Result<PageNumber> {
         let start = size_of::<u16>() + PageNumber::serialized_size() * index;
-        PageNumber::from_le_bytes(
-            self.data[start..(start + PageNumber::serialized_size())]
-                .try_into()
-                .unwrap(),
-        )
+        let end = start + PageNumber::serialized_size();
+        let Some(bytes) = self.data.get(start..end) else {
+            return Err(StorageError::corrupted(&format!(
+                "PageList entry {index} is past the end of a {} byte freelist record",
+                self.data.len()
+            )));
+        };
+        Ok(PageNumber::from_le_bytes(bytes.try_into().unwrap()))
     }
 }
 
@@ -1087,8 +1104,8 @@ impl WriteTransaction {
             for entry in data_freed.range::<TransactionIdWithPagination>(..).unwrap() {
                 let (_, entry) = entry.unwrap();
                 let value = entry.value();
-                for i in 0..value.len() {
-                    let p = value.get(i);
+                for i in 0..value.len().unwrap() {
+                    let p = value.get(i).unwrap();
                     assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
@@ -1104,8 +1121,8 @@ impl WriteTransaction {
             {
                 let (_, entry) = entry.unwrap();
                 let value = entry.value();
-                for i in 0..value.len() {
-                    let p = value.get(i);
+                for i in 0..value.len().unwrap() {
+                    let p = value.get(i).unwrap();
                     assert!(all_allocated.remove(&p));
                     println!("{p:?}");
                 }
@@ -1452,8 +1469,9 @@ impl WriteTransaction {
             };
             for entry in data_allocated.range(lower..)? {
                 let (_, value) = entry?;
-                for i in 0..value.value().len() {
-                    data_freed_pages.push(value.value().get(i));
+                let pages = value.value();
+                for i in 0..pages.len()? {
+                    data_freed_pages.push(pages.get(i)?);
                 }
             }
             // Also queue unpersisted allocations from non-durable commits after the savepoint.
@@ -2454,8 +2472,8 @@ impl WriteTransaction {
                 extracted_transactions.push(transaction_id);
             }
             let page_list = page_list.value();
-            for i in 0..page_list.len() {
-                process_page(page_list.get(i));
+            for i in 0..page_list.len()? {
+                process_page(page_list.get(i)?);
             }
         }
 
@@ -2506,14 +2524,15 @@ impl WriteTransaction {
                     break;
                 };
                 let pages = entry.value();
+                let page_count = pages.len()?;
                 let mut new_pages = vec![];
-                for i in 0..pages.len() {
-                    let page = pages.get(i);
+                for i in 0..page_count {
+                    let page = pages.get(i)?;
                     if !self.mem.free_if_unpersisted(page, &PageTracker::ignore()) {
                         new_pages.push(page);
                     }
                 }
-                if new_pages.len() != pages.len() {
+                if new_pages.len() != page_count {
                     drop(entry);
                     if new_pages.is_empty() {
                         data_freed.remove(&key)?;
