@@ -14,7 +14,6 @@ use crate::tree_store::{
 };
 use crate::types::{Key, MutInPlaceValue, Value};
 use crate::{AccessGuard, Result, StorageError};
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -114,8 +113,8 @@ impl UntypedBtree {
         F: FnMut(&PagePath) -> Result,
     {
         if path.depth() > MAX_BTREE_DEPTH {
-            return Err(crate::StorageError::Corrupted(
-                "Btree exceeded maximum depth".to_string(),
+            return Err(crate::StorageError::corrupted(
+                "Btree exceeded maximum depth",
             ));
         }
         visitor(&path)?;
@@ -130,8 +129,8 @@ impl UntypedBtree {
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
                     if path.parents().contains(&child_page) || path.page_number() == child_page {
-                        return Err(crate::StorageError::Corrupted(
-                            "Cycle detected in Btree pages".to_string(),
+                        return Err(crate::StorageError::corrupted(
+                            "Cycle detected in Btree pages",
                         ));
                     }
                     let child_path = path.with_child(child_page);
@@ -1105,9 +1104,7 @@ impl<K: Key, V: Value> Btree<K, V> {
             };
             descended = Some(self.mem.get_page(child_page, self.hint)?);
         }
-        Err(StorageError::Corrupted(
-            "Btree exceeded maximum depth".to_string(),
-        ))
+        Err(StorageError::corrupted("Btree exceeded maximum depth"))
     }
 
     pub(crate) fn first(
@@ -1129,9 +1126,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         depth: usize,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if depth > MAX_BTREE_DEPTH {
-            return Err(StorageError::Corrupted(
-                "Btree exceeded maximum depth".to_string(),
-            ));
+            return Err(StorageError::corrupted("Btree exceeded maximum depth"));
         }
         let node_mem = page.memory();
         match node_mem[0] {
@@ -1168,9 +1163,7 @@ impl<K: Key, V: Value> Btree<K, V> {
         depth: usize,
     ) -> Result<Option<(AccessGuard<'static, K>, AccessGuard<'static, V>)>> {
         if depth > MAX_BTREE_DEPTH {
-            return Err(StorageError::Corrupted(
-                "Btree exceeded maximum depth".to_string(),
-            ));
+            return Err(StorageError::corrupted("Btree exceeded maximum depth"));
         }
         let node_mem = page.memory();
         match node_mem[0] {
