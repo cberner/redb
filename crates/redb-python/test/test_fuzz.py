@@ -245,12 +245,12 @@ class RedbMachine(RuleBasedStateMachine):
             len(self.stale)
 
     @precondition(lambda self: self.write is None and self.open_reads == 0)
-    @rule()
-    def reopen_database(self) -> None:
-        """Closes and reopens the file: what was committed is what is there"""
+    @rule(mode=st.sampled_from([redb.SingleWriter, redb.MultiWriter]))
+    def reopen_database(self, mode: redb.ConcurrencyMode) -> None:
+        """Closes and reopens the file, in either mode: what was committed is what is there"""
         self.db = self.stale = None
         gc.collect()
-        self.db = redb.Database.open(self.path)
+        self.db = redb.Database.open(self.path, concurrency=mode)
         with self.db.begin_write() as txn:
             for name, model in self.committed.items():
                 assert len(txn.open_table(TABLES[name])) == len(model)

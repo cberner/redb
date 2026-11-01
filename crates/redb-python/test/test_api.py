@@ -429,3 +429,26 @@ def test_retain(tmp_db_path: Path) -> None:
         assert [key for key, _ in users] == [15, 16, 17, 18, 19]
         users.retain(lambda key, value: False)
         assert len(users) == 0
+
+
+def test_concurrency_modes(tmp_db_path: Path) -> None:
+    assert redb.SingleWriter is redb.ConcurrencyMode.SingleWriter
+    assert redb.MultiWriter is redb.ConcurrencyMode.MultiWriter
+    # One writer at a time by default, whatever mode the second one asks for
+    db = redb.Database.create(str(tmp_db_path))
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(str(tmp_db_path), concurrency=redb.MultiWriter)
+    del db
+    # Any number of writers in MultiWriter mode; each sees the others' commits
+    first = redb.Database.open(str(tmp_db_path), concurrency=redb.MultiWriter)
+    second = redb.Database.open(str(tmp_db_path), concurrency=redb.MultiWriter)
+    with first.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    assert second.begin_read().open_table(USERS)[1] == b"alice"
+    with second.begin_write() as txn:
+        txn.open_table(USERS)[2] = b"bob"
+    assert first.begin_read().open_table(USERS)[2] == b"bob"
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(str(tmp_db_path))  # a single writer cannot join them
+    with pytest.raises(TypeError):
+        redb.Database.open(str(tmp_db_path), concurrency="MultiWriter")
