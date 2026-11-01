@@ -55,6 +55,8 @@ jobs:
       CARGO_DENY_VERSION: "0.20.2"
       CARGO_FUZZ_VERSION: "0.12.0"
       JUST_VERSION: "1.36.0"
+      # The newest uv that the pinned Rust toolchain builds; later releases need a newer rustc
+      UV_VERSION: "0.9.26"
 
     steps:
       - uses: actions/checkout@v6
@@ -84,7 +86,9 @@ jobs:
                 ~/.cargo/bin/cargo-fuzz.exe
                 ~/.cargo/bin/just
                 ~/.cargo/bin/just.exe
-            key: ${{ runner.os }}-${{ runner.arch }}-tools-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_FUZZ_VERSION }}-${{ env.JUST_VERSION }}
+                ~/.cargo/bin/uv
+                ~/.cargo/bin/uv.exe
+            key: ${{ runner.os }}-${{ runner.arch }}-tools-${{ env.CARGO_DENY_VERSION }}-${{ env.CARGO_FUZZ_VERSION }}-${{ env.JUST_VERSION }}-${{ env.UV_VERSION }}
 
       - name: Cache
         id: rust-cache
@@ -140,6 +144,10 @@ jobs:
         if: steps.tool-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version ${{ env.JUST_VERSION }} just --locked
 
+      - name: Install uv
+        if: steps.tool-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version ${{ env.UV_VERSION }} uv --locked
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -191,22 +199,7 @@ jobs:
         run: just test_all_no_sandbox
 
       - name: Run CPython wrapper tests
-        if: runner.os != 'Windows'
-        run: |
-          python3 -m venv venv
-          source venv/bin/activate
-          pip3 install --upgrade pip
-          pip3 install maturin
-          just test_py
-
-      - name: Run CPython wrapper tests
-        if: runner.os == 'Windows'
-        run: |
-          python3 -m venv venv
-          venv\Scripts\activate
-          pip3 install --upgrade pip
-          pip3 install maturin
-          just test_py
+        run: just test_py
 
       - name: Run WASI tests
         if: runner.os != 'Windows'

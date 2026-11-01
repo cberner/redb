@@ -12,8 +12,8 @@ classifiers = ["Development Status :: 4 - Beta",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Rust"]
 
-[project.optional-dependencies]
-test = [
+[dependency-groups]
+dev = [
     "pytest>=7.0",
     "hypothesis>=6.0",
 ]
@@ -24,6 +24,18 @@ build-backend = "maturin"
 
 [tool.maturin]
 compatibility = "manylinux2014"
+
+[tool.uv]
+# Rebuild the extension when its sources or build profile change. The redb crate is outside this
+# directory, where uv does not look, so `just install_py` rebuilds unconditionally; cargo then
+# recompiles only what changed.
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "build.rs" },
+    { file = "src/**/*.rs" },
+    { env = "MATURIN_PEP517_ARGS" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

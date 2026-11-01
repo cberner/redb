@@ -17,6 +17,8 @@ Cargo.lock
 **/__pycache__
 **/*.pyc
 .venv/
+# Not checked in, like Cargo.lock
+uv.lock
 
 # Profiling
 perf.data*
