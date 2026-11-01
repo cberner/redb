@@ -125,6 +125,11 @@ impl BuddyAllocator {
                 "Buddy allocator record is empty".to_string(),
             ));
         };
+        if max_order > MAX_MAX_PAGE_ORDER {
+            return Err(StorageError::Corrupted(format!(
+                "Buddy allocator max_order {max_order} exceeds the maximum of {MAX_MAX_PAGE_ORDER}"
+            )));
+        }
         let orders = usize::from(max_order) + 1;
         let Some(num_pages_bytes) =
             data.get(NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>()))
@@ -136,6 +141,12 @@ impl BuddyAllocator {
         };
         // `get` of a fixed-width range yields exactly that width.
         let num_pages = u32::from_le_bytes(num_pages_bytes.try_into().unwrap());
+        // resize() from len==0 uses trailing_zeros()==32 and 2u32.pow(32).
+        if num_pages == 0 {
+            return Err(StorageError::Corrupted(
+                "Buddy allocator num_pages is zero".to_string(),
+            ));
+        }
 
         let mut metadata = FREE_END_OFFSETS;
         let mut data_start = FREE_END_OFFSETS + orders * size_of::<u32>();
