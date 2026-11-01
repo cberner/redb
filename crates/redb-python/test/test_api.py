@@ -350,3 +350,27 @@ def test_live_ranges(tmp_db_path: Path) -> None:
     txn.abort()
     with pytest.raises(redb.TransactionCompleted):
         next(entries)
+
+
+def test_changes_end_iteration(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        for key in (1, 2, 3):
+            users[key] = b"x"
+        # Changing the table ends an iteration over it, as with a dict
+        entries = iter(users)
+        assert next(entries) == (1, b"x")
+        users[4] = b"x"
+        with pytest.raises(RuntimeError, match="changed during iteration"):
+            next(entries)
+        # ... but an exhausted iteration stays exhausted
+        entries = iter(users)
+        assert len(list(entries)) == 4
+        users[4] = b"four"
+        assert next(entries, None) is None
+        # A table of the same transaction is not affected by changes to another
+        others = txn.open_table(redb.TableDefinition("others", redb.u64, redb.bytes))
+        entries = iter(users)
+        others[1] = b"x"
+        assert next(entries) == (1, b"x")
