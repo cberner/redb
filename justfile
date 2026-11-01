@@ -38,16 +38,19 @@ publish_py: test_py
     docker pull quay.io/pypa/manylinux2014_x86_64
     MATURIN_PYPI_TOKEN=$(cat ~/.pypi/redb_token) docker run -it --rm -e "MATURIN_PYPI_TOKEN" -v `pwd`:/redb-ro:ro quay.io/pypa/manylinux2014_x86_64 /redb-ro/crates/redb-python/py_publish.sh
 
-test_py: install_py
-    python3 -m pytest ./crates/redb-python/test
+# uv builds the Python extension through maturin; a debug build, as `maturin develop` makes
+export MATURIN_PEP517_ARGS := "--profile dev"
 
+test_py: install_py
+    uv run --project ./crates/redb-python pytest ./crates/redb-python/test
+
+# Builds the bindings and the test dependencies into ./crates/redb-python/.venv
 install_py: pre_no_sandbox
-    maturin develop --manifest-path=./crates/redb-python/Cargo.toml
-    python3 -m pip install pytest hypothesis
+    uv sync --project ./crates/redb-python --reinstall-package redb
 
 # Runs the Python model-based fuzzer for the given number of seconds
 fuzz_py seconds='600': install_py
-    python3 ./crates/redb-python/test/fuzz.py --seconds {{seconds}}
+    uv run --project ./crates/redb-python python ./crates/redb-python/test/fuzz.py --seconds {{seconds}}
 
 test: pre
     ./scripts/podman-sandbox.sh 'RUST_BACKTRACE=1 cargo test --frozen --all-features'

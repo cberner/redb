@@ -59,9 +59,10 @@ db = redb.open("my_db.redb", concurrency=redb.MultiWriter)
 ```
 
 ## Development
-The bindings are built with [maturin](https://www.maturin.rs). `just install_py` builds and
-installs them into the active virtualenv, `just test_py` runs the tests, and `just fuzz_py` runs
-the Hypothesis-based fuzzer.
+The bindings are built with [maturin](https://www.maturin.rs) and developed with
+[uv](https://docs.astral.sh/uv/), which installs maturin and the test dependencies itself.
+`just install_py` builds the bindings into `crates/redb-python/.venv`, `just test_py` runs the
+tests, and `just fuzz_py` runs the Hypothesis-based fuzzer.
 
 ## License
 
