@@ -92,6 +92,10 @@ class RedbMachine(RuleBasedStateMachine):
         # A handle from a transaction that was committed or aborted
         self.stale: redb.Table | None = None
         self.open_reads = 0
+        # The persistent savepoints, each the committed tables as they stood, and the open
+        # write transaction's view of them
+        self.savepoints: dict[int, Model] = {}
+        self.pending_savepoints: dict[int, Model] = {}
 
     def teardown(self) -> None:
         self.handles.clear()
@@ -139,6 +143,8 @@ class RedbMachine(RuleBasedStateMachine):
         # A handle keeps its transaction alive, so one is kept only once it has been finished
         self.stale = next(iter(self.handles.values()), None) if finished else None
         self.write = None
+        # What an aborted transaction made or deleted is gone; a committed one's were taken over
+        self.pending_savepoints = dict(self.savepoints)
         self.handles.clear()
         gc.collect()
 
@@ -148,6 +154,7 @@ class RedbMachine(RuleBasedStateMachine):
         assert self.db is not None
         self.write = self.db.begin_write()
         self.pending = {name: dict(table) for name, table in self.committed.items()}
+        self.pending_savepoints = dict(self.savepoints)
 
     @precondition(writing)
     @rule()
@@ -155,6 +162,7 @@ class RedbMachine(RuleBasedStateMachine):
         assert self.write is not None
         self.write.commit()
         self.committed = self.pending
+        self.savepoints = self.pending_savepoints
         self._end_write(finished=True)
 
     @precondition(writing)
@@ -292,6 +300,7 @@ class RedbMachine(RuleBasedStateMachine):
         gc.collect()
         self.db = redb.Database.open(self.path, concurrency=mode)
         with self.db.begin_write() as txn:
+            assert txn.list_persistent_savepoints() == sorted(self.savepoints)
             for name, model in self.committed.items():
                 assert len(txn.open_table(TABLES[name])) == len(model)
 
@@ -302,12 +311,64 @@ class RedbMachine(RuleBasedStateMachine):
         assert self.db is not None
         if check:
             assert self.db.check_integrity() is True
+        elif self.savepoints:
+            with pytest.raises(redb.PersistentSavepointExists):
+                self.db.compact()
         else:
             self.db.compact()
         with self.db.begin_read() as txn:
             assert txn.list_tables() == sorted(self.committed)
             for name, model in self.committed.items():
                 assert dict(txn.open_table(TABLES[name])) == model
+
+    @precondition(lambda self: self.write is None)
+    @rule()
+    def savepoint(self) -> None:
+        """Opens a write transaction with a savepoint of what is committed"""
+        self.begin_write()
+        assert self.write is not None
+        savepoint = self.write.persistent_savepoint()
+        assert savepoint not in self.pending_savepoints
+        self.pending_savepoints[savepoint] = {
+            name: dict(table) for name, table in self.committed.items()
+        }
+        assert self.write.list_persistent_savepoints() == sorted(self.pending_savepoints)
+
+    @precondition(lambda self: bool(self.pending_savepoints))
+    @rule(data=st.data())
+    def restore_savepoint(self, data: st.DataObject) -> None:
+        """Puts the tables back as they were at a savepoint, which drops the later savepoints"""
+        if self.write is None:
+            self.begin_write()
+        assert self.write is not None
+        savepoint = data.draw(st.sampled_from(sorted(self.pending_savepoints)))
+        self.write.restore_savepoint(savepoint)
+        self.pending = {
+            name: dict(table) for name, table in self.pending_savepoints[savepoint].items()
+        }
+        self.pending_savepoints = {
+            id: tables for id, tables in self.pending_savepoints.items() if id <= savepoint
+        }
+        assert self.write.list_persistent_savepoints() == sorted(self.pending_savepoints)
+        for name in TABLES:
+            if name in self.pending:
+                assert dict(self.write.open_table(TABLES[name])) == self.pending[name]
+        assert self.write.list_tables() == sorted(self.pending)
+
+    @rule(data=st.data())
+    def delete_savepoint(self, data: st.DataObject) -> None:
+        if self.write is None:
+            self.begin_write()
+        assert self.write is not None
+        known = sorted(self.pending_savepoints)
+        savepoint = data.draw(st.sampled_from(known) if known else st.just(0)) + data.draw(
+            st.sampled_from([0, 1000])
+        )
+        existed = self.write.delete_persistent_savepoint(savepoint)
+        assert existed == (savepoint in self.pending_savepoints)
+        self.pending_savepoints.pop(savepoint, None)
+        with pytest.raises(redb.InvalidSavepoint):
+            self.write.restore_savepoint(savepoint)
 
     @rule(target=reads)
     def begin_read(self) -> tuple[redb.ReadTransaction, Model]:

@@ -5,6 +5,7 @@ use ::redb::{TableDefinition, TableHandle, UntypedTableHandle};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
 /// A table named by its definition, or by its name alone as `list_tables` gives it
@@ -57,9 +58,11 @@ fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
 pub(crate) struct PyWriteTransaction {
     // None once committed or aborted
     state: Mutex<Option<Active>>,
-    // How many times each table has been changed, which a range over a table compares against
-    // to notice the table changing under it
+    // How many times each table has been changed, and how many times all of them were, by a
+    // savepoint restore; a range over a table compares the sum against what it saw, to notice
+    // the table changing under it
     mutations: Mutex<HashMap<String, u64>>,
+    restores: AtomicU64,
 }
 
 impl PyWriteTransaction {
@@ -67,6 +70,7 @@ impl PyWriteTransaction {
         Self {
             state: Mutex::new(Some(Active { txn, db })),
             mutations: Mutex::new(HashMap::new()),
+            restores: AtomicU64::new(0),
         }
     }
 
@@ -97,12 +101,14 @@ impl PyWriteTransaction {
     }
 
     pub(crate) fn mutation_count(&self, table: &str) -> u64 {
-        self.mutations
+        let of_table = self
+            .mutations
             .lock()
             .unwrap()
             .get(table)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        self.restores.load(Ordering::Acquire) + of_table
     }
 
     /// Runs `f` on the transaction, which is this operation's alone until `f` returns
@@ -113,6 +119,16 @@ impl PyWriteTransaction {
         let state = self.lock()?;
         let active = state.as_ref().ok_or_else(completed)?;
         f(&active.txn)
+    }
+
+    /// `with_txn` for what redb lets only a `&mut` transaction do
+    fn with_txn_mut<R>(
+        &self,
+        f: impl FnOnce(&mut ::redb::WriteTransaction) -> PyResult<R>,
+    ) -> PyResult<R> {
+        let mut state = self.lock()?;
+        let active = state.as_mut().ok_or_else(completed)?;
+        f(&mut active.txn)
     }
 }
 
@@ -144,6 +160,36 @@ impl PyWriteTransaction {
         self.with_txn(|txn| txn.rename_table(untyped(&name), untyped(&new_name)).pyerr())?;
         self.mutated(&name);
         self.mutated(&new_name);
+        Ok(())
+    }
+
+    /// Records the tables as they stand, under an id that lasts, across transactions, until
+    /// `delete_persistent_savepoint`, for `restore_savepoint` to bring them back. Refused with
+    /// `InvalidSavepoint` once a table has been opened in this transaction. The pages a
+    /// savepoint keeps are not freed while it exists
+    fn persistent_savepoint(&self) -> PyResult<u64> {
+        self.with_txn(|txn| txn.persistent_savepoint().pyerr())
+    }
+
+    /// The ids of the persistent savepoints, in order
+    fn list_persistent_savepoints(&self) -> PyResult<Vec<u64>> {
+        self.with_txn(|txn| Ok(txn.list_persistent_savepoints().pyerr()?.collect()))
+    }
+
+    /// Deletes a persistent savepoint, and reports whether it existed
+    fn delete_persistent_savepoint(&self, id: u64) -> PyResult<bool> {
+        self.with_txn(|txn| txn.delete_persistent_savepoint(id).pyerr())
+    }
+
+    /// Puts every table back as it was at the savepoint, in this transaction, and deletes the
+    /// savepoints made after it. Ranges over the tables end. Refused with `InvalidSavepoint`
+    /// for an id that is not a savepoint's
+    fn restore_savepoint(&self, id: u64) -> PyResult<()> {
+        self.with_txn_mut(|txn| {
+            let savepoint = txn.get_persistent_savepoint(id).pyerr()?;
+            txn.restore_savepoint(&savepoint).pyerr()
+        })?;
+        self.restores.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
