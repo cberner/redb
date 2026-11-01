@@ -1,12 +1,13 @@
 use crate::BackendError;
 use crate::io;
-use crate::transaction_tracker::{TransactionId, TransactionTracker};
+use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::transactions::AllocatorStateLatch;
 #[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, HeaderGuard, InternalTableDefinition, PAGE_SIZE, PageHint,
-    PageNumber, PageResolver, ShrinkPolicy, TableTree, TableType, TransactionalMemory, WriterLock,
+    PageNumber, PageResolver, SerializedSavepoint, ShrinkPolicy, TableTree, TableType,
+    TransactionalMemory, WriterLock,
 };
 use crate::types::{Key, Value};
 use crate::{
@@ -17,6 +18,8 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
+use alloc::vec;
+use alloc::vec::Vec;
 use core::fmt::{Debug, Display, Formatter};
 
 use alloc::sync::Arc;
@@ -31,7 +34,7 @@ use crate::error::TransactionError;
 use crate::sealed::{Sealed, SealedInApi5};
 use crate::transactions::{
     ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
-    DATA_FREED_TABLE, PageList, SYSTEM_FREED_TABLE, SystemTableDefinition,
+    DATA_FREED_TABLE, PageList, SAVEPOINT_TABLE, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
 #[cfg(not(redb_no_std))]
@@ -809,8 +812,9 @@ impl Database {
         Self::verify_checksums(mem, data_root, system_root)
     }
 
-    // Verifies the checksums reachable from the given data and system roots, reading pages through
-    // `mem` (i.e. from disk if its cache was invalidated first).
+    // Verifies the checksums reachable from the given data and system roots, and from the user
+    // roots of the persistent savepoints recorded in the system tree, reading pages through `mem`
+    // (i.e. from disk if its cache was invalidated first).
     fn verify_checksums(
         mem: Arc<TransactionalMemory>,
         data_root: Option<BtreeHeader>,
@@ -830,13 +834,68 @@ impl Database {
             system_root,
             PageHint::None,
             Arc::new(TransactionGuard::untracked()),
-            resolver,
+            resolver.clone(),
         )?;
         if !system_table_tree.verify_checksums()? {
             return Ok(false);
         }
+        // A persistent savepoint keeps the pages of the user tree it saved, and restoring it makes
+        // them the current tree again, so they are part of the committed state. The system tree
+        // verified above, so the savepoint records are intact.
+        for user_root in Self::persistent_savepoint_roots(&system_table_tree, resolver.clone())? {
+            let saved_tree = TableTree::new(
+                user_root,
+                PageHint::None,
+                Arc::new(TransactionGuard::untracked()),
+                resolver.clone(),
+            )?;
+            if !saved_tree.verify_checksums()? {
+                return Ok(false);
+            }
+        }
 
         Ok(true)
+    }
+
+    // The user roots of the persistent savepoints recorded in the given system tree
+    fn persistent_savepoint_roots(
+        system_tree: &TableTree,
+        resolver: PageResolver,
+    ) -> Result<Vec<Option<BtreeHeader>>> {
+        let table_name = SAVEPOINT_TABLE.name();
+        let definition = match system_tree
+            .get_table::<SavepointId, SerializedSavepoint<'static>>(table_name, TableType::Normal)
+        {
+            Ok(Some(definition)) => definition,
+            Ok(None) | Err(TableError::TableDoesNotExist(_)) => return Ok(vec![]),
+            Err(TableError::Storage(err)) => return Err(err),
+            Err(_) => {
+                return Err(StorageError::Corrupted(format!(
+                    "Unable to open {table_name}"
+                )));
+            }
+        };
+        let table_root = match definition {
+            InternalTableDefinition::Normal { table_root, .. } => table_root,
+            InternalTableDefinition::Multimap { .. } => {
+                return Err(StorageError::Corrupted(format!(
+                    "{table_name} is not a normal table"
+                )));
+            }
+        };
+        let table: ReadOnlyTable<SavepointId, SerializedSavepoint<'static>> = ReadOnlyTable::new(
+            table_name.to_string(),
+            table_root,
+            PageHint::None,
+            Arc::new(TransactionGuard::untracked()),
+            resolver,
+        )?;
+        let mut roots = vec![];
+        for entry in ReadableTable::iter(&table)? {
+            let (_, savepoint) = entry?;
+            roots.push(savepoint.value().get_user_root()?);
+        }
+        Ok(roots)
     }
 
     /// Force a check of the integrity of the database file, and repair it if possible.

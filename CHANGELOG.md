@@ -68,6 +68,8 @@
 * Operations on tables with `&str` or `String` keys are faster.
 
 ### Bug fixes
+* Repair and `check_integrity()` verify the trees kept by persistent savepoints, which were not
+  checked before.
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
   transaction.
 * Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a

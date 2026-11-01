@@ -160,6 +160,10 @@ impl SerializedSavepoint<'_> {
         Ok((savepoint.id, savepoint.transaction_id))
     }
 
+    pub(crate) fn get_user_root(&self) -> Result<Option<BtreeHeader>> {
+        Ok(self.parse()?.user_root)
+    }
+
     fn parse(&self) -> Result<PersistentSavepoint> {
         let data = self.data();
         let serialized_len =
