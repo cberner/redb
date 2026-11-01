@@ -27,11 +27,8 @@ impl PyTableDefinition {
         key_type: &Bound<'_, PyAny>,
         value_type: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
-        if name.is_empty() {
-            return Err(PyValueError::new_err("table name must not be empty"));
-        }
         Ok(Self {
-            name,
+            name: checked_name(name)?,
             key: Type::from_py(key_type)?,
             value: Type::from_py(value_type)?,
         })
@@ -60,6 +57,14 @@ impl PyTableDefinition {
             self.value.name()
         )
     }
+}
+
+/// A table name, which redb requires to be non-empty
+pub(crate) fn checked_name(name: String) -> PyResult<String> {
+    if name.is_empty() {
+        return Err(PyValueError::new_err("table name must not be empty"));
+    }
+    Ok(name)
 }
 
 /// Opens the redb table `name` with the types its definition dispatched to
