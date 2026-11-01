@@ -6,7 +6,7 @@ use ::redb::{
     AccessGuard, Key, OwnedRange, ReadOnlyTable, ReadTransaction, ReadableTable,
     ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction,
 };
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::any::Any;
 use std::borrow::Borrow;
@@ -183,14 +183,27 @@ impl PyTable {
         Ok(table)
     }
 
-    /// Opens the redb table for `f`, and closes it after
+    /// Opens the redb table for `f` to read, and closes it after
     fn with_table<K: Key + 'static, V: Value + 'static, R>(
         &self,
-        f: impl for<'txn> FnOnce(&mut Table<'txn, K, V>) -> PyResult<R>,
+        f: impl for<'txn> FnOnce(&Table<'txn, K, V>) -> PyResult<R>,
     ) -> PyResult<R> {
         self.txn
             .get()
-            .with_txn(|txn| f(&mut open::<K, V>(txn, &self.name)?))
+            .with_txn(|txn| f(&open::<K, V>(txn, &self.name)?))
+    }
+
+    /// Opens the redb table for `f` to change, and counts the change for the ranges over the
+    /// table, whether or not `f` succeeded. A `&mut Table` exists only here, so no change goes
+    /// uncounted.
+    fn with_table_mut<K: Key + 'static, V: Value + 'static, R>(
+        &self,
+        f: impl for<'txn> FnOnce(&mut Table<'txn, K, V>) -> PyResult<R>,
+    ) -> PyResult<R> {
+        let txn = self.txn.get();
+        let result = txn.with_txn(|txn| f(&mut open::<K, V>(txn, &self.name)?));
+        txn.mutated(&self.name);
+        result
     }
 }
 
@@ -250,14 +263,15 @@ impl PyTable {
     ) -> PyResult<Py<PyAny>> {
         with_types!(self.key, self.value, K, V, {
             let (key, value) = (K::from_py(key)?, V::from_py(value)?);
-            self.with_table::<K, V, _>(|table| {
+            self.with_table_mut::<K, V, _>(|table| {
                 py_value::<V>(py, table.insert(K::lend(&key), V::lend(&value)).pyerr()?)
             })
         })
     }
 
     /// Iterates the `(key, value)` entries with `start <= key < end` in key order, or in
-    /// reverse; either bound may be None
+    /// reverse; either bound may be None. Changing the table while iterating is an error, as
+    /// it is for a dict.
     #[pyo3(signature = (start=None, end=None, *, reverse=false))]
     fn range(
         slf: Py<Self>,
@@ -276,9 +290,11 @@ impl PyTable {
             };
             (key(start)?, key(end)?)
         });
+        let mutations = table.txn.get().mutation_count(&table.name);
         Ok(PyRange {
             source: Source::Write(WriteRange {
                 table: slf,
+                mutations,
                 start,
                 start_inclusive: true,
                 end,
@@ -447,9 +463,12 @@ where
     }
 }
 
-/// A range of a write transaction's table, which is reopened and sought again at each call
+/// A range of a write transaction's table, which is reopened and sought again at each call;
+/// a change to the table ends it, as for a dict
 struct WriteRange {
     table: Py<PyTable>,
+    // The table's change count when the iteration began
+    mutations: u64,
     // The bounds still to cover; `start` (or `end`, in reverse) moves past each key returned
     start: Option<Py<PyAny>>,
     start_inclusive: bool,
@@ -462,7 +481,11 @@ impl WriteRange {
         if self.done {
             return Ok(None); // and stays exhausted, as a dict's iterator does
         }
+        // A changed table ends the iteration, as a dict's does
         let table = self.table.get();
+        if table.txn.get().mutation_count(&table.name) != self.mutations {
+            return Err(PyRuntimeError::new_err("table changed during iteration"));
+        }
         let entry = with_types!(table.key, table.value, K, V, {
             let start = self
                 .start

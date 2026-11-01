@@ -183,6 +183,23 @@ class RedbMachine(RuleBasedStateMachine):
         table, model = self._table(name)
         self._check_range(table, model, data, reverse)
 
+    @rule(name=names, data=st.data())
+    def change_while_iterating(self, name: str, data: st.DataObject) -> None:
+        table, model = self._table(name)
+        entries = iter(table)
+        first = next(entries, None)
+        assert first == (min(model.items()) if model else None)
+        key = data.draw(KEYS[TABLES[name].key_type])
+        value = data.draw(VALUES[TABLES[name].value_type])
+        table[key] = value
+        model[key] = value
+        if first is None:
+            # Exhausted before the change, which stays final, as for a dict
+            assert next(entries, None) is None
+        else:
+            with pytest.raises(RuntimeError):
+                next(entries)
+
     @precondition(lambda self: self.stale is not None)
     @rule()
     def stale_handle(self) -> None:

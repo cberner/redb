@@ -2,6 +2,7 @@ use crate::database::PyDatabase;
 use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
 use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition};
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 // Field order is the drop order: `txn` must go before `db`, since dropping the last reference
@@ -37,17 +38,39 @@ fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
 pub(crate) struct PyWriteTransaction {
     // None once committed or aborted
     state: Mutex<Option<Active>>,
+    // How many times each table has been changed, which a range over a table compares against
+    // to notice the table changing under it
+    mutations: Mutex<HashMap<String, u64>>,
 }
 
 impl PyWriteTransaction {
     pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::WriteTransaction) -> Self {
         Self {
             state: Mutex::new(Some(Active { txn, db })),
+            mutations: Mutex::new(HashMap::new()),
         }
     }
 
     fn take(&self) -> Option<Active> {
         self.state.lock().unwrap().take()
+    }
+
+    pub(crate) fn mutated(&self, table: &str) {
+        *self
+            .mutations
+            .lock()
+            .unwrap()
+            .entry(table.to_string())
+            .or_default() += 1;
+    }
+
+    pub(crate) fn mutation_count(&self, table: &str) -> u64 {
+        self.mutations
+            .lock()
+            .unwrap()
+            .get(table)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Runs `f` on the transaction, which is this operation's alone until `f` returns
