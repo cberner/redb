@@ -480,3 +480,51 @@ def test_open_read_only(tmp_db_path: Path) -> None:
     with writer.begin_write() as txn:
         txn.open_table(USERS)[3] = b"carol"
     assert reader.begin_read().open_table(USERS)[3] == b"carol"
+
+
+def test_table_management(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    groups = redb.TableDefinition("groups", redb.u64, redb.bytes)
+    people = redb.TableDefinition("people", redb.u64, redb.bytes)
+    with db.begin_write() as txn:
+        assert txn.list_tables() == []
+        txn.open_table(USERS)[1] = b"alice"
+        txn.open_table(groups)
+        assert txn.list_tables() == ["groups", "users"]
+    with db.begin_write() as txn:
+        # A table goes by its definition or by its name, as list_tables gives it
+        txn.rename_table(USERS, people)
+        assert txn.list_tables() == ["groups", "people"]
+        assert txn.open_table(people)[1] == b"alice"
+        with pytest.raises(redb.TableExists):
+            txn.rename_table("groups", "people")
+        with pytest.raises(redb.TableDoesNotExist):
+            txn.rename_table("users", "members")
+        assert txn.delete_table("groups") is True
+        assert txn.delete_table(groups) is False
+        with pytest.raises(TypeError):
+            txn.delete_table(3)
+        with pytest.raises(ValueError):
+            txn.delete_table("")
+    read = db.begin_read()
+    assert read.list_tables() == ["people"]
+    with pytest.raises(redb.TableDoesNotExist):
+        read.open_table(USERS)
+    # A Table object is its name's binding: a range over a deleted table ends, and the object
+    # used again opens the table anew, empty
+    with db.begin_write() as txn:
+        table = txn.open_table(people)
+        entries = iter(table)
+        txn.delete_table(people)
+        with pytest.raises(RuntimeError):
+            next(entries)
+        assert len(table) == 0
+        assert txn.list_tables() == ["people"]
+        # A range over the name a table is renamed to ends as well
+        txn.open_table(groups)[2] = b"bob"
+        txn.delete_table(people)
+        entries = iter(table)
+        txn.rename_table(groups, people)
+        with pytest.raises(RuntimeError):
+            next(entries)
+        assert table[2] == b"bob"

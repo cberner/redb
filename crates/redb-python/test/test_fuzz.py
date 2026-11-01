@@ -238,6 +238,30 @@ class RedbMachine(RuleBasedStateMachine):
         for key in doomed:
             model.pop(key, None)
 
+    @rule(name=names, by_definition=st.booleans())
+    def delete_table(self, name: str, by_definition: bool) -> None:
+        if self.write is None:
+            self.begin_write()
+        assert self.write is not None
+        table = TABLES[name] if by_definition else name
+        assert self.write.delete_table(table) == (name in self.pending)
+        self.pending.pop(name, None)
+        self.handles.pop(name, None)
+        assert self.write.list_tables() == sorted(self.pending)
+
+    @rule(name=names)
+    def rename_table(self, name: str) -> None:
+        """Renames a table away and back; the data moves with it"""
+        _, model = self._table(name)
+        assert self.write is not None
+        definition = TABLES[name]
+        renamed = redb.TableDefinition("renamed", definition.key_type, definition.value_type)
+        self.write.rename_table(definition, "renamed")
+        assert self.write.list_tables() == sorted((set(self.pending) - {name}) | {"renamed"})
+        assert dict(self.write.open_table(renamed)) == model
+        self.write.rename_table("renamed", definition)
+        assert self.write.list_tables() == sorted(self.pending)
+
     @precondition(lambda self: self.stale is not None)
     @rule()
     def stale_handle(self) -> None:
@@ -261,7 +285,9 @@ class RedbMachine(RuleBasedStateMachine):
         assert self.db is not None
         self.open_reads += 1
         snapshot = {name: dict(table) for name, table in self.committed.items()}
-        return self.db.begin_read(), snapshot
+        txn = self.db.begin_read()
+        assert txn.list_tables() == sorted(snapshot)
+        return txn, snapshot
 
     @rule(read=reads, name=names, data=st.data())
     def read_get(

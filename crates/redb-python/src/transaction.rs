@@ -1,10 +1,28 @@
 use crate::database::PyDatabase;
 use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
-use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition};
+use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition, checked_name};
+use ::redb::{TableDefinition, TableHandle, UntypedTableHandle};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, TryLockError};
+
+/// A table named by its definition, or by its name alone as `list_tables` gives it
+fn table_name(table: &Bound<'_, PyAny>) -> PyResult<String> {
+    match table.cast::<PyTableDefinition>() {
+        Ok(definition) => Ok(definition.get().name.clone()),
+        Err(_) => checked_name(table.extract()?),
+    }
+}
+
+/// redb names the table to delete or rename by a handle, whose types go unused
+fn untyped(name: &str) -> TableDefinition<'_, &'static [u8], &'static [u8]> {
+    TableDefinition::new(name)
+}
+
+fn names(tables: impl Iterator<Item = UntypedTableHandle>) -> Vec<String> {
+    tables.map(|table| table.name().to_string()).collect()
+}
 
 // Field order is the drop order: `txn` must go before `db`, since dropping the last reference
 // to a Database waits for its live write transaction, which would be this one.
@@ -105,6 +123,30 @@ impl PyWriteTransaction {
         PyTable::new(slf, definition)
     }
 
+    /// The names of the tables, in order, those created in this transaction included
+    fn list_tables(&self) -> PyResult<Vec<String>> {
+        self.with_txn(|txn| Ok(names(txn.list_tables().pyerr()?)))
+    }
+
+    /// Deletes a table, named by its definition or its name, and reports whether it existed. A
+    /// `Table` object for it opens it anew, empty, if used again
+    fn delete_table(&self, table: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let name = table_name(table)?;
+        let existed = self.with_txn(|txn| txn.delete_table(untyped(&name)).pyerr())?;
+        self.mutated(&name);
+        Ok(existed)
+    }
+
+    /// Renames a table; refused with `TableExists` if the new name is taken. A `Table` object
+    /// stays bound to the old name, and ranges over either name end
+    fn rename_table(&self, table: &Bound<'_, PyAny>, new_name: &Bound<'_, PyAny>) -> PyResult<()> {
+        let (name, new_name) = (table_name(table)?, table_name(new_name)?);
+        self.with_txn(|txn| txn.rename_table(untyped(&name), untyped(&new_name)).pyerr())?;
+        self.mutated(&name);
+        self.mutated(&new_name);
+        Ok(())
+    }
+
     /// Writes every change made in the transaction to the database
     fn commit(&self, py: Python<'_>) -> PyResult<()> {
         finish(py, self.take()?.ok_or_else(completed)?, true)
@@ -176,6 +218,13 @@ impl PyReadTransaction {
         let state = self.state.lock().unwrap();
         let active = state.as_ref().ok_or_else(closed)?;
         PyReadOnlyTable::new(&active.txn, active.db.clone_ref(py), definition)
+    }
+
+    /// The names of the tables of the snapshot, in order
+    fn list_tables(&self) -> PyResult<Vec<String>> {
+        let state = self.state.lock().unwrap();
+        let active = state.as_ref().ok_or_else(closed)?;
+        Ok(names(active.txn.list_tables().pyerr()?))
     }
 
     /// Ends the transaction now; refused while a table from it is still alive
