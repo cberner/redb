@@ -146,6 +146,18 @@ impl BtreeBitmap {
                     data.len(),
                 )));
             };
+            // U64GroupedBitmap::from_bytes still panics on short or misaligned frames.
+            // Reject those here so in-range but empty/odd layers return Corrupted.
+            if layer.len() < size_of::<u32>()
+                || !(layer.len() - size_of::<u32>()).is_multiple_of(size_of::<u64>())
+            {
+                return Err(StorageError::Corrupted(format!(
+                    "Btree bitmap layer at {data_start}..{data_end} is {} bytes; expected a {}-byte header followed by {}-byte words",
+                    layer.len(),
+                    size_of::<u32>(),
+                    size_of::<u64>(),
+                )));
+            }
             heights.push(U64GroupedBitmap::from_bytes(layer));
             data_start = data_end;
             metadata += size_of::<u32>();
