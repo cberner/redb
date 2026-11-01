@@ -1624,8 +1624,12 @@ impl Database {
         region_size: Option<u64>,
         cache_size: usize,
         concurrency_mode: ConcurrencyMode,
-        repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
+        repair: RepairConfig<'_>,
     ) -> Result<Self, DatabaseError> {
+        let RepairConfig {
+            check_integrity: check_integrity_on_open,
+            callback: repair_callback,
+        } = repair;
         #[cfg(feature = "logging")]
         let file_path = format!("{:?}", &file);
         #[cfg(feature = "logging")]
@@ -1644,8 +1648,14 @@ impl Database {
         let mut mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, unless nothing has been
-        // committed, we need a full repair
-        let repaired = if let Some(tree) = Self::get_allocator_state_table(&mem)? {
+        // committed, we need a full repair. An integrity check on open skips the recorded state,
+        // and the unverified read of the system tree that finding it takes, and verifies the file
+        let allocator_state = if check_integrity_on_open {
+            None
+        } else {
+            Self::get_allocator_state_table(&mem)?
+        };
+        let repaired = if let Some(tree) = allocator_state {
             #[cfg(feature = "logging")]
             debug!("Found valid allocator state, full repair not needed");
             mem.load_allocator_state(&tree)?;
@@ -1660,7 +1670,14 @@ impl Database {
             false
         } else {
             #[cfg(feature = "logging")]
-            warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
+            if check_integrity_on_open {
+                debug!(
+                    "Integrity check of database {:?} requested. Repairing",
+                    &file_path
+                );
+            } else {
+                warn!("Database {:?} not shutdown cleanly. Repairing", &file_path);
+            }
             let mut handle = RepairSession::new(0.0);
             repair_callback(&mut handle);
             if handle.aborted() {
@@ -2108,12 +2125,19 @@ impl ConcurrencyMode {
     }
 }
 
+// How an open treats a file that needs a repair, or is asked for one
+struct RepairConfig<'a> {
+    check_integrity: bool,
+    callback: &'a (dyn Fn(&mut RepairSession) + 'static),
+}
+
 /// Configuration builder of a redb [Database].
 pub struct Builder {
     page_size: usize,
     region_size: Option<u64>,
     cache_size: usize,
     concurrency_mode: ConcurrencyMode,
+    check_integrity_on_open: bool,
     repair_callback: Box<dyn Fn(&mut RepairSession)>,
 }
 
@@ -2133,6 +2157,7 @@ impl Builder {
             region_size: None,
             concurrency_mode: ConcurrencyMode::ExclusiveWriter,
             cache_size: 1024 * 1024 * 1024,
+            check_integrity_on_open: false,
             repair_callback: Box::new(|_| {}),
         }
     }
@@ -2178,6 +2203,22 @@ impl Builder {
         self
     }
 
+    /// Check the integrity of the database every time it is opened, not only after a crash.
+    ///
+    /// With this set, the open runs the check and repair of [`Database::check_integrity`]: the
+    /// checksum of every page of the committed trees is verified and the allocator state is
+    /// rebuilt. A file altered since redb last wrote it fails to open with
+    /// [`StorageError::Corrupted`] instead of being trusted.
+    ///
+    /// The check reads the whole file and commits, so it does not apply to
+    /// [`Self::open_read_only`].
+    ///
+    /// Defaults to `false`.
+    pub fn set_check_integrity_on_open(&mut self, enabled: bool) -> &mut Self {
+        self.check_integrity_on_open = enabled;
+        self
+    }
+
     #[cfg(any(test, fuzzing))]
     pub fn set_region_size(&mut self, size: u64) -> &mut Self {
         assert!(size.is_power_of_two());
@@ -2205,7 +2246,10 @@ impl Builder {
             self.region_size,
             self.cache_size,
             self.concurrency_mode,
-            &self.repair_callback,
+            RepairConfig {
+                check_integrity: self.check_integrity_on_open,
+                callback: &self.repair_callback,
+            },
         )
     }
 
@@ -2221,7 +2265,10 @@ impl Builder {
             None,
             self.cache_size,
             self.concurrency_mode,
-            &self.repair_callback,
+            RepairConfig {
+                check_integrity: self.check_integrity_on_open,
+                callback: &self.repair_callback,
+            },
         )
     }
 
@@ -2262,7 +2309,10 @@ impl Builder {
             self.region_size,
             self.cache_size,
             self.concurrency_mode,
-            &self.repair_callback,
+            RepairConfig {
+                check_integrity: self.check_integrity_on_open,
+                callback: &self.repair_callback,
+            },
         )
     }
 
@@ -2278,7 +2328,10 @@ impl Builder {
             self.region_size,
             self.cache_size,
             self.concurrency_mode,
-            &self.repair_callback,
+            RepairConfig {
+                check_integrity: self.check_integrity_on_open,
+                callback: &self.repair_callback,
+            },
         )
     }
 }
