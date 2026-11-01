@@ -1,6 +1,6 @@
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
-    LeafBuilder, LeafMutator, OwnedEntryBuffer, RawBranchBuilder, branch_separator,
+    BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LeafAccessor, LeafBuilder,
+    LeafMutator, OwnedEntryBuffer, PageType, RawBranchBuilder, branch_separator,
     is_single_large_value, leaf_below_merge_threshold, leaf_split_required,
     retained_after_removals,
 };
@@ -748,9 +748,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         value: &[u8],
         rightmost: bool,
     ) -> Result<InsertionResult<'a, V>> {
-        let node_mem = page.memory();
-        Ok(match node_mem[0] {
-            LEAF => {
+        Ok(match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let (position, found) = accessor.position::<K>(key);
 
@@ -830,7 +829,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     drop(page);
                     let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
                     let mut mutator =
-                        LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+                        LeafMutator::new(&mut page_mut, K::fixed_width(), V::fixed_width())?;
                     if found {
                         mutator.replace(position, value);
                     } else {
@@ -1025,7 +1024,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     }
                 }
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 let child_checksum = accessor.child_checksum(child_index).unwrap();
@@ -1060,7 +1059,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     let page_number = page.get_page_number();
                     drop(page);
                     let mut mutpage = self.page_allocator.get_page_mut(page_number)?;
-                    let mut mutator = BranchMutator::new(mutpage.memory_mut());
+                    let mut mutator = BranchMutator::new(&mut mutpage)?;
                     mutator.write_child_page(
                         child_index,
                         sub_result.new_root,
@@ -1083,7 +1082,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                         .page_allocator
                         .allocate(page.memory().len(), self.allocated)?;
                     new_page.memory_mut().copy_from_slice(page.memory());
-                    BranchMutator::new(new_page.memory_mut()).write_child_page(
+                    BranchMutator::new(&mut new_page)?.write_child_page(
                         child_index,
                         sub_result.new_root,
                         sub_result.root_checksum,
@@ -1173,7 +1172,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
 
                 result
             }
-            _ => unreachable!(),
         })
     }
 
@@ -1195,19 +1193,17 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
     fn insert_inplace_helper(&mut self, mut page: PageMut, key: &[u8], value: &[u8]) -> Result<()> {
         assert!(self.page_allocator.uncommitted(page.get_page_number()));
 
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => {
+        match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 let (position, found) = accessor.position::<K>(key);
                 assert!(found);
                 let old_len = accessor.entry(position).unwrap().value().len();
                 assert!(value.len() <= old_len);
-                let mut mutator =
-                    LeafMutator::new(page.memory_mut(), K::fixed_width(), V::fixed_width());
+                let mut mutator = LeafMutator::new(&mut page, K::fixed_width(), V::fixed_width())?;
                 mutator.replace(position, value);
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let (child_index, child_page) = accessor.child_for_key::<K>(key);
                 self.insert_inplace_helper(
@@ -1215,10 +1211,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                     key,
                     value,
                 )?;
-                let mut mutator = BranchMutator::new(page.memory_mut());
+                let mut mutator = BranchMutator::new(&mut page)?;
                 mutator.write_child_page(child_index, child_page, DEFERRED);
             }
-            _ => unreachable!(),
         }
 
         Ok(())
@@ -1264,7 +1259,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
                 end - start,
                 position,
                 K::fixed_width(),
-            );
+            )?;
             return Ok((Subtree(page_number), key_guard, guard));
         }
 
@@ -1339,8 +1334,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         {
             drop(page);
             let mut page_mut = self.page_allocator.get_page_mut(page_number)?;
-            let mut mutator =
-                LeafMutator::new(page_mut.memory_mut(), K::fixed_width(), V::fixed_width());
+            let mut mutator = LeafMutator::new(&mut page_mut, K::fixed_width(), V::fixed_width())?;
             mutator.remove_indices(indexes);
             return Ok(Subtree(page_number));
         }
@@ -1484,7 +1478,7 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         if self.page_allocator.uncommitted(original_page_number) {
             drop(page);
             let mut mutpage = self.page_allocator.get_page_mut(original_page_number)?;
-            let mut mutator = BranchMutator::new(mutpage.memory_mut());
+            let mut mutator = BranchMutator::new(&mut mutpage)?;
             mutator.write_child_page(child_index, new_child, DEFERRED);
             Ok((original_page_number, false))
         } else {
@@ -1814,11 +1808,9 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         key: &[u8],
         allow_in_place: bool,
     ) -> Result<(DeletionResult, Option<AccessGuard<'a, V>>)> {
-        let node_mem = page.memory();
-        match node_mem[0] {
-            LEAF => self.delete_leaf_helper(page, key, allow_in_place),
-            BRANCH => self.delete_branch_helper(page, key, allow_in_place),
-            _ => unreachable!(),
+        match PageType::from_page(&page)? {
+            PageType::Leaf => self.delete_leaf_helper(page, key, allow_in_place),
+            PageType::Branch => self.delete_branch_helper(page, key, allow_in_place),
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::AccessGuard;
 use crate::sync::Mutex;
 use crate::tree_store::btree_base::{
-    BRANCH, BranchAccessor, LEAF, LeafAccessor, MAX_BTREE_DEPTH, OwnedEntryBuffer,
+    BranchAccessor, LeafAccessor, MAX_BTREE_DEPTH, OwnedEntryBuffer, PageType,
     leaf_below_merge_threshold, leaf_fits_one_page, retained_after_removals,
 };
 use crate::tree_store::btree_iters::EntryGuard;
@@ -143,8 +143,8 @@ where
 {
     let mut page = page;
     loop {
-        let (child_index, child_page) = match page.memory()[0] {
-            LEAF => {
+        let (child_index, child_page) = match PageType::from_page(&page)? {
+            PageType::Leaf => {
                 let (leaf_position, len) = {
                     let accessor =
                         LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
@@ -159,12 +159,11 @@ where
                     len,
                 });
             }
-            BRANCH => {
+            PageType::Branch => {
                 let accessor = BranchAccessor::new(&page, K::fixed_width());
                 let child_index = child_to_visit::<K>(&accessor, position);
                 (child_index, accessor.child_page(child_index).unwrap())
             }
-            _ => unreachable!(),
         };
         if path.len() >= MAX_BTREE_DEPTH {
             return Err(StorageError::Corrupted(
