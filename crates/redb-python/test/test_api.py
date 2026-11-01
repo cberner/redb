@@ -662,3 +662,17 @@ def test_savepoints(tmp_db_path: Path) -> None:
         assert txn.delete_persistent_savepoint(first) is True
         assert txn.delete_persistent_savepoint(first) is False
         assert txn.list_persistent_savepoints() == []
+
+
+def test_open_functions(tmp_db_path: Path) -> None:
+    with pytest.raises(redb.Io):
+        redb.open(str(tmp_db_path))  # open() does not create
+    db = redb.Database.create(str(tmp_db_path), concurrency=redb.MultiWriter)
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    writer = redb.open(str(tmp_db_path), concurrency=redb.MultiWriter, cache_size=1024 * 1024)
+    assert isinstance(writer, redb.Database)
+    assert writer.begin_read().open_table(USERS)[1] == b"alice"
+    reader = redb.open_read_only(str(tmp_db_path), cache_size=1024 * 1024)
+    assert isinstance(reader, redb.ReadOnlyDatabase)
+    assert reader.begin_read().open_table(USERS)[1] == b"alice"
