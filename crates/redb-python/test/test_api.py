@@ -33,6 +33,7 @@ def test_table_definition() -> None:
     assert users.key_type is redb.Type.u64
     assert users.value_type is redb.bytes
     assert redb.TableDefinition("t", bytes, bytes).key_type is redb.bytes
+    assert redb.TableDefinition("t", str, str).key_type is redb.str
     assert repr(users) == 'TableDefinition("users", redb.u64, redb.bytes)'
     with pytest.raises(TypeError, match="explicit width"):
         redb.TableDefinition("t", int, bytes)
@@ -528,3 +529,22 @@ def test_table_management(tmp_db_path: Path) -> None:
         with pytest.raises(RuntimeError):
             next(entries)
         assert table[2] == b"bob"
+
+
+def test_str_type(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        names = txn.open_table(redb.TableDefinition("names", redb.str, str))
+        names["b"] = "bee"
+        names["a"] = "ay"
+        names["\u00e9"] = "e acute"
+        # Sorted by code point, which is how redb orders the UTF-8
+        assert list(names) == [("a", "ay"), ("b", "bee"), ("\u00e9", "e acute")]
+        assert names.get("a") == "ay"
+        assert names.get("c") is None
+        with pytest.raises(TypeError, match="expected str, got bytes"):
+            names[b"a"] = "x"
+        with pytest.raises(TypeError):
+            names.get(1)
+        with pytest.raises(UnicodeEncodeError):
+            names["\ud800"] = "a lone surrogate has no UTF-8"

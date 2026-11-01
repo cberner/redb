@@ -2,7 +2,7 @@ use ::redb::Value;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyType};
+use pyo3::types::{PyByteArray, PyBytes, PyString, PyType};
 
 /// The key and value types a table may declare.
 ///
@@ -15,16 +15,19 @@ pub(crate) enum Type {
     Bytes,
     #[pyo3(name = "u64")]
     U64,
+    #[pyo3(name = "str")]
+    Str,
 }
 
 impl Type {
-    const ALL: [Type; 2] = [Type::Bytes, Type::U64];
+    const ALL: [Type; 3] = [Type::Bytes, Type::U64, Type::Str];
 
     /// The type's name in Python, as `redb.<name>` and `Type.<name>`
     pub(crate) fn name(self) -> &'static str {
         match self {
             Type::Bytes => "bytes",
             Type::U64 => "u64",
+            Type::Str => "str",
         }
     }
 
@@ -33,12 +36,17 @@ impl Type {
         if let Ok(t) = obj.extract::<Type>() {
             return Ok(t);
         }
-        let bytes = obj.py().get_type::<PyBytes>();
-        if obj.cast::<PyType>().is_ok_and(|cls| cls.is(&bytes)) {
-            return Ok(Type::Bytes);
+        let py = obj.py();
+        if let Ok(cls) = obj.cast::<PyType>() {
+            if cls.is(py.get_type::<PyBytes>()) {
+                return Ok(Type::Bytes);
+            }
+            if cls.is(py.get_type::<PyString>()) {
+                return Ok(Type::Str);
+            }
         }
         Err(PyTypeError::new_err(format!(
-            "expected a redb.Type or bytes (int needs an explicit width such as redb.u64), got {}",
+            "expected a redb.Type, bytes or str (int needs an explicit width such as redb.u64), got {}",
             obj.repr()?
         )))
     }
@@ -95,6 +103,28 @@ impl PyValue for u64 {
     }
 }
 
+impl PyValue for &'static str {
+    type Owned = String;
+
+    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+        match obj.cast::<PyString>() {
+            Ok(string) => Ok(string.to_str()?.to_owned()),
+            Err(_) => Err(PyTypeError::new_err(format!(
+                "expected str, got {}",
+                obj.get_type().name()?
+            ))),
+        }
+    }
+
+    fn lend(owned: &String) -> &str {
+        owned
+    }
+
+    fn to_py<'py>(py: Python<'py>, value: &str) -> PyResult<Bound<'py, PyAny>> {
+        Ok(PyString::new(py, value).into_any())
+    }
+}
+
 /// Runs `$body` with `$T` bound to the redb type that `$t` names at runtime.
 ///
 /// redb's API is generic over the key and value types, while a Python table definition only
@@ -110,6 +140,10 @@ macro_rules! with_type {
             }
             $crate::types::Type::U64 => {
                 type $T = u64;
+                $body
+            }
+            $crate::types::Type::Str => {
+                type $T = &'static str;
                 $body
             }
         }

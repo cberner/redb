@@ -34,6 +34,7 @@ TABLES = {
         redb.TableDefinition("bytes_u64", redb.bytes, redb.u64),
         redb.TableDefinition("u64_bytes", redb.u64, redb.bytes),
         redb.TableDefinition("u64_u64", redb.u64, redb.u64),
+        redb.TableDefinition("str_str", redb.str, redb.str),
     ]
 }
 
@@ -42,10 +43,12 @@ TABLES = {
 KEYS = {
     redb.bytes: st.binary(max_size=3),
     redb.u64: st.integers(0, 12) | st.integers(0, 2**64 - 1),
+    redb.str: st.text(max_size=3),
 }
 VALUES = {
     redb.bytes: st.binary(max_size=8) | st.binary(min_size=4096, max_size=12000),
     redb.u64: st.integers(0, 2**64 - 1),
+    redb.str: st.text(max_size=8),
 }
 
 Model = dict[str, dict[Any, Any]]
