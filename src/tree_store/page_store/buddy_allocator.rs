@@ -3,6 +3,9 @@ use crate::tree_store::page_store::bitmap::BtreeBitmap;
 #[cfg(test)]
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
+use crate::{Result, StorageError};
+use alloc::format;
+use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cmp::min;
@@ -115,34 +118,73 @@ impl BuddyAllocator {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
-        let max_order = data[MAX_ORDER_OFFSET];
-        let num_pages = u32::from_le_bytes(
-            data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
-
-        let mut metadata = FREE_END_OFFSETS;
-        let mut data_start = FREE_END_OFFSETS + (max_order as usize + 1) * size_of::<u32>();
-
-        let mut free = vec![];
-        for _ in 0..=max_order {
-            let data_end = u32::from_le_bytes(
-                data[metadata..(metadata + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end]));
-            data_start = data_end;
-            metadata += size_of::<u32>();
+    pub(crate) fn from_bytes(data: &[u8]) -> Result<Self> {
+        // Header is max_order, 3 bytes of padding, num_pages, then one end offset per order.
+        let Some(&max_order) = data.get(MAX_ORDER_OFFSET) else {
+            return Err(StorageError::Corrupted(
+                "Buddy allocator record is empty".to_string(),
+            ));
+        };
+        if max_order > MAX_MAX_PAGE_ORDER {
+            return Err(StorageError::Corrupted(format!(
+                "Buddy allocator max_order {max_order} exceeds the maximum of {MAX_MAX_PAGE_ORDER}"
+            )));
+        }
+        let orders = usize::from(max_order) + 1;
+        let Some(num_pages_bytes) =
+            data.get(NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>()))
+        else {
+            return Err(StorageError::Corrupted(format!(
+                "Buddy allocator header is {} bytes; expected at least {FREE_END_OFFSETS}",
+                data.len()
+            )));
+        };
+        // `get` of a fixed-width range yields exactly that width.
+        let num_pages = u32::from_le_bytes(num_pages_bytes.try_into().unwrap());
+        // resize() from len==0 uses trailing_zeros()==32 and 2u32.pow(32).
+        if num_pages == 0 {
+            return Err(StorageError::Corrupted(
+                "Buddy allocator num_pages is zero".to_string(),
+            ));
         }
 
-        Self {
+        let mut metadata = FREE_END_OFFSETS;
+        let mut data_start = FREE_END_OFFSETS + orders * size_of::<u32>();
+        let mut free = Vec::with_capacity(orders);
+        // Same length schedule BuddyAllocator::new uses for each order.
+        let mut expected_len = num_pages;
+        for order in 0..=max_order {
+            let Some(end_bytes) = data.get(metadata..(metadata + size_of::<u32>())) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Buddy allocator order {order} end offset is past the end of a {} byte record",
+                    data.len()
+                )));
+            };
+            let data_end = u32::from_le_bytes(end_bytes.try_into().unwrap()) as usize;
+            let Some(bitmap_bytes) = data.get(data_start..data_end) else {
+                return Err(StorageError::Corrupted(format!(
+                    "Buddy allocator order {order} end offset {data_end} is outside {data_start}..={}",
+                    data.len()
+                )));
+            };
+            let bitmap = BtreeBitmap::from_bytes(bitmap_bytes);
+            if bitmap.len() != expected_len {
+                return Err(StorageError::Corrupted(format!(
+                    "Buddy allocator order {order} bitmap length {} does not match num_pages-derived length {expected_len}",
+                    bitmap.len(),
+                )));
+            }
+            free.push(bitmap);
+            data_start = data_end;
+            metadata += size_of::<u32>();
+            expected_len = next_higher_order(expected_len);
+        }
+
+        Ok(Self {
             free,
             len: num_pages,
             max_order,
-        }
+        })
     }
 
     #[inline]
