@@ -29,7 +29,7 @@ impl PyTableDefinition {
     ) -> PyResult<Self> {
         Ok(Self {
             name: checked_name(name)?,
-            key: Type::from_py(key_type)?,
+            key: Type::key_from_py(key_type)?,
             value: Type::from_py(value_type)?,
         })
     }
@@ -367,7 +367,7 @@ impl PyTable {
     ) -> PyResult<PyRange> {
         let table = slf.get();
         // Converted now, so a wrong type fails at the call and a bytearray cannot change later
-        let (start, end) = with_type!(table.key, K, {
+        let (start, end) = with_type!(key table.key, K, {
             let key = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<Py<PyAny>>> {
                 bound
                     .map(|key| Ok(K::to_py(py, K::lend(&K::from_py(key)?))?.unbind()))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import math
 import threading
 from pathlib import Path
 
@@ -33,6 +34,7 @@ def test_table_definition() -> None:
     assert users.key_type is redb.Type.u64
     assert users.value_type is redb.bytes
     assert redb.TableDefinition("t", bytes, bytes).key_type is redb.bytes
+    assert redb.TableDefinition("t", str, str).key_type is redb.str
     assert repr(users) == 'TableDefinition("users", redb.u64, redb.bytes)'
     with pytest.raises(TypeError, match="explicit width"):
         redb.TableDefinition("t", int, bytes)
@@ -528,3 +530,69 @@ def test_table_management(tmp_db_path: Path) -> None:
         with pytest.raises(RuntimeError):
             next(entries)
         assert table[2] == b"bob"
+
+
+def test_str_type(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        names = txn.open_table(redb.TableDefinition("names", redb.str, str))
+        names["b"] = "bee"
+        names["a"] = "ay"
+        names["\u00e9"] = "e acute"
+        # Sorted by code point, which is how redb orders the UTF-8
+        assert list(names) == [("a", "ay"), ("b", "bee"), ("\u00e9", "e acute")]
+        assert names.get("a") == "ay"
+        assert names.get("c") is None
+        with pytest.raises(TypeError, match="expected str, got bytes"):
+            names[b"a"] = "x"
+        with pytest.raises(TypeError):
+            names.get(1)
+        with pytest.raises(UnicodeEncodeError):
+            names["\ud800"] = "a lone surrogate has no UTF-8"
+
+
+def test_i64_and_bool_types(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        flags = txn.open_table(redb.TableDefinition("flags", redb.i64, bool))
+        for key in (2**63 - 1, 0, -1, -(2**63)):
+            flags[key] = key >= 0
+        # Signed order, not the order of the bytes
+        assert list(flags) == [(-(2**63), False), (-1, False), (0, True), (2**63 - 1, True)]
+        assert flags[-1] is False
+        with pytest.raises(OverflowError):
+            flags[2**63] = True
+        with pytest.raises(TypeError):
+            flags["1"] = True
+        with pytest.raises(TypeError, match="expected bool, got int"):
+            flags[1] = 1
+        # bool is a key type too, as in redb
+        seen = txn.open_table(redb.TableDefinition("seen", redb.bool, redb.u64))
+        seen[True] = 1
+        seen[False] = 0
+        assert list(seen) == [(False, 0), (True, 1)]
+
+
+def test_u128_i128_and_f64_types(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        wide = txn.open_table(redb.TableDefinition("wide", redb.i128, redb.u128))
+        wide[2**127 - 1] = 0
+        wide[-(2**127)] = 2**128 - 1
+        assert list(wide) == [(-(2**127), 2**128 - 1), (2**127 - 1, 0)]
+        with pytest.raises(OverflowError):
+            wide[2**127] = 0
+        with pytest.raises(OverflowError):
+            wide[0] = -1
+        # f64 is a value type alone, as in redb, which gives floats no order
+        readings = txn.open_table(redb.TableDefinition("readings", redb.u64, float))
+        readings[1] = 0.5
+        readings[2] = float("-inf")
+        readings[3] = 7  # converted as float() would
+        readings[4] = float("nan")
+        assert list(readings)[:3] == [(1, 0.5), (2, float("-inf")), (3, 7.0)]
+        assert math.isnan(readings[4])
+        with pytest.raises(TypeError):
+            readings[5] = "0.5"
+    with pytest.raises(TypeError, match="f64 cannot be a key"):
+        redb.TableDefinition("t", float, redb.u64)
