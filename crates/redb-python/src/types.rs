@@ -2,7 +2,7 @@ use ::redb::Value;
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyString, PyType};
+use pyo3::types::{PyBool, PyByteArray, PyBytes, PyString, PyType};
 
 /// The key and value types a table may declare.
 ///
@@ -17,10 +17,14 @@ pub(crate) enum Type {
     U64,
     #[pyo3(name = "str")]
     Str,
+    #[pyo3(name = "i64")]
+    I64,
+    #[pyo3(name = "bool")]
+    Bool,
 }
 
 impl Type {
-    const ALL: [Type; 3] = [Type::Bytes, Type::U64, Type::Str];
+    const ALL: [Type; 5] = [Type::Bytes, Type::U64, Type::Str, Type::I64, Type::Bool];
 
     /// The type's name in Python, as `redb.<name>` and `Type.<name>`
     pub(crate) fn name(self) -> &'static str {
@@ -28,6 +32,8 @@ impl Type {
             Type::Bytes => "bytes",
             Type::U64 => "u64",
             Type::Str => "str",
+            Type::I64 => "i64",
+            Type::Bool => "bool",
         }
     }
 
@@ -44,11 +50,60 @@ impl Type {
             if cls.is(py.get_type::<PyString>()) {
                 return Ok(Type::Str);
             }
+            if cls.is(py.get_type::<PyBool>()) {
+                return Ok(Type::Bool);
+            }
         }
         Err(PyTypeError::new_err(format!(
-            "expected a redb.Type, bytes or str (int needs an explicit width such as redb.u64), got {}",
+            "expected a redb.Type, bytes, str or bool (int needs an explicit width such as redb.u64), got {}",
             obj.repr()?
         )))
+    }
+}
+
+/// The integer types, whose conversions are Python's own: a `TypeError` for anything but an
+/// int, an `OverflowError` for one outside the type's range
+macro_rules! int_value {
+    ($($t:ty),*) => {$(
+        impl PyValue for $t {
+            type Owned = $t;
+
+            fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<$t> {
+                obj.extract()
+            }
+
+            fn lend(owned: &$t) -> $t {
+                *owned
+            }
+
+            fn to_py(py: Python<'_>, value: $t) -> PyResult<Bound<'_, PyAny>> {
+                value.into_bound_py_any(py)
+            }
+        }
+    )*};
+}
+
+int_value!(u64, i64);
+
+impl PyValue for bool {
+    type Owned = bool;
+
+    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+        match obj.cast::<PyBool>() {
+            Ok(value) => Ok(value.is_true()),
+            Err(_) => Err(PyTypeError::new_err(format!(
+                "expected bool, got {}",
+                obj.get_type().name()?
+            ))),
+        }
+    }
+
+    fn lend(owned: &bool) -> bool {
+        *owned
+    }
+
+    fn to_py(py: Python<'_>, value: bool) -> PyResult<Bound<'_, PyAny>> {
+        Ok(PyBool::new(py, value).to_owned().into_any())
     }
 }
 
@@ -84,22 +139,6 @@ impl PyValue for &'static [u8] {
 
     fn to_py<'py>(py: Python<'py>, value: &[u8]) -> PyResult<Bound<'py, PyAny>> {
         Ok(PyBytes::new(py, value).into_any())
-    }
-}
-
-impl PyValue for u64 {
-    type Owned = u64;
-
-    fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<u64> {
-        obj.extract()
-    }
-
-    fn lend(owned: &u64) -> u64 {
-        *owned
-    }
-
-    fn to_py(py: Python<'_>, value: u64) -> PyResult<Bound<'_, PyAny>> {
-        value.into_bound_py_any(py)
     }
 }
 
@@ -144,6 +183,14 @@ macro_rules! with_type {
             }
             $crate::types::Type::Str => {
                 type $T = &'static str;
+                $body
+            }
+            $crate::types::Type::I64 => {
+                type $T = i64;
+                $body
+            }
+            $crate::types::Type::Bool => {
+                type $T = bool;
                 $body
             }
         }

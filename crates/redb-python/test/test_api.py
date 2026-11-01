@@ -548,3 +548,25 @@ def test_str_type(tmp_db_path: Path) -> None:
             names.get(1)
         with pytest.raises(UnicodeEncodeError):
             names["\ud800"] = "a lone surrogate has no UTF-8"
+
+
+def test_i64_and_bool_types(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        flags = txn.open_table(redb.TableDefinition("flags", redb.i64, bool))
+        for key in (2**63 - 1, 0, -1, -(2**63)):
+            flags[key] = key >= 0
+        # Signed order, not the order of the bytes
+        assert list(flags) == [(-(2**63), False), (-1, False), (0, True), (2**63 - 1, True)]
+        assert flags[-1] is False
+        with pytest.raises(OverflowError):
+            flags[2**63] = True
+        with pytest.raises(TypeError):
+            flags["1"] = True
+        with pytest.raises(TypeError, match="expected bool, got int"):
+            flags[1] = 1
+        # bool is a key type too, as in redb
+        seen = txn.open_table(redb.TableDefinition("seen", redb.bool, redb.u64))
+        seen[True] = 1
+        seen[False] = 0
+        assert list(seen) == [(False, 0), (True, 1)]
