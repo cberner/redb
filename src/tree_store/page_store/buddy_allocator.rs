@@ -151,6 +151,8 @@ impl BuddyAllocator {
         let mut metadata = FREE_END_OFFSETS;
         let mut data_start = FREE_END_OFFSETS + orders * size_of::<u32>();
         let mut free = Vec::with_capacity(orders);
+        // Same length schedule BuddyAllocator::new uses for each order.
+        let mut expected_len = num_pages;
         for order in 0..=max_order {
             let Some(end_bytes) = data.get(metadata..(metadata + size_of::<u32>())) else {
                 return Err(StorageError::Corrupted(format!(
@@ -159,15 +161,23 @@ impl BuddyAllocator {
                 )));
             };
             let data_end = u32::from_le_bytes(end_bytes.try_into().unwrap()) as usize;
-            let Some(bitmap) = data.get(data_start..data_end) else {
+            let Some(bitmap_bytes) = data.get(data_start..data_end) else {
                 return Err(StorageError::Corrupted(format!(
                     "Buddy allocator order {order} end offset {data_end} is outside {data_start}..={}",
                     data.len()
                 )));
             };
-            free.push(BtreeBitmap::from_bytes(bitmap));
+            let bitmap = BtreeBitmap::from_bytes(bitmap_bytes);
+            if bitmap.len() != expected_len {
+                return Err(StorageError::Corrupted(format!(
+                    "Buddy allocator order {order} bitmap length {} does not match num_pages-derived length {expected_len}",
+                    bitmap.len(),
+                )));
+            }
+            free.push(bitmap);
             data_start = data_end;
             metadata += size_of::<u32>();
+            expected_len = next_higher_order(expected_len);
         }
 
         Ok(Self {
