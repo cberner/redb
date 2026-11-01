@@ -346,6 +346,9 @@ class RedbMachine(RuleBasedStateMachine):
         self.pending = {
             name: dict(table) for name, table in self.pending_savepoints[savepoint].items()
         }
+        # A table created in this transaction is gone with the restore, and a handle on it no
+        # longer stands for a table that exists; the next use opens, and so creates, it again
+        self.handles.clear()
         self.pending_savepoints = {
             id: tables for id, tables in self.pending_savepoints.items() if id <= savepoint
         }
