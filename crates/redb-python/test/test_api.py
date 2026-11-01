@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import math
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -596,3 +597,38 @@ def test_u128_i128_and_f64_types(tmp_db_path: Path) -> None:
             readings[5] = "0.5"
     with pytest.raises(TypeError, match="f64 cannot be a key"):
         redb.TableDefinition("t", float, redb.u64)
+
+
+def test_maintenance(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path), cache_size=4 * 1024 * 1024)
+    with db.begin_write() as txn:
+        users = txn.open_table(USERS)
+        for key in range(2000):
+            users[key] = bytes(1000)
+    with db.begin_write() as txn:
+        txn.delete_table(USERS)
+    before = tmp_db_path.stat().st_size
+    assert db.check_integrity() is True
+    assert db.compact() is True
+    assert tmp_db_path.stat().st_size < before
+    assert db.compact() is False
+    # Neither runs while a transaction is alive
+    read = db.begin_read()
+    with pytest.raises(redb.TransactionInProgress):
+        db.compact()
+    with pytest.raises(redb.TransactionInProgress):
+        db.check_integrity()
+    read.close()
+    assert db.check_integrity() is True
+    # Nor while another thread waits to begin one: that thread waits for this one's transaction
+    txn = db.begin_write()
+    waiting = threading.Thread(target=lambda: db.begin_write().abort())
+    waiting.start()
+    time.sleep(0.2)
+    with pytest.raises(redb.TransactionInProgress):
+        db.compact()
+    txn.abort()
+    waiting.join()
+    assert db.compact() is False
+    reader = redb.Database.open_read_only(str(tmp_db_path), cache_size=1024 * 1024)
+    assert reader.begin_read().list_tables() == []

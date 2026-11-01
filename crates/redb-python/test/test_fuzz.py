@@ -295,6 +295,20 @@ class RedbMachine(RuleBasedStateMachine):
             for name, model in self.committed.items():
                 assert len(txn.open_table(TABLES[name])) == len(model)
 
+    @precondition(lambda self: self.write is None and self.open_reads == 0)
+    @rule(check=st.booleans())
+    def maintain(self, check: bool) -> None:
+        """Checks or compacts the file between transactions; what was committed is what is there"""
+        assert self.db is not None
+        if check:
+            assert self.db.check_integrity() is True
+        else:
+            self.db.compact()
+        with self.db.begin_read() as txn:
+            assert txn.list_tables() == sorted(self.committed)
+            for name, model in self.committed.items():
+                assert dict(txn.open_table(TABLES[name])) == model
+
     @rule(target=reads)
     def begin_read(self) -> tuple[redb.ReadTransaction, Model]:
         """A snapshot of what is committed now, kept for later steps to read"""
