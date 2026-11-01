@@ -1,4 +1,3 @@
-use crate::database::PyDatabase;
 use crate::error::PyErrExt;
 use crate::transaction::PyWriteTransaction;
 use crate::types::{PyValue, Type, with_type, with_types};
@@ -413,14 +412,14 @@ pub(crate) struct PyReadOnlyTable {
     key: Type,
     value: Type,
     table: Box<dyn Any + Send + Sync>,
-    // Dropped after `table`, whose snapshot needs the Database's storage open
-    db: Py<PyDatabase>,
+    // Dropped after `table`, whose snapshot needs the database's storage open
+    db: Py<PyAny>,
 }
 
 impl PyReadOnlyTable {
     pub(crate) fn new(
         txn: &ReadTransaction,
-        db: Py<PyDatabase>,
+        db: Py<PyAny>,
         definition: &PyTableDefinition,
     ) -> PyResult<Self> {
         let table: Box<dyn Any + Send + Sync> =
@@ -612,8 +611,8 @@ impl WriteRange {
 enum Source {
     Read {
         range: Box<dyn ReadRange>,
-        // Dropped after `range`, whose snapshot needs the Database's storage open
-        _db: Py<PyDatabase>,
+        // Dropped after `range`, whose snapshot needs the database's storage open
+        _db: Py<PyAny>,
     },
     Write(WriteRange),
 }

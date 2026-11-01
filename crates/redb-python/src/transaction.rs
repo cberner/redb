@@ -142,10 +142,11 @@ fn closed() -> PyErr {
 }
 
 // Field order is the drop order: `txn` before `db`. Dropping the last reference to a Database
-// closes its storage whatever read transactions are alive, so each of them keeps the Database.
+// closes its storage whatever read transactions are alive, so each of them keeps its database
+// object, a Database or a ReadOnlyDatabase.
 struct ReadActive {
     txn: ::redb::ReadTransaction,
-    db: Py<PyDatabase>,
+    db: Py<PyAny>,
 }
 
 /// A read transaction: a snapshot of the database, which the tables opened from it keep alive
@@ -157,7 +158,7 @@ pub(crate) struct PyReadTransaction {
 }
 
 impl PyReadTransaction {
-    pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::ReadTransaction) -> Self {
+    pub(crate) fn new(db: Py<PyAny>, txn: ::redb::ReadTransaction) -> Self {
         Self {
             state: Mutex::new(Some(ReadActive { txn, db })),
         }
