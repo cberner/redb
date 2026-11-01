@@ -27,3 +27,9 @@ name = "fuzz_redb"
 path = "fuzz_targets/fuzz_redb.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_corruption"
+path = "fuzz_targets/fuzz_corruption.rs"
+test = false
+doc = false

@@ -57,6 +57,12 @@ changing on-disk format, B-tree logic, transaction/savepoint code, or anything e
 where corner cases matter. Related targets: `just fuzz_ci` (60s
 smoke run), `just fuzz_coverage` (HTML coverage report).
 
+`just fuzz_corruption` runs `fuzz_corruption`, which mutates the bytes of a committed database and
+checks that opening it with `Builder::set_check_integrity_on_open(true)`, calling
+`check_integrity()`, restoring its persistent savepoints, and reading and writing after a successful
+repair return `Ok` or `Err` without panicking. Run it when changing repair, `check_integrity()`, or
+any code that decodes bytes read from the file.
+
 ## Benchmarks
 
 `just bench` runs `redb-bench`'s default benchmark (`redb_benchmark`). Pass a
