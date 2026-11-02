@@ -106,11 +106,15 @@ watch +args='test':
 fuzz: pre
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000
 
+fuzz_corruption: pre
+    cargo fuzz run --sanitizer=none fuzz_corruption -- -max_len=256 -rss_limit_mb=2048
+
 fuzz_cmin:
     cargo fuzz cmin --sanitizer=none fuzz_redb -- -max_len=10000
 
 fuzz_ci: pre_all_no_sandbox
     cargo fuzz run --sanitizer=none fuzz_redb -- -max_len=10000 -max_total_time=60
+    cargo fuzz run --sanitizer=none fuzz_corruption -- -max_len=256 -rss_limit_mb=2048 -max_total_time=60
 
 fuzz_coverage: pre
     #!/usr/bin/env bash
