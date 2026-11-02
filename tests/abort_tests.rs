@@ -30,7 +30,7 @@ fn abort_restores_file_size() {
         for cache_size in [0, 1024 * 1024] {
             for durability in [Durability::Immediate, Durability::None] {
                 let tmpfile = create_tempfile();
-                let mut db = Database::builder()
+                let db = Database::builder()
                     .set_cache_size(cache_size)
                     .create(tmpfile.path())
                     .unwrap();
@@ -72,7 +72,7 @@ fn abort_restores_file_size() {
                 txn.commit().unwrap();
                 drop(db);
 
-                let mut db = Database::open(tmpfile.path()).unwrap();
+                let db = Database::open(tmpfile.path()).unwrap();
                 assert!(db.check_integrity().unwrap());
                 let reader = db.begin_read().unwrap();
                 let table = reader.open_table(TABLE).unwrap();
@@ -86,7 +86,7 @@ fn abort_restores_file_size() {
 #[test]
 fn abort_restores_empty_database_size() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let original_len = tmpfile.as_file().metadata().unwrap().len();
     let txn = db.begin_write().unwrap();
     insert_rows(&txn, 0, 1800);
@@ -141,7 +141,7 @@ fn durable_commit_after_abort_discards_aborted_writes() {
         for drop_transaction in [false, true] {
             // InMemoryBackend rejects writes past EOF, even if a later resize would hide them.
             let backend = TestBackend::default();
-            let mut db = Database::builder()
+            let db = Database::builder()
                 .set_cache_size(cache_size)
                 .create_with_backend(backend.clone())
                 .unwrap();
@@ -212,7 +212,7 @@ fn abort_reports_truncation_failure() {
     drop(db);
 
     backend.fail_truncate.store(false, Ordering::SeqCst);
-    let mut db = Database::builder().create_with_backend(backend).unwrap();
+    let db = Database::builder().create_with_backend(backend).unwrap();
     assert!(db.check_integrity().unwrap());
     let reader = db.begin_read().unwrap();
     let table = reader.open_table(TABLE).unwrap();

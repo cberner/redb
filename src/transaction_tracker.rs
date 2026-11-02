@@ -462,10 +462,14 @@ impl TransactionTracker {
     }
 
     // Reserves a repair commit's id so it is never issued again: crash recovery orders the
-    // commit slots by transaction id, so an id must never be committed twice
+    // commit slots by transaction id, so an id must never be committed twice. The integrity
+    // check holds the slot while it repairs, with no transaction live on it
     pub(crate) fn reserve_repair_transaction_id(&self, id: TransactionId) {
         let mut state = self.state.lock().unwrap();
-        assert_eq!(state.write_slot, WriteSlotState::Free);
+        assert!(matches!(
+            state.write_slot,
+            WriteSlotState::Free | WriteSlotState::Initializing
+        ));
         state.next_transaction_id = state.next_transaction_id.max(id);
     }
 
@@ -545,18 +549,9 @@ impl TransactionTracker {
         !self.state.lock().unwrap().persistent_savepoints.is_empty()
     }
 
-    // True if an ephemeral (non-persistent) savepoint exists. Unlike persistent ones, it may pin a
-    // non-durable transaction whose pages a reload would discard.
-    pub(crate) fn any_ephemeral_savepoint_exists(&self) -> bool {
-        let state = self.state.lock().unwrap();
-        state
-            .valid_savepoints
-            .keys()
-            .any(|id| !state.persistent_savepoints.contains(id))
-    }
-
-    // Excludes internal read refs that only pin durable ancestors of pending
-    // non-durable commits.
+    // Whether a read transaction, or an ephemeral savepoint, is live. The references the database
+    // itself holds, for its persistent savepoints and its pending non-durable commits, are not
+    // counted
     pub(crate) fn any_user_read_reference_exists(&self) -> bool {
         let state = self.state.lock().unwrap();
         for (id, count) in &state.live_read_transactions {
@@ -565,7 +560,12 @@ impl TransactionTracker {
                 .values()
                 .filter(|ancestor| *ancestor == id)
                 .count() as u64;
-            if *count > pending_count {
+            let savepoint_count = state
+                .persistent_savepoint_references
+                .get(id)
+                .copied()
+                .unwrap_or(0);
+            if *count > pending_count + savepoint_count {
                 return true;
             }
         }

@@ -572,8 +572,7 @@ impl<'a> Deref for HeaderHold<'a> {
 }
 
 /// The lock admitting this process to write. Writer-byte locks are released when the last
-/// holder drops; exclusive-writer locks are released by `close()`. Holds the storage rather than
-/// `TransactionalMemory`, so integrity checks can borrow the memory through `Arc::get_mut()`.
+/// holder drops; exclusive-writer locks are released by `close()`.
 pub(crate) struct WriterLock {
     storage: Arc<PagedCachedFile>,
     range: Option<(Bound<u64>, Bound<u64>)>,
@@ -1328,7 +1327,9 @@ impl TransactionalMemory {
         self.storage.invalidate_cache_all();
     }
 
-    pub(crate) fn clear_cache_and_reload(&mut self) -> Result<(bool, bool), DatabaseError> {
+    /// Discards the in-memory state for the file's. The caller must hold the write slot and the
+    /// read gate, so that nothing reads through this memory meanwhile
+    pub(crate) fn clear_cache_and_reload(&self) -> Result<(bool, bool), DatabaseError> {
         // The in-memory state is being discarded for the on-disk state, so buffered writes --
         // which can only belong to the discarded state -- are dropped rather than written out;
         // after an external truncation, writing them could even fail beyond the end of the file.
@@ -2544,7 +2545,7 @@ mod test {
         txn.commit().unwrap();
         drop(db);
 
-        let mut db = Database::builder()
+        let db = Database::builder()
             .set_region_size((8 * page_size).try_into().unwrap())
             .set_page_size(page_size)
             .open(tmpfile.path())
@@ -2566,7 +2567,7 @@ mod test {
             panic!();
         });
 
-        let mut db = Database::open(tmpfile).unwrap();
+        let db = Database::open(tmpfile).unwrap();
         assert!(db.check_integrity().unwrap());
     }
 

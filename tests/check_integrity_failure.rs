@@ -94,7 +94,7 @@ fn writes_are_refused_after_a_failed_check_integrity() {
         "could not locate the value on disk to corrupt"
     );
 
-    let mut db = Database::builder()
+    let db = Database::builder()
         .create_with_backend(backend.clone())
         .unwrap();
     assert!(matches!(

@@ -3097,7 +3097,7 @@ mod test {
 
         // Closing must not record a clean shutdown, so reopening repairs the database
         drop(db);
-        let mut db = Database::open(tmpfile.path()).unwrap();
+        let db = Database::open(tmpfile.path()).unwrap();
         assert!(db.check_integrity().unwrap());
         {
             let read_txn = db.begin_read().unwrap();
@@ -3159,7 +3159,7 @@ mod test {
         // has a repair to commit
         db.get_memory().allocate_helper(1, false).unwrap();
 
-        let mut db = db;
+        let db = db;
         assert!(!db.check_integrity().unwrap());
         let repair_id = db.get_memory().get_last_committed_transaction_id().unwrap();
 
@@ -3212,7 +3212,7 @@ mod test {
         txn.commit().unwrap();
 
         drop(db);
-        let mut db = Database::open(tmpfile.path()).unwrap();
+        let db = Database::open(tmpfile.path()).unwrap();
         let txn = db.begin_write().unwrap();
         let reopened_pages = txn.stats().unwrap().allocated_pages();
         txn.abort().unwrap();
@@ -3243,7 +3243,7 @@ mod test {
         txn.commit().unwrap();
         drop(db);
 
-        let mut db = Database::open(tmpfile.path()).unwrap();
+        let db = Database::open(tmpfile.path()).unwrap();
         {
             let txn = db.begin_read().unwrap();
             let table = txn.open_table(X).unwrap();
@@ -3259,7 +3259,7 @@ mod test {
     #[test]
     fn check_integrity_clears_leak_latch() {
         let tmpfile = crate::create_tempfile();
-        let mut db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path()).unwrap();
         let txn = db.begin_write().unwrap();
         {
             let mut table = txn.open_table(X).unwrap();

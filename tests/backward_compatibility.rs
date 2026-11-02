@@ -446,7 +446,7 @@ fn restore_and_delete_redb2_6_persistent_savepoint() {
         txn.commit().unwrap();
     }
 
-    let mut db = redb::Database::open(tmpfile.path()).unwrap();
+    let db = redb::Database::open(tmpfile.path()).unwrap();
     let ids: Vec<u64> = {
         let txn = db.begin_write().unwrap();
         let ids = txn.list_persistent_savepoints().unwrap().collect();

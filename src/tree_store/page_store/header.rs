@@ -887,7 +887,7 @@ mod test {
             .unwrap();
         let db2_backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
         let db2_backend_control = db2_backend.clone();
-        let mut db2 = Database::builder()
+        let db2 = Database::builder()
             .create_with_backend(db2_backend)
             .unwrap();
         {
@@ -1093,7 +1093,7 @@ mod test {
     #[test]
     fn truncated_file_is_rejected() {
         let tmpfile = crate::create_tempfile();
-        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
         assert!(db.check_integrity().unwrap());
         drop(db);
 
@@ -1194,7 +1194,7 @@ mod test {
         overwrite_root_length(tmpfile.path(), super::USER_ROOT_OFFSET, u64::MAX);
         overwrite_root_length(tmpfile.path(), super::SYSTEM_ROOT_OFFSET, u64::MAX);
 
-        let mut db = Database::create(tmpfile.path()).unwrap();
+        let db = Database::create(tmpfile.path()).unwrap();
         // Repaired, so not clean, even though every checksum in the file verifies
         assert!(!db.check_integrity().unwrap());
         {
@@ -1262,7 +1262,7 @@ mod test {
 
         // Debug builds walk the data tree while opening; release builds reach it via the check
         let err = match Database::create(tmpfile.path()) {
-            Ok(mut db) => db.check_integrity().unwrap_err(),
+            Ok(db) => db.check_integrity().unwrap_err(),
             Err(err) => err,
         };
         assert!(

@@ -314,7 +314,7 @@ fn an_integrity_check_syncs_to_a_peers_commits() {
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
-    let mut db = Database::builder()
+    let db = Database::builder()
         .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .create(tmpfile.path())
         .unwrap();
@@ -368,7 +368,7 @@ fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
 
     for &mode in shared_modes() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let mut db = Database::builder()
+        let db = Database::builder()
             .set_concurrency_mode(mode)
             .create(tmpfile.path())
             .unwrap();
@@ -427,7 +427,7 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
     use std::time::Duration;
 
     let tmpfile = tempfile::NamedTempFile::new().unwrap();
-    let mut db = Database::builder()
+    let db = Database::builder()
         .set_concurrency_mode(ConcurrencyMode::MultiWriter)
         .create(tmpfile.path())
         .unwrap();
@@ -594,7 +594,7 @@ mod peer_commits {
     fn check_abandoned_savepoint(abandon: impl Fn(redb::WriteTransaction)) {
         for advance_snapshot in [false, true] {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
-            let (mut db, peer) = two_handles(tmpfile.path());
+            let (db, peer) = two_handles(tmpfile.path());
             insert(&db, 0);
 
             let txn = db.begin_write().unwrap();
@@ -734,7 +734,7 @@ mod peer_commits {
         );
         drop(peer);
 
-        let mut db = open(tmpfile.path());
+        let db = open(tmpfile.path());
         for key in 1..=3 {
             assert_eq!(value(&db, key), key);
         }

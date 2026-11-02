@@ -161,7 +161,7 @@ fn open_corrupted(path: &Path, data: &[u8]) -> Outcome {
         .set_check_integrity_on_open(true)
         .open(path)
     {
-        Ok(mut db) => {
+        Ok(db) => {
             let _ = db.check_integrity();
             read_everything(&db);
             Outcome::Opened
@@ -180,7 +180,7 @@ fn check_integrity_on_open_opens_an_intact_database() {
     let tmpfile = create_tempfile();
     build_database(tmpfile.path());
 
-    let mut db = Database::builder()
+    let db = Database::builder()
         .set_check_integrity_on_open(true)
         .open(tmpfile.path())
         .unwrap();

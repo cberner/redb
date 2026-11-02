@@ -230,7 +230,7 @@ fn apply(bytes: &mut Vec<u8>, mutation: &Mutation) {
 // those as crashes.
 fn exercise(bytes: Vec<u8>) {
     let storage = Arc::new(RwLock::new(bytes));
-    let mut db = match Database::builder()
+    let db = match Database::builder()
         .set_cache_size(CACHE_SIZE)
         .set_check_integrity_on_open(true)
         .create_with_backend(MemoryBackend(storage))

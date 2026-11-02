@@ -1305,7 +1305,7 @@ fn test_page_reuse_after_unclean_reopen(quick_repair: bool) {
 
     std::mem::forget(db);
 
-    let mut db = Database::builder().create_with_backend(backend).unwrap();
+    let db = Database::builder().create_with_backend(backend).unwrap();
     {
         let txn = db.begin_read().unwrap();
         let table = txn.open_table(U64_TABLE).unwrap();
@@ -2426,7 +2426,7 @@ fn savepoint_integrity_value(i: u64, len: usize) -> Vec<u8> {
 fn check_integrity_after_persistent_savepoint_delete() {
     let tmpfile = create_tempfile();
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2480,7 +2480,7 @@ fn check_integrity_after_persistent_savepoint_delete() {
 fn check_integrity_with_persistent_savepoint_then_restore() {
     let tmpfile = create_tempfile();
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2534,7 +2534,7 @@ fn check_integrity_with_persistent_savepoint_then_restore() {
 fn check_integrity_after_persistent_savepoint_restore_and_delete() {
     let tmpfile = create_tempfile();
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
@@ -2606,7 +2606,7 @@ fn check_integrity_ephemeral_savepoint_drop_racing_commit() {
         inner: FileBackend::new(tmpfile.into_file()).unwrap(),
         state: sync_state.clone(),
     };
-    let mut db = Database::builder().create_with_backend(backend).unwrap();
+    let db = Database::builder().create_with_backend(backend).unwrap();
 
     // Transaction T0: initial data. The ephemeral savepoint created below pins T0.
     let txn = db.begin_write().unwrap();
@@ -2671,7 +2671,7 @@ fn check_integrity_ephemeral_savepoint_drop_racing_commit() {
 fn ephemeral_savepoint_racing_first_open_no_leak() {
     let tmpfile = create_tempfile();
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let txn = db.begin_write().unwrap();
     {
@@ -2745,7 +2745,7 @@ fn regression20() {
         MultimapTableDefinition::new("some-table");
 
     for _ in 0..3 {
-        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
         db.check_integrity().unwrap();
 
         let txn = db.begin_write().unwrap();
@@ -3042,7 +3042,7 @@ fn check_integrity_clean() {
 
     let table_def: TableDefinition<'static, u64, u64> = TableDefinition::new("x");
 
-    let mut db = Database::builder().create(tmpfile.path()).unwrap();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
     assert!(db.check_integrity().unwrap());
 
     let txn = db.begin_write().unwrap();
@@ -3057,11 +3057,11 @@ fn check_integrity_clean() {
     assert!(db.check_integrity().unwrap());
     drop(db);
 
-    let mut db = Database::builder().create(tmpfile.path()).unwrap();
+    let db = Database::builder().create(tmpfile.path()).unwrap();
     assert!(db.check_integrity().unwrap());
     drop(db);
 
-    let mut db = Database::builder().open(tmpfile.path()).unwrap();
+    let db = Database::builder().open(tmpfile.path()).unwrap();
     assert!(db.check_integrity().unwrap());
 }
 
@@ -3075,7 +3075,7 @@ fn check_integrity_clean_after_delete() {
 
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let write_txn = db.begin_write().unwrap();
     {
@@ -3108,7 +3108,7 @@ fn check_integrity_clean_after_delete() {
 #[test]
 fn check_integrity_preserves_non_durable_commit() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -3169,7 +3169,7 @@ fn check_integrity_with_live_savepoint_on_nondurable_commit() {
     let table2: TableDefinition<u64, &[u8]> = TableDefinition::new("x2");
 
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     // Durable baseline
     let txn = db.begin_write().unwrap();
@@ -4256,9 +4256,10 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
     db.compact().unwrap();
 }
 
-// compact() takes a shared handle, and still reports a transaction that is live on it
+// compact() and check_integrity() take a shared handle, and still report a transaction that is
+// live on it
 #[test]
-fn compact_through_a_shared_handle() {
+fn maintenance_through_a_shared_handle() {
     let tmpfile = create_tempfile();
     let db = Arc::new(Database::create(tmpfile.path()).unwrap());
     let txn = db.begin_write().unwrap();
@@ -4283,20 +4284,25 @@ fn compact_through_a_shared_handle() {
         db.compact(),
         Err(CompactionError::TransactionInProgress)
     ));
+    assert!(matches!(
+        db.check_integrity(),
+        Err(DatabaseError::TransactionInProgress)
+    ));
     drop(read);
 
     assert!(db.compact().unwrap());
+    assert!(db.check_integrity().unwrap());
     let read = db.begin_read().unwrap();
     let table = read.open_table(U64_TABLE).unwrap();
     assert_eq!(table.get(499).unwrap().unwrap().value(), 499);
     assert!(table.get(500).unwrap().is_none());
 }
 
-// Transactions that other threads begin while a compaction runs wait for it to return, and a
-// transaction that is live when it is called is reported: neither deadlocks against the other
-// threads, and the file stays sound throughout
+// Transactions that other threads begin while a compaction or an integrity check runs wait for
+// it to return, and a transaction that is live when one is called is reported: neither deadlocks
+// against the other threads, and the file stays sound throughout
 #[test]
-fn compact_alongside_transactions_on_other_threads() {
+fn maintenance_alongside_transactions_on_other_threads() {
     // The writer below keeps a window of 100 keys and never touches the sentinel, so every
     // snapshot holds the sentinel and 101 entries
     const SENTINEL: u64 = u64::MAX;
@@ -4345,12 +4351,17 @@ fn compact_alongside_transactions_on_other_threads() {
     }
 
     let (sender, receiver) = mpsc::channel();
-    let compactor = {
+    let maintainer = {
         let db = db.clone();
         thread::spawn(move || {
             for _ in 0..50 {
                 match db.compact() {
                     Ok(_) | Err(CompactionError::TransactionInProgress) => {}
+                    Err(err) => panic!("{err:?}"),
+                }
+                match db.check_integrity() {
+                    Ok(clean) => assert!(clean),
+                    Err(DatabaseError::TransactionInProgress) => {}
                     Err(err) => panic!("{err:?}"),
                 }
             }
@@ -4359,14 +4370,13 @@ fn compact_alongside_transactions_on_other_threads() {
     };
     receiver
         .recv_timeout(Duration::from_secs(120))
-        .expect("compact() deadlocked against the transactions of other threads");
+        .expect("maintenance deadlocked against the transactions of other threads");
     stop.store(true, Ordering::Relaxed);
     for thread in threads {
         thread.join().unwrap();
     }
-    compactor.join().unwrap();
+    maintainer.join().unwrap();
 
-    let mut db = Arc::into_inner(db).unwrap();
     assert!(db.check_integrity().unwrap());
     let read = db.begin_read().unwrap();
     let table = read.open_table(U64_TABLE).unwrap();
@@ -4608,7 +4618,7 @@ fn rename_table_with_modifications_data_loss() {
 
     // Step 3: Reopen and verify data survives and integrity check passes.
     {
-        let mut db = Database::builder().create(tmpfile.path()).unwrap();
+        let db = Database::builder().create(tmpfile.path()).unwrap();
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_table(RENAMED_TABLE).unwrap();
         assert_eq!(table.get(0).unwrap().unwrap().value(), "initial_value_0");
@@ -4901,7 +4911,7 @@ fn persistent_savepoint_abort_unbounded_leak() {
 #[test]
 fn check_integrity_with_live_read_transaction() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let txn = db.begin_write().unwrap();
     {

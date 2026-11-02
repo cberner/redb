@@ -55,7 +55,7 @@ fn check_integrity_verifies_the_trees_of_persistent_savepoints() {
         data[range.start + PAGE_SIZE / 2] ^= 0x10;
         fs::write(tmpfile.path(), &data).unwrap();
         // The file was shut down cleanly, so the open trusts it; only the check reads the page
-        let mut db = Database::open(tmpfile.path()).unwrap();
+        let db = Database::open(tmpfile.path()).unwrap();
         match db.check_integrity() {
             Err(DatabaseError::Storage(StorageError::Corrupted(_))) => corrupted += 1,
             Ok(_) => {}
@@ -70,7 +70,7 @@ fn check_integrity_verifies_the_trees_of_persistent_savepoints() {
 
     // The intact file passes, and the savepoint still restores the deleted value
     fs::write(tmpfile.path(), &pristine).unwrap();
-    let mut db = Database::open(tmpfile.path()).unwrap();
+    let db = Database::open(tmpfile.path()).unwrap();
     assert!(db.check_integrity().unwrap());
     let mut txn = db.begin_write().unwrap();
     let savepoint = txn.get_persistent_savepoint(savepoint_id).unwrap();

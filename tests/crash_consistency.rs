@@ -155,7 +155,7 @@ fn crash_during_growing_commit_is_recoverable() {
     let recovered = InMemoryBackend::new();
     recovered.set_len(image.len() as u64).unwrap();
     recovered.write(0, &image).unwrap();
-    let mut db = Database::builder()
+    let db = Database::builder()
         .create_with_backend(recovered)
         .expect("database must be recoverable after a crash during a file-growing commit");
     {

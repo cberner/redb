@@ -791,7 +791,7 @@ impl Sealed for Database {}
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
-        // Not under a maintenance operation, which holds the gate while it runs
+        // Not under a compaction or an integrity check, which hold the gate while they run
         let _gate = self.transaction_tracker.begin_read_hold();
         let (guard, root) =
             TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
@@ -929,7 +929,8 @@ impl Database {
     ///
     /// Returns [`DatabaseError::TransactionInProgress`] if any read or write transaction, or an
     /// ephemeral [`Savepoint`](crate::Savepoint), is still alive on this handle when this method
-    /// is called.
+    /// is called. A transaction that another thread begins on this handle while the check runs
+    /// waits for it to return.
     ///
     /// Transactions committed with [`Durability::None`](crate::Durability::None) that have not yet
     /// been made durable are made durable if the check passes, or rolled back if the database must
@@ -940,18 +941,31 @@ impl Database {
     /// writes to the file until it returns. A read transaction in another process neither blocks
     /// the check nor is disturbed by it. See
     /// [`Builder::set_concurrency_mode`](crate::Builder::set_concurrency_mode).
-    pub fn check_integrity(&mut self) -> Result<bool, DatabaseError> {
-        if Arc::get_mut(&mut self.mem).is_none() {
+    pub fn check_integrity(&self) -> Result<bool, DatabaseError> {
+        // Diagnosed before the slot is taken: the caller may legally hold the write transaction,
+        // which is not lifetime-bound to the Database, and taking the slot would wait on it
+        if self.transaction_tracker.write_transaction_live() {
             return Err(DatabaseError::TransactionInProgress);
         }
-        // An ephemeral savepoint may pin a non-durable transaction whose pages the reload below
-        // discards; restoring it afterwards could corrupt the database. Persistent savepoints are
-        // durable, so they are unaffected.
-        if self.transaction_tracker.any_ephemeral_savepoint_exists() {
+        // A read transaction reads through the cache and the in-memory header that the reload
+        // below replaces, and an ephemeral savepoint may pin a non-durable transaction whose
+        // pages the reload discards; restoring it afterwards could corrupt the database.
+        // Persistent savepoints are durable, so they are unaffected.
+        if self.transaction_tracker.any_user_read_reference_exists() {
             return Err(DatabaseError::TransactionInProgress);
         }
 
-        // Report a latched I/O failure as such, not as the discarded allocator state it also causes
+        // Held until the check returns, and lent to the transactions it runs, so that no
+        // transaction of this process begins under it: a write waits on the slot, and a read on
+        // the gate. Checked again under both, for a transaction that began meanwhile
+        let slot = WriteSlot::take(self.transaction_tracker.clone());
+        let _gate = self.transaction_tracker.maintenance_hold();
+        if self.transaction_tracker.any_user_read_reference_exists() {
+            return Err(DatabaseError::TransactionInProgress);
+        }
+        // Under the slot, since the write transaction it waited on can fail its commit, latching
+        // an I/O error and discarding the allocator state. Report a latched I/O failure as such,
+        // not as the discarded allocator state it also causes
         self.mem.check_io_errors()?;
         // Once the allocator state has been discarded (by a failed commit or integrity check),
         // the database must be reopened to rebuild it; this check requires one to compare against
@@ -961,13 +975,12 @@ impl Database {
             )
             .into());
         }
-
         // Held until the check returns, so the file it reloads is the file it repairs
         let writer_lock = self.mem.lock_writer()?;
         // Repairing rebuilds the allocator state, so a failure part way through leaves one that
         // describes neither the file nor anything else. Holding an allocator state must continue
         // to mean it describes the file.
-        let result = self.check_integrity_inner(&writer_lock);
+        let result = self.check_integrity_inner(&slot, &writer_lock);
         if result.is_err() {
             self.mem.invalidate_allocator_state();
         }
@@ -975,7 +988,8 @@ impl Database {
     }
 
     fn check_integrity_inner(
-        &mut self,
+        &self,
+        slot: &WriteSlot,
         writer_lock: &Arc<WriterLock>,
     ) -> Result<bool, DatabaseError> {
         // A pending Durability::None commit is acknowledged, live data that the reload below would
@@ -996,7 +1010,7 @@ impl Database {
                 // clean only if neither the allocator nor the durable state below needed repair.
                 let durable_clean = self.durable_state_clean()?;
                 let mut txn = self
-                    .begin_write_with(None, Some(writer_lock), None)
+                    .begin_write_with(Some(slot), Some(writer_lock), None)
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
                 txn.disable_post_commit_free();
                 txn.commit()
@@ -1017,8 +1031,7 @@ impl Database {
         // finds another process's commit, the snapshot it recorded is compared instead: that is
         // what the next open trusts.
         let own_allocator_hash = self.mem.allocator_hash();
-        let mem = Arc::get_mut(&mut self.mem).unwrap();
-        let (mut was_clean, peer_committed) = mem.clear_cache_and_reload()?;
+        let (mut was_clean, peer_committed) = self.mem.clear_cache_and_reload()?;
         let allocator_hash = if peer_committed {
             match Self::get_allocator_state_table(&self.mem)? {
                 Some(tree) => {
@@ -1041,7 +1054,7 @@ impl Database {
 
         let old_roots = [self.mem.get_data_root(), self.mem.get_system_root()];
 
-        let new_roots = Self::do_repair(&mut self.mem, &|_| {}).map_err(|err| match err {
+        let new_roots = Self::do_repair(&self.mem, &|_| {}).map_err(|err| match err {
             DatabaseError::Storage(storage_err) => storage_err,
             _ => unreachable!(),
         })?;
@@ -1080,6 +1093,7 @@ impl Database {
             Self::sync_persistent_savepoints(
                 &self.transaction_tracker,
                 &self.mem,
+                Some(slot),
                 Some(writer_lock),
             )?;
         }
@@ -1089,7 +1103,7 @@ impl Database {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
-                None,
+                Some(slot),
                 Some(writer_lock),
                 None,
             )?;
@@ -1099,16 +1113,17 @@ impl Database {
     }
 
     // Synchronizes the tracker state for the file's persistent savepoints. The transaction this
-    // begins is lent `writer_lock`, when the caller holds one
+    // begins is lent `write_slot` and `writer_lock`, when the caller holds them
     fn sync_persistent_savepoints(
         transaction_tracker: &Arc<TransactionTracker>,
         mem: &Arc<TransactionalMemory>,
+        write_slot: Option<&WriteSlot>,
         writer_lock: Option<&Arc<WriterLock>>,
     ) -> Result<(), DatabaseError> {
         let txn = begin_write_with_allocation_policy(
             transaction_tracker,
             mem,
-            None,
+            write_slot,
             writer_lock,
             None,
             AllocationPolicy::Default,
@@ -1128,7 +1143,7 @@ impl Database {
     // The allocator is rebuilt from the live roots -- a rebuild from the durable roots would
     // falsely differ when the live state is ahead of durable (e.g. a durable commit's free-page
     // epilogue).
-    fn repair_live_state(&mut self) -> Result<Option<bool>, DatabaseError> {
+    fn repair_live_state(&self) -> Result<Option<bool>, DatabaseError> {
         match Self::verify_primary_checksums(self.mem.clone()) {
             Ok(true) => {
                 let live_allocator_hash = self.mem.allocator_hash();
@@ -1496,8 +1511,10 @@ impl Database {
         }
     }
 
+    // The caller must be the only user of `mem`: nothing reads through it while the allocator
+    // state is rebuilt
     fn do_repair(
-        mem: &mut Arc<TransactionalMemory>, // Only &mut to ensure exclusivity
+        mem: &Arc<TransactionalMemory>,
         repair_callback: &(dyn Fn(&mut RepairSession) + 'static),
     ) -> Result<[Option<BtreeHeader>; 2], DatabaseError> {
         if !Self::primary_verifies(mem)? {
@@ -1677,7 +1694,7 @@ impl Database {
             false,
             concurrency_mode,
         )?;
-        let mut mem = Arc::new(mem);
+        let mem = Arc::new(mem);
         // If the last transaction used 2-phase commit and updated the allocator state table, then
         // we can just load the allocator state from there. Otherwise, unless nothing has been
         // committed, we need a full repair. An integrity check on open skips the recorded state,
@@ -1715,7 +1732,7 @@ impl Database {
             if handle.aborted() {
                 return Err(DatabaseError::RepairAborted);
             }
-            let [data_root, system_root] = Self::do_repair(&mut mem, repair_callback)?;
+            let [data_root, system_root] = Self::do_repair(&mem, repair_callback)?;
             let next_transaction_id = mem.get_last_committed_transaction_id()?.next();
             mem.commit(
                 data_root,
@@ -1738,7 +1755,7 @@ impl Database {
         let transaction_tracker = Arc::new(TransactionTracker::new(next_transaction_id));
 
         // Restore the tracker state for any persistent savepoints
-        Self::sync_persistent_savepoints(&transaction_tracker, &mem, writer_lock.as_ref())?;
+        Self::sync_persistent_savepoints(&transaction_tracker, &mem, None, writer_lock.as_ref())?;
         // In multi-writer mode a repair ends with a commit recording the allocator state, as
         // compaction and the integrity check do, so that the next open, in any process, loads it
         if repaired && concurrency_mode.is_multi_writer() {
@@ -2796,7 +2813,7 @@ mod test {
         let value = vec![0xAB; 2000];
         for quick_repair in [false, true] {
             let tmpfile = crate::create_tempfile();
-            let mut db = Database::builder()
+            let db = Database::builder()
                 .set_region_size(256 * 1024)
                 .create(tmpfile.path())
                 .unwrap();
@@ -2823,7 +2840,7 @@ mod test {
             }
             assert!(db.check_integrity().unwrap());
             drop(db);
-            let mut db = Database::open(tmpfile.path()).unwrap();
+            let db = Database::open(tmpfile.path()).unwrap();
             assert!(db.check_integrity().unwrap());
             let txn = db.begin_read().unwrap();
             let table = txn.open_table(TABLE).unwrap();
@@ -4667,7 +4684,7 @@ mod active_transaction_test {
     #[test]
     fn an_integrity_check_records_a_peers_unrecorded_commit() {
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let peer = Database::builder()
             .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .open(tmpfile.path())
@@ -4713,7 +4730,7 @@ mod active_transaction_test {
         use crate::tree_store::{AllocationPolicy, PageAllocator, PageTracker};
 
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         let peer = Database::builder()
             .set_concurrency_mode(ConcurrencyMode::MultiWriter)
             .open(tmpfile.path())

@@ -1638,7 +1638,7 @@ fn same_size_overwrite_preserves_snapshot() {
     const ELEMENTS: u64 = 10_000;
 
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(DEFINITION).unwrap();
@@ -3214,7 +3214,7 @@ fn ascending_inserts_pack_leaves_across_transactions() {
 #[test]
 fn packed_leaves_accept_interior_inserts() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let definition: TableDefinition<u64, [u8; 150]> = TableDefinition::new("x");
 
@@ -4231,7 +4231,7 @@ fn option_nonzero_table_reopens() {
         write_txn.commit().unwrap();
     }
 
-    let mut db = Database::open(tmpfile.path()).unwrap();
+    let db = Database::open(tmpfile.path()).unwrap();
     assert!(db.check_integrity().unwrap());
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(TABLE).unwrap();

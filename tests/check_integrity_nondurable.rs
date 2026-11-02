@@ -105,7 +105,7 @@ fn make_db(backend: PatchBackend, n: u64) -> Database {
 #[test]
 fn check_integrity_does_not_promote_disk_corrupt_nondurable_commit() {
     let backend = PatchBackend::default();
-    let mut db = Database::builder()
+    let db = Database::builder()
         .set_cache_size(0)
         .create_with_backend(backend.clone())
         .unwrap();
@@ -146,7 +146,7 @@ fn check_integrity_does_not_promote_disk_corrupt_nondurable_commit() {
 
     // The durable baseline is intact and the non-durable commit was rolled back.
     drop(db);
-    let mut reopened = Database::builder().create_with_backend(backend).unwrap();
+    let reopened = Database::builder().create_with_backend(backend).unwrap();
     assert!(reopened.check_integrity().unwrap());
     let read = reopened.begin_read().unwrap();
     let table = read.open_table(TABLE).unwrap();
@@ -159,7 +159,7 @@ fn check_integrity_does_not_promote_disk_corrupt_nondurable_commit() {
 #[test]
 fn check_integrity_preserves_growing_nondurable_commit() {
     let backend = PatchBackend::default();
-    let mut db = make_db(backend.clone(), 1);
+    let db = make_db(backend.clone(), 1);
 
     let len_before = backend.file_len();
     {
@@ -199,7 +199,7 @@ fn check_integrity_preserves_nondurable_commit_that_creates_a_table() {
     const OTHER: TableDefinition<u64, &[u8]> = TableDefinition::new("other");
 
     let backend = PatchBackend::default();
-    let mut db = make_db(backend.clone(), 1);
+    let db = make_db(backend.clone(), 1);
     {
         let mut txn = db.begin_write().unwrap();
         txn.set_durability(Durability::None).unwrap();
@@ -234,7 +234,7 @@ fn check_integrity_preserves_nondurable_commit_that_creates_a_table() {
 #[test]
 fn check_integrity_handles_external_extension_with_pending_commit() {
     let backend = PatchBackend::default();
-    let mut db = make_db(backend.clone(), 5);
+    let db = make_db(backend.clone(), 5);
 
     {
         let mut txn = db.begin_write().unwrap();
@@ -279,7 +279,7 @@ fn check_integrity_handles_external_extension_with_pending_commit() {
 #[test]
 fn check_integrity_detects_truncation_after_nondurable_growth() {
     let backend = PatchBackend::default();
-    let mut db = make_db(backend.clone(), 1);
+    let db = make_db(backend.clone(), 1);
     let durable_len = backend.file_len();
 
     {
@@ -308,7 +308,7 @@ fn check_integrity_detects_truncation_after_nondurable_growth() {
     drop(db);
 
     // The durable state must still be recoverable on reopen.
-    let mut reopened = Database::builder().create_with_backend(backend).unwrap();
+    let reopened = Database::builder().create_with_backend(backend).unwrap();
     assert!(reopened.check_integrity().unwrap());
     let read = reopened.begin_read().unwrap();
     let table = read.open_table(TABLE).unwrap();
