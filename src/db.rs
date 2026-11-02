@@ -797,6 +797,10 @@ impl Database {
     }
 
     /// Opens an existing redb database.
+    ///
+    /// The open trusts a file that was shut down cleanly and may panic if it was corrupted outside
+    /// redb. [`Builder::set_check_integrity_on_open`] reports corruption as
+    /// [`StorageError::Corrupted`] instead.
     #[cfg(not(redb_no_std))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
@@ -899,6 +903,10 @@ impl Database {
     }
 
     /// Force a check of the integrity of the database file, and repair it if possible.
+    ///
+    /// Reports a file corrupted outside redb as [`StorageError::Corrupted`] rather than panicking,
+    /// as does an open with [`Builder::set_check_integrity_on_open`]. A plain open makes no such
+    /// promise.
     ///
     /// Note: Calling this function is unnecessary during normal operation. redb will automatically
     /// detect and recover from crashes, power loss, and other unclean shutdowns. This function is
@@ -2208,7 +2216,7 @@ impl Builder {
     /// With this set, the open runs the check and repair of [`Database::check_integrity`]: the
     /// checksum of every page of the committed trees is verified and the allocator state is
     /// rebuilt. A file altered since redb last wrote it fails to open with
-    /// [`StorageError::Corrupted`] instead of being trusted.
+    /// [`StorageError::Corrupted`] instead of being trusted, where a plain open may panic.
     ///
     /// The check reads the whole file and commits, so it does not apply to
     /// [`Self::open_read_only`].

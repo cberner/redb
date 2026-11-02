@@ -20,3 +20,10 @@ and are not detected during normal reads. `check_integrity()` verifies every pag
 be used as a point-in-time check when corruption is suspected. The checksums are xxh3, which is
 sufficient to detect accidental corruption but not deliberate tampering; users who need tamper
 evidence should layer their own integrity check.
+
+### Which operations report a corrupted file?
+
+`check_integrity()`, and an open with `Builder::set_check_integrity_on_open(true)`, verify every
+page checksum before decoding anything, and report a file corrupted outside redb as
+`StorageError::Corrupted` instead of panicking. A plain `open()` trusts the file and may panic on a
+corrupted one. The hot paths do not verify checksums.
