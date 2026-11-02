@@ -1001,12 +1001,18 @@ impl Database {
         let mem = Arc::get_mut(&mut self.mem).unwrap();
         let (mut was_clean, peer_committed) = mem.clear_cache_and_reload()?;
         let allocator_hash = if peer_committed {
-            match Self::get_allocator_state_table(&self.mem)? {
-                Some(tree) => {
-                    self.mem.load_allocator_state(&tree)?;
-                    Some(self.mem.allocator_hash())
+            // The peer's snapshot is in pages this handle has not verified; verify before decoding
+            // it, so that a corrupted file is reported rather than panicking
+            if Self::primary_verifies(&self.mem)? {
+                match Self::get_allocator_state_table(&self.mem)? {
+                    Some(tree) => {
+                        self.mem.load_allocator_state(&tree)?;
+                        Some(self.mem.allocator_hash())
+                    }
+                    None => None,
                 }
-                None => None,
+            } else {
+                None
             }
         } else {
             Some(own_allocator_hash)

@@ -493,6 +493,40 @@ mod peer_commits {
         table.get(key).unwrap().unwrap().value()
     }
 
+    /// The check reads the allocator snapshot a peer committed; on a corrupted file that must fail
+    /// as `Corrupted`, not panic.
+    #[test]
+    fn check_integrity_reports_a_corrupted_file_after_a_peers_commit() {
+        const PAGE_SIZE: usize = 4096;
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let path = tmpfile.path();
+        let (_, peer) = two_handles(path);
+        let pages = std::fs::read(path).unwrap().len() / PAGE_SIZE;
+
+        let mut corrupted = 0;
+        for page in 1..pages {
+            // A fresh handle, so that the peer's commit below is one it has not seen
+            let mut db = open(path);
+            insert(&peer, page as u64);
+            let pristine = std::fs::read(path).unwrap();
+            let mut data = pristine.clone();
+            data[page * PAGE_SIZE..(page + 1) * PAGE_SIZE].fill(0);
+            std::fs::write(path, &data).unwrap();
+            match db.check_integrity() {
+                Err(DatabaseError::Storage(StorageError::Corrupted(_))) => corrupted += 1,
+                Ok(_) => {}
+                Err(err) => panic!("page {page}: unexpected error {err:?}"),
+            }
+            drop(db);
+            std::fs::write(path, &pristine).unwrap();
+        }
+        // Zeroing a free page is tolerated, zeroing a page of the committed trees is not
+        assert!(
+            corrupted > 0,
+            "{corrupted} of {pages} zeroed pages were rejected"
+        );
+    }
+
     /// A read on a writable handle reads the file, so it sees a peer's commit without this
     /// handle writing anything itself.
     #[test]
