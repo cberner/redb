@@ -432,20 +432,37 @@ impl CacheStats {
 }
 
 // The write slot, taken ahead of the writer byte and held until the transaction ends. Releases
-// it on drop, and performs the close a `Database::drop()` deferred to that end
+// it on drop, and performs the close a `Database::drop()` deferred to that end. A maintenance
+// operation takes it for as long as it runs and lends it to the transactions it runs: a loan
+// returns the slot to the operation when the transaction ends
 pub(crate) struct WriteSlot {
     tracker: Arc<TransactionTracker>,
+    owned: bool,
 }
 
 impl WriteSlot {
     fn take(tracker: Arc<TransactionTracker>) -> Self {
         tracker.take_write_slot();
-        Self { tracker }
+        Self {
+            tracker,
+            owned: true,
+        }
+    }
+
+    fn lend(&self) -> Self {
+        Self {
+            tracker: self.tracker.clone(),
+            owned: false,
+        }
     }
 }
 
 impl Drop for WriteSlot {
     fn drop(&mut self) {
+        if !self.owned {
+            self.tracker.return_write_slot();
+            return;
+        }
         if let Some(mem) = self.tracker.end_write_transaction() {
             close_database(&self.tracker, &mem);
         }
@@ -774,6 +791,8 @@ impl Sealed for Database {}
 
 impl ReadableDatabase for Database {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
+        // Not under a maintenance operation, which holds the gate while it runs
+        let _gate = self.transaction_tracker.begin_read_hold();
         let (guard, root) =
             TransactionGuard::allocate_read(self.transaction_tracker.clone(), &self.mem)?;
         #[cfg(feature = "logging")]
@@ -977,7 +996,7 @@ impl Database {
                 // clean only if neither the allocator nor the durable state below needed repair.
                 let durable_clean = self.durable_state_clean()?;
                 let mut txn = self
-                    .begin_write_with(Some(writer_lock), None)
+                    .begin_write_with(None, Some(writer_lock), None)
                     .map_err(|e| DatabaseError::Storage(e.into_storage_error()))?;
                 txn.disable_post_commit_free();
                 txn.commit()
@@ -1070,6 +1089,7 @@ impl Database {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
+                None,
                 Some(writer_lock),
                 None,
             )?;
@@ -1088,6 +1108,7 @@ impl Database {
         let txn = begin_write_with_allocation_policy(
             transaction_tracker,
             mem,
+            None,
             writer_lock,
             None,
             AllocationPolicy::Default,
@@ -1154,10 +1175,14 @@ impl Database {
     /// Compacts the database file
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
-    pub fn compact(&mut self) -> Result<bool, CompactionError> {
-        // These checks must run before begin_write(): the caller may legally hold an open
-        // WriteTransaction (it is not lifetime-bound to the Database), on which begin_write()
-        // below would wait forever. Savepoints must be diagnosed before read references,
+    ///
+    /// Returns [`CompactionError::TransactionInProgress`] if a read or write transaction is alive
+    /// on this handle, and a savepoint error if a savepoint exists. A transaction that another
+    /// thread begins on this handle while the compaction runs waits for it to return.
+    pub fn compact(&self) -> Result<bool, CompactionError> {
+        // These checks must run before the write slot is taken: the caller may legally hold an
+        // open WriteTransaction (it is not lifetime-bound to the Database), on which taking the
+        // slot would wait forever. Savepoints must be diagnosed before read references,
         // because every live savepoint also holds a read reference, and the write transaction
         // after both, so that what it holds is reported first. The tracker covers persistent
         // savepoints created by previous Database instances, because they are re-registered
@@ -1186,16 +1211,18 @@ impl Database {
         if self.transaction_tracker.write_transaction_live() {
             return Err(CompactionError::TransactionInProgress);
         }
+        // Held until the compaction is over and lent to the transactions it runs, so that no
+        // transaction of this process begins under them: a write waits on the slot, and a read
+        // on the gate. The slot is taken once a write transaction begun before this call has
+        // ended: its commit would wait on the holds below, and in multi-writer mode its end
+        // would release the writer byte from under a hold taken meanwhile
+        let slot = WriteSlot::take(self.transaction_tracker.clone());
+        let _gate = self.transaction_tracker.maintenance_hold();
         // Where the file is shared, held until the compaction is over and lent to the
         // transactions it runs: no other process begins a transaction under them, and one that
-        // already has is a transaction in progress. Taken once a write transaction begun before
-        // this call has ended: its commit would wait on the holds, and in multi-writer mode its
-        // end would release the writer byte from under a hold taken meanwhile
+        // already has is a transaction in progress
         let (writer_lock, header_lock) = if self.mem.concurrency_mode().is_multi_process_writable()
         {
-            self.begin_write()
-                .map_err(|e| e.into_storage_error())?
-                .abort()?;
             (
                 Some(self.mem.lock_writer()?),
                 Some(self.mem.lock_header_exclusive()?),
@@ -1207,10 +1234,11 @@ impl Database {
         // Once https://github.com/cberner/redb/issues/829 is fixed, we should upgrade this to use quick-repair -- that way the user
         // can cancel the compaction without requiring a full repair afterwards
         let txn = self
-            .begin_write_with(writer_lock.as_ref(), header_lock.as_ref())
+            .begin_write_with(Some(&slot), writer_lock.as_ref(), header_lock.as_ref())
             .map_err(|e| e.into_storage_error())?;
-        // Re-check inside the write transaction: a concurrent writer may have created a
-        // savepoint between the checks above and the start of this transaction.
+        // Re-check inside the write transaction: a transaction that began between the checks
+        // above and the holds, or a writer in another process, may have created a savepoint or
+        // a read reference meanwhile
         if txn.list_persistent_savepoints()?.next().is_some() {
             return Err(CompactionError::PersistentSavepointExists);
         }
@@ -1233,6 +1261,7 @@ impl Database {
         // Commit to free up any pending free pages
         self.drain_pending_free_pages(
             ShrinkPolicy::Maximum,
+            &slot,
             writer_lock.as_ref(),
             header_lock.as_ref(),
         )?;
@@ -1243,7 +1272,7 @@ impl Database {
             let mut progress = false;
 
             let mut txn = self
-                .begin_write_with(writer_lock.as_ref(), header_lock.as_ref())
+                .begin_write_with(Some(&slot), writer_lock.as_ref(), header_lock.as_ref())
                 .map_err(|e| e.into_storage_error())?;
             txn.skip_allocator_state_record();
             if txn.compact_pages()? {
@@ -1258,6 +1287,7 @@ impl Database {
             // post-commit cleanup root updates.
             self.drain_pending_free_pages(
                 ShrinkPolicy::Maximum,
+                &slot,
                 writer_lock.as_ref(),
                 header_lock.as_ref(),
             )?;
@@ -1278,6 +1308,7 @@ impl Database {
             ensure_allocator_state_table_and_trim(
                 &self.transaction_tracker,
                 &self.mem,
+                Some(&slot),
                 writer_lock.as_ref(),
                 header_lock.as_ref(),
             )?;
@@ -1289,6 +1320,7 @@ impl Database {
     fn drain_pending_free_pages(
         &self,
         shrink_policy: ShrinkPolicy,
+        write_slot: &WriteSlot,
         writer_lock: Option<&Arc<WriterLock>>,
         header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result {
@@ -1297,7 +1329,7 @@ impl Database {
         let mut force_commit = true;
         loop {
             let mut txn = self
-                .begin_write_with(writer_lock, header_lock)
+                .begin_write_with(Some(write_slot), writer_lock, header_lock)
                 .map_err(|e| e.into_storage_error())?;
             if !force_commit && !txn.pending_free_pages()? {
                 txn.abort()?;
@@ -1713,6 +1745,7 @@ impl Database {
             ensure_allocator_state_table_and_trim(
                 &transaction_tracker,
                 &mem,
+                None,
                 writer_lock.as_ref(),
                 None,
             )?;
@@ -1782,17 +1815,19 @@ impl Database {
     /// database open: if the [`Database`] is dropped while the transaction is live, the
     /// transaction remains usable and the database closes when the transaction completes.
     pub fn begin_write(&self) -> Result<WriteTransaction, TransactionError> {
-        self.begin_write_with(None, None)
+        self.begin_write_with(None, None, None)
     }
 
     fn begin_write_with(
         &self,
+        write_slot: Option<&WriteSlot>,
         writer_lock: Option<&Arc<WriterLock>>,
         header_lock: Option<&HeaderGuard<'_>>,
     ) -> Result<WriteTransaction, TransactionError> {
         begin_write_with_allocation_policy(
             &self.transaction_tracker,
             &self.mem,
+            write_slot,
             writer_lock,
             header_lock,
             AllocationPolicy::Default,
@@ -1860,16 +1895,18 @@ fn sync_to_latest_commit(
 // Takes the write slot and the writer byte, syncs to the file's latest commit, and builds the
 // transaction on them.
 //
-// A caller that already holds the writer byte lends its lock as `writer_lock`. Taking the writer
-// byte again from this file description would return that same lock, and the end of this
-// transaction would then release the caller's. A caller that holds the header lock lends it as
-// `header_lock`, because the in-process half of that lock cannot be taken twice.
+// A caller that already holds the write slot lends it as `write_slot`: taking it again would wait
+// on the caller. A caller that already holds the writer byte lends its lock as `writer_lock`.
+// Taking the writer byte again from this file description would return that same lock, and the
+// end of this transaction would then release the caller's. A caller that holds the header lock
+// lends it as `header_lock`, because the in-process half of that lock cannot be taken twice.
 //
 // The allocation policy is fixed for the lifetime of the transaction; every page allocation the
 // transaction makes goes through it.
 fn begin_write_with_allocation_policy(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
+    write_slot: Option<&WriteSlot>,
     writer_lock: Option<&Arc<WriterLock>>,
     header_lock: Option<&HeaderGuard<'_>>,
     allocation_policy: AllocationPolicy,
@@ -1878,7 +1915,10 @@ fn begin_write_with_allocation_policy(
     mem.check_io_errors()?;
     // The slot ahead of the byte: locks on the byte from one file description are one lock, so
     // the slot is what orders this process's writers. An error return drops both
-    let slot = WriteSlot::take(transaction_tracker.clone());
+    let slot = write_slot.map_or_else(
+        || WriteSlot::take(transaction_tracker.clone()),
+        WriteSlot::lend,
+    );
     let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
     let latch = sync_to_latest_commit(mem, &writer_lock, header_lock)?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
@@ -1918,11 +1958,12 @@ fn begin_write_with_allocation_policy(
 // compaction's, and the one ending a repair in the open or the integrity check. Not for a state
 // that needs repair: a transaction dropped while a panic unwound leaked its pages, and recording
 // that state would make the leak permanent, where the next open's rebuild reclaims it.
-// `writer_lock` and `header_lock` are the ones the caller lends, when it holds them; nothing is
-// waiting on the write slot in any of these cases
+// `write_slot`, `writer_lock` and `header_lock` are the ones the caller lends, when it holds
+// them; nothing else is waiting on the write slot in any of these cases
 fn ensure_allocator_state_table_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
+    write_slot: Option<&WriteSlot>,
     writer_lock: Option<&Arc<WriterLock>>,
     header_lock: Option<&HeaderGuard<'_>>,
 ) -> Result {
@@ -1932,13 +1973,21 @@ fn ensure_allocator_state_table_and_trim(
     );
     #[cfg(feature = "logging")]
     debug!("Writing allocator state table");
-    commit_and_trim(transaction_tracker, mem, writer_lock, header_lock, true)
+    commit_and_trim(
+        transaction_tracker,
+        mem,
+        write_slot,
+        writer_lock,
+        header_lock,
+        true,
+    )
 }
 
 // A commit that trims the file, and records the allocator state when asked to
 fn commit_and_trim(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
+    write_slot: Option<&WriteSlot>,
     writer_lock: Option<&Arc<WriterLock>>,
     header_lock: Option<&HeaderGuard<'_>>,
     record_allocator_state: bool,
@@ -1950,6 +1999,7 @@ fn commit_and_trim(
     let mut tx = begin_write_with_allocation_policy(
         transaction_tracker,
         mem,
+        write_slot,
         writer_lock,
         header_lock,
         AllocationPolicy::Lowest,
@@ -1994,7 +2044,14 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     let recorded = if !writing {
         false
     } else if promote_only {
-        let result = commit_and_trim(transaction_tracker, mem, writer_lock.as_ref(), None, false);
+        let result = commit_and_trim(
+            transaction_tracker,
+            mem,
+            None,
+            writer_lock.as_ref(),
+            None,
+            false,
+        );
         #[cfg(feature = "logging")]
         if result.is_err() {
             warn!("Failed to make the pending non-durable commits durable. They are lost.");
@@ -2006,6 +2063,7 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
         let result = ensure_allocator_state_table_and_trim(
             transaction_tracker,
             mem,
+            None,
             writer_lock.as_ref(),
             None,
         );
@@ -2831,7 +2889,7 @@ mod test {
         let tmpfile = crate::create_tempfile();
         let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
         let region_size = 256 * 1024;
-        let mut db = Database::builder()
+        let db = Database::builder()
             .set_region_size(region_size)
             .create(tmpfile.path())
             .unwrap();
@@ -3103,9 +3161,10 @@ mod writer_byte_test {
             let write = db.begin_write().unwrap();
             write.open_table(TABLE).unwrap().insert(1, 1).unwrap();
             write.commit().unwrap();
+            let slot = super::WriteSlot::take(db.transaction_tracker.clone());
             let writer = db.mem.lock_writer().unwrap();
             let header = db.mem.lock_header_exclusive().unwrap();
-            db.drain_pending_free_pages(ShrinkPolicy::Maximum, Some(&writer), Some(&header))
+            db.drain_pending_free_pages(ShrinkPolicy::Maximum, &slot, Some(&writer), Some(&header))
                 .unwrap();
             assert!(
                 Database::get_allocator_state_table(&db.mem)
@@ -3413,7 +3472,7 @@ mod writer_byte_test {
     #[test]
     fn a_multi_writer_compaction_records_the_allocator_state() {
         let tmpfile = crate::create_tempfile();
-        let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         commit_one(&db);
 
         db.compact().unwrap();
@@ -4918,7 +4977,7 @@ mod active_transaction_test {
             let writer_lock = db.mem.lock_writer().unwrap();
             let header_lock = db.mem.lock_header_exclusive().unwrap();
             let txn = db
-                .begin_write_with(Some(&writer_lock), Some(&header_lock))
+                .begin_write_with(None, Some(&writer_lock), Some(&header_lock))
                 .unwrap();
             let savepoints: Vec<u64> = txn.list_persistent_savepoints().unwrap().collect();
             txn.abort().unwrap();
@@ -4951,7 +5010,7 @@ mod active_transaction_test {
         let probe = probe(tmpfile.path());
 
         let header_lock = db.mem.lock_header_exclusive().unwrap();
-        let txn = db.begin_write_with(None, Some(&header_lock)).unwrap();
+        let txn = db.begin_write_with(None, None, Some(&header_lock)).unwrap();
         txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
         txn.commit_with(Some(&header_lock)).unwrap();
         assert!(!probe.try_lock_shared_range(HEADER_LOCK).unwrap());
@@ -4969,12 +5028,46 @@ mod active_transaction_test {
         let probe = probe(tmpfile.path());
 
         let writer_lock = db.mem.lock_writer().unwrap();
-        let txn = db.begin_write_with(Some(&writer_lock), None).unwrap();
+        let txn = db.begin_write_with(None, Some(&writer_lock), None).unwrap();
         txn.abort().unwrap();
         assert!(!probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
 
         drop(writer_lock);
         assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+
+    /// A loan of the write slot returns it to its owner when the transaction built on it ends,
+    /// and when it is dropped before one is built, as a begin that fails while taking the writer
+    /// byte or syncing to the file drops it
+    #[test]
+    fn a_lent_slot_returns_to_its_owner() {
+        use crate::ReadableTable;
+
+        let tmpfile = crate::create_tempfile();
+        let db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
+
+        let slot = super::WriteSlot::take(db.transaction_tracker.clone());
+        drop(slot.lend());
+        let txn = db.begin_write_with(Some(&slot), None, None).unwrap();
+        txn.abort().unwrap();
+        let txn = db.begin_write_with(Some(&slot), None, None).unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        txn.commit().unwrap();
+        assert!(db.transaction_tracker.write_transaction_live());
+
+        drop(slot);
+        assert!(!db.transaction_tracker.write_transaction_live());
+        let txn = db.begin_write().unwrap();
+        assert_eq!(
+            txn.open_table(TABLE)
+                .unwrap()
+                .get(1)
+                .unwrap()
+                .unwrap()
+                .value(),
+            1
+        );
+        txn.abort().unwrap();
     }
 }

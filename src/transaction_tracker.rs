@@ -1,5 +1,5 @@
 use crate::StorageError;
-use crate::sync::{Condvar, Mutex};
+use crate::sync::{Condvar, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::tree_store::{BtreeHeader, HeaderGuard, TransactionalMemory, WriterLock};
 use crate::{Key, Result, TypeName, Value};
 use alloc::collections::BTreeSet;
@@ -93,7 +93,8 @@ enum WriteSlotState {
     Free,
     // The slot is taken and the writer byte is being acquired, which waits on any peer that
     // holds it. There is no transaction id yet: it is issued from the file's latest commit,
-    // which is only known once the byte is held
+    // which is only known once the byte is held. Also the state between the transactions a
+    // maintenance operation runs, which holds the slot throughout and lends it to each of them
     Initializing,
     // A live transaction guarantees that this process holds the writer byte
     Live(TransactionId),
@@ -247,11 +248,16 @@ impl State {
 pub(crate) struct TransactionTracker {
     state: Mutex<State>,
     live_write_transaction_available: Condvar,
+    // Held shared while a read transaction begins on the database, and exclusively by a
+    // maintenance operation for as long as it runs, so that no read begins under one. Writes are
+    // excluded by the write slot, which the operation holds meanwhile
+    begin_read_gate: RwLock<()>,
 }
 
 impl TransactionTracker {
     pub(crate) fn new(next_transaction_id: TransactionId) -> Self {
         Self {
+            begin_read_gate: RwLock::new(()),
             state: Mutex::new(State {
                 next_savepoint_id: SavepointId(0),
                 next_local_savepoint_id: LocalSavepointId(0),
@@ -267,6 +273,23 @@ impl TransactionTracker {
             }),
             live_write_transaction_available: Condvar::new(),
         }
+    }
+
+    // Taken by a read transaction for as long as it is beginning. Waits for a maintenance
+    // operation to return
+    pub(crate) fn begin_read_hold(&self) -> RwLockReadGuard<'_, ()> {
+        self.begin_read_gate
+            .read()
+            .unwrap_or_else(crate::sync::PoisonError::into_inner)
+    }
+
+    // Taken by a maintenance operation for as long as it runs, once it holds the write slot.
+    // Waits for the read transactions that are beginning to have begun, and no other begins
+    // until the hold is dropped
+    pub(crate) fn maintenance_hold(&self) -> RwLockWriteGuard<'_, ()> {
+        self.begin_read_gate
+            .write()
+            .unwrap_or_else(crate::sync::PoisonError::into_inner)
     }
 
     // Takes the write slot, waiting for the write transaction that holds it to end. The
@@ -317,6 +340,18 @@ impl TransactionTracker {
     // Whether a write transaction holds the write slot in this process
     pub(crate) fn write_transaction_live(&self) -> bool {
         self.state.lock().unwrap().write_slot != WriteSlotState::Free
+    }
+
+    // Returns a lent slot to its owner, at the end of the transaction built on it, or from
+    // `Initializing` when the begin failed before building one. The next transaction the owner
+    // lends the slot to is issued an id from this state
+    pub(crate) fn return_write_slot(&self) {
+        let mut state = self.state.lock().unwrap();
+        assert!(matches!(
+            state.write_slot,
+            WriteSlotState::Initializing | WriteSlotState::Finalizing
+        ));
+        state.write_slot = WriteSlotState::Initializing;
     }
 
     // Returns the deferred close, if the Database was dropped while this transaction was live.

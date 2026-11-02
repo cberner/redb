@@ -540,7 +540,7 @@ mod peer_commits {
     #[test]
     fn a_write_transaction_syncs_to_a_peers_savepoint() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
-        let (mut db, peer) = two_handles(tmpfile.path());
+        let (db, peer) = two_handles(tmpfile.path());
         let txn = peer.begin_write().unwrap();
         let peers_savepoint = txn.persistent_savepoint().unwrap();
         txn.commit().unwrap();
@@ -966,7 +966,7 @@ mod compaction {
     fn compaction_refuses_a_peers_read_transaction() {
         for &mode in shared_modes() {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
-            let mut writer = create(tmpfile.path(), mode);
+            let writer = create(tmpfile.path(), mode);
             insert(&writer, 0..1, &[1u8; 512]);
 
             let reader = open_read_only(tmpfile.path(), mode);
@@ -993,7 +993,7 @@ mod compaction {
         for &mode in shared_modes() {
             for multimap in [false, true] {
                 let tmpfile = tempfile::NamedTempFile::new().unwrap();
-                let mut writer = create(tmpfile.path(), mode);
+                let writer = create(tmpfile.path(), mode);
                 let value = [7u8; 512];
                 let write = writer.begin_write().unwrap();
                 {
@@ -1056,7 +1056,7 @@ mod compaction {
     fn compaction_shrinks_a_file_a_peer_has_open() {
         for &mode in shared_modes() {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
-            let mut writer = create(tmpfile.path(), mode);
+            let writer = create(tmpfile.path(), mode);
             let value = vec![7u8; 1024];
             insert(&writer, 0..512, &value);
 

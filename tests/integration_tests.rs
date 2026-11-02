@@ -1647,7 +1647,7 @@ fn small_db_is_small_file() {
     let tmpfile = create_tempfile();
     const TABLE: TableDefinition<u32, u32> = TableDefinition::new("TABLE");
 
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let wtx = db.begin_write().unwrap();
     let mut table = wtx.open_table(TABLE).unwrap();
     table.insert(0, 0).unwrap();
@@ -2764,7 +2764,7 @@ fn regression20() {
 fn regression21() {
     let tmpfile = create_tempfile();
 
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
 
     let write_tx = db.begin_write().unwrap();
     let read_tx = db.begin_read().unwrap();
@@ -3957,7 +3957,7 @@ fn compaction() {
     // since we left the last 100 values in the db.
     drop(db);
     let file_size = tmpfile.as_file().metadata().unwrap().len();
-    let mut db = Database::open(tmpfile.path()).unwrap();
+    let db = Database::open(tmpfile.path()).unwrap();
 
     assert!(db.compact().unwrap());
     drop(db);
@@ -3968,7 +3968,7 @@ fn compaction() {
 #[test]
 fn compact_after_non_durable_commit() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
 
     let mut txn = db.begin_write().unwrap();
@@ -3986,7 +3986,7 @@ fn compact_after_non_durable_commit() {
 #[test]
 fn compact_after_post_commit_page_reuse() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
     let big_value = vec![0u8; 100 * 1024];
 
@@ -4037,7 +4037,7 @@ fn compact_does_not_grow_file() {
     let before = tmpfile.as_file().metadata().unwrap().len();
 
     {
-        let mut db = Database::open(tmpfile.path()).unwrap();
+        let db = Database::open(tmpfile.path()).unwrap();
         db.compact().unwrap();
     }
 
@@ -4053,7 +4053,7 @@ fn compact_does_not_grow_file() {
 #[test]
 fn compact_returns_persistent_savepoint_error() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -4078,7 +4078,7 @@ fn compact_returns_persistent_savepoint_error() {
 #[test]
 fn compact_returns_ephemeral_savepoint_error() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -4118,7 +4118,7 @@ fn compact_returns_persistent_savepoint_error_after_reopen() {
         txn.commit().unwrap();
     }
 
-    let mut db = Database::open(tmpfile.path()).unwrap();
+    let db = Database::open(tmpfile.path()).unwrap();
     let err = db.compact().unwrap_err();
     assert!(
         matches!(err, CompactionError::PersistentSavepointExists),
@@ -4131,7 +4131,7 @@ fn compact_returns_persistent_savepoint_error_after_reopen() {
 #[test]
 fn compact_returns_transaction_in_progress_error() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -4157,7 +4157,7 @@ fn compact_returns_transaction_in_progress_error() {
 #[test]
 fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -4179,7 +4179,7 @@ fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
     receiver
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("compact() deadlocked on the caller's own write transaction");
-    let (mut db, result) = handle.join().unwrap();
+    let (db, result) = handle.join().unwrap();
     let err = result.unwrap_err();
     assert!(
         matches!(err, CompactionError::EphemeralSavepointExists),
@@ -4196,7 +4196,7 @@ fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
 #[test]
 fn compact_does_not_block_on_held_write_transaction() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
 
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -4208,7 +4208,7 @@ fn compact_does_not_block_on_held_write_transaction() {
     receiver
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("compact() deadlocked on the caller's own write transaction");
-    let (mut db, result) = handle.join().unwrap();
+    let (db, result) = handle.join().unwrap();
     let err = result.unwrap_err();
     assert!(
         matches!(err, CompactionError::TransactionInProgress),
@@ -4224,7 +4224,7 @@ fn compact_does_not_block_on_held_write_transaction() {
 #[test]
 fn compact_returns_persistent_savepoint_error_before_commit() {
     let tmpfile = create_tempfile();
-    let mut db = Database::create(tmpfile.path()).unwrap();
+    let db = Database::create(tmpfile.path()).unwrap();
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
@@ -4244,7 +4244,7 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
     receiver
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("compact() deadlocked on the caller's own write transaction");
-    let (mut db, result) = handle.join().unwrap();
+    let (db, result) = handle.join().unwrap();
     let err = result.unwrap_err();
     assert!(
         matches!(err, CompactionError::PersistentSavepointExists),
@@ -4254,6 +4254,123 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
     // Aborting rolls back the persistent savepoint, so compaction is allowed again
     txn.abort().unwrap();
     db.compact().unwrap();
+}
+
+// compact() takes a shared handle, and still reports a transaction that is live on it
+#[test]
+fn compact_through_a_shared_handle() {
+    let tmpfile = create_tempfile();
+    let db = Arc::new(Database::create(tmpfile.path()).unwrap());
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..1000 {
+            table.insert(i, i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 500..1000 {
+            table.remove(i).unwrap();
+        }
+    }
+    txn.commit().unwrap();
+
+    let read = db.begin_read().unwrap();
+    assert!(matches!(
+        db.compact(),
+        Err(CompactionError::TransactionInProgress)
+    ));
+    drop(read);
+
+    assert!(db.compact().unwrap());
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.get(499).unwrap().unwrap().value(), 499);
+    assert!(table.get(500).unwrap().is_none());
+}
+
+// Transactions that other threads begin while a compaction runs wait for it to return, and a
+// transaction that is live when it is called is reported: neither deadlocks against the other
+// threads, and the file stays sound throughout
+#[test]
+fn compact_alongside_transactions_on_other_threads() {
+    // The writer below keeps a window of 100 keys and never touches the sentinel, so every
+    // snapshot holds the sentinel and 101 entries
+    const SENTINEL: u64 = u64::MAX;
+    let tmpfile = create_tempfile();
+    let db = Arc::new(Database::create(tmpfile.path()).unwrap());
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 0..100 {
+            table.insert(i, i).unwrap();
+        }
+        table.insert(SENTINEL, SENTINEL).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut threads = vec![];
+    for _ in 0..2 {
+        let db = db.clone();
+        let stop = stop.clone();
+        threads.push(thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let read = db.begin_read().unwrap();
+                let table = read.open_table(U64_TABLE).unwrap();
+                assert_eq!(table.get(SENTINEL).unwrap().unwrap().value(), SENTINEL);
+                assert_eq!(table.len().unwrap(), 101);
+            }
+        }));
+    }
+    {
+        let db = db.clone();
+        let stop = stop.clone();
+        threads.push(thread::spawn(move || {
+            let mut i = 100;
+            while !stop.load(Ordering::Relaxed) {
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut table = txn.open_table(U64_TABLE).unwrap();
+                    table.insert(i, i).unwrap();
+                    table.remove(i - 100).unwrap();
+                }
+                txn.commit().unwrap();
+                i += 1;
+            }
+        }));
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let compactor = {
+        let db = db.clone();
+        thread::spawn(move || {
+            for _ in 0..50 {
+                match db.compact() {
+                    Ok(_) | Err(CompactionError::TransactionInProgress) => {}
+                    Err(err) => panic!("{err:?}"),
+                }
+            }
+            sender.send(()).unwrap();
+        })
+    };
+    receiver
+        .recv_timeout(Duration::from_secs(120))
+        .expect("compact() deadlocked against the transactions of other threads");
+    stop.store(true, Ordering::Relaxed);
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    compactor.join().unwrap();
+
+    let mut db = Arc::into_inner(db).unwrap();
+    assert!(db.check_integrity().unwrap());
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 101);
 }
 
 fn require_send<T: Send>(_: &T) {}

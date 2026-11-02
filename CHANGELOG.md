@@ -67,6 +67,10 @@
 ### New features
 * Add `Builder::set_check_integrity_on_open()`, which verifies the whole file on every `open()`
   instead of trusting the state recorded by a clean shutdown.
+* `Database::compact()` takes `&self` rather than `&mut self`, so it can be called on a shared
+  handle, such as an `Arc<Database>`. A transaction that another thread begins on the handle while
+  the compaction runs waits for it to return; one that is live when it is called is still reported
+  as `TransactionInProgress`.
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.
