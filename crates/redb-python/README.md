@@ -58,6 +58,10 @@ import redb
 db = redb.open("my_db.redb", concurrency=redb.MultiWriter)
 ```
 
+A database, and the transactions and tables opened from it, belong to the process that opened
+it. A forked child, such as a `multiprocessing` worker started with `fork`, must open the database
+itself: using an inherited one raises `redb.UsedAfterFork`.
+
 ## Development
 The bindings are built with [maturin](https://www.maturin.rs) and developed with
 [uv](https://docs.astral.sh/uv/), which installs maturin and the test dependencies itself.

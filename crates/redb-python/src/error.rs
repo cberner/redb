@@ -17,6 +17,13 @@ create_exception!(
     "The transaction was already committed or aborted."
 );
 
+create_exception!(
+    redb,
+    UsedAfterFork,
+    Error,
+    "Opened by the process this one was forked from."
+);
+
 // One exception class per `redb::Error` variant, each a direct subclass of `Error`. Every
 // other redb error enum converts into `redb::Error`, which flattens them all.
 macro_rules! variants {
@@ -80,6 +87,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "TransactionCompleted",
         py.get_type::<TransactionCompleted>(),
     )?;
+    m.add("UsedAfterFork", py.get_type::<UsedAfterFork>())?;
     add_variants(m)
 }
 

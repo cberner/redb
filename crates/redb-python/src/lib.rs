@@ -16,6 +16,7 @@
 
 mod database;
 mod error;
+mod fork;
 mod table;
 mod transaction;
 mod types;
@@ -26,6 +27,7 @@ use pyo3::prelude::*;
 pub fn redb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     database::register(m)?;
     error::register(m)?;
+    fork::register(m)?;
     table::register(m)?;
     transaction::register(m)?;
     types::register(m)?;

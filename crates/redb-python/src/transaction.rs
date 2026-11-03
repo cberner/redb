@@ -1,5 +1,6 @@
 use crate::database::PyDatabase;
 use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
+use crate::fork::ProcessLocal;
 use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition, checked_name};
 use ::redb::{TableDefinition, TableHandle, UntypedTableHandle};
 use pyo3::exceptions::PyRuntimeError;
@@ -57,7 +58,7 @@ fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
 #[pyclass(module = "redb", name = "WriteTransaction", frozen)]
 pub(crate) struct PyWriteTransaction {
     // None once committed or aborted
-    state: Mutex<Option<Active>>,
+    state: ProcessLocal<Mutex<Option<Active>>>,
     // How many times each table has been changed, and how many times all of them were, by a
     // savepoint restore; a range over a table compares the sum against what it saw, to notice
     // the table changing under it
@@ -68,7 +69,7 @@ pub(crate) struct PyWriteTransaction {
 impl PyWriteTransaction {
     pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::WriteTransaction) -> Self {
         Self {
-            state: Mutex::new(Some(Active { txn, db })),
+            state: ProcessLocal::new(Mutex::new(Some(Active { txn, db }))),
             mutations: Mutex::new(HashMap::new()),
             restores: AtomicU64::new(0),
         }
@@ -79,7 +80,7 @@ impl PyWriteTransaction {
     /// or another thread's call while such a predicate runs. Waiting would deadlock, since the
     /// holder needs the GIL back to finish, so it fails instead.
     fn lock(&self) -> PyResult<MutexGuard<'_, Option<Active>>> {
-        self.state.try_lock().map_err(|err| match err {
+        self.state.get()?.try_lock().map_err(|err| match err {
             TryLockError::WouldBlock => PyRuntimeError::new_err(
                 "transaction in use by another operation (a predicate cannot use its own table)",
             ),
@@ -242,14 +243,18 @@ struct ReadActive {
 #[pyclass(module = "redb", name = "ReadTransaction", frozen)]
 pub(crate) struct PyReadTransaction {
     // None once closed
-    state: Mutex<Option<ReadActive>>,
+    state: ProcessLocal<Mutex<Option<ReadActive>>>,
 }
 
 impl PyReadTransaction {
     pub(crate) fn new(db: Py<PyAny>, txn: ::redb::ReadTransaction) -> Self {
         Self {
-            state: Mutex::new(Some(ReadActive { txn, db })),
+            state: ProcessLocal::new(Mutex::new(Some(ReadActive { txn, db }))),
         }
+    }
+
+    fn lock(&self) -> PyResult<MutexGuard<'_, Option<ReadActive>>> {
+        Ok(self.state.get()?.lock().unwrap())
     }
 }
 
@@ -261,21 +266,21 @@ impl PyReadTransaction {
         py: Python<'_>,
         definition: &PyTableDefinition,
     ) -> PyResult<PyReadOnlyTable> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock()?;
         let active = state.as_ref().ok_or_else(closed)?;
         PyReadOnlyTable::new(&active.txn, active.db.clone_ref(py), definition)
     }
 
     /// The names of the tables of the snapshot, in order
     fn list_tables(&self) -> PyResult<Vec<String>> {
-        let state = self.state.lock().unwrap();
+        let state = self.lock()?;
         let active = state.as_ref().ok_or_else(closed)?;
         Ok(names(active.txn.list_tables().pyerr()?))
     }
 
     /// Ends the transaction now; refused while a table from it is still alive
     fn close(&self) -> PyResult<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.lock()?;
         let ReadActive { txn, db } = state.take().ok_or_else(closed)?;
         match txn.close() {
             Ok(()) => Ok(()),
@@ -290,7 +295,7 @@ impl PyReadTransaction {
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        if slf.state.lock().unwrap().is_none() {
+        if slf.lock()?.is_none() {
             return Err(closed());
         }
         Ok(slf)
@@ -302,9 +307,9 @@ impl PyReadTransaction {
         _exc_type: &Bound<'_, PyAny>,
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
-    ) -> bool {
-        self.state.lock().unwrap().take();
-        false
+    ) -> PyResult<bool> {
+        self.lock()?.take();
+        Ok(false)
     }
 }
 
