@@ -3,10 +3,10 @@ name = "redb"
 description = "Python bindings for redb, an embedded key-value store"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-*"]
 dynamic = ["version"]
 classifiers = ["Development Status :: 4 - Beta",
-    "License :: OSI Approved :: MIT License",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -19,7 +19,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+requires = ["maturin>=1.12,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
