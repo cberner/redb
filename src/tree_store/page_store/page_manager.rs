@@ -1,8 +1,8 @@
 use crate::CacheStats;
 use crate::db::{
-    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, PROTOCOL_GENERATION_BYTE,
-    PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE, TXN_BASE,
-    WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
+    BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
+    PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE,
+    TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
 };
 use crate::io;
 use crate::sync::Mutex;
@@ -719,15 +719,15 @@ impl TransactionalMemory {
             ),
             (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
         ];
-        // A read-only handle leaves the shared writer byte and the other generations' protocol
-        // bytes unlocked, because it queries them below. It takes its own generation byte first,
-        // so that the generation query runs before any range that a writer of another generation
-        // would hold exclusively.
+        // A read-only handle leaves the shared writer byte, the other generations' protocol bytes
+        // and the legacy reader byte unlocked, because it queries them below. It takes its own
+        // generation byte first, so that the generation query runs before any range that a writer
+        // of another generation would hold exclusively.
         let read_only_ranges = [
             byte_range(PROTOCOL_GENERATION_BYTE),
             suffix_range,
             (
-                Bound::Included(PROTOCOL_GENERATION_BYTES.end),
+                Bound::Excluded(LEGACY_READER_BYTE),
                 Bound::Excluded(BACKEND_LOCK_RANGE.start),
             ),
             (
@@ -769,7 +769,12 @@ impl TransactionalMemory {
             // The generation query runs as soon as this handle's own generation byte is held, so
             // that a writer of another generation is reported as a mismatch rather than as a
             // lock conflict on one of the later ranges.
-            if read_only && taken == 0 && Self::another_protocol_generation_open(storage)? {
+            if read_only
+                && taken == 0
+                && (cfg!(feature = "experimental-api-5")
+                    || !storage.query_lock_range(byte_range(LEGACY_READER_BYTE))?)
+                && Self::another_protocol_generation_open(storage)?
+            {
                 return Err(DatabaseError::LockProtocolMismatch);
             }
         }
@@ -3353,15 +3358,18 @@ mod lock_protocol_test {
     }
 
     /// Every handle except an exclusive writer holds a shared lock on its own generation byte,
-    /// and on no other generation's byte, while it is open. An exclusive writer locks the whole
-    /// range.
+    /// and on no other generation's byte, nor the legacy reader byte, while it is open. An
+    /// exclusive writer locks the whole range.
     #[test]
     fn a_handle_announces_its_protocol_generation() {
-        use crate::db::{PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, byte_range};
+        use crate::db::{
+            LEGACY_READER_BYTE, PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, byte_range,
+        };
 
         let tmpfile = crate::create_tempfile();
         let observer = reopen(tmpfile.path());
         let own = byte_range(PROTOCOL_GENERATION_BYTE);
+        let legacy = byte_range(LEGACY_READER_BYTE);
         let others = [
             PROTOCOL_GENERATION_BYTES.start..PROTOCOL_GENERATION_BYTE,
             PROTOCOL_GENERATION_BYTE + 1..PROTOCOL_GENERATION_BYTES.end,
@@ -3384,6 +3392,10 @@ mod lock_protocol_test {
             for range in others.iter().filter(|range| !range.is_empty()) {
                 assert!(!observer.query_lock(range.clone()).unwrap());
             }
+            assert!(
+                !observer.query_lock(legacy).unwrap(),
+                "{mode:?} read_only={read_only}"
+            );
             storage.close().unwrap();
             assert!(!observer.query_lock(own).unwrap());
         }
@@ -3393,6 +3405,7 @@ mod lock_protocol_test {
         for range in others.iter().filter(|range| !range.is_empty()) {
             assert!(observer.query_lock(range.clone()).unwrap());
         }
+        assert!(observer.query_lock(legacy).unwrap());
         writer.close().unwrap();
     }
 
@@ -3463,14 +3476,60 @@ mod lock_protocol_test {
         assert!(refused(exclusive_writer(tmpfile.path(), false)));
         peer.unlock_range(own).unwrap();
     }
+
+    /// Takes the shared ranges of a reader of 4.3 or 4.4
+    fn lock_as_older_reader(older: &File) {
+        use crate::db::{BACKEND_LOCK_RANGE, SHARED_WRITER_BYTE};
+        use std::ops::Bound;
+
+        for range in [
+            (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded),
+            (
+                Bound::Excluded(SHARED_WRITER_BYTE),
+                Bound::Excluded(BACKEND_LOCK_RANGE.start),
+            ),
+            (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
+        ] {
+            assert!(older.try_lock_shared_range(range).unwrap());
+        }
+    }
+
+    /// Beside a reader of 4.3 or 4.4, a read-only exclusive-writer handle opens, except under
+    /// `experimental-api-5`, and an exclusive writer is refused. The other modes report a mismatch.
+    #[test]
+    fn opens_beside_a_reader_of_an_older_version() {
+        let tmpfile = crate::create_tempfile();
+        let older = reopen(tmpfile.path());
+        lock_as_older_reader(&older);
+        let reader = exclusive_writer(tmpfile.path(), true);
+        if cfg!(feature = "experimental-api-5") {
+            assert!(mismatched(reader));
+        } else {
+            reader.unwrap().close().unwrap();
+        }
+        assert!(refused(exclusive_writer(tmpfile.path(), false)));
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+            for read_only in [false, true] {
+                assert!(
+                    mismatched(open(tmpfile.path(), read_only, mode)),
+                    "{mode:?} read_only={read_only}"
+                );
+            }
+        }
+        drop(older);
+
+        let reader = exclusive_writer(tmpfile.path(), true).unwrap();
+        lock_as_older_reader(&reopen(tmpfile.path()));
+        reader.close().unwrap();
+    }
 }
 
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
     use crate::db::{
-        BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, PROTOCOL_GENERATION_BYTE,
-        PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
+        BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
+        PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
     };
     use crate::io;
     use crate::sync::Mutex;
@@ -3514,6 +3573,8 @@ mod lock_failure_test {
         // The answer to a query of the protocol generation bytes. Every open except an exclusive
         // writer's makes that query first; `querying` answers the queries that follow it.
         generation_querying: Answer,
+        // The answer to a query of the legacy reader byte
+        legacy_reader_querying: Answer,
         held: LockRanges,
         released: LockRanges,
         closed: AtomicBool,
@@ -3614,6 +3675,10 @@ mod lock_failure_test {
             ));
             let held = self.held.lock().unwrap();
             assert!(held.iter().all(|held| !overlaps(*held, (start, end))));
+            if (start, end) == byte_range(LEGACY_READER_BYTE) {
+                assert!(held.contains(&byte_range(PROTOCOL_GENERATION_BYTE)));
+                return self.legacy_reader_querying.result();
+            }
             let generation_bytes = (
                 Bound::Included(PROTOCOL_GENERATION_BYTES.start),
                 Bound::Excluded(PROTOCOL_GENERATION_BYTES.end),
@@ -3678,6 +3743,7 @@ mod lock_failure_test {
                 fail_unlock: false,
                 querying,
                 generation_querying: Answer::Refused,
+                legacy_reader_querying: Answer::Refused,
                 held: Arc::new(Mutex::new(Vec::new())),
                 released: released.clone(),
                 closed: AtomicBool::new(false),
@@ -3763,18 +3829,21 @@ mod lock_failure_test {
         matches!(result, Err(DatabaseError::LockProtocolMismatch))
     }
 
+    /// The opens that query the protocol generation bytes, as (mode, read-only)
+    const ASKING: [(ConcurrencyMode, bool); 5] = [
+        (ConcurrencyMode::SingleWriter, false),
+        (ConcurrencyMode::SingleWriter, true),
+        (ConcurrencyMode::MultiWriter, false),
+        (ConcurrencyMode::MultiWriter, true),
+        (ConcurrencyMode::ExclusiveWriter, true),
+    ];
+
     /// The shared modes and a read-only exclusive writer announce their own generation, then ask
     /// whether a process of another generation has the database open, and refuse if one does. An
     /// exclusive writer locks the whole generation range instead, so it never asks.
     #[test]
     fn a_process_of_another_protocol_generation_refuses_the_open() {
-        let asking = [
-            (ConcurrencyMode::SingleWriter, false),
-            (ConcurrencyMode::SingleWriter, true),
-            (ConcurrencyMode::MultiWriter, false),
-            (ConcurrencyMode::MultiWriter, true),
-            (ConcurrencyMode::ExclusiveWriter, true),
-        ];
+        let asking = ASKING;
         for (mode, read_only) in asking {
             for answer in [Answer::Acquired, Answer::Failed] {
                 let (mut backend, released) = backend(Answer::Acquired, Answer::Refused);
@@ -3820,6 +3889,30 @@ mod lock_failure_test {
         TransactionalMemory::lock_for_open(&storage, false, ConcurrencyMode::ExclusiveWriter)
             .unwrap();
         storage.close().unwrap();
+    }
+
+    /// Only a read-only exclusive-writer open queries the legacy reader byte, and skips the
+    /// generation check when it is locked. Under `experimental-api-5` no open queries it.
+    #[test]
+    fn a_locked_legacy_reader_byte_masks_the_generation_bytes_from_a_reader() {
+        for (mode, read_only) in ASKING {
+            for answer in [Answer::Acquired, Answer::Failed] {
+                let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+                backend.legacy_reader_querying = answer;
+                backend.generation_querying = Answer::Acquired;
+                let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+                let result = TransactionalMemory::lock_for_open(&storage, read_only, mode);
+                if mode != ConcurrencyMode::ExclusiveWriter || cfg!(feature = "experimental-api-5")
+                {
+                    assert!(mismatched(result), "{mode:?} read_only={read_only}");
+                } else if answer == Answer::Acquired {
+                    result.unwrap();
+                } else {
+                    assert!(failed(result));
+                }
+                storage.close().unwrap();
+            }
+        }
     }
 
     #[test]
