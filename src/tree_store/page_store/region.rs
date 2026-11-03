@@ -1,5 +1,5 @@
 use crate::tree_store::page_store::base::MAX_REGIONS;
-use crate::tree_store::page_store::bitmap::BtreeBitmap;
+use crate::tree_store::page_store::bitmap::{BtreeBitmap, read_u32};
 use crate::tree_store::page_store::buddy_allocator::BuddyAllocator;
 use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::page_manager::{INITIAL_REGIONS, MAX_MAX_PAGE_ORDER};
@@ -47,28 +47,28 @@ impl RegionTracker {
         result
     }
 
-    pub(super) fn from_bytes(page: &[u8]) -> Self {
-        let orders = u32::from_le_bytes(page[..size_of::<u32>()].try_into().unwrap());
+    pub(super) fn from_bytes(page: &[u8]) -> Option<Self> {
+        // new() always writes one tracker per order, and find_free() relies on it
+        let orders = read_u32(page, 0)?;
+        if orders != u32::from(MAX_MAX_PAGE_ORDER) + 1 {
+            return None;
+        }
         let mut start = size_of::<u32>();
         let mut allocator_lens = vec![];
         for _ in 0..orders {
-            let allocator_len =
-                u32::from_le_bytes(page[start..start + size_of::<u32>()].try_into().unwrap())
-                    as usize;
-            allocator_lens.push(allocator_len);
+            allocator_lens.push(read_u32(page, start)? as usize);
             start += size_of::<u32>();
         }
         let mut data = vec![];
         for allocator_len in allocator_lens {
-            data.push(BtreeBitmap::from_bytes(
-                &page[start..(start + allocator_len)],
-            ));
-            start += allocator_len;
+            let end = start.checked_add(allocator_len)?;
+            data.push(BtreeBitmap::from_bytes(page.get(start..end)?)?);
+            start = end;
         }
 
-        Self {
+        Some(Self {
             order_trackers: data,
-        }
+        })
     }
 
     pub(crate) fn find_free(&self, order: u8) -> Option<u32> {

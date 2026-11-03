@@ -72,6 +72,7 @@
 * Operations on tables with `&str` or `String` keys are faster.
 
 ### Bug fixes
+* `open()` reports a malformed allocator state as `StorageError::Corrupted` instead of panicking.
 * Repair and `check_integrity()` verify the trees kept by persistent savepoints, which were not
   checked before.
 * Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write

@@ -6,6 +6,12 @@ use core::mem::size_of;
 const HEIGHT_OFFSET: usize = 0;
 const END_OFFSETS: usize = HEIGHT_OFFSET + size_of::<u32>();
 
+// Reads a little-endian u32, or None if the data is too short
+pub(super) fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(size_of::<u32>())?)?;
+    Some(u32::from_le_bytes(bytes.try_into().unwrap()))
+}
+
 pub(super) struct BtreeBitmap {
     heights: Vec<U64GroupedBitmap>,
 }
@@ -92,29 +98,20 @@ impl BtreeBitmap {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
-        let height = u32::from_le_bytes(
-            data[HEIGHT_OFFSET..(HEIGHT_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
-
-        let mut metadata = END_OFFSETS;
-        let mut data_start = END_OFFSETS + (height as usize) * size_of::<u32>();
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
+        let height = read_u32(data, HEIGHT_OFFSET)? as usize;
+        let mut data_start = END_OFFSETS.checked_add(height.checked_mul(size_of::<u32>())?)?;
 
         let mut heights = vec![];
-        for _ in 0..height {
-            let data_end = u32::from_le_bytes(
-                data[metadata..(metadata + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            heights.push(U64GroupedBitmap::from_bytes(&data[data_start..data_end]));
+        for i in 0..height {
+            let data_end = read_u32(data, END_OFFSETS + i * size_of::<u32>())? as usize;
+            heights.push(U64GroupedBitmap::from_bytes(
+                data.get(data_start..data_end)?,
+            )?);
             data_start = data_end;
-            metadata += size_of::<u32>();
         }
 
-        Self { heights }
+        (!heights.is_empty()).then_some(Self { heights })
     }
 
     // Initializes a new allocator, with no ids free
@@ -278,22 +275,17 @@ impl U64GroupedBitmap {
         result
     }
 
-    pub fn from_bytes(serialized: &[u8]) -> Self {
-        assert_eq!(0, (serialized.len() - size_of::<u32>()) % size_of::<u64>());
-        let len = u32::from_le_bytes(serialized[..size_of::<u32>()].try_into().unwrap());
-        let words = (serialized.len() - size_of::<u32>()) / size_of::<u64>();
-        let mut data = Vec::with_capacity(words);
-        for i in 0..words {
-            let start = size_of::<u32>() + i * size_of::<u64>();
-            let value = u64::from_le_bytes(
-                serialized[start..(start + size_of::<u64>())]
-                    .try_into()
-                    .unwrap(),
-            );
-            data.push(value);
+    pub fn from_bytes(serialized: &[u8]) -> Option<Self> {
+        let len = read_u32(serialized, 0)?;
+        let words = serialized[size_of::<u32>()..].chunks_exact(size_of::<u64>());
+        if !words.remainder().is_empty() {
+            return None;
         }
+        let data: Vec<u64> = words
+            .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            .collect();
 
-        Self { len, data }
+        (data.len() >= Self::required_words(len)).then_some(Self { len, data })
     }
 
     fn data_index_of(bit: u32) -> (usize, usize) {
