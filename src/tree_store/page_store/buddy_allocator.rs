@@ -1,5 +1,5 @@
 use crate::tree_store::PageNumber;
-use crate::tree_store::page_store::bitmap::BtreeBitmap;
+use crate::tree_store::page_store::bitmap::{BtreeBitmap, read_u32};
 #[cfg(test)]
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
@@ -115,34 +115,36 @@ impl BuddyAllocator {
         result
     }
 
-    pub(crate) fn from_bytes(data: &[u8]) -> Self {
-        let max_order = data[MAX_ORDER_OFFSET];
-        let num_pages = u32::from_le_bytes(
-            data[NUM_PAGES_OFFSET..(NUM_PAGES_OFFSET + size_of::<u32>())]
-                .try_into()
-                .unwrap(),
-        );
+    pub(crate) fn from_bytes(data: &[u8]) -> Option<Self> {
+        let max_order = *data.get(MAX_ORDER_OFFSET)?;
+        let num_pages = read_u32(data, NUM_PAGES_OFFSET)?;
+        if max_order > MAX_MAX_PAGE_ORDER || num_pages == 0 {
+            return None;
+        }
 
         let mut metadata = FREE_END_OFFSETS;
         let mut data_start = FREE_END_OFFSETS + (max_order as usize + 1) * size_of::<u32>();
 
+        // Each order must have the length new() gives it
+        let mut pages_for_order = num_pages;
         let mut free = vec![];
         for _ in 0..=max_order {
-            let data_end = u32::from_le_bytes(
-                data[metadata..(metadata + size_of::<u32>())]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            free.push(BtreeBitmap::from_bytes(&data[data_start..data_end]));
+            let data_end = read_u32(data, metadata)? as usize;
+            let bitmap = BtreeBitmap::from_bytes(data.get(data_start..data_end)?)?;
+            if bitmap.len() != pages_for_order {
+                return None;
+            }
+            free.push(bitmap);
+            pages_for_order = next_higher_order(pages_for_order);
             data_start = data_end;
             metadata += size_of::<u32>();
         }
 
-        Self {
+        Some(Self {
             free,
             len: num_pages,
             max_order,
-        }
+        })
     }
 
     #[inline]

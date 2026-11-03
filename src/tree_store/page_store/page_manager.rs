@@ -1751,18 +1751,19 @@ impl TransactionalMemory {
         assert!(self.is_valid_allocator_state(tree)?);
 
         // Load the allocator state
+        let corrupted = || StorageError::corrupted("Malformed allocator state");
         let mut region_allocators = vec![];
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
         {
-            region_allocators.push(BuddyAllocator::from_bytes(region?.value()));
+            region_allocators
+                .push(BuddyAllocator::from_bytes(region?.value()).ok_or_else(corrupted)?);
         }
 
-        let region_tracker = RegionTracker::from_bytes(
-            tree.get(&AllocatorStateKey::RegionTracker)?
-                .unwrap()
-                .value(),
-        );
+        let region_tracker = tree
+            .get(&AllocatorStateKey::RegionTracker)?
+            .and_then(|tracker| RegionTracker::from_bytes(tracker.value()))
+            .ok_or_else(corrupted)?;
 
         let mut state = self.state.lock().unwrap();
         state.allocators = AllocatorState::Loaded(Allocators {
