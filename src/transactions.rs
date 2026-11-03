@@ -89,7 +89,7 @@ impl<'a> PageList<'a> {
             .map(|bytes| usize::from(u16::from_le_bytes(bytes.try_into().unwrap())))
             .and_then(|len| data.get(size_of::<u16>()..Self::required_bytes(len)));
         let Some(entries) = entries else {
-            return Err(StorageError::corrupted("Truncated free page list"));
+            return Err(StorageError::unreachable("Truncated free page list"));
         };
         Ok(entries
             .chunks_exact(PageNumber::serialized_size())

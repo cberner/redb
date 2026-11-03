@@ -1751,7 +1751,7 @@ impl TransactionalMemory {
         assert!(self.is_valid_allocator_state(tree)?);
 
         // Load the allocator state
-        let corrupted = || StorageError::corrupted("Malformed allocator state");
+        let corrupted = || StorageError::unreachable("Malformed allocator state");
         let mut region_allocators = vec![];
         for region in
             tree.range(&(AllocatorStateKey::Region(0)..=AllocatorStateKey::Region(u32::MAX)))?
