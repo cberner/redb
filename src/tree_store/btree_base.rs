@@ -32,7 +32,7 @@ impl PageType {
         match page_type {
             LEAF => Ok(Self::Leaf),
             BRANCH => Ok(Self::Branch),
-            _ => Err(StorageError::corrupted(&format!(
+            _ => Err(StorageError::unreachable(&format!(
                 "Invalid page type byte {page_type} for page {:?}",
                 page.get_page_number()
             ))),
