@@ -1,4 +1,5 @@
 use crate::error::{PyErrExt, TransactionInProgress};
+use crate::fork::ProcessLocal;
 use crate::transaction::{PyReadTransaction, PyWriteTransaction};
 use ::redb::ReadableDatabase;
 use pyo3::prelude::*;
@@ -57,15 +58,21 @@ impl ConcurrencyMode {
 #[pyclass(module = "redb", name = "Database", frozen)]
 pub(crate) struct PyDatabase {
     // Maintenance needs the database to itself, as `&mut`; transactions share it
-    inner: RwLock<::redb::Database>,
+    inner: ProcessLocal<RwLock<::redb::Database>>,
 }
 
 impl PyDatabase {
+    fn new(inner: ::redb::Database) -> Self {
+        Self {
+            inner: ProcessLocal::new(RwLock::new(inner)),
+        }
+    }
+
     /// The database alone, for maintenance. Refused rather than waited for while a transaction
     /// is beginning on another thread: that thread may be waiting for the caller's own write
     /// transaction to end, which the caller cannot do from here
     fn exclusive(&self) -> PyResult<RwLockWriteGuard<'_, ::redb::Database>> {
-        self.inner.try_write().map_err(|err| match err {
+        self.inner.get()?.try_write().map_err(|err| match err {
             TryLockError::WouldBlock => {
                 TransactionInProgress::new_err("a transaction is beginning on another thread")
             }
@@ -88,9 +95,7 @@ impl PyDatabase {
         let inner = py
             .detach(|| concurrency.builder(cache_size).create(path))
             .pyerr()?;
-        Ok(Self {
-            inner: RwLock::new(inner),
-        })
+        Ok(Self::new(inner))
     }
 
     /// Opens an existing database
@@ -105,24 +110,20 @@ impl PyDatabase {
         let inner = py
             .detach(|| concurrency.builder(cache_size).open(path))
             .pyerr()?;
-        Ok(Self {
-            inner: RwLock::new(inner),
-        })
+        Ok(Self::new(inner))
     }
 
     /// Begins a write transaction, waiting for any other writer to finish
     fn begin_write(slf: Py<Self>, py: Python<'_>) -> PyResult<PyWriteTransaction> {
-        let txn = py
-            .detach(|| slf.get().inner.read().unwrap().begin_write())
-            .pyerr()?;
+        let db = slf.get().inner.get()?;
+        let txn = py.detach(|| db.read().unwrap().begin_write()).pyerr()?;
         Ok(PyWriteTransaction::new(slf, txn))
     }
 
     /// Begins a read transaction: a snapshot of the data committed so far
     fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
-        let txn = py
-            .detach(|| slf.get().inner.read().unwrap().begin_read())
-            .pyerr()?;
+        let db = slf.get().inner.get()?;
+        let txn = py.detach(|| db.read().unwrap().begin_read()).pyerr()?;
         Ok(PyReadTransaction::new(slf.into_any(), txn))
     }
 
@@ -161,21 +162,24 @@ impl PyDatabase {
                     .open_read_only(path)
             })
             .pyerr()?;
-        Ok(PyReadOnlyDatabase { inner })
+        Ok(PyReadOnlyDatabase {
+            inner: ProcessLocal::new(inner),
+        })
     }
 }
 
 /// A database open for reading only, which follows the commits of the process writing to it
 #[pyclass(module = "redb", name = "ReadOnlyDatabase", frozen)]
 pub(crate) struct PyReadOnlyDatabase {
-    inner: ::redb::ReadOnlyDatabase,
+    inner: ProcessLocal<::redb::ReadOnlyDatabase>,
 }
 
 #[pymethods]
 impl PyReadOnlyDatabase {
     /// Begins a read transaction: a snapshot of the data committed so far
     fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
-        let txn = py.detach(|| slf.get().inner.begin_read()).pyerr()?;
+        let db = slf.get().inner.get()?;
+        let txn = py.detach(|| db.begin_read()).pyerr()?;
         Ok(PyReadTransaction::new(slf.into_any(), txn))
     }
 }
