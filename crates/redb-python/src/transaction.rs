@@ -79,9 +79,9 @@ impl PyWriteTransaction {
     }
 
     /// The state, held for the length of one operation. An operation that finds it held is
-    /// running inside another: a `retain` or `extract_if` predicate using the table it filters,
-    /// or another thread's call while such a predicate runs. Waiting would deadlock, since the
-    /// holder needs the GIL back to finish, so it fails instead.
+    /// running inside another: a `retain` predicate using the table it filters, or another
+    /// thread's call while such a predicate runs. Waiting would deadlock, since the holder needs
+    /// the GIL back to finish, so it fails instead.
     fn lock(&self) -> PyResult<MutexGuard<'_, Option<Active>>> {
         self.state.get()?.try_lock().map_err(|err| match err {
             TryLockError::WouldBlock => PyRuntimeError::new_err(
