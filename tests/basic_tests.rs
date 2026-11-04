@@ -51,6 +51,16 @@ fn create_tempfile() -> tempfile::NamedTempFile {
     }
 }
 
+#[cfg(feature = "experimental-api-5")]
+fn file_backend(file: std::fs::File) -> FileBackend {
+    FileBackend::new(file)
+}
+
+#[cfg(not(feature = "experimental-api-5"))]
+fn file_backend(file: std::fs::File) -> FileBackend {
+    FileBackend::new(file).unwrap()
+}
+
 #[test]
 fn len() {
     let tmpfile = create_tempfile();
@@ -92,9 +102,9 @@ fn read_only() {
         ));
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         assert!(matches!(
-            Database::builder().open_read_only_with_backend(
-                FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap()
-            ),
+            Database::builder().open_read_only_with_backend(file_backend(
+                std::fs::File::open(tmpfile.path()).unwrap()
+            )),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
         drop(db);
@@ -106,9 +116,7 @@ fn read_only() {
     assert_eq!(table.len().unwrap(), 3);
 
     let db2 = Database::builder()
-        .open_read_only_with_backend(
-            FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap(),
-        )
+        .open_read_only_with_backend(file_backend(std::fs::File::open(tmpfile.path()).unwrap()))
         .unwrap();
     let read_txn2 = db2.begin_read().unwrap();
     let table2 = read_txn2.open_table(STR_TABLE).unwrap();
@@ -138,9 +146,7 @@ fn read_only_backend_preserves_bytes() {
     let before = std::fs::read(tmpfile.path()).unwrap();
     {
         let db = Database::builder()
-            .open_read_only_with_backend(
-                FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap(),
-            )
+            .open_read_only_with_backend(file_backend(std::fs::File::open(tmpfile.path()).unwrap()))
             .unwrap();
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_table(STR_TABLE).unwrap();
@@ -174,7 +180,7 @@ fn read_only_file_refuses_recovery_without_modifying_bytes() {
         .unwrap();
 
     assert!(matches!(
-        Database::builder().open_read_only_with_backend(FileBackend::new(file).unwrap()),
+        Database::builder().open_read_only_with_backend(file_backend(file)),
         Err(redb::DatabaseError::RepairAborted)
     ));
     assert_eq!(std::fs::read(tmpfile.path()).unwrap(), before);
@@ -198,7 +204,7 @@ fn read_only_file_keeps_opened_file_after_path_replacement() {
     std::fs::rename(replacement.path(), original.path()).unwrap();
 
     let db = Database::builder()
-        .open_read_only_with_backend(FileBackend::new(file).unwrap())
+        .open_read_only_with_backend(file_backend(file))
         .unwrap();
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();

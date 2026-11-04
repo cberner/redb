@@ -1,4 +1,6 @@
 use crate::BackendError;
+#[cfg(not(feature = "experimental-api-5"))]
+use crate::DatabaseError;
 #[cfg(any(
     windows,
     all(test, any(target_os = "linux", target_vendor = "apple")),
@@ -7,7 +9,7 @@ use crate::BackendError;
 use crate::db::{BACKEND_LOCK_RANGE, byte_range};
 #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
 use crate::db::{SHARED_READER_BYTE, SHARED_WRITER_BYTE};
-use crate::{DatabaseError, Result, StorageBackend};
+use crate::{Result, StorageBackend};
 use std::collections::HashSet;
 use std::fs::{File, TryLockError};
 use std::io;
@@ -97,12 +99,24 @@ pub struct FileBackend {
 
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
+    #[cfg(feature = "experimental-api-5")]
+    pub fn new(file: File) -> Self {
+        Self::from_file(file)
+    }
+
+    /// Creates a new backend which stores data to the given file.
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Ok(Self {
+        Ok(Self::from_file(file))
+    }
+
+    // Infallible under either API, for callers inside the crate
+    pub(crate) fn from_file(file: File) -> Self {
+        Self {
             whole_file_locked: AtomicBool::new(false),
             locked_ranges: Mutex::new(HashSet::new()),
             file,
-        })
+        }
     }
 
     // Best-effort compatibility with redb before 4.3: when an open takes a range that stands for
@@ -510,7 +524,7 @@ mod range_lock_tests {
 
     /// Exercise the public whole-storage primitive, including the shared writer byte.
     fn open_file(file: File, read_only: bool) -> Result<FileBackend, crate::DatabaseError> {
-        let backend = FileBackend::new(file).unwrap();
+        let backend = FileBackend::from_file(file);
         let acquired = if read_only {
             backend.try_lock_shared_range(FULL_RANGE.0, FULL_RANGE.1)
         } else {
@@ -566,8 +580,8 @@ mod range_lock_tests {
         use std::ops::Bound::{Excluded, Included, Unbounded};
 
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
-        let peer = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let backend = FileBackend::from_file(reopen(tmpfile.path()));
+        let peer = FileBackend::from_file(reopen(tmpfile.path()));
         let ranges = [
             (Included(BACKEND_LOCK_RANGE.end), Unbounded),
             (Included(100), Excluded(BACKEND_LOCK_RANGE.start)),
@@ -630,7 +644,7 @@ mod range_lock_tests {
         ] {
             let tmpfile = crate::create_tempfile();
             let holder = reopen(tmpfile.path());
-            let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+            let backend = FileBackend::from_file(reopen(tmpfile.path()));
             let range = byte_range(100);
             holder.lock_range(byte_range(QUERY_BYTE)).unwrap();
             holder.lock_range(range).unwrap();
@@ -674,7 +688,7 @@ mod range_lock_tests {
             for operation in [QueryMutexOperation::Exclusive, QueryMutexOperation::Shared] {
                 let tmpfile = crate::create_tempfile();
                 let holder = reopen(tmpfile.path());
-                let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+                let backend = FileBackend::from_file(reopen(tmpfile.path()));
                 let range = if whole_storage {
                     FULL_RANGE
                 } else {
@@ -702,7 +716,7 @@ mod range_lock_tests {
     fn query_mutex_is_released_after_conflicts_and_errors() {
         let tmpfile = crate::create_tempfile();
         let holder = reopen(tmpfile.path());
-        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let backend = FileBackend::from_file(reopen(tmpfile.path()));
         let range = byte_range(100);
         holder.lock_range(range).unwrap();
         for operation in [
@@ -745,7 +759,7 @@ mod range_lock_tests {
     #[test]
     fn query_mutex_serializes_queries_on_the_same_backend() {
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let backend = FileBackend::from_file(reopen(tmpfile.path()));
         let observer = reopen(tmpfile.path());
         let barrier = std::sync::Barrier::new(4);
         thread::scope(|scope| {
@@ -773,7 +787,7 @@ mod range_lock_tests {
         let tmpfile = crate::create_tempfile();
         // No whole-storage lock: on the platforms whose locks do not split, a range it covered
         // could not be locked or released on its own
-        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let backend = FileBackend::from_file(reopen(tmpfile.path()));
         let byte = BASE..BASE + 1;
 
         let observer = reopen(tmpfile.path());
@@ -970,7 +984,7 @@ mod range_lock_tests {
     #[test]
     fn blocking_whole_storage_locks_have_no_protocol_holes() {
         let tmpfile = crate::create_tempfile();
-        let backend = FileBackend::new(reopen(tmpfile.path())).unwrap();
+        let backend = FileBackend::from_file(reopen(tmpfile.path()));
         let observer = reopen(tmpfile.path());
         for shared in [false, true] {
             if shared {
@@ -1003,7 +1017,7 @@ mod range_lock_tests {
             return;
         }
         observer.unlock().unwrap();
-        let backend = FileBackend::new(file).unwrap();
+        let backend = FileBackend::from_file(file);
 
         for range in [
             (Bound::Included(BASE + 1025), Bound::Unbounded),

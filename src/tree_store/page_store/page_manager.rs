@@ -2840,7 +2840,7 @@ mod header_lock_test {
         // These stand in for separate processes' handles, so each gives the writer byte back as
         // the end of an open does, by dropping the lock its open held
         let (mem, _writer_lock) = TransactionalMemory::new(
-            Box::new(FileBackend::new(file)?),
+            Box::new(FileBackend::from_file(file)),
             true,
             PAGE_SIZE,
             None,
@@ -2859,7 +2859,7 @@ mod header_lock_test {
         let file = std::fs::OpenOptions::new().read(true).open(path)?;
         let (mem, _writer_lock) = TransactionalMemory::new(
             Box::new(crate::tree_store::ReadOnlyBackend::new(Box::new(
-                FileBackend::new(file)?,
+                FileBackend::from_file(file),
             ))),
             false,
             PAGE_SIZE,
@@ -3067,7 +3067,7 @@ mod lock_protocol_test {
         read_only: bool,
         concurrency_mode: ConcurrencyMode,
     ) -> Result<PagedCachedFile, DatabaseError> {
-        let storage = PagedCachedFile::new(Box::new(FileBackend::new(file)?), 4096, 0);
+        let storage = PagedCachedFile::new(Box::new(FileBackend::from_file(file)), 4096, 0);
         TransactionalMemory::lock_for_open(&storage, read_only, concurrency_mode)?;
 
         Ok(storage)
