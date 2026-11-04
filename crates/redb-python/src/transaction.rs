@@ -1,4 +1,4 @@
-use crate::database::PyDatabase;
+use crate::database::{PyDatabase, check_open};
 use crate::error::{
     PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted, TransactionInUse,
 };
@@ -302,13 +302,15 @@ impl PyReadTransaction {
     ) -> PyResult<PyReadOnlyTable> {
         let state = self.lock()?;
         let active = state.as_ref().ok_or_else(closed)?;
+        check_open(active.db.bind(py))?;
         PyReadOnlyTable::new(&active.txn, active.db.clone_ref(py), definition)
     }
 
     /// The names of the tables of the snapshot, in order
-    fn list_tables(&self) -> PyResult<Vec<String>> {
+    fn list_tables(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         let state = self.lock()?;
         let active = state.as_ref().ok_or_else(closed)?;
+        check_open(active.db.bind(py))?;
         Ok(names(active.txn.list_tables().pyerr()?))
     }
 
