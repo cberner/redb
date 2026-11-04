@@ -721,6 +721,17 @@ def test_close(tmp_db_path: Path) -> None:
     with pytest.raises(redb.DatabaseClosed):
         db.begin_read()
 
+    # What was opened to read from it stops reading, but can still be exited
+    for open_db in (redb.Database.open, redb.Database.open_read_only):
+        db = open_db(path)
+        with db.begin_read() as read:
+            table = read.open_table(USERS)
+            entries = iter(table)
+            db.close()
+            for use in (lambda: table[1], lambda: next(entries), read.list_tables):
+                with pytest.raises(redb.DatabaseClosed):
+                    use()
+
     # An open write transaction keeps the file open until it ends
     db = redb.Database.open(path)
     txn = db.begin_write()
@@ -734,6 +745,31 @@ def test_close(tmp_db_path: Path) -> None:
     with pytest.raises(redb.DatabaseClosed):
         reader.begin_read()
     reader.close()
+
+def test_reads_during_maintenance(tmp_db_path: Path) -> None:
+    # compact() holds the database's lock until it has the GIL back, so a read checking that the
+    # database is open must not wait for the lock: that deadlocked
+    db = redb.Database.create(str(tmp_db_path))
+    with db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+    table = db.begin_read().open_table(USERS)
+    stop = threading.Event()
+
+    def maintain() -> None:
+        while not stop.is_set():
+            try:
+                db.compact()
+            except redb.TransactionInProgress:
+                pass
+
+    maintainer = threading.Thread(target=maintain)
+    maintainer.start()
+    try:
+        for _ in range(10_000):
+            assert len(table) == 1
+    finally:
+        stop.set()
+        maintainer.join()
 
 def test_open_functions(tmp_db_path: Path) -> None:
     # open() does not create. A redb.Io is an OSError too, with the OS error number

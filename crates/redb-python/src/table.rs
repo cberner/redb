@@ -1,3 +1,4 @@
+use crate::database::check_open;
 use crate::error::{PyErrExt, TableChangedDuringIteration};
 use crate::fork::ProcessLocal;
 use crate::transaction::PyWriteTransaction;
@@ -448,7 +449,11 @@ impl PyReadOnlyTable {
     }
 
     /// The redb table, as the types its definition dispatched to
-    fn table<K: Key + 'static, V: Value + 'static>(&self) -> PyResult<&ReadOnlyTable<K, V>> {
+    fn table<K: Key + 'static, V: Value + 'static>(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<&ReadOnlyTable<K, V>> {
+        check_open(self.db.bind(py))?;
         Ok(self
             .table
             .get()?
@@ -464,16 +469,18 @@ impl PyReadOnlyTable {
         &self.name
     }
 
-    fn __len__(&self) -> PyResult<usize> {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         with_types!(self.key, self.value, K, V, {
-            length(self.table::<K, V>()?)
+            length(self.table::<K, V>(py)?)
         })
     }
 
     /// The value at `key`, or None
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         with_types!(self.key, self.value, K, V, {
-            lookup::<K, V>(py, self.table::<K, V>()?, &K::from_py(key)?)
+            // The key first: converting it can run Python code, which may close the database
+            let key = K::from_py(key)?;
+            lookup::<K, V>(py, self.table::<K, V>(py)?, &key)
         })
     }
 
@@ -492,14 +499,14 @@ impl PyReadOnlyTable {
     /// The entry with the smallest key, as a `(key, value)` pair, or None if the table is empty
     fn first(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
         with_types!(self.key, self.value, K, V, {
-            first_entry::<K, V>(py, self.table::<K, V>()?)
+            first_entry::<K, V>(py, self.table::<K, V>(py)?)
         })
     }
 
     /// The entry with the largest key, as a `(key, value)` pair, or None if the table is empty
     fn last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
         with_types!(self.key, self.value, K, V, {
-            last_entry::<K, V>(py, self.table::<K, V>()?)
+            last_entry::<K, V>(py, self.table::<K, V>(py)?)
         })
     }
 
@@ -517,13 +524,13 @@ impl PyReadOnlyTable {
             let start = start.map(K::from_py).transpose()?;
             let end = end.map(K::from_py).transpose()?;
             let range = self
-                .table::<K, V>()?
+                .table::<K, V>(py)?
                 .range_owned(limits::<K>(start.as_ref(), true, end.as_ref()))
                 .pyerr()?;
             Ok(PyRange {
                 source: Source::Read {
                     range: ProcessLocal::new(Box::new(range)),
-                    _db: self.db.clone_ref(py),
+                    db: self.db.clone_ref(py),
                 },
                 reverse,
             })
@@ -627,7 +634,7 @@ enum Source {
     Read {
         range: ProcessLocal<Box<dyn ReadRange>>,
         // Dropped after `range`, whose snapshot needs the database's storage open
-        _db: Py<PyAny>,
+        db: Py<PyAny>,
     },
     Write(WriteRange),
 }
@@ -647,7 +654,10 @@ impl PyRange {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Pair>> {
         match &mut self.source {
-            Source::Read { range, .. } => range.get_mut()?.next(py, self.reverse),
+            Source::Read { range, db } => {
+                check_open(db.bind(py))?;
+                range.get_mut()?.next(py, self.reverse)
+            }
             Source::Write(range) => range.next(py, self.reverse),
         }
     }
