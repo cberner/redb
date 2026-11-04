@@ -274,7 +274,10 @@ impl TableTreeMut {
         self.pending_table_updates.clear();
     }
 
-    #[cfg_attr(any(not(debug_assertions), redb_no_std), expect(dead_code))]
+    #[cfg_attr(
+        any(not(debug_assertions), feature = "experimental-api-5"),
+        expect(dead_code)
+    )]
     pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
     where
         F: FnMut(&PagePath) -> Result,

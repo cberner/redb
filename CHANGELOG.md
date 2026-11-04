@@ -28,6 +28,8 @@
 * Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
   `ReadableTable::upper_bound()` have no default implementation, so implementations of
   `ReadableTable` must provide them.
+* Under the `experimental-api-5` feature flag, `WriteTransaction::print_allocated_page_debug()`, an
+  internal debugging aid present only in debug builds, is removed.
 * Behind the `experimental-api-5` feature flag, `Range` and `MultimapRange` keep the table
   borrowed until they are dropped, rather than until their last use. Mutating the table while a
   range over it is still in scope, which could panic, no longer compiles.
@@ -79,6 +81,8 @@
 ### Deprecations
 * `Builder::create_file()` is deprecated; use
   `Builder::create_with_backend(FileBackend::new(file)?)` instead.
+* `WriteTransaction::print_allocated_page_debug()` is deprecated. It is an internal debugging aid,
+  present only in debug builds.
 
 ### Bug fixes
 * `open()` reports a malformed allocator state as `StorageError::Corrupted` instead of panicking.
