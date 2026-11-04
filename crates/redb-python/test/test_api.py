@@ -577,6 +577,17 @@ def test_i64_and_bool_types(tmp_db_path: Path) -> None:
             flags["1"] = True
         with pytest.raises(TypeError, match="expected bool, got int"):
             flags[1] = 1
+        # Nor is a bool an int, though Python has it subclass int
+        with pytest.raises(TypeError, match="expected int, got bool"):
+            flags[True] = True
+        for i, int_type in enumerate((redb.u64, redb.i64, redb.u128, redb.i128)):
+            ints = txn.open_table(redb.TableDefinition(f"ints{i}", int_type, int_type))
+            with pytest.raises(TypeError, match="expected int, got bool"):
+                ints[True] = 1
+            with pytest.raises(TypeError, match="expected int, got bool"):
+                ints[1] = False
+            with pytest.raises(TypeError, match="expected int, got bool"):
+                ints.get(False)
         # bool is a key type too, as in redb
         seen = txn.open_table(redb.TableDefinition("seen", redb.bool, redb.u64))
         seen[True] = 1
