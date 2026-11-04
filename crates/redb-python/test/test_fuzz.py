@@ -270,7 +270,11 @@ class RedbMachine(RuleBasedStateMachine):
         table = TABLES[name] if by_definition else name
         assert self.write.delete_table(table) == (name in self.pending)
         self.pending.pop(name, None)
-        self.handles.pop(name, None)
+        handle = self.handles.pop(name, None)
+        if handle is not None:
+            # A handle on a deleted table raises rather than creating it again
+            with pytest.raises(redb.TableDoesNotExist):
+                len(handle)
         assert self.write.list_tables() == sorted(self.pending)
 
     @rule(name=names)
@@ -346,9 +350,15 @@ class RedbMachine(RuleBasedStateMachine):
         self.pending = {
             name: dict(table) for name, table in self.pending_savepoints[savepoint].items()
         }
-        # A table created in this transaction is gone with the restore, and a handle on it no
-        # longer stands for a table that exists; the next use opens, and so creates, it again
-        self.handles.clear()
+        # A handle on a table the savepoint did not have raises rather than creating it again;
+        # the others go on working, on the restored tables
+        for name, handle in list(self.handles.items()):
+            if name in self.pending:
+                assert len(handle) == len(self.pending[name])
+            else:
+                with pytest.raises(redb.TableDoesNotExist):
+                    len(handle)
+                del self.handles[name]
         self.pending_savepoints = {
             id: tables for id, tables in self.pending_savepoints.items() if id <= savepoint
         }
