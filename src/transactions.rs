@@ -7,7 +7,7 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{
     LocalSavepointId, SavepointId, TransactionId, TransactionTracker,
 };
-#[cfg(all(debug_assertions, not(redb_no_std)))]
+#[cfg(all(debug_assertions, not(feature = "experimental-api-5")))]
 use crate::tree_store::PageNumberHashSet;
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, DatabaseLayout, HeaderGuard,
@@ -1044,7 +1044,13 @@ impl WriteTransaction {
                 .is_some())
     }
 
-    #[cfg(all(debug_assertions, not(redb_no_std)))]
+    /// Prints the pages that each part of the database holds, and any it has leaked. Only
+    /// present in debug builds.
+    #[cfg(all(debug_assertions, not(feature = "experimental-api-5")))]
+    #[deprecated(
+        since = "4.5.0",
+        note = "an internal debugging aid, removed in redb 5.0"
+    )]
     pub fn print_allocated_page_debug(&self) {
         let mut all_allocated = PageNumberHashSet::from_iter(self.mem.all_allocated_pages());
 
