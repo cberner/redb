@@ -2306,9 +2306,26 @@ impl Builder {
         path: impl AsRef<Path>,
     ) -> Result<ReadOnlyDatabase, DatabaseError> {
         let file = OpenOptions::new().read(true).open(path)?;
+        self.open_read_only_with_backend(FileBackend::new(file)?)
+    }
 
+    /// Opens an existing redb database with the given backend, without modifying it.
+    ///
+    /// A database requiring recovery is rejected rather than repaired. The locking and concurrency
+    /// rules of [`Self::open_read_only`] also apply to this method.
+    ///
+    /// When using a [`FileBackend`], the supplied file is used without reopening its pathname.
+    /// Each database handle must use an independently opened file. Do not use [`File::try_clone`]
+    /// or a duplicated file descriptor to open another database handle: they can share the same
+    /// open file description and its locks. Closing either database can release the other's
+    /// locks, allowing a writer to invalidate its read-only snapshot.
+    #[cfg(not(redb_no_std))]
+    pub fn open_read_only_with_backend(
+        &self,
+        backend: impl StorageBackend,
+    ) -> Result<ReadOnlyDatabase, DatabaseError> {
         ReadOnlyDatabase::new(
-            Box::new(FileBackend::new(file)?),
+            Box::new(backend),
             self.page_size,
             None,
             self.cache_size,

@@ -3,11 +3,11 @@ use rand::random;
 use redb::CommitError;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use redb::DatabaseError;
-use redb::backends::InMemoryBackend;
+use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
     Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageError, TableDefinition,
-    TableError, TableHandle, TypeName, Value, WriteTransaction,
+    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend, StorageError,
+    TableDefinition, TableError, TableHandle, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
 use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
@@ -90,6 +90,13 @@ fn read_only() {
             ReadOnlyDatabase::open(tmpfile.path()),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        assert!(matches!(
+            Database::builder().open_read_only_with_backend(
+                FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap()
+            ),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
         drop(db);
     }
 
@@ -98,8 +105,12 @@ fn read_only() {
     let table = read_txn.open_table(STR_TABLE).unwrap();
     assert_eq!(table.len().unwrap(), 3);
 
-    let db2 = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
-    let read_txn2 = db.begin_read().unwrap();
+    let db2 = Database::builder()
+        .open_read_only_with_backend(
+            FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap(),
+        )
+        .unwrap();
+    let read_txn2 = db2.begin_read().unwrap();
     let table2 = read_txn2.open_table(STR_TABLE).unwrap();
     assert_eq!(table2.len().unwrap(), 3);
 
@@ -110,6 +121,96 @@ fn read_only() {
     ));
     drop(db);
     drop(db2);
+}
+
+#[test]
+fn read_only_backend_preserves_bytes() {
+    let tmpfile = create_tempfile();
+    {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            table.insert("hello", "world").unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+    let before = std::fs::read(tmpfile.path()).unwrap();
+    {
+        let db = Database::builder()
+            .open_read_only_with_backend(
+                FileBackend::new(std::fs::File::open(tmpfile.path()).unwrap()).unwrap(),
+            )
+            .unwrap();
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+    }
+    assert_eq!(std::fs::read(tmpfile.path()).unwrap(), before);
+
+    let backend = InMemoryBackend::new();
+    backend.set_len(before.len() as u64).unwrap();
+    backend.write(0, &before).unwrap();
+    let db = Database::builder()
+        .open_read_only_with_backend(backend)
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn read_only_file_refuses_recovery_without_modifying_bytes() {
+    let tmpfile = create_tempfile();
+    drop(Database::create(tmpfile.path()).unwrap());
+    let mut before = std::fs::read(tmpfile.path()).unwrap();
+    // The god byte's recovery-required bit, cleared by a clean shutdown.
+    before[9] |= 2;
+    std::fs::write(tmpfile.path(), &before).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(tmpfile.path())
+        .unwrap();
+
+    assert!(matches!(
+        Database::builder().open_read_only_with_backend(FileBackend::new(file).unwrap()),
+        Err(redb::DatabaseError::RepairAborted)
+    ));
+    assert_eq!(std::fs::read(tmpfile.path()).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_only_file_keeps_opened_file_after_path_replacement() {
+    let original = create_tempfile();
+    let replacement = create_tempfile();
+    for (tmpfile, value) in [(&original, "original"), (&replacement, "replacement")] {
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            table.insert("hello", value).unwrap();
+        }
+        write_txn.commit().unwrap();
+    }
+    let file = std::fs::File::open(original.path()).unwrap();
+    std::fs::rename(replacement.path(), original.path()).unwrap();
+
+    let db = Database::builder()
+        .open_read_only_with_backend(FileBackend::new(file).unwrap())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "original");
+
+    let replacement_db = ReadOnlyDatabase::open(original.path()).unwrap();
+    let replacement_txn = replacement_db.begin_read().unwrap();
+    let replacement_table = replacement_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(
+        replacement_table.get("hello").unwrap().unwrap().value(),
+        "replacement"
+    );
 }
 
 #[test]
