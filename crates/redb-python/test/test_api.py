@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import importlib.metadata
 import math
 import threading
 import time
@@ -37,6 +38,11 @@ def test_star_import_does_not_shadow_builtins() -> None:
         assert hasattr(redb, name)
     assert namespace["Database"] is redb.Database
     assert namespace["u64"] is redb.u64
+
+
+def test_version_is_the_package_version() -> None:
+    assert redb.__version__ == importlib.metadata.version("redb")
+    assert "__version__" not in redb.__all__
 
 
 def test_table_definition() -> None:
