@@ -24,6 +24,11 @@ build-backend = "maturin"
 
 [tool.maturin]
 compatibility = "manylinux2014"
+# The package's `__init__.py` wraps the extension module
+python-source = "python"
+module-name = "redb.redb"
+# Left in the source by running the tests
+exclude = ["python/**/__pycache__/**"]
 
 [tool.uv]
 # Rebuild the extension when its sources or build profile change. The redb crate is outside this
