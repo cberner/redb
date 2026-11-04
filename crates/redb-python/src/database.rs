@@ -1,4 +1,4 @@
-use crate::error::{PyErrExt, TransactionInProgress};
+use crate::error::{DatabaseClosed, PyErrExt, TransactionInProgress};
 use crate::fork::ProcessLocal;
 use crate::transaction::{PyReadTransaction, PyWriteTransaction};
 use ::redb::ReadableDatabase;
@@ -57,27 +57,54 @@ impl ConcurrencyMode {
 /// unless given.
 #[pyclass(module = "redb", name = "Database", frozen)]
 pub(crate) struct PyDatabase {
-    // Maintenance needs the database to itself, as `&mut`; transactions share it
-    inner: ProcessLocal<RwLock<::redb::Database>>,
+    // Maintenance needs the database to itself, as `&mut`; transactions share it. None once
+    // closed
+    inner: ProcessLocal<RwLock<Option<::redb::Database>>>,
+}
+
+fn closed() -> PyErr {
+    DatabaseClosed::new_err(::redb::Error::DatabaseClosed.to_string())
+}
+
+/// The lock alone, for maintenance or for closing. Refused rather than waited for while a
+/// transaction is beginning on another thread: that thread may be waiting for the caller's own
+/// write transaction to end, which the caller cannot do from here
+fn exclusive<T>(lock: &RwLock<T>) -> PyResult<RwLockWriteGuard<'_, T>> {
+    lock.try_write().map_err(|err| match err {
+        TryLockError::WouldBlock => {
+            TransactionInProgress::new_err("a transaction is beginning on another thread")
+        }
+        TryLockError::Poisoned(err) => panic!("{err}"),
+    })
+}
+
+/// Closes the database in `lock`, if it is still open, dropping it without the GIL
+fn close<T: Send>(py: Python<'_>, lock: &RwLock<Option<T>>) -> PyResult<()> {
+    let db = exclusive(lock)?.take();
+    py.detach(|| drop(db));
+    Ok(())
+}
+
+/// Begins a read transaction of the database in `lock`
+fn begin_read<T: ReadableDatabase + Send + Sync>(
+    py: Python<'_>,
+    lock: &RwLock<Option<T>>,
+) -> PyResult<::redb::ReadTransaction> {
+    py.detach(|| lock.read().unwrap().as_ref().map(T::begin_read))
+        .ok_or_else(closed)?
+        .pyerr()
 }
 
 impl PyDatabase {
     fn new(inner: ::redb::Database) -> Self {
         Self {
-            inner: ProcessLocal::new(RwLock::new(inner)),
+            inner: ProcessLocal::new(RwLock::new(Some(inner))),
         }
     }
 
-    /// The database alone, for maintenance. Refused rather than waited for while a transaction
-    /// is beginning on another thread: that thread may be waiting for the caller's own write
-    /// transaction to end, which the caller cannot do from here
-    fn exclusive(&self) -> PyResult<RwLockWriteGuard<'_, ::redb::Database>> {
-        self.inner.get()?.try_write().map_err(|err| match err {
-            TryLockError::WouldBlock => {
-                TransactionInProgress::new_err("a transaction is beginning on another thread")
-            }
-            TryLockError::Poisoned(err) => panic!("{err}"),
-        })
+    /// The database alone, for maintenance
+    fn exclusive(&self) -> PyResult<RwLockWriteGuard<'_, Option<::redb::Database>>> {
+        exclusive(self.inner.get()?)
     }
 }
 
@@ -116,15 +143,44 @@ impl PyDatabase {
     /// Begins a write transaction, waiting for any other writer to finish
     fn begin_write(slf: Py<Self>, py: Python<'_>) -> PyResult<PyWriteTransaction> {
         let db = slf.get().inner.get()?;
-        let txn = py.detach(|| db.read().unwrap().begin_write()).pyerr()?;
+        let txn = py
+            .detach(|| {
+                db.read()
+                    .unwrap()
+                    .as_ref()
+                    .map(::redb::Database::begin_write)
+            })
+            .ok_or_else(closed)?
+            .pyerr()?;
         Ok(PyWriteTransaction::new(slf, txn))
     }
 
     /// Begins a read transaction: a snapshot of the data committed so far
     fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
-        let db = slf.get().inner.get()?;
-        let txn = py.detach(|| db.read().unwrap().begin_read()).pyerr()?;
+        let txn = begin_read(py, slf.get().inner.get()?)?;
         Ok(PyReadTransaction::new(slf.into_any(), txn))
+    }
+
+    /// Closes the database, after which its methods raise `DatabaseClosed`. A write transaction
+    /// still open keeps the file open until it ends. Closing a closed database does nothing
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        close(py, self.inner.get()?)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Closes the database, whether or not an exception is propagating out of the block
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        self.close(py)?;
+        Ok(false)
     }
 
     /// Rewrites the file without its free space, shrinking it; `False` if there was none to
@@ -132,7 +188,7 @@ impl PyDatabase {
     /// alive or beginning
     fn compact(&self, py: Python<'_>) -> PyResult<bool> {
         let mut guard = self.exclusive()?;
-        let db = &mut *guard;
+        let db = guard.as_mut().ok_or_else(closed)?;
         py.detach(|| db.compact()).pyerr()
     }
 
@@ -141,7 +197,7 @@ impl PyDatabase {
     /// while a transaction of this database is alive or beginning
     fn check_integrity(&self, py: Python<'_>) -> PyResult<bool> {
         let mut guard = self.exclusive()?;
-        let db = &mut *guard;
+        let db = guard.as_mut().ok_or_else(closed)?;
         py.detach(|| db.check_integrity()).pyerr()
     }
 
@@ -163,7 +219,7 @@ impl PyDatabase {
             })
             .pyerr()?;
         Ok(PyReadOnlyDatabase {
-            inner: ProcessLocal::new(inner),
+            inner: ProcessLocal::new(RwLock::new(Some(inner))),
         })
     }
 }
@@ -171,16 +227,37 @@ impl PyDatabase {
 /// A database open for reading only, which follows the commits of the process writing to it
 #[pyclass(module = "redb", name = "ReadOnlyDatabase", frozen)]
 pub(crate) struct PyReadOnlyDatabase {
-    inner: ProcessLocal<::redb::ReadOnlyDatabase>,
+    // None once closed
+    inner: ProcessLocal<RwLock<Option<::redb::ReadOnlyDatabase>>>,
 }
 
 #[pymethods]
 impl PyReadOnlyDatabase {
     /// Begins a read transaction: a snapshot of the data committed so far
     fn begin_read(slf: Py<Self>, py: Python<'_>) -> PyResult<PyReadTransaction> {
-        let db = slf.get().inner.get()?;
-        let txn = py.detach(|| db.begin_read()).pyerr()?;
+        let txn = begin_read(py, slf.get().inner.get()?)?;
         Ok(PyReadTransaction::new(slf.into_any(), txn))
+    }
+
+    /// Closes the database, as `Database.close` does
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        close(py, self.inner.get()?)
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Closes the database, whether or not an exception is propagating out of the block
+    fn __exit__(
+        &self,
+        py: Python<'_>,
+        _exc_type: &Bound<'_, PyAny>,
+        _exc_value: &Bound<'_, PyAny>,
+        _traceback: &Bound<'_, PyAny>,
+    ) -> PyResult<bool> {
+        self.close(py)?;
+        Ok(false)
     }
 }
 
