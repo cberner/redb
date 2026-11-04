@@ -153,6 +153,52 @@ fn read_only() {
     drop(db2);
 }
 
+// Enough entries that the table's root is a branch, so a lookup reads a leaf through the page
+// cache rather than from the root page the table holds
+const DEEP_TABLE: TableDefinition<u64, u64> = TableDefinition::new("deep");
+const DEEP_ENTRIES: u64 = 10_000;
+
+fn fill_deep_table(db: &Database) {
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(DEEP_TABLE).unwrap();
+        for i in 0..DEEP_ENTRIES {
+            table.insert(i, i).unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+}
+
+#[test]
+fn dropping_the_database_empties_its_cache() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    fill_deep_table(&db);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEEP_TABLE).unwrap();
+    assert_eq!(table.get(5000).unwrap().unwrap().value(), 5000);
+    // The leaf is cached now, but closing the file empties the cache
+    drop(db);
+    assert!(matches!(table.get(5000), Err(StorageError::DatabaseClosed)));
+}
+
+#[test]
+fn read_only_close() {
+    let tmpfile = create_tempfile();
+    fill_deep_table(&Database::create(tmpfile.path()).unwrap());
+
+    let db = ReadOnlyDatabase::open(tmpfile.path()).unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEEP_TABLE).unwrap();
+    assert_eq!(table.get(5000).unwrap().unwrap().value(), 5000);
+    db.close().unwrap();
+    // The transaction, still alive, reads nothing more from the file or its cache
+    assert!(matches!(table.get(5000), Err(StorageError::DatabaseClosed)));
+    // and no longer holds the file: a writer that locks all of it can open it
+    Database::open(tmpfile.path()).unwrap();
+}
+
 #[test]
 fn read_only_backend_preserves_bytes() {
     let tmpfile = create_tempfile();
