@@ -1,4 +1,4 @@
-use crate::error::PyErrExt;
+use crate::error::{PyErrExt, TableChangedDuringIteration};
 use crate::fork::ProcessLocal;
 use crate::transaction::PyWriteTransaction;
 use crate::types::{PyValue, Type, with_type, with_types};
@@ -6,7 +6,7 @@ use ::redb::{
     AccessGuard, Key, OwnedRange, ReadOnlyTable, ReadTransaction, ReadableTable,
     ReadableTableMetadata, Table, TableDefinition, Value, WriteTransaction,
 };
-use pyo3::exceptions::{PyKeyError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use std::any::Any;
 use std::borrow::Borrow;
@@ -584,7 +584,9 @@ impl WriteRange {
         // A changed table ends the iteration, as a dict's does
         let table = self.table.get();
         if table.txn.get().mutation_count(&table.name) != self.mutations {
-            return Err(PyRuntimeError::new_err("table changed during iteration"));
+            return Err(TableChangedDuringIteration::new_err(
+                "table changed during iteration",
+            ));
         }
         let entry = with_types!(table.key, table.value, K, V, {
             let start = self

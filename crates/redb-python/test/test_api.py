@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import gc
 import importlib.metadata
 import math
@@ -27,7 +28,8 @@ def test_errors_form_a_flat_hierarchy() -> None:
     assert redb.Io in subclasses
     assert redb.TransactionCompleted in subclasses
     for cls in subclasses:
-        assert cls.__bases__ == (redb.Error,)
+        assert cls.__bases__ == ((redb.Error, OSError) if cls is redb.Io else (redb.Error,))
+        assert cls.__module__ == "redb"
 
 
 def test_star_import_does_not_shadow_builtins() -> None:
@@ -381,7 +383,7 @@ def test_changes_end_iteration(tmp_db_path: Path) -> None:
         entries = iter(users)
         assert next(entries) == (1, b"x")
         users[4] = b"x"
-        with pytest.raises(RuntimeError, match="changed during iteration"):
+        with pytest.raises(redb.TableChangedDuringIteration, match="changed during iteration"):
             next(entries)
         # ... but an exhausted iteration stays exhausted
         entries = iter(users)
@@ -412,7 +414,7 @@ def test_removal(tmp_db_path: Path) -> None:
         # Removing ends an iteration, like inserting
         entries = iter(users)
         assert users.pop_first() == (4, b"4")
-        with pytest.raises(RuntimeError, match="changed during iteration"):
+        with pytest.raises(redb.TableChangedDuringIteration, match="changed during iteration"):
             next(entries)
         assert users.pop_last() == (5, b"5")
         assert users.pop_first() is None
@@ -443,7 +445,7 @@ def test_retain(tmp_db_path: Path) -> None:
             users.retain(picky)
         assert [key for key, _ in users] == [15, 16, 17, 18, 19]
         # A predicate cannot use the table it is filtering, which would wait for itself
-        with pytest.raises(RuntimeError, match="in use"):
+        with pytest.raises(redb.TransactionInUse, match="in use"):
             users.retain(lambda key, _: key in users)
         assert [key for key, _ in users] == [15, 16, 17, 18, 19]
         users.retain(lambda key, value: False)
@@ -535,7 +537,7 @@ def test_table_management(tmp_db_path: Path) -> None:
         table = txn.open_table(people)
         entries = iter(table)
         txn.delete_table(people)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(redb.TableChangedDuringIteration):
             next(entries)
         for use in (lambda: len(table), lambda: 1 in table, lambda: table.insert(3, b"carol")):
             with pytest.raises(redb.TableDoesNotExist):
@@ -547,7 +549,7 @@ def test_table_management(tmp_db_path: Path) -> None:
         old_name[2] = b"bob"
         entries = iter(table)
         txn.rename_table(groups, people)
-        with pytest.raises(RuntimeError):
+        with pytest.raises(redb.TableChangedDuringIteration):
             next(entries)
         assert table[2] == b"bob"
         with pytest.raises(redb.TableDoesNotExist):
@@ -675,7 +677,7 @@ def test_savepoints(tmp_db_path: Path) -> None:
         later[1] = 1
         txn.restore_savepoint(first)
         # Every table is as it was then, the ranges over them end, and later savepoints are gone
-        with pytest.raises(RuntimeError):
+        with pytest.raises(redb.TableChangedDuringIteration):
             next(entries)
         assert dict(users) == {1: b"alice"}
         assert txn.list_persistent_savepoints() == [first]
@@ -693,8 +695,11 @@ def test_savepoints(tmp_db_path: Path) -> None:
 
 
 def test_open_functions(tmp_db_path: Path) -> None:
-    with pytest.raises(redb.Io):
-        redb.open(str(tmp_db_path))  # open() does not create
+    # open() does not create. A redb.Io is an OSError too, with the OS error number
+    with pytest.raises(redb.Io) as raised:
+        redb.open(str(tmp_db_path))
+    assert isinstance(raised.value, OSError)
+    assert raised.value.errno == errno.ENOENT
     db = redb.Database.create(str(tmp_db_path), concurrency=redb.MultiWriter)
     with db.begin_write() as txn:
         txn.open_table(USERS)[1] = b"alice"

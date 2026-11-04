@@ -221,7 +221,7 @@ class RedbMachine(RuleBasedStateMachine):
             # Exhausted before the change, which stays final, as for a dict
             assert next(entries, None) is None
         else:
-            with pytest.raises(RuntimeError):
+            with pytest.raises(redb.TableChangedDuringIteration):
                 next(entries)
 
     @rule(name=names, data=st.data(), delitem=st.booleans())
