@@ -31,5 +31,7 @@ pub fn redb(m: &Bound<'_, PyModule>) -> PyResult<()> {
     table::register(m)?;
     transaction::register(m)?;
     types::register(m)?;
+    // An attribute, not an export: `__init__.py` takes it by name
+    m.setattr("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
