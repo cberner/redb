@@ -28,9 +28,10 @@ assert table["my_key"] == 123
 ```
 
 ## Features
-* `dict`-like tables: `table[key]`, `table[key] = value`, `del table[key]`, `key in table`,
-  `len(table)`, iteration, `get()`, `range()`, `first()`, `last()`, `pop_first()`, `pop_last()`
-  and `retain()`
+* Tables support `table[key]`, `table[key] = value`, `del table[key]`, `key in table` and
+  `len(table)` as a `dict` does, along with `get()`, `range()`, `first()`, `last()`,
+  `pop_first()`, `pop_last()` and `retain()`. Iterating a table, or a `range()` of it, yields
+  `(key, value)` pairs in key order
 * Fully ACID-compliant transactions. Leaving a `with db.begin_write()` block commits the
   transaction, or aborts it if an exception was raised
 * Concurrent readers and a writer, in one process or in several
