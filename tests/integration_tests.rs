@@ -39,6 +39,16 @@ fn create_tempfile() -> tempfile::NamedTempFile {
     }
 }
 
+#[cfg(feature = "experimental-api-5")]
+fn file_backend(file: fs::File) -> FileBackend {
+    FileBackend::new(file)
+}
+
+#[cfg(not(feature = "experimental-api-5"))]
+fn file_backend(file: fs::File) -> FileBackend {
+    FileBackend::new(file).unwrap()
+}
+
 #[derive(Debug)]
 struct BlockingSyncState {
     block_next: AtomicBool,
@@ -270,7 +280,7 @@ impl StorageBackend for FailingBackend {
 fn previous_io_error() {
     let tmpfile = create_tempfile();
 
-    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let backend = FailingBackend::new(file_backend(tmpfile.into_file()));
     let fail_syncs = backend.fail_syncs.clone();
     let db = Database::builder().create_with_backend(backend).unwrap();
     fail_syncs.store(true, Ordering::SeqCst);
@@ -295,7 +305,7 @@ fn read_past_eof_errors() {
     let mut tmpfile = create_tempfile();
     tmpfile.write_all(&[1u8; 8]).unwrap();
     tmpfile.flush().unwrap();
-    let backend = FileBackend::new(tmpfile.into_file()).unwrap();
+    let backend = file_backend(tmpfile.into_file());
 
     // Entirely past EOF.
     let mut buf = [0u8; 16];
@@ -317,8 +327,8 @@ fn file_backend_lock_bounds_preserve_endpoints() {
     use std::ops::Bound::{Excluded, Included, Unbounded};
 
     let tmpfile = create_tempfile();
-    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
-    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    let backend = file_backend(tmpfile.reopen().unwrap());
+    let peer = file_backend(tmpfile.reopen().unwrap());
     for (start, end, first) in [
         (Included(100), Excluded(103), 100),
         (Excluded(99), Included(102), 100),
@@ -357,8 +367,8 @@ fn file_backend_invalid_lock_bounds_leave_existing_locks_held() {
     use std::ops::Bound::{Excluded, Included, Unbounded};
 
     let tmpfile = create_tempfile();
-    let backend = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
-    let peer = FileBackend::new(tmpfile.reopen().unwrap()).unwrap();
+    let backend = file_backend(tmpfile.reopen().unwrap());
+    let peer = file_backend(tmpfile.reopen().unwrap());
     assert!(
         backend
             .try_lock_range(Included(500), Included(500))
@@ -401,8 +411,7 @@ fn file_backend_custom_open_respects_file_locks() {
     let tmpfile = create_tempfile();
     let open = |custom| {
         if custom {
-            Database::builder()
-                .create_with_backend(FileBackend::new(tmpfile.reopen().unwrap()).unwrap())
+            Database::builder().create_with_backend(file_backend(tmpfile.reopen().unwrap()))
         } else {
             Database::create(tmpfile.path())
         }
@@ -442,7 +451,7 @@ fn file_backend_custom_open_releases_locks_with_a_retained_file_clone() {
         }
         let file = tmpfile.reopen().unwrap();
         let retained = file.try_clone().unwrap();
-        let result = Database::builder().create_with_backend(FileBackend::new(file).unwrap());
+        let result = Database::builder().create_with_backend(file_backend(file));
         assert_eq!(result.is_err(), invalid);
         drop(result);
 
@@ -460,7 +469,7 @@ fn file_backend_custom_open_releases_locks_with_a_retained_file_clone() {
 #[test]
 fn extract_if_error_latches() {
     let tmpfile = create_tempfile();
-    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let backend = FailingBackend::new(file_backend(tmpfile.into_file()));
     let fail_reads = backend.fail_reads.clone();
     // Zero cache so iteration must read leaves through the backend.
     let db = Builder::new()
@@ -508,7 +517,7 @@ fn extract_if_error_latches() {
 #[test]
 fn extract_if_error_commit_reports_storage_failure() {
     let tmpfile = create_tempfile();
-    let backend = FailingBackend::new(FileBackend::new(tmpfile.into_file()).unwrap());
+    let backend = FailingBackend::new(file_backend(tmpfile.into_file()));
     let fail_reads = backend.fail_reads.clone();
     let db = Builder::new()
         .set_cache_size(0)
@@ -1318,7 +1327,7 @@ fn test_page_reuse_with_racing_reader(quick_repair: bool) {
     let tmpfile = create_tempfile();
     let sync_state = Arc::new(BlockingSyncState::new());
     let backend = BlockingSyncBackend {
-        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        inner: file_backend(tmpfile.into_file()),
         state: sync_state.clone(),
     };
     let db = Arc::new(Database::builder().create_with_backend(backend).unwrap());
@@ -2603,7 +2612,7 @@ fn check_integrity_ephemeral_savepoint_drop_racing_commit() {
     let table_def: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
     let sync_state = Arc::new(BlockingSyncState::new());
     let backend = BlockingSyncBackend {
-        inner: FileBackend::new(tmpfile.into_file()).unwrap(),
+        inner: file_backend(tmpfile.into_file()),
         state: sync_state.clone(),
     };
     let mut db = Database::builder().create_with_backend(backend).unwrap();

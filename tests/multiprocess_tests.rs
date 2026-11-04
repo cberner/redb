@@ -1,9 +1,27 @@
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+use redb::backends::FileBackend;
 use redb::backends::InMemoryBackend;
 use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
 
 /// The modes in which processes share a file
 fn shared_modes() -> &'static [ConcurrencyMode] {
     &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_vendor = "apple", windows),
+    feature = "experimental-api-5"
+))]
+fn file_backend(file: std::fs::File) -> FileBackend {
+    FileBackend::new(file)
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_vendor = "apple", windows),
+    not(feature = "experimental-api-5")
+))]
+fn file_backend(file: std::fs::File) -> FileBackend {
+    FileBackend::new(file).unwrap()
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
@@ -152,7 +170,7 @@ mod shared_reader {
                 .unwrap();
             let db = Database::builder()
                 .create_with_backend(CrashBackend {
-                    inner: redb::backends::FileBackend::new(file).unwrap(),
+                    inner: file_backend(file),
                     dead: Arc::clone(&dead),
                 })
                 .unwrap();
@@ -810,7 +828,6 @@ mod peer_commits {
 fn file_backend_custom_open_supports_shared_modes() {
     #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
-    use redb::backends::FileBackend;
     use redb::{ReadableDatabase, TableDefinition};
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
@@ -818,8 +835,7 @@ fn file_backend_custom_open_supports_shared_modes() {
         let tmpfile = tempfile::NamedTempFile::new().unwrap();
         let mut builder = Database::builder();
         builder.set_concurrency_mode(mode);
-        let open =
-            || builder.create_with_backend(FileBackend::new(tmpfile.reopen().unwrap()).unwrap());
+        let open = || builder.create_with_backend(file_backend(tmpfile.reopen().unwrap()));
         let db = open().unwrap();
         let write = db.begin_write().unwrap();
         write.open_table(TABLE).unwrap().insert(0, 0).unwrap();

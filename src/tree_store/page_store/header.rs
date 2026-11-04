@@ -856,7 +856,7 @@ mod test {
             .write(true)
             .open(tmpfile.path())
             .unwrap();
-        let backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let backend = FailingBackend::new(FileBackend::from_file(cloned));
         let backend_control = backend.clone();
         let db = Database::builder().create_with_backend(backend).unwrap();
         let write_txn = db.begin_write().unwrap();
@@ -885,7 +885,7 @@ mod test {
             .write(true)
             .open(tmpfile.path())
             .unwrap();
-        let db2_backend = FailingBackend::new(FileBackend::new(cloned).unwrap());
+        let db2_backend = FailingBackend::new(FileBackend::from_file(cloned));
         let db2_backend_control = db2_backend.clone();
         let mut db2 = Database::builder()
             .create_with_backend(db2_backend)

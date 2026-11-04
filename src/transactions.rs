@@ -3026,7 +3026,7 @@ mod test {
         drop(kept_by_caller);
 
         let (mem, _writer) = TransactionalMemory::new(
-            Box::new(FileBackend::new(observer).unwrap()),
+            Box::new(FileBackend::from_file(observer)),
             false,
             PAGE_SIZE,
             None,

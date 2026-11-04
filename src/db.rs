@@ -2259,7 +2259,7 @@ impl Builder {
             .open(path)?;
 
         Database::new(
-            Box::new(FileBackend::new(file)?),
+            Box::new(FileBackend::from_file(file)),
             true,
             self.page_size,
             self.region_size,
@@ -2278,7 +2278,7 @@ impl Builder {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
         Database::new(
-            Box::new(FileBackend::new(file)?),
+            Box::new(FileBackend::from_file(file)),
             false,
             self.page_size,
             None,
@@ -2306,7 +2306,7 @@ impl Builder {
         path: impl AsRef<Path>,
     ) -> Result<ReadOnlyDatabase, DatabaseError> {
         let file = OpenOptions::new().read(true).open(path)?;
-        self.open_read_only_with_backend(FileBackend::new(file)?)
+        self.open_read_only_with_backend(FileBackend::from_file(file))
     }
 
     /// Opens an existing redb database with the given backend, without modifying it.
@@ -2339,7 +2339,7 @@ impl Builder {
     #[cfg(not(redb_no_std))]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
-            Box::new(FileBackend::new(file)?),
+            Box::new(FileBackend::from_file(file)),
             true,
             self.page_size,
             self.region_size,
@@ -2499,7 +2499,7 @@ mod test {
         let (file, path) = tmpfile.into_parts();
 
         // Fails the fourth write of the second commit below; the create makes three
-        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), 17);
+        let backend = FailingBackend::new(FileBackend::from_file(file), 17);
         let db = Database::builder()
             .set_cache_size(12686)
             .set_page_size(8 * 1024)
@@ -2535,7 +2535,7 @@ mod test {
         let tmpfile = crate::create_tempfile();
         let (file, path) = tmpfile.into_parts();
 
-        let backend = FailingBackend::new(FileBackend::new(file).unwrap(), u64::MAX);
+        let backend = FailingBackend::new(FileBackend::from_file(file), u64::MAX);
         let countdown = backend.countdown.clone();
         let db = Database::builder()
             .set_cache_size(0)
@@ -3619,7 +3619,7 @@ mod consistent_byte_test {
         let dead = Arc::new(AtomicBool::new(false));
         let db = Database::builder()
             .create_with_backend(CrashBackend {
-                inner: FileBackend::new(file).unwrap(),
+                inner: FileBackend::from_file(file),
                 dead: Arc::clone(&dead),
             })
             .unwrap();
@@ -3762,7 +3762,7 @@ mod consistent_byte_test {
         let reader_saw = Arc::new(Mutex::new(None));
         let db = builder(ConcurrencyMode::MultiWriter)
             .create_with_backend(ReaderAtConsistentByte {
-                inner: FileBackend::new(probe(tmpfile.path())).unwrap(),
+                inner: FileBackend::from_file(probe(tmpfile.path())),
                 path: tmpfile.path().to_path_buf(),
                 reader_saw: reader_saw.clone(),
             })
@@ -3803,14 +3803,13 @@ mod unflushed_primary_test {
     /// A separate description, so its locks conflict with the database's exactly as another
     /// process's would
     fn file(path: &Path) -> FileBackend {
-        FileBackend::new(
+        FileBackend::from_file(
             OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(path)
                 .unwrap(),
         )
-        .unwrap()
     }
 
     /// Whether the file marks its primary unflushed
