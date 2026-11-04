@@ -97,7 +97,9 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     ///
     /// Note: redb will not access the backend after calling this method and will call it exactly
     /// once: when the [`Database`] is dropped, or, if a [`WriteTransaction`] was live at that
-    /// point, when that transaction completes, or if opening the database fails
+    /// point, when that transaction completes, or if opening the database fails. For a read-only
+    /// database, it is called by `ReadOnlyDatabase::close()`, or once the database and all of its
+    /// read transactions have been dropped
     fn close(&self) -> core::result::Result<(), io::Error> {
         Ok(())
     }
@@ -679,6 +681,16 @@ impl ReadOnlyDatabase {
     #[cfg(not(redb_no_std))]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
+    }
+
+    /// Closes the database
+    ///
+    /// The file and its locks are released immediately, rather than when the last read transaction
+    /// is dropped. Read transactions that are still alive can no longer access the file, so their
+    /// reads return [`StorageError::DatabaseClosed`]. Data they have already loaded into memory,
+    /// such as the root page of an open table, may still be returned.
+    pub fn close(self) -> Result<(), DatabaseError> {
+        Ok(self.mem.close(None)?)
     }
 
     fn new(

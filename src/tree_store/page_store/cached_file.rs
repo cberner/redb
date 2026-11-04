@@ -438,7 +438,29 @@ impl PagedCachedFile {
     }
 
     pub(crate) fn close(&self) -> Result {
-        self.file.close()
+        let result = self.file.close();
+        // Nothing is read from or written to the file once it is closed, so the cache is of no use
+        self.clear_cache();
+        result
+    }
+
+    // Takes the write buffer locks before the read cache locks, as read() and flush_write_buffer()
+    fn clear_cache(&self) {
+        for cache_slot in 0..self.read_cache.len() {
+            let mut write_buffer = self.write_buffer[cache_slot].lock().unwrap();
+            let bytes: usize = write_buffer
+                .cache
+                .iter()
+                .flat_map(|(_, page)| page)
+                .map(|page| page.len())
+                .sum();
+            write_buffer.clear();
+            self.write_buffer_bytes.fetch_sub(bytes, Ordering::AcqRel);
+            let mut read_cache = self.read_cache[cache_slot].write().unwrap();
+            let bytes: usize = read_cache.iter().map(|(_, page)| page.len()).sum();
+            read_cache.clear();
+            self.read_cache_bytes.fetch_sub(bytes, Ordering::AcqRel);
+        }
     }
 
     pub(crate) fn check_io_errors(&self) -> Result {
@@ -730,6 +752,11 @@ impl PagedCachedFile {
 
         let cache_size = self.read_cache_bytes.fetch_add(len, Ordering::AcqRel);
         let mut write_lock = self.read_cache[cache_slot].write().unwrap();
+        // Read just before the file was closed: caching it now would undo close()'s clearing
+        if self.file.closed.load(Ordering::Acquire) {
+            self.read_cache_bytes.fetch_sub(len, Ordering::AcqRel);
+            return Ok(buffer);
+        }
         let cache_size = if let Some(replaced) = write_lock.insert(offset, buffer.clone()) {
             // A race could cause us to replace an existing buffer
             self.read_cache_bytes

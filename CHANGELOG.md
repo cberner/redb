@@ -78,6 +78,8 @@
 * Add `Builder::open_read_only_with_backend()` to open a read-only database from a storage backend.
 * Add `Builder::set_check_integrity_on_open()`, which verifies the whole file on every `open()`
   instead of trusting the state recorded by a clean shutdown.
+* Add `ReadOnlyDatabase::close()`, which releases the file and its locks without waiting for the
+  read transactions opened from the database to be dropped.
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.
