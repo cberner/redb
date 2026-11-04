@@ -65,6 +65,7 @@
   writing, one write transaction at a time, and any may number open it read-only.
 
 ### New features
+* Add `Builder::open_read_only_with_backend()` to open a read-only database from a storage backend.
 * Add `Builder::set_check_integrity_on_open()`, which verifies the whole file on every `open()`
   instead of trusting the state recorded by a clean shutdown.
 
