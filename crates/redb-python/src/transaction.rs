@@ -1,9 +1,10 @@
 use crate::database::PyDatabase;
-use crate::error::{PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted};
+use crate::error::{
+    PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted, TransactionInUse,
+};
 use crate::fork::ProcessLocal;
 use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition, checked_name};
 use ::redb::{TableDefinition, TableHandle, UntypedTableHandle};
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,7 +85,7 @@ impl PyWriteTransaction {
     /// the GIL back to finish, so it fails instead.
     fn lock(&self) -> PyResult<MutexGuard<'_, Option<Active>>> {
         self.state.get()?.try_lock().map_err(|err| match err {
-            TryLockError::WouldBlock => PyRuntimeError::new_err(
+            TryLockError::WouldBlock => TransactionInUse::new_err(
                 "transaction in use by another operation (a predicate cannot use its own table)",
             ),
             TryLockError::Poisoned(err) => panic!("{err}"),
