@@ -33,6 +33,8 @@
   range over it is still in scope, which could panic, no longer compiles.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
   alone, rather than also with the whole-file lock earlier versions take.
+* Under the `experimental-api-5` feature flag, `Builder::create_file()` is removed; use
+  `Builder::create_with_backend(FileBackend::new(file))` instead.
 * Under the `experimental-api-5` feature flag, `FileBackend::new()` returns `FileBackend` instead
   of `Result<FileBackend, DatabaseError>`, since it cannot fail.
 * Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
@@ -73,6 +75,10 @@
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.
+
+### Deprecations
+* `Builder::create_file()` is deprecated; use
+  `Builder::create_with_backend(FileBackend::new(file)?)` instead.
 
 ### Bug fixes
 * `open()` reports a malformed allocator state as `StorageError::Corrupted` instead of panicking.

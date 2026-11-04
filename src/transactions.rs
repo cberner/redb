@@ -3005,7 +3005,7 @@ mod test {
             let result = Database::builder()
                 .set_concurrency_mode(ConcurrencyMode::MultiWriter)
                 .set_repair_callback(|_| panic!("the allocator snapshot should be valid"))
-                .create_file(file);
+                .create_with_backend(FileBackend::from_file(file));
             completed.send(result).unwrap();
         });
         let result = completion
