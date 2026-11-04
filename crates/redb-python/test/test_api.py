@@ -29,6 +29,16 @@ def test_errors_form_a_flat_hierarchy() -> None:
         assert cls.__bases__ == (redb.Error,)
 
 
+def test_star_import_does_not_shadow_builtins() -> None:
+    namespace: dict[str, object] = {}
+    exec("from redb import *", namespace)
+    for name in ("open", "str", "bytes", "bool"):
+        assert name not in namespace
+        assert hasattr(redb, name)
+    assert namespace["Database"] is redb.Database
+    assert namespace["u64"] is redb.u64
+
+
 def test_table_definition() -> None:
     users = redb.TableDefinition("users", redb.u64, redb.bytes)
     assert users.name == "users"
