@@ -27,6 +27,9 @@ table = read_txn.open_table(TABLE)
 assert table["my_key"] == 123
 ```
 
+A database closes when it is garbage collected, or explicitly with `close()`, which a
+`with redb.open(...) as db:` block calls when it ends.
+
 ## Features
 * Tables support `table[key]`, `table[key] = value`, `del table[key]`, `key in table` and
   `len(table)` as a `dict` does, along with `get()`, `range()`, `first()`, `last()`,
