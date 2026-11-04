@@ -47,11 +47,6 @@ impl<T> ProcessLocal<T> {
         self.check()?;
         Ok(self.value.as_ref().expect("present until dropped"))
     }
-
-    pub(crate) fn get_mut(&mut self) -> PyResult<&mut T> {
-        self.check()?;
-        Ok(self.value.as_mut().expect("present until dropped"))
-    }
 }
 
 impl<T> Drop for ProcessLocal<T> {

@@ -6,6 +6,7 @@ import errno
 import gc
 import importlib.metadata
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -703,6 +704,70 @@ def test_savepoints(tmp_db_path: Path) -> None:
         assert txn.delete_persistent_savepoint(first) is True
         assert txn.delete_persistent_savepoint(first) is False
         assert txn.list_persistent_savepoints() == []
+
+
+def test_close(tmp_db_path: Path) -> None:
+    path = str(tmp_db_path)
+    with redb.Database.create(path) as db:
+        with db.begin_write() as txn:
+            txn.open_table(USERS)[1] = b"alice"
+    for use in (db.begin_write, db.begin_read, db.compact, db.check_integrity):
+        with pytest.raises(redb.DatabaseClosed):
+            use()
+    db.close()  # closing again does nothing
+    # Closed, the file is free to open again, and a with block closes it on an exception too
+    with pytest.raises(ValueError):
+        with redb.Database.open(path) as db:
+            raise ValueError
+    with pytest.raises(redb.DatabaseClosed):
+        db.begin_read()
+
+    # What was opened to read from it stops reading, but can still be exited
+    db = redb.Database.open(path)
+    with db.begin_read() as read:
+        table = read.open_table(USERS)
+        entries = iter(table)
+        db.close()
+        for use in (lambda: table[1], lambda: next(entries), lambda: read.open_table(USERS)):
+            with pytest.raises(redb.DatabaseClosed):
+                use()
+
+    # An open write transaction keeps the file open until it ends
+    db = redb.Database.open(path)
+    txn = db.begin_write()
+    db.close()
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(path)
+    txn.open_table(USERS)[2] = b"bob"
+    txn.commit()
+    with redb.Database.open_read_only(path) as reader:
+        assert dict(reader.begin_read().open_table(USERS)) == {1: b"alice", 2: b"bob"}
+    with pytest.raises(redb.DatabaseClosed):
+        reader.begin_read()
+    reader.close()
+
+
+@pytest.mark.skipif(not Path("/proc/locks").exists(), reason="reads Linux's /proc/locks")
+def test_close_releases_the_file(tmp_db_path: Path) -> None:
+    path = str(tmp_db_path)
+    with redb.Database.create(path) as db, db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+
+    def locks() -> int:
+        inode = os.stat(path).st_ino
+        with open("/proc/locks") as held:
+            return sum(f":{inode} " in line for line in held)
+
+    # Even while what was opened to read from it is still referenced
+    for open_db in (redb.Database.open, redb.Database.open_read_only):
+        db = open_db(path)
+        read = db.begin_read()
+        table = read.open_table(USERS)
+        entries = iter(table)
+        assert locks() > 0
+        db.close()
+        assert locks() == 0
+        del read, table, entries
 
 
 def test_open_functions(tmp_db_path: Path) -> None:

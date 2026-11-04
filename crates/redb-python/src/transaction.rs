@@ -1,4 +1,4 @@
-use crate::database::PyDatabase;
+use crate::database::{Child, Open, PyDatabase};
 use crate::error::{
     PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted, TransactionInUse,
 };
@@ -277,18 +277,14 @@ struct ReadActive {
 #[pyclass(module = "redb", name = "ReadTransaction", frozen)]
 pub(crate) struct PyReadTransaction {
     // None once closed
-    state: ProcessLocal<Mutex<Option<ReadActive>>>,
+    state: Child<Option<ReadActive>>,
 }
 
 impl PyReadTransaction {
-    pub(crate) fn new(db: Py<PyAny>, txn: ::redb::ReadTransaction) -> Self {
+    pub(crate) fn new(db: Py<PyAny>, txn: ::redb::ReadTransaction, open: &Open) -> Self {
         Self {
-            state: ProcessLocal::new(Mutex::new(Some(ReadActive { txn, db }))),
+            state: open.adopt(Some(ReadActive { txn, db })),
         }
-    }
-
-    fn lock(&self) -> PyResult<MutexGuard<'_, Option<ReadActive>>> {
-        Ok(self.state.get()?.lock().unwrap())
     }
 }
 
@@ -300,49 +296,62 @@ impl PyReadTransaction {
         py: Python<'_>,
         definition: &PyTableDefinition,
     ) -> PyResult<PyReadOnlyTable> {
-        let state = self.lock()?;
-        let active = state.as_ref().ok_or_else(closed)?;
-        PyReadOnlyTable::new(&active.txn, active.db.clone_ref(py), definition)
+        self.state.with(|state| {
+            let active = state.as_ref().ok_or_else(closed)?;
+            PyReadOnlyTable::new(
+                &active.txn,
+                active.db.clone_ref(py),
+                self.state.open(),
+                definition,
+            )
+        })
     }
 
     /// The names of the tables of the snapshot, in order
     fn list_tables(&self) -> PyResult<Vec<String>> {
-        let state = self.lock()?;
-        let active = state.as_ref().ok_or_else(closed)?;
-        Ok(names(active.txn.list_tables().pyerr()?))
+        self.state.with(|state| {
+            let active = state.as_ref().ok_or_else(closed)?;
+            Ok(names(active.txn.list_tables().pyerr()?))
+        })
     }
 
     /// Ends the transaction now; refused while a table from it is still alive
     fn close(&self) -> PyResult<()> {
-        let mut state = self.lock()?;
-        let ReadActive { txn, db } = state.take().ok_or_else(closed)?;
-        match txn.close() {
-            Ok(()) => Ok(()),
-            Err(::redb::TransactionError::ReadTransactionStillInUse(txn)) => {
-                *state = Some(ReadActive { txn: *txn, db });
-                Err(ReadTransactionStillInUse::new_err(
-                    "a table from this transaction is still alive",
-                ))
+        self.state.with_mut(|state| {
+            let ReadActive { txn, db } = state.take().ok_or_else(closed)?;
+            match txn.close() {
+                Ok(()) => Ok(()),
+                Err(::redb::TransactionError::ReadTransactionStillInUse(txn)) => {
+                    *state = Some(ReadActive { txn: *txn, db });
+                    Err(ReadTransactionStillInUse::new_err(
+                        "a table from this transaction is still alive",
+                    ))
+                }
+                Err(err) => Err(err).pyerr(),
             }
-            Err(err) => Err(err).pyerr(),
-        }
+        })
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        if slf.lock()?.is_none() {
-            return Err(closed());
-        }
+        slf.state
+            .with(|state| state.as_ref().map(drop).ok_or_else(closed))?;
         Ok(slf)
     }
 
-    // Releases the transaction; tables still referenced keep the snapshot alive
+    // Releases the transaction; tables still referenced keep the snapshot alive. A closed
+    // database has released it already
     fn __exit__(
         &self,
         _exc_type: &Bound<'_, PyAny>,
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        self.lock()?.take();
+        if self.state.open().check().is_ok() {
+            self.state.with_mut(|state| {
+                state.take();
+                Ok(())
+            })?;
+        }
         Ok(false)
     }
 }

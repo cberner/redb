@@ -1,5 +1,5 @@
+use crate::database::{Child, Open};
 use crate::error::{PyErrExt, TableChangedDuringIteration};
-use crate::fork::ProcessLocal;
 use crate::transaction::PyWriteTransaction;
 use crate::types::{PyValue, Type, with_type, with_types};
 use ::redb::{
@@ -420,7 +420,7 @@ pub(crate) struct PyReadOnlyTable {
     name: String,
     key: Type,
     value: Type,
-    table: ProcessLocal<Box<dyn Any + Send + Sync>>,
+    table: Child<Box<dyn Any + Send + Sync>>,
     // Dropped after `table`, whose snapshot needs the database's storage open
     db: Py<PyAny>,
 }
@@ -429,6 +429,7 @@ impl PyReadOnlyTable {
     pub(crate) fn new(
         txn: &ReadTransaction,
         db: Py<PyAny>,
+        open: &Open,
         definition: &PyTableDefinition,
     ) -> PyResult<Self> {
         let table: Box<dyn Any + Send + Sync> =
@@ -442,18 +443,21 @@ impl PyReadOnlyTable {
             name: definition.name.clone(),
             key: definition.key,
             value: definition.value,
-            table: ProcessLocal::new(table),
+            table: open.adopt(table),
             db,
         })
     }
 
-    /// The redb table, as the types its definition dispatched to
-    fn table<K: Key + 'static, V: Value + 'static>(&self) -> PyResult<&ReadOnlyTable<K, V>> {
-        Ok(self
-            .table
-            .get()?
-            .downcast_ref()
-            .expect("opened with its definition's types"))
+    /// `f` on the redb table, as the types its definition dispatched to
+    fn with_table<K: Key + 'static, V: Value + 'static, R>(
+        &self,
+        f: impl FnOnce(&ReadOnlyTable<K, V>) -> PyResult<R>,
+    ) -> PyResult<R> {
+        self.table.with(|table| {
+            f(table
+                .downcast_ref()
+                .expect("opened with its definition's types"))
+        })
     }
 }
 
@@ -466,14 +470,15 @@ impl PyReadOnlyTable {
 
     fn __len__(&self) -> PyResult<usize> {
         with_types!(self.key, self.value, K, V, {
-            length(self.table::<K, V>()?)
+            self.with_table::<K, V, _>(length)
         })
     }
 
     /// The value at `key`, or None
     fn get(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         with_types!(self.key, self.value, K, V, {
-            lookup::<K, V>(py, self.table::<K, V>()?, &K::from_py(key)?)
+            let key = K::from_py(key)?;
+            self.with_table::<K, V, _>(|table| lookup::<K, V>(py, table, &key))
         })
     }
 
@@ -492,14 +497,14 @@ impl PyReadOnlyTable {
     /// The entry with the smallest key, as a `(key, value)` pair, or None if the table is empty
     fn first(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
         with_types!(self.key, self.value, K, V, {
-            first_entry::<K, V>(py, self.table::<K, V>()?)
+            self.with_table::<K, V, _>(|table| first_entry::<K, V>(py, table))
         })
     }
 
     /// The entry with the largest key, as a `(key, value)` pair, or None if the table is empty
     fn last(&self, py: Python<'_>) -> PyResult<Option<Pair>> {
         with_types!(self.key, self.value, K, V, {
-            last_entry::<K, V>(py, self.table::<K, V>()?)
+            self.with_table::<K, V, _>(|table| last_entry::<K, V>(py, table))
         })
     }
 
@@ -516,13 +521,15 @@ impl PyReadOnlyTable {
         with_types!(self.key, self.value, K, V, {
             let start = start.map(K::from_py).transpose()?;
             let end = end.map(K::from_py).transpose()?;
-            let range = self
-                .table::<K, V>()?
-                .range_owned(limits::<K>(start.as_ref(), true, end.as_ref()))
-                .pyerr()?;
+            let range = self.with_table::<K, V, _>(|table| {
+                table
+                    .range_owned(limits::<K>(start.as_ref(), true, end.as_ref()))
+                    .pyerr()
+            })?;
+            let range: Box<dyn ReadRange> = Box::new(range);
             Ok(PyRange {
                 source: Source::Read {
-                    range: ProcessLocal::new(Box::new(range)),
+                    range: self.table.open().adopt(range),
                     _db: self.db.clone_ref(py),
                 },
                 reverse,
@@ -625,7 +632,7 @@ impl WriteRange {
 /// Where the entries come from; only a read-only table has an owned range in redb
 enum Source {
     Read {
-        range: ProcessLocal<Box<dyn ReadRange>>,
+        range: Child<Box<dyn ReadRange>>,
         // Dropped after `range`, whose snapshot needs the database's storage open
         _db: Py<PyAny>,
     },
@@ -647,7 +654,7 @@ impl PyRange {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Pair>> {
         match &mut self.source {
-            Source::Read { range, .. } => range.get_mut()?.next(py, self.reverse),
+            Source::Read { range, .. } => range.with_mut(|range| range.next(py, self.reverse)),
             Source::Write(range) => range.next(py, self.reverse),
         }
     }
