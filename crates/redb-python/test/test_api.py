@@ -524,23 +524,29 @@ def test_table_management(tmp_db_path: Path) -> None:
     with pytest.raises(redb.TableDoesNotExist):
         read.open_table(USERS)
     # A Table object is its name's binding: a range over a deleted table ends, and the object
-    # used again opens the table anew, empty
+    # raises, rather than creating the table again, until a table has its name
     with db.begin_write() as txn:
         table = txn.open_table(people)
         entries = iter(table)
         txn.delete_table(people)
         with pytest.raises(RuntimeError):
             next(entries)
-        assert len(table) == 0
-        assert txn.list_tables() == ["people"]
-        # A range over the name a table is renamed to ends as well
-        txn.open_table(groups)[2] = b"bob"
-        txn.delete_table(people)
+        for use in (lambda: len(table), lambda: 1 in table, lambda: table.insert(3, b"carol")):
+            with pytest.raises(redb.TableDoesNotExist):
+                use()
+        assert txn.list_tables() == []
+        # A range over the name a table is renamed to ends as well, the object of that name is
+        # bound to the renamed table, and the object of the old name raises
+        old_name = txn.open_table(groups)
+        old_name[2] = b"bob"
         entries = iter(table)
         txn.rename_table(groups, people)
         with pytest.raises(RuntimeError):
             next(entries)
         assert table[2] == b"bob"
+        with pytest.raises(redb.TableDoesNotExist):
+            old_name.get(2)
+    assert db.begin_read().list_tables() == ["people"]
 
 
 def test_str_type(tmp_db_path: Path) -> None:
@@ -659,12 +665,18 @@ def test_savepoints(tmp_db_path: Path) -> None:
         users = txn.open_table(USERS)
         del users[1]
         entries = iter(users)
+        later = txn.open_table(redb.TableDefinition("later", redb.u64, redb.u64))
+        later[1] = 1
         txn.restore_savepoint(first)
         # Every table is as it was then, the ranges over them end, and later savepoints are gone
         with pytest.raises(RuntimeError):
             next(entries)
         assert dict(users) == {1: b"alice"}
         assert txn.list_persistent_savepoints() == [first]
+        # A table the savepoint did not have is gone, and its object raises rather than creating it
+        with pytest.raises(redb.TableDoesNotExist):
+            1 in later
+        assert txn.list_tables() == ["users"]
     assert dict(db.begin_read().open_table(USERS)) == {1: b"alice"}
     with db.begin_write() as txn:
         with pytest.raises(redb.InvalidSavepoint):

@@ -1,11 +1,11 @@
 use crate::database::PyDatabase;
-use crate::error::{PyErrExt, ReadTransactionStillInUse, TransactionCompleted};
+use crate::error::{PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted};
 use crate::fork::ProcessLocal;
 use crate::table::{PyReadOnlyTable, PyTable, PyTableDefinition, checked_name};
 use ::redb::{TableDefinition, TableHandle, UntypedTableHandle};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, TryLockError};
 
@@ -64,6 +64,8 @@ pub(crate) struct PyWriteTransaction {
     // the table changing under it
     mutations: Mutex<HashMap<String, u64>>,
     restores: AtomicU64,
+    // Which of the names a `Table` object was opened with still have a table
+    tables: Mutex<HashSet<String>>,
 }
 
 impl PyWriteTransaction {
@@ -72,6 +74,7 @@ impl PyWriteTransaction {
             state: ProcessLocal::new(Mutex::new(Some(Active { txn, db }))),
             mutations: Mutex::new(HashMap::new()),
             restores: AtomicU64::new(0),
+            tables: Mutex::new(HashSet::new()),
         }
     }
 
@@ -122,6 +125,28 @@ impl PyWriteTransaction {
         f(&active.txn)
     }
 
+    /// A `Table` object opened `name`, so it has a table
+    pub(crate) fn opened(&self, name: &str) {
+        self.tables.lock().unwrap().insert(name.to_string());
+    }
+
+    /// `with_txn`, for an operation through a `Table` object on `name`. Refused while no table
+    /// has the name, since redb would create it again
+    pub(crate) fn with_table_txn<R>(
+        &self,
+        name: &str,
+        f: impl FnOnce(&::redb::WriteTransaction) -> PyResult<R>,
+    ) -> PyResult<R> {
+        self.with_txn(|txn| {
+            if !self.tables.lock().unwrap().contains(name) {
+                return Err(TableDoesNotExist::new_err(format!(
+                    "table {name:?} no longer exists in this transaction"
+                )));
+            }
+            f(txn)
+        })
+    }
+
     /// `with_txn` for what redb lets only a `&mut` transaction do
     fn with_txn_mut<R>(
         &self,
@@ -146,19 +171,24 @@ impl PyWriteTransaction {
     }
 
     /// Deletes a table, named by its definition or its name, and reports whether it existed. A
-    /// `Table` object for it opens it anew, empty, if used again
+    /// `Table` object for it raises `TableDoesNotExist` until a table has the name again
     fn delete_table(&self, table: &Bound<'_, PyAny>) -> PyResult<bool> {
         let name = table_name(table)?;
         let existed = self.with_txn(|txn| txn.delete_table(untyped(&name)).pyerr())?;
+        self.tables.lock().unwrap().remove(&name);
         self.mutated(&name);
         Ok(existed)
     }
 
     /// Renames a table; refused with `TableExists` if the new name is taken. A `Table` object
-    /// stays bound to the old name, and ranges over either name end
+    /// stays bound to the old name, as `delete_table` leaves it, and ranges over either name end
     fn rename_table(&self, table: &Bound<'_, PyAny>, new_name: &Bound<'_, PyAny>) -> PyResult<()> {
         let (name, new_name) = (table_name(table)?, table_name(new_name)?);
         self.with_txn(|txn| txn.rename_table(untyped(&name), untyped(&new_name)).pyerr())?;
+        let mut tables = self.tables.lock().unwrap();
+        tables.remove(&name);
+        tables.insert(new_name.clone());
+        drop(tables);
         self.mutated(&name);
         self.mutated(&new_name);
         Ok(())
@@ -183,12 +213,15 @@ impl PyWriteTransaction {
     }
 
     /// Puts every table back as it was at the savepoint, in this transaction, and deletes the
-    /// savepoints made after it. Ranges over the tables end. Refused with `InvalidSavepoint`
-    /// for an id that is not a savepoint's
+    /// savepoints made after it. Ranges over the tables end, and a `Table` object for a table the
+    /// savepoint did not have raises `TableDoesNotExist`. Refused with `InvalidSavepoint` for an
+    /// id that is not a savepoint's
     fn restore_savepoint(&self, id: u64) -> PyResult<()> {
         self.with_txn_mut(|txn| {
             let savepoint = txn.get_persistent_savepoint(id).pyerr()?;
-            txn.restore_savepoint(&savepoint).pyerr()
+            txn.restore_savepoint(&savepoint).pyerr()?;
+            *self.tables.lock().unwrap() = names(txn.list_tables().pyerr()?).into_iter().collect();
+            Ok(())
         })?;
         self.restores.fetch_add(1, Ordering::Release);
         Ok(())

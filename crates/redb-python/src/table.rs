@@ -206,7 +206,8 @@ impl<'py> Predicate<'py> {
 /// A write transaction's handle on one of its tables.
 ///
 /// Each operation opens the redb table, runs, and closes it again, so this is only the name's
-/// binding to the table: dropping it does nothing.
+/// binding to the table: dropping it does nothing. While no table has the name, as after
+/// `delete_table`, an operation raises `TableDoesNotExist` rather than creating it again.
 #[pyclass(module = "redb", name = "Table", frozen)]
 pub(crate) struct PyTable {
     txn: Py<PyWriteTransaction>,
@@ -227,9 +228,11 @@ impl PyTable {
             value: definition.value,
         };
         // Creates the table if it does not exist, and checks the types of one that does
+        let txn = table.txn.get();
         with_types!(table.key, table.value, K, V, {
-            table.with_table::<K, V, _>(|_| Ok(()))?;
+            txn.with_txn(|redb_txn| open::<K, V>(redb_txn, &table.name).map(drop))?;
         });
+        txn.opened(&table.name);
         Ok(table)
     }
 
@@ -240,7 +243,7 @@ impl PyTable {
     ) -> PyResult<R> {
         self.txn
             .get()
-            .with_txn(|txn| f(&open::<K, V>(txn, &self.name)?))
+            .with_table_txn(&self.name, |txn| f(&open::<K, V>(txn, &self.name)?))
     }
 
     /// Opens the redb table for `f` to change, and counts the change for the ranges over the
@@ -251,7 +254,7 @@ impl PyTable {
         f: impl for<'txn> FnOnce(&mut Table<'txn, K, V>) -> PyResult<R>,
     ) -> PyResult<R> {
         let txn = self.txn.get();
-        let result = txn.with_txn(|txn| f(&mut open::<K, V>(txn, &self.name)?));
+        let result = txn.with_table_txn(&self.name, |txn| f(&mut open::<K, V>(txn, &self.name)?));
         txn.mutated(&self.name);
         result
     }
