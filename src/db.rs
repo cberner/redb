@@ -25,8 +25,10 @@ use core::fmt::{Debug, Display, Formatter};
 use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::ops::{Bound, Range};
+#[cfg(all(not(redb_no_std), not(feature = "experimental-api-5")))]
+use std::fs::File;
 #[cfg(not(redb_no_std))]
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 #[cfg(not(redb_no_std))]
 use std::path::Path;
 
@@ -2315,10 +2317,11 @@ impl Builder {
     /// rules of [`Self::open_read_only`] also apply to this method.
     ///
     /// When using a [`FileBackend`], the supplied file is used without reopening its pathname.
-    /// Each database handle must use an independently opened file. Do not use [`File::try_clone`]
-    /// or a duplicated file descriptor to open another database handle: they can share the same
-    /// open file description and its locks. Closing either database can release the other's
-    /// locks, allowing a writer to invalidate its read-only snapshot.
+    /// Each database handle must use an independently opened file. Do not use
+    /// [`File::try_clone`](std::fs::File::try_clone) or a duplicated file descriptor to open
+    /// another database handle: they can share the same open file description and its locks.
+    /// Closing either database can release the other's locks, allowing a writer to invalidate its
+    /// read-only snapshot.
     #[cfg(not(redb_no_std))]
     pub fn open_read_only_with_backend(
         &self,
@@ -2336,7 +2339,11 @@ impl Builder {
     /// Open an existing or create a new database in the given `file`.
     ///
     /// The file must be empty or contain a valid database.
-    #[cfg(not(redb_no_std))]
+    #[cfg(all(not(redb_no_std), not(feature = "experimental-api-5")))]
+    #[deprecated(
+        since = "4.5.0",
+        note = "use `create_with_backend(FileBackend::new(file)?)` instead"
+    )]
     pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
         Database::new(
             Box::new(FileBackend::from_file(file)),
@@ -2899,7 +2906,7 @@ mod test {
         let tmpfile = crate::create_tempfile();
 
         let _db = Database::builder()
-            .create_file(tmpfile.into_file())
+            .create_with_backend(FileBackend::from_file(tmpfile.into_file()))
             .unwrap();
     }
 
