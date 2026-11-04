@@ -167,6 +167,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         predicate: F,
@@ -187,8 +188,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// The predicate must not panic. If it panics, the write transaction is
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
+    ///
+    /// Pass `..` as the range to visit the whole table.
     #[cfg(feature = "experimental-api-5")]
-    pub fn extract_from_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
+    pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl KeyRange<K>,
         predicate: F,

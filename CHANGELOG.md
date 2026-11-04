@@ -13,7 +13,7 @@
   regardless of the `std` feature, as before.
 * Behind the `experimental-api-5` feature flag, the range taking methods --
   `ReadableTable::range()`, `ReadOnlyTable::range_owned()`, `Table::retain_in()`,
-  `Table::extract_from_if()`, and their multimap equivalents -- take a `KeyRange` instead of a
+  `Table::extract_if()`, and their multimap equivalents -- take a `KeyRange` instead of a
   `RangeBounds` over a borrowed key type, so ranges that carry no key type no longer need one
   named: `table.range(..)` replaces `table.range::<KeyType>(..)`. Calls that named the key type in
   a turbofish must drop it, and implementations of `ReadableTable` or `ReadableMultimapTable` must
@@ -21,6 +21,10 @@
   `ReadOnlyMultimapTable::range()`, whose `'static` iterators do not keep the transaction alive,
   are removed under the flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
   `range_owned()` variants when the iterator must outlive the table.
+* Under the `experimental-api-5` feature flag, `Table::extract_if()` takes a range before the
+  predicate, as `BTreeMap::extract_if()` does, and `Table::extract_from_if()` is removed. Use
+  `extract_if(.., predicate)` for the whole table, and `extract_if(range, predicate)` in place of
+  `extract_from_if(range, predicate)`.
 * The inherent `ReadOnlyTable::get()` and `ReadOnlyMultimapTable::get()`, whose `'static` guards
   and iterators likewise do not keep the transaction alive, are also removed under the
   `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
