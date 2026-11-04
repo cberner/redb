@@ -31,6 +31,18 @@ const SLICE_TABLE2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice2
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
+// Bridges extract_if(), which takes a range under experimental-api-5, so that these tests cover both
+// configurations
+macro_rules! extract_all_if {
+    ($table:expr, $predicate:expr) => {{
+        #[cfg(feature = "experimental-api-5")]
+        let extracted = $table.extract_if(.., $predicate);
+        #[cfg(not(feature = "experimental-api-5"))]
+        let extracted = $table.extract_if($predicate);
+        extracted
+    }};
+}
+
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
         tempfile::NamedTempFile::new_in("/tmp").unwrap()
@@ -489,7 +501,7 @@ fn extract_if_error_latches() {
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(U64_TABLE).unwrap();
-        let mut iter = table.extract_if(|_, _| true).unwrap();
+        let mut iter = extract_all_if!(table, |_, _| true).unwrap();
         assert!(iter.next().unwrap().is_ok());
         fail_reads.store(true, Ordering::SeqCst);
         // The current leaf may drain from memory before a read is needed.
@@ -539,7 +551,7 @@ fn extract_if_error_commit_reports_storage_failure() {
         fail_reads.store(true, Ordering::SeqCst);
         // The predicate never matches, so no removals are pending when the
         // read error surfaces and finalization succeeds without I/O.
-        let mut iter = table.extract_if(|_, _| false).unwrap();
+        let mut iter = extract_all_if!(table, |_, _| false).unwrap();
         assert!(iter.next().unwrap().is_err());
         fail_reads.store(false, Ordering::SeqCst);
     }
@@ -5108,7 +5120,7 @@ fn extract_if_next_then_next_back_panic() {
     let txn = db.begin_write().unwrap();
     {
         let mut table = txn.open_table(table_def).unwrap();
-        let mut iter = table.extract_if(|_, _| true).unwrap();
+        let mut iter = extract_all_if!(table, |_, _| true).unwrap();
 
         let first = iter.next();
         assert!(first.is_some());
