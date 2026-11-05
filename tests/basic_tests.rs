@@ -1,7 +1,6 @@
 use rand::random;
 #[cfg(not(target_os = "wasi"))]
 use redb::CommitError;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use redb::DatabaseError;
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
@@ -200,6 +199,29 @@ fn read_only_close() {
 }
 
 #[test]
+fn close() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    fill_deep_table(&db);
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEEP_TABLE).unwrap();
+    assert_eq!(table.get(5000).unwrap().unwrap().value(), 5000);
+    db.close().unwrap();
+    assert!(matches!(table.get(5000), Err(StorageError::DatabaseClosed)));
+
+    // The file is released while the read transaction is still alive, and was shut down cleanly,
+    // so re-opening it needs no repair
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(DEEP_TABLE).unwrap();
+    assert_eq!(table.get(5000).unwrap().unwrap().value(), 5000);
+}
+
+#[test]
 fn read_only_backend_preserves_bytes() {
     let tmpfile = create_tempfile();
     {
@@ -310,6 +332,38 @@ fn write_transaction_keeps_database_open() {
 
     // The deferred close ran when the transaction completed, so re-opening succeeds and
     // does not require a repair
+    let db = Database::builder()
+        .set_repair_callback(|session| session.abort())
+        .open(tmpfile.path())
+        .unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn close_with_live_write_transaction() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    assert!(matches!(
+        db.close(),
+        Err(DatabaseError::TransactionInProgress)
+    ));
+    // As when the database is dropped, the transaction remains usable and keeps the file locked
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        table.insert("hello", "world").unwrap();
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    assert!(matches!(
+        Database::open(tmpfile.path()),
+        Err(DatabaseError::DatabaseAlreadyOpen)
+    ));
+
+    write_txn.commit().unwrap();
+
+    // The deferred close ran when the transaction completed
     let db = Database::builder()
         .set_repair_callback(|session| session.abort())
         .open(tmpfile.path())
