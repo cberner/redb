@@ -90,14 +90,15 @@ fn exclusive<T>(lock: &RwLock<T>) -> PyResult<RwLockWriteGuard<'_, T>> {
     })
 }
 
-/// Closes the database in `lock` with `close`, if it is still open, without the GIL
+/// Closes the database in `lock` with `close`, if it is still open, without the GIL. The outer
+/// error is the bindings refusing, which leaves the database open; the inner one is redb's
 fn close<T: Send>(
     py: Python<'_>,
     lock: &RwLock<Option<T>>,
     close: impl FnOnce(T) -> Result<(), ::redb::DatabaseError> + Send,
-) -> PyResult<()> {
+) -> PyResult<Result<(), ::redb::DatabaseError>> {
     let db = exclusive(lock)?.take();
-    py.detach(|| db.map_or(Ok(()), close)).pyerr()
+    Ok(py.detach(|| db.map_or(Ok(()), close)))
 }
 
 /// Begins a read transaction of the database in `lock`
@@ -192,7 +193,7 @@ impl PyDatabase {
     /// raises `TransactionInProgress`, closing the database all the same. Closing a closed
     /// database does nothing
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        close(py, self.inner.get()?, ::redb::Database::close)
+        close(py, self.inner.get()?, ::redb::Database::close)?.pyerr()
     }
 
     /// `DatabaseClosed` once closed
@@ -203,15 +204,20 @@ impl PyDatabase {
         Ok(slf)
     }
 
-    /// Closes the database, whether or not an exception is propagating out of the block
+    /// Closes the database, whether or not an exception is propagating out of the block. An
+    /// exception that is propagating is not replaced by the `TransactionInProgress` of a close
+    /// that a write transaction still open defers, since the database is closed all the same
     fn __exit__(
         &self,
         py: Python<'_>,
-        _exc_type: &Bound<'_, PyAny>,
+        exc_type: Option<&Bound<'_, PyAny>>,
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        self.close(py)?;
+        match close(py, self.inner.get()?, ::redb::Database::close)? {
+            Err(::redb::DatabaseError::TransactionInProgress) if exc_type.is_some() => {}
+            result => result.pyerr()?,
+        }
         Ok(false)
     }
 
@@ -273,7 +279,7 @@ impl PyReadOnlyDatabase {
 
     /// Closes the database, as `Database.close` does
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        close(py, self.inner.get()?, ::redb::ReadOnlyDatabase::close)
+        close(py, self.inner.get()?, ::redb::ReadOnlyDatabase::close)?.pyerr()
     }
 
     /// `DatabaseClosed` once closed

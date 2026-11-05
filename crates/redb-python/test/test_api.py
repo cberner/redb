@@ -781,6 +781,26 @@ def test_close(tmp_db_path: Path) -> None:
     reader.close()
 
 
+def test_with_block_keeps_its_exception(tmp_db_path: Path) -> None:
+    # A write transaction still open defers the close, which leaving the block does not report
+    # in place of the exception leaving it
+    path = str(tmp_db_path)
+    with pytest.raises(ValueError):
+        with redb.Database.create(path) as db:
+            txn = db.begin_write()
+            raise ValueError
+    # Closed all the same, and the file released once the transaction ends
+    with pytest.raises(redb.DatabaseClosed):
+        db.begin_read()
+    txn.abort()
+    # Without an exception, the deferred close is still reported
+    with pytest.raises(redb.TransactionInProgress):
+        with redb.Database.open(path) as db:
+            txn = db.begin_write()
+    txn.abort()
+    redb.Database.open(path).close()
+
+
 @pytest.mark.skipif(not Path("/proc/locks").exists(), reason="reads Linux's /proc/locks")
 def test_close_releases_the_file(tmp_db_path: Path) -> None:
     path = str(tmp_db_path)
