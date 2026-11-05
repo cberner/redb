@@ -741,8 +741,18 @@ def test_close(tmp_db_path: Path) -> None:
         redb.Database.open(path)
     txn.open_table(USERS)[2] = b"bob"
     txn.commit()
+    # as it does once its database object is gone, rather than closed
+    txn = redb.Database.open(path).begin_write()
+    with pytest.raises(redb.DatabaseAlreadyOpen):
+        redb.Database.open(path)
+    txn.open_table(USERS)[3] = b"carol"
+    txn.commit()
     with redb.Database.open_read_only(path) as reader:
-        assert dict(reader.begin_read().open_table(USERS)) == {1: b"alice", 2: b"bob"}
+        assert dict(reader.begin_read().open_table(USERS)) == {
+            1: b"alice",
+            2: b"bob",
+            3: b"carol",
+        }
     with pytest.raises(redb.DatabaseClosed):
         reader.begin_read()
     reader.close()
