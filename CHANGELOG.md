@@ -69,10 +69,13 @@
 * Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
   may share the database.
 * `ConcurrencyMode::ExclusiveWriter` (the default) locks the whole file, as earlier versions do.
-* `ConcurrencyMode::SingleWriter`, allows one process to write, and any number of processes may open
+* `ConcurrencyMode::SingleWriter` allows one process to write, and any number of processes may open
   the database read-only.
-* `ConcurrencyMode::MultiWriter`, allows any number of processes to open the database for
-  writing, one write transaction at a time, and any may number open it read-only.
+* `ConcurrencyMode::MultiWriter` allows any number of processes to open the database for
+  writing, one write transaction at a time, and any number may open it read-only.
+* Don't share a database file between processes using these modes and processes using the
+  `experimental-multiprocess` feature of redb 4.3 or 4.4. Their locking is incompatible, and 4.5
+  can't detect the older processes.
 
 ### New features
 * Add `Builder::open_read_only_with_backend()` to open a read-only database from a storage backend.
