@@ -95,14 +95,16 @@ impl Type {
 
 /// The numeric types, whose conversions are Python's own: a `TypeError` for an object of
 /// another type, an `OverflowError` for an int outside the type's range. A bool, an int to
-/// Python, is not taken for one of the integer types
+/// Python, is taken for none of them
 macro_rules! number_value {
-    ($kind:ident: $($t:ty),*) => {$(
+    ($expected:literal: $($t:ty),*) => {$(
         impl PyValue for $t {
             type Owned = $t;
 
             fn from_py(obj: &Bound<'_, PyAny>) -> PyResult<$t> {
-                number_value!(@refuse $kind, obj);
+                if obj.is_instance_of::<PyBool>() {
+                    return Err(PyTypeError::new_err(concat!("expected ", $expected, ", got bool")));
+                }
                 obj.extract()
             }
 
@@ -115,16 +117,10 @@ macro_rules! number_value {
             }
         }
     )*};
-    (@refuse int, $obj:ident) => {
-        if $obj.is_instance_of::<PyBool>() {
-            return Err(PyTypeError::new_err("expected int, got bool"));
-        }
-    };
-    (@refuse float, $obj:ident) => {};
 }
 
-number_value!(int: u64, i64, u128, i128);
-number_value!(float: f64);
+number_value!("int": u64, i64, u128, i128);
+number_value!("float": f64);
 
 impl PyValue for bool {
     type Owned = bool;
