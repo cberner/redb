@@ -749,9 +749,14 @@ def test_close(tmp_db_path: Path) -> None:
                 with pytest.raises(redb.DatabaseClosed):
                     use()
 
-    # An open write transaction keeps the file open until it ends
+    # An open write transaction keeps the file open until it ends, which the close reports,
+    # though the database is closed all the same
     db = redb.Database.open(path)
     txn = db.begin_write()
+    with pytest.raises(redb.TransactionInProgress):
+        db.close()
+    with pytest.raises(redb.DatabaseClosed):
+        db.begin_read()
     db.close()
     with pytest.raises(redb.DatabaseAlreadyOpen):
         redb.Database.open(path)

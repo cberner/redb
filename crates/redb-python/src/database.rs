@@ -88,11 +88,14 @@ fn exclusive<T>(lock: &RwLock<T>) -> PyResult<RwLockWriteGuard<'_, T>> {
     })
 }
 
-/// Closes the database in `lock`, if it is still open, dropping it without the GIL
-fn close<T: Send>(py: Python<'_>, lock: &RwLock<Option<T>>) -> PyResult<()> {
+/// Closes the database in `lock` with `close`, if it is still open, without the GIL
+fn close<T: Send>(
+    py: Python<'_>,
+    lock: &RwLock<Option<T>>,
+    close: impl FnOnce(T) -> Result<(), ::redb::DatabaseError> + Send,
+) -> PyResult<()> {
     let db = exclusive(lock)?.take();
-    py.detach(|| drop(db));
-    Ok(())
+    py.detach(|| db.map_or(Ok(()), close)).pyerr()
 }
 
 /// Begins a read transaction of the database in `lock`
@@ -174,10 +177,11 @@ impl PyDatabase {
     /// Closes the database. From then on it raises `DatabaseClosed`, and the read transactions,
     /// tables and ranges opened from it can no longer read the file, so their reads raise it too.
     /// What they have already loaded, such as the only page of a small table, may still be
-    /// returned. A write transaction still open keeps the file open until it ends. Closing a
-    /// closed database does nothing
+    /// returned. A write transaction still open keeps the file open until it ends, and the close
+    /// raises `TransactionInProgress`, closing the database all the same. Closing a closed
+    /// database does nothing
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        close(py, self.inner.get()?)
+        close(py, self.inner.get()?, ::redb::Database::close)
     }
 
     /// `DatabaseClosed` once closed
@@ -258,11 +262,7 @@ impl PyReadOnlyDatabase {
 
     /// Closes the database, as `Database.close` does
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        match exclusive(self.inner.get()?)?.take() {
-            // Closes its storage too, which dropping it would leave to its last read transaction
-            Some(db) => py.detach(|| db.close()).pyerr(),
-            None => Ok(()),
-        }
+        close(py, self.inner.get()?, ::redb::ReadOnlyDatabase::close)
     }
 
     /// `DatabaseClosed` once closed
