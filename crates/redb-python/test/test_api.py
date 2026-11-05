@@ -631,6 +631,10 @@ def test_u128_i128_and_f64_types(tmp_db_path: Path) -> None:
         assert math.isnan(readings[4])
         with pytest.raises(TypeError):
             readings[5] = "0.5"
+        # A bool is no float either, as it is no int
+        with pytest.raises(TypeError, match="expected float, got bool"):
+            readings[5] = True
+        assert 5 not in readings
     with pytest.raises(TypeError, match="f64 cannot be a key"):
         redb.TableDefinition("t", float, redb.u64)
 
