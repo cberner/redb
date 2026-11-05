@@ -262,7 +262,11 @@ impl PyReadOnlyDatabase {
 
     /// Closes the database, as `Database.close` does
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        close(py, self.inner.get()?)
+        match exclusive(self.inner.get()?)?.take() {
+            // Closes its storage too, which dropping it would leave to its last read transaction
+            Some(db) => py.detach(|| db.close()).pyerr(),
+            None => Ok(()),
+        }
     }
 
     fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {

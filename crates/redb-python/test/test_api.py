@@ -6,6 +6,7 @@ import errno
 import gc
 import importlib.metadata
 import math
+import os
 import threading
 import time
 from pathlib import Path
@@ -745,6 +746,30 @@ def test_close(tmp_db_path: Path) -> None:
     with pytest.raises(redb.DatabaseClosed):
         reader.begin_read()
     reader.close()
+
+
+@pytest.mark.skipif(not Path("/proc/locks").exists(), reason="reads Linux's /proc/locks")
+def test_close_releases_the_file(tmp_db_path: Path) -> None:
+    path = str(tmp_db_path)
+    with redb.Database.create(path) as db, db.begin_write() as txn:
+        txn.open_table(USERS)[1] = b"alice"
+
+    def locks() -> int:
+        inode = os.stat(path).st_ino
+        with open("/proc/locks") as held:
+            return sum(f":{inode} " in line for line in held)
+
+    # Even while what was opened to read from it is still referenced
+    for open_db in (redb.Database.open, redb.Database.open_read_only):
+        db = open_db(path)
+        read = db.begin_read()
+        table = read.open_table(USERS)
+        entries = iter(table)
+        assert locks() > 0
+        db.close()
+        assert locks() == 0
+        del read, table, entries
+
 
 def test_reads_during_maintenance(tmp_db_path: Path) -> None:
     # compact() holds the database's lock until it has the GIL back, so a read checking that the
