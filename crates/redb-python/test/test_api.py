@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import _thread
 import errno
 import gc
 import importlib.metadata
@@ -826,6 +827,41 @@ def test_reads_during_maintenance(tmp_db_path: Path) -> None:
     finally:
         stop.set()
         maintainer.join()
+
+
+def test_begin_write_waits_for_another_writer(tmp_db_path: Path) -> None:
+    db = redb.Database.create(str(tmp_db_path))
+    started = threading.Event()
+
+    def write() -> None:
+        with db.begin_write() as txn:
+            started.set()
+            time.sleep(0.2)
+            txn.open_table(USERS)[1] = b"alice"
+
+    writer = threading.Thread(target=write)
+    writer.start()
+    started.wait()
+    # Waits for the other thread's transaction, then sees what it committed
+    with db.begin_write() as txn:
+        assert dict(txn.open_table(USERS)) == {1: b"alice"}
+    writer.join()
+
+
+def test_begin_write_wait_can_be_interrupted(tmp_db_path: Path) -> None:
+    # As a second begin_write() on this thread waits forever, for a transaction only this thread
+    # can end: re-running `txn = db.begin_write()` in a notebook, say. Ctrl-C ends the wait
+    db = redb.Database.create(str(tmp_db_path))
+    txn = db.begin_write()
+    interrupt = threading.Timer(0.2, _thread.interrupt_main)
+    interrupt.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            db.begin_write()
+    finally:
+        interrupt.cancel()
+    txn.abort()
+    db.begin_write().abort()
 
 def test_open_functions(tmp_db_path: Path) -> None:
     # open() does not create. A redb.Io is an OSError too, with the OS error number

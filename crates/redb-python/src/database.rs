@@ -5,6 +5,8 @@ use ::redb::ReadableDatabase;
 use pyo3::prelude::*;
 use std::path::PathBuf;
 use std::sync::{RwLock, RwLockWriteGuard, TryLockError};
+use std::thread;
+use std::time::Duration;
 
 /// How processes may share a database file.
 ///
@@ -153,19 +155,28 @@ impl PyDatabase {
         Ok(Self::new(inner))
     }
 
-    /// Begins a write transaction, waiting for any other writer to finish
+    /// Begins a write transaction, waiting for any other writer to finish. Ctrl-C interrupts the
+    /// wait
     fn begin_write(&self, py: Python<'_>) -> PyResult<PyWriteTransaction> {
         let db = self.inner.get()?;
-        let txn = py
-            .detach(|| {
+        let mut backoff = Duration::from_millis(1);
+        loop {
+            // The lock only for the attempt, so that close() can take it between attempts
+            let attempt = py.detach(|| {
                 db.read()
                     .unwrap()
                     .as_ref()
-                    .map(::redb::Database::begin_write)
-            })
-            .ok_or_else(closed)?
-            .pyerr()?;
-        Ok(PyWriteTransaction::new(txn))
+                    .map(::redb::Database::try_begin_write)
+            });
+            match attempt.ok_or_else(closed)? {
+                Err(::redb::TransactionError::WouldBlock) => {}
+                result => return Ok(PyWriteTransaction::new(result.pyerr()?)),
+            }
+            // Waited for without the GIL, and in steps, between which Ctrl-C can be raised
+            py.check_signals()?;
+            py.detach(|| thread::sleep(backoff));
+            backoff = (backoff * 2).min(Duration::from_millis(32));
+        }
     }
 
     /// Begins a read transaction: a snapshot of the data committed so far

@@ -114,6 +114,7 @@ variants! {
     PreviousIo,
     LockPoisoned,
     ReadTransactionStillInUse,
+    WouldBlock,
 }
 
 // `create_exception!` types are not `#[pyclass]`es, so instead of `add_class` each class is
