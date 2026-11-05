@@ -66,16 +66,6 @@ fn closed() -> PyErr {
     DatabaseClosed::new_err(::redb::Error::DatabaseClosed.to_string())
 }
 
-/// `DatabaseClosed` if `db`, the database a read transaction, table or range came from, is closed
-pub(crate) fn check_open(db: &Bound<'_, PyAny>) -> PyResult<()> {
-    let open = if let Ok(db) = db.cast::<PyDatabase>() {
-        is_open(db.get().inner.get()?)
-    } else {
-        is_open(db.cast::<PyReadOnlyDatabase>()?.get().inner.get()?)
-    };
-    if open { Ok(()) } else { Err(closed()) }
-}
-
 /// Without waiting for the lock: `compact()` and `check_integrity()` hold it until they have the
 /// GIL back, which the caller holds. Neither closes the database
 fn is_open<T>(lock: &RwLock<Option<T>>) -> bool {
@@ -181,9 +171,11 @@ impl PyDatabase {
         Ok(PyReadTransaction::new(slf.into_any(), txn))
     }
 
-    /// Closes the database. From then on it, and the read transactions, tables and ranges
-    /// opened from it, raise `DatabaseClosed`. A write transaction still open keeps the file
-    /// open until it ends. Closing a closed database does nothing
+    /// Closes the database. From then on it raises `DatabaseClosed`, and the read transactions,
+    /// tables and ranges opened from it can no longer read the file, so their reads raise it too.
+    /// What they have already loaded, such as the only page of a small table, may still be
+    /// returned. A write transaction still open keeps the file open until it ends. Closing a
+    /// closed database does nothing
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         close(py, self.inner.get()?)
     }
