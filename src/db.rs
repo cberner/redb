@@ -456,7 +456,9 @@ impl WriteSlot {
 impl Drop for WriteSlot {
     fn drop(&mut self) {
         if let Some(mem) = self.tracker.end_write_transaction() {
-            close_database(&self.tracker, &mem);
+            // close_database() has logged any error, and the Database is gone, so it has no caller
+            // to return to
+            let _ = close_database(&self.tracker, &mem);
         }
     }
 }
@@ -2002,15 +2004,21 @@ fn commit_and_trim(
 // Runs exactly once, when the database closes: from Database::drop, or from the end of the
 // write transaction that was live at that point. In both cases the Database is being, or has
 // been, dropped, so no new write transaction can be started concurrently and the commit in here
-// cannot block on the write-transaction slot.
-fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<TransactionalMemory>) {
+// cannot block on the write-transaction slot. Returns the error that left the close unclean,
+// having logged it.
+fn close_database(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+) -> Result {
     // A transaction dropped while a panic unwound leaked its pages: the allocator state is not
     // recorded, and the next open rebuilds it. A pending non-durable commit is still made
     // durable, by a plain commit, so that the rebuild does not roll it back
     let promote_only = mem.needs_repair();
+    // A latched I/O failure leaves the file for the next open to recover, and is the close's error
+    let mut result = mem.check_io_errors();
     // Not after a latched I/O failure, nor with nothing to write, decided ahead of the lock
     let writing = !crate::panicking()
-        && mem.check_io_errors().is_ok()
+        && result.is_ok()
         && (!promote_only || mem.pending_non_durable_commit());
     // One hold across the allocator state's commit and the shutdown header: a commit another
     // process made between them would be overwritten by the header. Without the hold, neither
@@ -2019,44 +2027,48 @@ fn close_database(transaction_tracker: &Arc<TransactionTracker>, mem: &Arc<Trans
     let writer_lock = if writing {
         // Multi-writer commits are durable and record allocator state, so close can skip
         // maintenance rather than deadlock waiting for a peer's write transaction.
-        mem.try_lock_writer().ok().flatten()
+        mem.try_lock_writer().unwrap_or_else(|err| {
+            result = Err(err);
+            None
+        })
     } else {
         None
     };
-    let writing = writing && writer_lock.is_some();
-    let recorded = if !writing {
-        false
-    } else if promote_only {
-        let result = commit_and_trim(transaction_tracker, mem, writer_lock.as_ref(), None, false);
-        #[cfg(feature = "logging")]
-        if result.is_err() {
-            warn!("Failed to make the pending non-durable commits durable. They are lost.");
+    let recorded = match &writer_lock {
+        None => false,
+        Some(writer_lock) if promote_only => {
+            result = commit_and_trim(transaction_tracker, mem, Some(writer_lock), None, false);
+            #[cfg(feature = "logging")]
+            if result.is_err() {
+                warn!("Failed to make the pending non-durable commits durable. They are lost.");
+            }
+            false
         }
-        #[cfg(not(feature = "logging"))]
-        let _ = result;
-        false
-    } else {
-        let result = ensure_allocator_state_table_and_trim(
-            transaction_tracker,
-            mem,
-            writer_lock.as_ref(),
-            None,
-        );
-        #[cfg(feature = "logging")]
-        if result.is_err() {
-            warn!("Failed to write allocator state table. Repair may be required at restart.");
+        Some(writer_lock) => {
+            result = ensure_allocator_state_table_and_trim(
+                transaction_tracker,
+                mem,
+                Some(writer_lock),
+                None,
+            );
+            #[cfg(feature = "logging")]
+            if result.is_err() {
+                warn!("Failed to write allocator state table. Repair may be required at restart.");
+            }
+            result.is_ok()
         }
-        result.is_ok()
     };
     // The shutdown header describes this handle, which matches the file only once the commit
     // above has synced to the file's latest commit and recorded the allocator state. Without a
     // record, write no header, and leave the file for the next open to recover.
     let writer_lock = writer_lock.filter(|_| recorded);
 
-    if mem.close(writer_lock.as_ref()).is_err() {
-        #[cfg(feature = "logging")]
+    let close_result = mem.close(writer_lock.as_ref());
+    #[cfg(feature = "logging")]
+    if close_result.is_err() {
         warn!("Failed to flush database file. Repair may be required at restart.");
     }
+    result.and(close_result)
 }
 
 impl Drop for Database {
@@ -2074,7 +2086,8 @@ impl Drop for Database {
             return;
         }
 
-        close_database(&self.transaction_tracker, &self.mem);
+        // close_database() has logged any error, which drop cannot return
+        let _ = close_database(&self.transaction_tracker, &self.mem);
     }
 }
 

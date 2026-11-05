@@ -2510,8 +2510,9 @@ impl TransactionalMemory {
             let mut state = self.state.lock()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
             // an allocator state describing what it wrote, and one not marked for repair.
-            if state.allocators.is_loaded() && !self.needs_repair() && self.storage.flush().is_ok()
-            {
+            if state.allocators.is_loaded() && !self.needs_repair() {
+                // and everything else already on disk: if that fails, the flag stays set
+                self.storage.flush()?;
                 state.header.recovery_required = false;
                 self.write_header(&state.header, &header_lock)?;
                 self.storage.flush()?;
