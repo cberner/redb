@@ -726,14 +726,26 @@ def test_close(tmp_db_path: Path) -> None:
     with pytest.raises(redb.DatabaseClosed):
         db.begin_read()
 
-    # What was opened to read from it stops reading, but can still be exited
+    # What was opened to read from it can no longer read the file, but can still be exited. What
+    # it has already loaded may still be returned, so the table is large enough that a lookup,
+    # and the rest of an iteration, need pages it has not
+    deep = redb.TableDefinition("deep", redb.u64, redb.u64)
+    with redb.Database.open(path) as db, db.begin_write() as txn:
+        table = txn.open_table(deep)
+        for i in range(10_000):
+            table[i] = i
     for open_db in (redb.Database.open, redb.Database.open_read_only):
         db = open_db(path)
         with db.begin_read() as read:
-            table = read.open_table(USERS)
+            table = read.open_table(deep)
             entries = iter(table)
             db.close()
-            for use in (lambda: table[1], lambda: next(entries), read.list_tables):
+            with pytest.raises(redb.DatabaseClosed):
+                table[5_000]
+            with pytest.raises(redb.DatabaseClosed):
+                for _ in entries:
+                    pass
+            for use in (read.list_tables, lambda: read.open_table(USERS)):
                 with pytest.raises(redb.DatabaseClosed):
                     use()
 
@@ -787,8 +799,7 @@ def test_close_releases_the_file(tmp_db_path: Path) -> None:
 
 
 def test_reads_during_maintenance(tmp_db_path: Path) -> None:
-    # compact() holds the database's lock until it has the GIL back, so a read checking that the
-    # database is open must not wait for the lock: that deadlocked
+    # Reads go on while another thread tries to compact, which their transaction makes refuse
     db = redb.Database.create(str(tmp_db_path))
     with db.begin_write() as txn:
         txn.open_table(USERS)[1] = b"alice"
