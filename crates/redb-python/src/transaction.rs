@@ -1,4 +1,4 @@
-use crate::database::{PyDatabase, check_open};
+use crate::database::check_open;
 use crate::error::{
     PyErrExt, ReadTransactionStillInUse, TableDoesNotExist, TransactionCompleted, TransactionInUse,
 };
@@ -27,21 +27,12 @@ fn names(tables: impl Iterator<Item = UntypedTableHandle>) -> Vec<String> {
     tables.map(|table| table.name().to_string()).collect()
 }
 
-// Field order is the drop order: `txn` must go before `db`, since dropping the last reference
-// to a Database waits for its live write transaction, which would be this one.
-struct Active {
-    txn: ::redb::WriteTransaction,
-    db: Py<PyDatabase>,
-}
-
 fn completed() -> PyErr {
     TransactionCompleted::new_err("transaction already committed or aborted")
 }
 
 /// Commits or aborts, without the GIL
-fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
-    // `txn` is consumed here, before `db` drops at the end of the scope
-    let Active { txn, db: _db } = active;
+fn finish(py: Python<'_>, txn: ::redb::WriteTransaction, commit: bool) -> PyResult<()> {
     if commit {
         py.detach(|| txn.commit()).pyerr()
     } else {
@@ -58,8 +49,9 @@ fn finish(py: Python<'_>, active: Active, commit: bool) -> PyResult<()> {
 /// leaving the `with` block commits, or aborts if an exception is propagating out of it.
 #[pyclass(module = "redb", name = "WriteTransaction", frozen)]
 pub(crate) struct PyWriteTransaction {
-    // None once committed or aborted
-    state: ProcessLocal<Mutex<Option<Active>>>,
+    // None once committed or aborted. The database it came from stays open while it is alive,
+    // even once that database is closed or dropped
+    state: ProcessLocal<Mutex<Option<::redb::WriteTransaction>>>,
     // How many times each table has been changed, and how many times all of them were, by a
     // savepoint restore; a range over a table compares the sum against what it saw, to notice
     // the table changing under it
@@ -70,9 +62,9 @@ pub(crate) struct PyWriteTransaction {
 }
 
 impl PyWriteTransaction {
-    pub(crate) fn new(db: Py<PyDatabase>, txn: ::redb::WriteTransaction) -> Self {
+    pub(crate) fn new(txn: ::redb::WriteTransaction) -> Self {
         Self {
-            state: ProcessLocal::new(Mutex::new(Some(Active { txn, db }))),
+            state: ProcessLocal::new(Mutex::new(Some(txn))),
             mutations: Mutex::new(HashMap::new()),
             restores: AtomicU64::new(0),
             tables: Mutex::new(HashSet::new()),
@@ -83,7 +75,7 @@ impl PyWriteTransaction {
     /// running inside another: a `retain` predicate using the table it filters, or another
     /// thread's call while such a predicate runs. Waiting would deadlock, since the holder needs
     /// the GIL back to finish, so it fails instead.
-    fn lock(&self) -> PyResult<MutexGuard<'_, Option<Active>>> {
+    fn lock(&self) -> PyResult<MutexGuard<'_, Option<::redb::WriteTransaction>>> {
         self.state.get()?.try_lock().map_err(|err| match err {
             TryLockError::WouldBlock => TransactionInUse::new_err(
                 "transaction in use by another operation (a predicate cannot use its own table)",
@@ -92,7 +84,7 @@ impl PyWriteTransaction {
         })
     }
 
-    fn take(&self) -> PyResult<Option<Active>> {
+    fn take(&self) -> PyResult<Option<::redb::WriteTransaction>> {
         Ok(self.lock()?.take())
     }
 
@@ -121,9 +113,7 @@ impl PyWriteTransaction {
         &self,
         f: impl FnOnce(&::redb::WriteTransaction) -> PyResult<R>,
     ) -> PyResult<R> {
-        let state = self.lock()?;
-        let active = state.as_ref().ok_or_else(completed)?;
-        f(&active.txn)
+        f(self.lock()?.as_ref().ok_or_else(completed)?)
     }
 
     /// A `Table` object opened `name`, so it has a table
@@ -153,9 +143,7 @@ impl PyWriteTransaction {
         &self,
         f: impl FnOnce(&mut ::redb::WriteTransaction) -> PyResult<R>,
     ) -> PyResult<R> {
-        let mut state = self.lock()?;
-        let active = state.as_mut().ok_or_else(completed)?;
-        f(&mut active.txn)
+        f(self.lock()?.as_mut().ok_or_else(completed)?)
     }
 }
 
@@ -253,8 +241,8 @@ impl PyWriteTransaction {
         _exc_value: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        if let Some(active) = self.take()? {
-            finish(py, active, exc_type.is_none())?;
+        if let Some(txn) = self.take()? {
+            finish(py, txn, exc_type.is_none())?;
         }
         Ok(false)
     }

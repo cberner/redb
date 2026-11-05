@@ -161,8 +161,8 @@ impl PyDatabase {
     }
 
     /// Begins a write transaction, waiting for any other writer to finish
-    fn begin_write(slf: Py<Self>, py: Python<'_>) -> PyResult<PyWriteTransaction> {
-        let db = slf.get().inner.get()?;
+    fn begin_write(&self, py: Python<'_>) -> PyResult<PyWriteTransaction> {
+        let db = self.inner.get()?;
         let txn = py
             .detach(|| {
                 db.read()
@@ -172,7 +172,7 @@ impl PyDatabase {
             })
             .ok_or_else(closed)?
             .pyerr()?;
-        Ok(PyWriteTransaction::new(slf, txn))
+        Ok(PyWriteTransaction::new(txn))
     }
 
     /// Begins a read transaction: a snapshot of the data committed so far
