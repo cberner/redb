@@ -3,7 +3,25 @@ name = "redb"
 description = "Rust Embedded DataBase"
 readme = "README.md"
 version = "4.4.0"
-exclude = ["fuzz/"]
+# Development and CI files. maturin builds the redb-python sdist from this same file list, so
+# they are left out of both packages
+exclude = [
+    "fuzz/",
+    ".cargo/",
+    ".containerignore",
+    ".dockerignore",
+    ".editorconfig",
+    ".github/",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Containerfile.sandbox",
+    "Dockerfile.bench",
+    "clippy.toml",
+    "deny.toml",
+    "justfile",
+    "rustfmt.toml",
+    "scripts/",
+]
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
