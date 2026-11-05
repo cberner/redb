@@ -57,7 +57,9 @@ processes open it for reading with `redb.open_read_only()`. Each read transactio
 commit.
 
 To allow more than one writer process, open the database with `concurrency=redb.MultiWriter` in
-every process. Write transactions from different processes take turns.
+every process. Write transactions run one at a time, across processes as within one:
+`begin_write()` waits while another is in progress. Waiting writers are not served in order, so a
+writer that begins again as soon as it commits can keep the others waiting.
 
 ```python
 import redb
