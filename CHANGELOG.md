@@ -85,6 +85,8 @@
   read transactions opened from the database to be dropped.
 * Add `Database::close()`, which closes the database as dropping it does, but returns any error
   rather than ignoring it.
+* Add `Database::try_begin_write()`, which returns the new `TransactionError::WouldBlock` where
+  `begin_write()` would wait for another write transaction to finish.
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.

@@ -451,6 +451,11 @@ impl WriteSlot {
         tracker.take_write_slot();
         Self { tracker }
     }
+
+    // None while another write transaction holds the slot
+    fn try_take(tracker: Arc<TransactionTracker>) -> Option<Self> {
+        tracker.try_take_write_slot().then(|| Self { tracker })
+    }
 }
 
 impl Drop for WriteSlot {
@@ -1859,6 +1864,30 @@ impl Database {
         self.begin_write_with(None, None)
     }
 
+    /// Begins a write transaction, without waiting for another one to finish
+    ///
+    /// Returns [`TransactionError::WouldBlock`] where [`Self::begin_write`] would wait: while
+    /// another write transaction of this database is alive, or, in
+    /// [`ConcurrencyMode::MultiWriter`], while another process is in a write transaction.
+    pub fn try_begin_write(&self) -> Result<WriteTransaction, TransactionError> {
+        self.mem.check_io_errors()?;
+        // In the order begin_write() takes them, and released if the second is not free
+        let slot = WriteSlot::try_take(self.transaction_tracker.clone())
+            .ok_or(TransactionError::WouldBlock)?;
+        let writer_lock = self
+            .mem
+            .try_lock_writer()?
+            .ok_or(TransactionError::WouldBlock)?;
+        begin_write_holding(
+            &self.transaction_tracker,
+            &self.mem,
+            slot,
+            writer_lock,
+            None,
+            AllocationPolicy::Default,
+        )
+    }
+
     fn begin_write_with(
         &self,
         writer_lock: Option<&Arc<WriterLock>>,
@@ -1954,6 +1983,26 @@ fn begin_write_with_allocation_policy(
     // the slot is what orders this process's writers. An error return drops both
     let slot = WriteSlot::take(transaction_tracker.clone());
     let writer_lock = writer_lock.map_or_else(|| mem.lock_writer(), |lent| Ok(lent.clone()))?;
+    begin_write_holding(
+        transaction_tracker,
+        mem,
+        slot,
+        writer_lock,
+        header_lock,
+        allocation_policy,
+    )
+}
+
+// The rest of beginning a write transaction, once the caller holds the write slot and the
+// writer byte
+fn begin_write_holding(
+    transaction_tracker: &Arc<TransactionTracker>,
+    mem: &Arc<TransactionalMemory>,
+    slot: WriteSlot,
+    writer_lock: Arc<WriterLock>,
+    header_lock: Option<&HeaderGuard<'_>>,
+    allocation_policy: AllocationPolicy,
+) -> Result<WriteTransaction, TransactionError> {
     let latch = sync_to_latest_commit(mem, &writer_lock, header_lock)?;
     // Re-checked after acquiring the write slot: the writer this call blocked on can fail its
     // commit, latching an I/O error and discarding the allocator state. The I/O check comes

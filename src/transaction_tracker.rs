@@ -280,6 +280,16 @@ impl TransactionTracker {
         state.write_slot = WriteSlotState::Initializing;
     }
 
+    // take_write_slot(), unless another write transaction holds the slot
+    pub(crate) fn try_take_write_slot(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        if state.write_slot != WriteSlotState::Free {
+            return false;
+        }
+        state.write_slot = WriteSlotState::Initializing;
+        true
+    }
+
     // Issues the slot's transaction an id that follows `last_committed`, the id of the file's
     // latest commit. `writer_lock` proves that the caller holds the writer byte, so that no
     // other process commits between reading that id and issuing this one.
