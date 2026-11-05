@@ -477,7 +477,9 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod peer_commits {
     use super::*;
-    use redb::{CompactionError, ReadableDatabase, ReadableTable, TableDefinition};
+    use redb::{
+        CompactionError, ReadableDatabase, ReadableTable, TableDefinition, TransactionError,
+    };
     use std::path::Path;
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
@@ -756,6 +758,24 @@ mod peer_commits {
 
         let db = open(tmpfile.path());
         assert_eq!(value(&db, 1), 1);
+    }
+
+    #[test]
+    fn try_begin_write_does_not_wait_for_a_peers_write_transaction() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        let txn = peer.begin_write().unwrap();
+        // The peer holds the writer byte; begin_write() would wait for it
+        assert!(matches!(
+            db.try_begin_write(),
+            Err(TransactionError::WouldBlock)
+        ));
+        txn.commit().unwrap();
+
+        let txn = db.try_begin_write().unwrap();
+        txn.open_table(TABLE).unwrap().insert(1, 1).unwrap();
+        txn.commit().unwrap();
+        assert_eq!(value(&peer, 1), 1);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
     Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
     ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend, StorageError,
-    TableDefinition, TableError, TableHandle, TypeName, Value, WriteTransaction,
+    TableDefinition, TableError, TableHandle, TransactionError, TypeName, Value, WriteTransaction,
 };
 use std::cmp::Ordering;
 use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
@@ -339,6 +339,34 @@ fn write_transaction_keeps_database_open() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(STR_TABLE).unwrap();
     assert_eq!(table.get("hello").unwrap().unwrap().value(), "world");
+}
+
+#[test]
+fn try_begin_write() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let txn = db.try_begin_write().unwrap();
+    txn.open_table(U64_TABLE).unwrap().insert(1, 1).unwrap();
+    // Where begin_write() would wait for the live transaction
+    assert!(matches!(
+        db.try_begin_write(),
+        Err(TransactionError::WouldBlock)
+    ));
+    txn.commit().unwrap();
+
+    // Free once it ends, and the refused attempt left nothing held
+    let txn = db.try_begin_write().unwrap();
+    assert_eq!(
+        txn.open_table(U64_TABLE)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .unwrap()
+            .value(),
+        1
+    );
+    txn.abort().unwrap();
+    db.begin_write().unwrap().commit().unwrap();
 }
 
 #[test]

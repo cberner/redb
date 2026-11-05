@@ -552,6 +552,9 @@ pub enum TransactionError {
     Storage(StorageError),
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(Box<ReadTransaction>),
+    /// Another write transaction is in progress, which [`crate::Database::try_begin_write`]
+    /// does not wait for
+    WouldBlock,
 }
 
 impl TransactionError {
@@ -570,6 +573,7 @@ impl From<TransactionError> for Error {
             TransactionError::ReadTransactionStillInUse(txn) => {
                 Error::ReadTransactionStillInUse(txn)
             }
+            TransactionError::WouldBlock => Error::WouldBlock,
         }
     }
 }
@@ -586,6 +590,9 @@ impl Display for TransactionError {
             TransactionError::Storage(storage) => storage.fmt(f),
             TransactionError::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")
+            }
+            TransactionError::WouldBlock => {
+                write!(f, "Another write transaction is in progress")
             }
         }
     }
@@ -758,6 +765,9 @@ pub enum Error {
     LockPoisoned(&'static panic::Location<'static>),
     /// The transaction is still referenced by a table or other object
     ReadTransactionStillInUse(Box<ReadTransaction>),
+    /// Another write transaction is in progress, which [`crate::Database::try_begin_write`]
+    /// does not wait for
+    WouldBlock,
 }
 
 impl<T> From<PoisonError<T>> for Error {
@@ -914,6 +924,9 @@ impl Display for Error {
             }
             Error::ReadTransactionStillInUse(_) => {
                 write!(f, "Transaction still in use")
+            }
+            Error::WouldBlock => {
+                write!(f, "Another write transaction is in progress")
             }
         }
     }
