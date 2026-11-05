@@ -64,8 +64,11 @@
   of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
   copying it into a new table. The file format is unchanged.
 
-## 4.5.0 - 2026-XX-XX
+## 4.5.0 - 2026-11-05
 ### Multi-process support
+Database files cannot be shared between processes using these modes and processes using the
+`experimental-multiprocess` feature of redb 4.3 or 4.4. Their locking is incompatible, and 4.5
+can't detect the older processes.
 * Add `Builder::set_concurrency_mode()`, which takes a `ConcurrencyMode` configuring how processes
   may share the database.
 * `ConcurrencyMode::ExclusiveWriter` (the default) locks the whole file, as earlier versions do.
@@ -73,9 +76,6 @@
   the database read-only.
 * `ConcurrencyMode::MultiWriter` allows any number of processes to open the database for
   writing, one write transaction at a time, and any number may open it read-only.
-* Don't share a database file between processes using these modes and processes using the
-  `experimental-multiprocess` feature of redb 4.3 or 4.4. Their locking is incompatible, and 4.5
-  can't detect the older processes.
 
 ### New features
 * Add `Builder::open_read_only_with_backend()` to open a read-only database from a storage backend.
@@ -85,8 +85,8 @@
   read transactions opened from the database to be dropped.
 * Add `Database::close()`, which closes the database as dropping it does, but returns any error
   rather than ignoring it.
-* Add `Database::try_begin_write()`, which returns the new `TransactionError::WouldBlock` where
-  `begin_write()` would wait for another write transaction to finish.
+* Add `Database::try_begin_write()`, which returns `TransactionError::WouldBlock` instead of
+  waiting for an in-progress write transaction to finish.
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.
@@ -101,14 +101,9 @@
 * `open()` reports a malformed allocator state as `StorageError::Corrupted` instead of panicking.
 * Repair and `check_integrity()` verify the trees kept by persistent savepoints, which were not
   checked before.
-* Fix a deadlock when dropping a `MultiWriter` database while another handle has a live write
-  transaction.
 * Fix `cache_stats()`, with the `cache_metrics` feature, panicking in debug builds or returning a
   `write_misses()` near `u64::MAX` in release builds when called while another thread is writing.
-* Repair and `check_integrity()` report a page with an invalid type byte as `StorageError::Corrupted`
-  instead of panicking.
-* Commits report a truncated free page list in a corrupted file as `StorageError::Corrupted` instead
-  of panicking.
+* Repair, `check_integrity()`, and `commit()` report some forms of file corruption as `StorageError::Corrupted` instead of panicking. This cannot occur in normal operation, and only effects database which were externally modified.
 
 ## redb-derive 0.2.0 - 2026-10-13
 * Fix `#[derive(Value)]` and `#[derive(Key)]` failing to compile on structs whose lifetimes are
