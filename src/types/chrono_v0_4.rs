@@ -2,13 +2,13 @@
 //!
 //! They are designed to be compatible with any time implemenation. All integers are using little endian. The layout of the memory is as follows:
 //!
-//!| Structure             | Layout                                                                                                                   | Size |                                                  |
-//!|-----------------------|--------------------------------------------------------------------------------------------------------------------------|------|--------------------------------------------------|
-//!| NaiveDate             | `{year:i32}\|{month:u8}\|{day:u8}`                                                                                       | 6    |                                                  |
-//!| NaiveTime             | `{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                                                           | 7    |                                                  |
-//!| NaiveDateTime         | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                         | 13   |                                                  |
-//!| FixedOffset           | `{seconds_from_utc:i32}`                                                                                                 | 4    |                                                  |
-//!| DateTime<FixedOffset> | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}\|{seconds_from_utc:i32}` | 17   | Time is stored in UTC with the offset in seconds |
+//!| Structure               | Layout                                                                                                                   | Size |                                                  |
+//!|-------------------------|--------------------------------------------------------------------------------------------------------------------------|------|--------------------------------------------------|
+//!| `NaiveDate`             | `{year:i32}\|{month:u8}\|{day:u8}`                                                                                       | 6    |                                                  |
+//!| `NaiveTime`             | `{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                                                           | 7    |                                                  |
+//!| `NaiveDateTime`         | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}`                         | 13   |                                                  |
+//!| `FixedOffset`           | `{seconds_from_utc:i32}`                                                                                                 | 4    |                                                  |
+//!| `DateTime<FixedOffset>` | `{year:i32}\|{month:u8}\|{day:u8}\|{seconds_from_midnight:u32:first 3 bytes}\|{nanoseconds:u32}\|{seconds_from_utc:i32}` | 17   | Time is stored in UTC with the offset in seconds |
 use crate::{Key, TypeName, Value};
 
 use chrono_v0_4::{
