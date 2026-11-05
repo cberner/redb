@@ -242,12 +242,13 @@ fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>
 }
 
 // A file backend whose read or sync operations fail while the matching flag
-// is set.
+// is set. Syncs also fail once `syncs_left` has counted down to zero.
 #[derive(Debug)]
 struct FailingBackend {
     inner: FileBackend,
     fail_reads: Arc<AtomicBool>,
     fail_syncs: Arc<AtomicBool>,
+    syncs_left: Arc<AtomicU64>,
 }
 
 impl FailingBackend {
@@ -256,6 +257,7 @@ impl FailingBackend {
             inner: backend,
             fail_reads: Arc::new(AtomicBool::new(false)),
             fail_syncs: Arc::new(AtomicBool::new(false)),
+            syncs_left: Arc::new(AtomicU64::new(u64::MAX)),
         }
     }
 }
@@ -277,7 +279,13 @@ impl StorageBackend for FailingBackend {
     }
 
     fn sync_data(&self) -> Result<(), std::io::Error> {
-        if self.fail_syncs.load(Ordering::SeqCst) {
+        let exhausted = self
+            .syncs_left
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_err();
+        if self.fail_syncs.load(Ordering::SeqCst) || exhausted {
             return Err(std::io::Error::from(ErrorKind::Other));
         }
         self.inner.sync_data()
@@ -306,6 +314,48 @@ fn previous_io_error() {
     assert!(matches!(
         db.begin_write().err().unwrap(),
         TransactionError::Storage(StorageError::PreviousIo)
+    ));
+}
+
+#[test]
+fn close_returns_errors() {
+    let open = || {
+        let backend = FailingBackend::new(file_backend(create_tempfile().into_file()));
+        let syncs_left = backend.syncs_left.clone();
+        let db = Database::builder().create_with_backend(backend).unwrap();
+        (db, syncs_left)
+    };
+
+    // Count the syncs a close makes: at least the commit recording the allocator state's, and
+    // the shutdown header's
+    let (db, syncs_left) = open();
+    let before = syncs_left.load(Ordering::SeqCst);
+    db.close().unwrap();
+    let syncs = before - syncs_left.load(Ordering::SeqCst);
+    assert!(syncs >= 2, "{syncs} syncs");
+
+    // Whichever of them fails, close() returns the error
+    for failing in 0..syncs {
+        let (db, syncs_left) = open();
+        syncs_left.store(failing, Ordering::SeqCst);
+        assert!(
+            matches!(db.close(), Err(DatabaseError::Storage(StorageError::Io(_)))),
+            "sync {failing} of {syncs}"
+        );
+    }
+
+    // An earlier failure leaves the file for the next open to recover
+    let (db, syncs_left) = open();
+    syncs_left.store(0, Ordering::SeqCst);
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    assert!(txn.commit().is_err());
+    assert!(matches!(
+        db.close(),
+        Err(DatabaseError::Storage(StorageError::PreviousIo))
     ));
 }
 

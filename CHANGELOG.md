@@ -83,6 +83,8 @@
   instead of trusting the state recorded by a clean shutdown.
 * Add `ReadOnlyDatabase::close()`, which releases the file and its locks without waiting for the
   read transactions opened from the database to be dropped.
+* Add `Database::close()`, which closes the database as dropping it does, but returns any error
+  rather than ignoring it.
 
 ### Performance
 * Operations on tables with `&str` or `String` keys are faster.

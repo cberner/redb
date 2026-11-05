@@ -754,12 +754,14 @@ impl ReadOnlyDatabase {
 ///
 /// Dropping the [`Database`] closes the database: buffered data is flushed, the file lock is
 /// released, and outstanding [`ReadTransaction`]s are invalidated (their operations will return
-/// [`StorageError::DatabaseClosed`]).
+/// [`StorageError::DatabaseClosed`]). Dropping it ignores any error from closing, which
+/// [`Self::close()`] returns instead.
 ///
 /// A live [`WriteTransaction`] keeps the database open, however: if one exists when the
-/// [`Database`] is dropped, the transaction remains fully usable and the close described above
-/// is deferred until the transaction commits, aborts, or is dropped. Until then the database
-/// file remains locked, so re-opening it fails with [`DatabaseError::DatabaseAlreadyOpen`].
+/// [`Database`] is dropped or closed, the transaction remains fully usable and the close
+/// described above is deferred until the transaction commits, aborts, or is dropped. Until then
+/// the database file remains locked, so re-opening it fails with
+/// [`DatabaseError::DatabaseAlreadyOpen`].
 ///
 /// # Examples
 ///
@@ -789,6 +791,8 @@ impl ReadOnlyDatabase {
 pub struct Database {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
+    // Set once close() has closed the database, or deferred the close, leaving drop nothing to do
+    closed: bool,
 }
 
 impl Sealed for Database {}
@@ -825,6 +829,40 @@ impl Database {
     #[cfg(not(redb_no_std))]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
+    }
+
+    /// Closes the database
+    ///
+    /// This does what dropping the database does, but returns any error rather than ignoring it.
+    /// Read transactions that are still alive can no longer access the file, so their reads return
+    /// [`StorageError::DatabaseClosed`]. Data they have already loaded into memory, such as the
+    /// root page of an open table, may still be returned.
+    ///
+    /// If a [`WriteTransaction`] is still alive, this returns
+    /// [`DatabaseError::TransactionInProgress`], and the database stays open until the transaction
+    /// ends. It then closes as a dropped database does, ignoring any error.
+    pub fn close(mut self) -> Result<(), DatabaseError> {
+        self.close_or_defer()
+    }
+
+    // Closes the database, or defers the close to the end of the live write transaction, which is
+    // reported as TransactionInProgress. Runs once, from close() or from drop
+    fn close_or_defer(&mut self) -> Result<(), DatabaseError> {
+        self.closed = true;
+        if self
+            .transaction_tracker
+            .defer_close_if_write_transaction_live(&self.mem)
+        {
+            // The write transaction holds the memory and tracker alive, so it remains fully
+            // usable; WriteSlot::drop performs the deferred close when it ends
+            #[cfg(feature = "logging")]
+            warn!(
+                "Database closed while a write transaction is in progress. The database will remain open until the write transaction completes."
+            );
+            return Err(DatabaseError::TransactionInProgress);
+        }
+
+        Ok(close_database(&self.transaction_tracker, &self.mem)?)
     }
 
     pub(crate) fn get_memory(&self) -> Arc<TransactionalMemory> {
@@ -1757,6 +1795,7 @@ impl Database {
         Ok(Database {
             mem,
             transaction_tracker,
+            closed: false,
         })
     }
 
@@ -2001,11 +2040,11 @@ fn commit_and_trim(
 
 // Closes the database: makes any pending non-durable commit durable, persists the allocator
 // state table, so that the next open does not require a repair, and closes the storage backend.
-// Runs exactly once, when the database closes: from Database::drop, or from the end of the
-// write transaction that was live at that point. In both cases the Database is being, or has
-// been, dropped, so no new write transaction can be started concurrently and the commit in here
-// cannot block on the write-transaction slot. Returns the error that left the close unclean,
-// having logged it.
+// Runs exactly once, when the database closes: from Database::close() or Database::drop, or from
+// the end of the write transaction that was live at that point. In all cases the Database is
+// being, or has been, consumed, so no new write transaction can be started concurrently and the
+// commit in here cannot block on the write-transaction slot. Errors are logged as well as
+// returned, since only Database::close() has a caller to return them to.
 fn close_database(
     transaction_tracker: &Arc<TransactionTracker>,
     mem: &Arc<TransactionalMemory>,
@@ -2073,21 +2112,10 @@ fn close_database(
 
 impl Drop for Database {
     fn drop(&mut self) {
-        if self
-            .transaction_tracker
-            .defer_close_if_write_transaction_live(&self.mem)
-        {
-            // The write transaction holds the memory and tracker alive, so it remains fully
-            // usable; TransactionGuard::drop performs the deferred close when it ends
-            #[cfg(feature = "logging")]
-            warn!(
-                "Database dropped while a write transaction is in progress. The database will remain open until the write transaction completes."
-            );
-            return;
+        if !self.closed {
+            // close_database() has logged any error
+            let _ = self.close_or_defer();
         }
-
-        // close_database() has logged any error, which drop cannot return
-        let _ = close_database(&self.transaction_tracker, &self.mem);
     }
 }
 
