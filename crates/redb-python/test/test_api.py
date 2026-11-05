@@ -715,7 +715,7 @@ def test_close(tmp_db_path: Path) -> None:
     with redb.Database.create(path) as db:
         with db.begin_write() as txn:
             txn.open_table(USERS)[1] = b"alice"
-    for use in (db.begin_write, db.begin_read, db.compact, db.check_integrity):
+    for use in (db.begin_write, db.begin_read, db.compact, db.check_integrity, db.__enter__):
         with pytest.raises(redb.DatabaseClosed):
             use()
     db.close()  # closing again does nothing
@@ -757,8 +757,9 @@ def test_close(tmp_db_path: Path) -> None:
             2: b"bob",
             3: b"carol",
         }
-    with pytest.raises(redb.DatabaseClosed):
-        reader.begin_read()
+    for use in (reader.begin_read, reader.__enter__):
+        with pytest.raises(redb.DatabaseClosed):
+            use()
     reader.close()
 
 

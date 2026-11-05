@@ -188,8 +188,12 @@ impl PyDatabase {
         close(py, self.inner.get()?)
     }
 
-    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
+    /// `DatabaseClosed` once closed
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        if !is_open(slf.inner.get()?) {
+            return Err(closed());
+        }
+        Ok(slf)
     }
 
     /// Closes the database, whether or not an exception is propagating out of the block
@@ -269,8 +273,12 @@ impl PyReadOnlyDatabase {
         }
     }
 
-    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
+    /// `DatabaseClosed` once closed
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        if !is_open(slf.inner.get()?) {
+            return Err(closed());
+        }
+        Ok(slf)
     }
 
     /// Closes the database, whether or not an exception is propagating out of the block
