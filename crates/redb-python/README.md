@@ -17,18 +17,21 @@ import redb
 
 TABLE = redb.TableDefinition("my_data", redb.str, redb.u64)
 
-db = redb.Database.create("my_db.redb")
-with db.begin_write() as txn:
-    table = txn.open_table(TABLE)
-    table["my_key"] = 123
+with redb.Database.create("my_db.redb") as db:
+    with db.begin_write() as txn:
+        table = txn.open_table(TABLE)
+        table["my_key"] = 123
 
-read_txn = db.begin_read()
-table = read_txn.open_table(TABLE)
-assert table["my_key"] == 123
+    read_txn = db.begin_read()
+    table = read_txn.open_table(TABLE)
+    assert table["my_key"] == 123
 ```
 
-A database closes when it is garbage collected, or explicitly with `close()`, which a
-`with redb.open(...) as db:` block calls when it ends.
+Leaving the `with` block closes the database, as `close()` does. Close every database you open
+rather than leaving it to the garbage collector: a process can exit without collecting it, for
+example through `os._exit()`, as `multiprocessing` workers started with `fork` do, or while a
+daemon thread still uses it. The file is then left needing a repair. The next writer to open it
+repairs it, and until then `redb.open_read_only()` raises `redb.RepairAborted`.
 
 ## Features
 * Tables support `table[key]`, `table[key] = value`, `del table[key]`, `key in table` and
