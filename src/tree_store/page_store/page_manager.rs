@@ -3178,7 +3178,6 @@ mod lock_protocol_test {
     /// With `older` holding the whole-file lock of redb before 4.3 exclusive, as a writer of
     /// such a version does, `open` is refused. On Windows that lock covers the query mutex, so
     /// the open waits for it instead.
-    #[cfg(not(feature = "experimental-api-5"))]
     fn assert_excluded_by_older_writer(
         older: &File,
         open: impl FnOnce() -> Result<PagedCachedFile, DatabaseError> + Send + 'static,
@@ -3211,7 +3210,6 @@ mod lock_protocol_test {
         }
     }
 
-    #[cfg(not(feature = "experimental-api-5"))]
     #[test]
     fn exclusive_writer_opens_exclude_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();
@@ -3229,7 +3227,6 @@ mod lock_protocol_test {
         }
     }
 
-    #[cfg(not(feature = "experimental-api-5"))]
     #[test]
     fn each_whole_file_reader_excludes_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();
@@ -3249,7 +3246,6 @@ mod lock_protocol_test {
     /// such a version, which takes it exclusive, is excluded while one is open, and excludes one.
     /// A reader of 4.0 to 4.2 holds it shared as well, so it is admitted beside a shared-mode
     /// reader, as it is beside a whole-file reader.
-    #[cfg(not(feature = "experimental-api-5"))]
     #[test]
     fn shared_mode_opens_exclude_older_whole_file_writers() {
         let tmpfile = crate::create_tempfile();

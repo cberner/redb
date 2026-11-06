@@ -2218,8 +2218,7 @@ impl RepairSession {
 /// locks the whole file, and is excluded by one. A read-only handle of redb 4.0 to 4.2 holds that
 /// lock shared, and on Linux, where it is a separate lock from the byte-range locks, is not
 /// excluded by a writer in either mode: it must not be opened on a database such a writer has
-/// open, since it reads a snapshot the writer may reuse. Under the `experimental-api-5` feature
-/// the whole-file lock is not taken in any mode, and no version before 4.3 is excluded.
+/// open, since it reads a snapshot the writer may reuse.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub enum ConcurrencyMode {
