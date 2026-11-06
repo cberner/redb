@@ -37,8 +37,6 @@
 * Behind the `experimental-api-5` feature flag, `Range` and `MultimapRange` keep the table
   borrowed until they are dropped, rather than until their last use. Mutating the table while a
   range over it is still in scope, which could panic, no longer compiles.
-* Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
-  alone, rather than also with the whole-file lock earlier versions take.
 * Under the `experimental-api-5` feature flag, `Builder::create_file()` is removed; use
   `Builder::create_with_backend(FileBackend::new(file))` instead.
 * Under the `experimental-api-5` feature flag, `FileBackend::new()` returns `FileBackend` instead
