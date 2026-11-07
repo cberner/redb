@@ -938,6 +938,15 @@ impl RawBtree {
         Ok(self.root.map_or(0, |x| x.length))
     }
 
+    /// Iterate every entry, yielding the stored key/value bytes in stored order.
+    ///
+    /// The order is the one produced by the table's typed comparator, which is
+    /// not necessarily byte order; callers that need key ordering must decode
+    /// the bytes themselves.
+    pub(crate) fn iter(&self) -> RawIter<'_> {
+        RawIter::new(self)
+    }
+
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some(header) = self.root {
             let mut visited = Vec::new();
@@ -1294,6 +1303,100 @@ pub(super) fn btree_stats(
             metadata_bytes: 0,
             fragmented_bytes: 0,
         })
+    }
+}
+
+/// Lazy iterator over the raw key/value bytes of a [`RawBtree`].
+///
+/// Pages are fetched on demand and the current leaf's entries are copied into
+/// the iterator's buffer, so no page guard outlives a `next()` call.
+pub(crate) struct RawIter<'a> {
+    mem: &'a PageResolver,
+    hint: PageHint,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    /// Branch pages being walked, each paired with the index of its next child.
+    stack: Vec<(PageNumber, usize)>,
+    buffer: Vec<(Vec<u8>, Vec<u8>)>,
+    position: usize,
+}
+
+impl<'a> RawIter<'a> {
+    fn new(btree: &'a RawBtree) -> Self {
+        let stack = match btree.root {
+            Some(header) => vec![(header.root, 0)],
+            None => Vec::new(),
+        };
+        Self {
+            mem: &btree.mem,
+            hint: btree.hint,
+            fixed_key_size: btree.fixed_key_size,
+            fixed_value_size: btree.fixed_value_size,
+            stack,
+            buffer: Vec::new(),
+            position: 0,
+        }
+    }
+
+    /// Walks to the next leaf and buffers its entries. Returns false at the end.
+    fn buffer_next_leaf(&mut self) -> Result<bool> {
+        while let Some((page_number, mut next_child)) = self.stack.pop() {
+            let page = self.mem.get_page(page_number, self.hint)?;
+            match page.memory()[0] {
+                LEAF => {
+                    let accessor = LeafAccessor::new(
+                        page.memory(),
+                        self.fixed_key_size,
+                        self.fixed_value_size,
+                    );
+                    self.buffer.clear();
+                    self.position = 0;
+                    for index in 0..accessor.num_pairs() {
+                        if let Some(entry) = accessor.entry(index) {
+                            self.buffer
+                                .push((entry.key().to_vec(), entry.value().to_vec()));
+                        }
+                    }
+                    return Ok(true);
+                }
+                BRANCH => {
+                    let accessor = BranchAccessor::new(&page, self.fixed_key_size);
+                    if next_child < accessor.count_children() {
+                        let child = accessor.child_page(next_child);
+                        next_child += 1;
+                        // Resume this branch after the child completes.
+                        self.stack.push((page_number, next_child));
+                        if let Some(child) = child {
+                            self.stack.push((child, 0));
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok(false)
+    }
+}
+
+impl Iterator for RawIter<'_> {
+    type Item = Result<(Vec<u8>, Vec<u8>)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.position < self.buffer.len() {
+                let entry = self.buffer[self.position].clone();
+                self.position += 1;
+                return Some(Ok(entry));
+            }
+            match self.buffer_next_leaf() {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(error) => {
+                    self.stack.clear();
+                    return Some(Err(error));
+                }
+            }
+        }
     }
 }
 
