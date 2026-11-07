@@ -2219,7 +2219,8 @@ impl RepairSession {
 /// lock shared, and on Linux, where it is a separate lock from the byte-range locks, is not
 /// excluded by a writer in either mode: it must not be opened on a database such a writer has
 /// open, since it reads a snapshot the writer may reuse. Under the `experimental-api-5` feature
-/// the whole-file lock is not taken in any mode, and no version before 4.3 is excluded.
+/// the whole-file lock is not held, and on Linux only an `ExclusiveWriter` writer detects a version
+/// before 4.3.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub enum ConcurrencyMode {

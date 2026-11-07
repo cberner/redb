@@ -3273,6 +3273,71 @@ mod lock_protocol_test {
         }
     }
 
+    /// Whether flock and range locks are independent here, as on a local filesystem
+    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    fn flock_is_separate_from_ranges(path: &Path) -> bool {
+        use crate::db::{BACKEND_LOCK_RANGE, byte_range};
+
+        let holder = reopen(path);
+        holder.try_lock().unwrap();
+        let separate = matches!(
+            reopen(path).query_lock(byte_range(BACKEND_LOCK_RANGE.start)),
+            Ok(false)
+        );
+        holder.unlock().unwrap();
+        separate
+    }
+
+    /// An exclusive writer is refused by an older redb's flock, and holds none itself
+    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[test]
+    fn an_exclusive_writer_open_is_refused_by_an_older_whole_file_lock() {
+        let tmpfile = crate::create_tempfile();
+        if !flock_is_separate_from_ranges(tmpfile.path()) {
+            return;
+        }
+        let older = reopen(tmpfile.path());
+        for older_shared in [false, true] {
+            if older_shared {
+                older.try_lock_shared().unwrap();
+            } else {
+                older.try_lock().unwrap();
+            }
+            assert!(refused(exclusive_writer(tmpfile.path(), false)));
+            older.unlock().unwrap();
+        }
+
+        let storage = exclusive_writer(tmpfile.path(), false).unwrap();
+        older.try_lock().unwrap();
+        older.unlock().unwrap();
+        storage.close().unwrap();
+    }
+
+    /// Only an exclusive writer checks
+    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[test]
+    fn other_opens_do_not_check_for_a_whole_file_lock() {
+        let tmpfile = crate::create_tempfile();
+        if !flock_is_separate_from_ranges(tmpfile.path()) {
+            return;
+        }
+        let older = reopen(tmpfile.path());
+        older.try_lock().unwrap();
+        for (mode, read_only) in [
+            (ConcurrencyMode::ExclusiveWriter, true),
+            (ConcurrencyMode::SingleWriter, false),
+            (ConcurrencyMode::SingleWriter, true),
+            (ConcurrencyMode::MultiWriter, false),
+            (ConcurrencyMode::MultiWriter, true),
+        ] {
+            open(tmpfile.path(), read_only, mode)
+                .unwrap()
+                .close()
+                .unwrap();
+        }
+        older.unlock().unwrap();
+    }
+
     /// Only a multi-writer cohort admits a second writer, and every mode byte is free again once
     /// its holder closes
     #[test]

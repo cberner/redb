@@ -1,12 +1,14 @@
 use crate::BackendError;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::DatabaseError;
+#[cfg(any(windows, target_os = "linux", all(test, target_vendor = "apple")))]
+use crate::db::BACKEND_LOCK_RANGE;
 #[cfg(any(
     windows,
     all(test, any(target_os = "linux", target_vendor = "apple")),
     all(target_os = "linux", not(feature = "experimental-api-5"))
 ))]
-use crate::db::{BACKEND_LOCK_RANGE, byte_range};
+use crate::db::byte_range;
 #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
 use crate::db::{SHARED_READER_BYTE, SHARED_WRITER_BYTE};
 use crate::{Result, StorageBackend};
@@ -30,8 +32,8 @@ fn is_whole_storage(range: (Bound<u64>, Bound<u64>)) -> bool {
 }
 
 // The suffix an exclusive-writer open takes, which stands for the whole-file lock of redb before
-// 4.3 in the mode of the open
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
+// 4.3 in the mode of the open. It is the first range such an open takes.
+#[cfg(target_os = "linux")]
 const LEGACY_WRITER_RANGE: (Bound<u64>, Bound<u64>) =
     (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
 
@@ -139,9 +141,24 @@ impl FileBackend {
         Ok(true)
     }
 
+    // Not held, since on NFS a held flock covers every byte. Called before the first range, so the
+    // release cannot drop any of this open's locks.
+    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    fn whole_file_locked_elsewhere(&self) -> io::Result<bool> {
+        match self.file.try_lock() {
+            Ok(()) => self.file.unlock().map(|()| false),
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(_)) => Ok(false),
+        }
+    }
+
     fn try_lock(&self, range: (Bound<u64>, Bound<u64>), shared: bool) -> io::Result<bool> {
         #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
         if needs_legacy_lock(range) && !self.lock_legacy_file(legacy_lock_shared(range, shared))? {
+            return Ok(false);
+        }
+        #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+        if range == LEGACY_WRITER_RANGE && !shared && self.whole_file_locked_elsewhere()? {
             return Ok(false);
         }
 
