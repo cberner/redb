@@ -836,6 +836,15 @@ impl ReadableTableMetadata for ReadOnlyUntypedTable {
 }
 
 impl ReadOnlyUntypedTable {
+    /// Iterate every entry, yielding the stored key and value bytes.
+    ///
+    /// Order is the table's stored (typed comparator) order, which is not
+    /// necessarily byte order. Each item is copied out of the page, so the
+    /// iterator does not keep page guards alive between calls.
+    pub fn iter(&self) -> impl Iterator<Item = Result<(Vec<u8>, Vec<u8>)>> + '_ {
+        self.tree.iter()
+    }
+
     pub(crate) fn new(
         name: &str,
         root_page: Option<BtreeHeader>,

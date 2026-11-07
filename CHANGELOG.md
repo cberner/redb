@@ -63,6 +63,10 @@
   bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
   of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
   copying it into a new table. The file format is unchanged.
+* Add `ReadOnlyUntypedTable::iter()`, which yields the stored key and value bytes of a table
+  in stored order. Tools that open a database at runtime, such as browsers, can now read tables
+  whose key/value types are not known at compile time, including tuples and nested types,
+  without instantiating a reader per type combination.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
