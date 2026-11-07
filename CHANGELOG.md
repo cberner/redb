@@ -7,7 +7,8 @@
   and everything that opens a database from a path or a `File` are unavailable in that mode, as is
   `ReadOnlyDatabase`; storage is supplied through `Builder::create_with_backend()`, and
   `StorageBackend` reports failures as `redb::io::Error`; the `io` module is public whenever
-  `experimental-api-5` is enabled, and with std it re-exports `std::io::Error`. The `cache_metrics`,
+  `experimental-api-5` is enabled, and with std it re-exports `std::io::Error`; without std, its
+  methods match their `std::io::Error` namesakes, and `other()` wraps any error. The `cache_metrics`,
   `chrono_v0_4` and `uuid` features are unavailable there: the first needs 64-bit atomics, and the
   other two link against the standard library. Leaving `experimental-api-5` off keeps the std build
   regardless of the `std` feature, as before.
