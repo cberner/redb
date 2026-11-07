@@ -38,7 +38,8 @@
   borrowed until they are dropped, rather than until their last use. Mutating the table while a
   range over it is still in scope, which could panic, no longer compiles.
 * Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
-  alone, rather than also with the whole-file lock earlier versions take.
+  alone, rather than also with the whole-file lock earlier versions take. On Linux, do not use redb
+  4.2 or earlier on a database that redb 5 has open: only an `ExclusiveWriter` writer detects them.
 * Under the `experimental-api-5` feature flag, `Builder::create_file()` is removed; use
   `Builder::create_with_backend(FileBackend::new(file))` instead.
 * Under the `experimental-api-5` feature flag, `FileBackend::new()` returns `FileBackend` instead
