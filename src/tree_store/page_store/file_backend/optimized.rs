@@ -656,10 +656,7 @@ mod range_lock_tests {
                 Self::Exclusive => backend.try_lock_range(range.0, range.1),
                 Self::Shared => backend.try_lock_shared_range(range.0, range.1),
             }
-            .map_err(|err| match err {
-                crate::BackendError::Io(err) => err,
-                crate::BackendError::Unsupported => io::ErrorKind::Unsupported.into(),
-            })
+            .map_err(io::Error::from)
         }
     }
 
