@@ -43,6 +43,8 @@
 ### New features
 * Add `Legacy<T>`, which is `T` without the niche it declares, for opening tables written before
   `T` declared one.
+* Add `BackendError::Other`, for a storage backend failure that is not an `io::Error`. It is
+  reported as `StorageError::Backend` and `Error::Backend`.
 * Turning off the `std` feature builds redb as a `no_std` crate, for embedded targets. It requires
   `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above, but
   not Cortex-M0. Storage is supplied through `Builder::create_with_backend()`; the file backend,

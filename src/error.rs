@@ -14,8 +14,24 @@ use core::panic;
 pub enum BackendError {
     /// The underlying storage operation failed.
     Io(io::Error),
+    /// The backend failed with an error that is not an I/O error.
+    Other(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support the requested operation.
     Unsupported,
+}
+
+impl BackendError {
+    // An I/O error wrapped in Other is unwrapped, so that it is matched as one
+    fn normalize(self) -> Self {
+        #[cfg(not(redb_no_std))]
+        if let Self::Other(err) = self {
+            return match err.downcast::<std::io::Error>() {
+                Ok(err) => Self::Io(*err),
+                Err(err) => Self::Other(err),
+            };
+        }
+        self
+    }
 }
 
 impl From<io::Error> for BackendError {
@@ -31,8 +47,9 @@ impl From<io::Error> for BackendError {
 
 impl From<BackendError> for io::Error {
     fn from(err: BackendError) -> Self {
-        match err {
+        match err.normalize() {
             BackendError::Io(err) => err,
+            BackendError::Other(err) => io::Error::other(err),
             BackendError::Unsupported => {
                 io::unsupported("the storage backend does not support this operation")
             }
@@ -50,6 +67,7 @@ impl Display for BackendError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Other(err) => write!(f, "Storage backend error: {err}"),
             Self::Unsupported => f.write_str("The storage backend does not support this operation"),
         }
     }
@@ -59,6 +77,7 @@ impl core::error::Error for BackendError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
+            Self::Other(err) => Some(&**err),
             Self::Unsupported => None,
         }
     }
@@ -73,6 +92,8 @@ pub enum StorageError {
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     Io(io::Error),
+    /// The storage backend failed with an error that is not an I/O error.
+    Backend(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support a required storage operation.
     Unsupported,
     PreviousIo,
@@ -108,8 +129,9 @@ impl From<io::Error> for StorageError {
 
 impl From<BackendError> for StorageError {
     fn from(err: BackendError) -> Self {
-        match err {
+        match err.normalize() {
             BackendError::Io(err) => Self::Io(err),
+            BackendError::Other(err) => Self::Backend(err),
             BackendError::Unsupported => Self::Unsupported,
         }
     }
@@ -121,6 +143,7 @@ impl From<StorageError> for Error {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
             StorageError::Io(x) => Error::Io(x),
+            StorageError::Backend(x) => Error::Backend(x),
             StorageError::Unsupported => Error::Unsupported,
             StorageError::PreviousIo => Error::PreviousIo,
             StorageError::DatabaseClosed => Error::DatabaseClosed,
@@ -144,6 +167,9 @@ impl Display for StorageError {
             }
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
+            }
+            StorageError::Backend(err) => {
+                write!(f, "Storage backend error: {err}")
             }
             StorageError::Unsupported => BackendError::Unsupported.fmt(f),
             StorageError::DatabaseClosed => {
@@ -757,6 +783,8 @@ pub enum Error {
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     Io(io::Error),
+    /// The storage backend failed with an error that is not an I/O error.
+    Backend(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support a required storage operation.
     Unsupported,
     DatabaseClosed,
@@ -859,6 +887,9 @@ impl Display for Error {
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
+            Error::Backend(err) => {
+                write!(f, "Storage backend error: {err}")
+            }
             Error::DatabaseClosed => {
                 write!(f, "Database has been closed")
             }
@@ -933,3 +964,46 @@ impl Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod test {
+    use super::{BackendError, Error, StorageError};
+    use alloc::boxed::Box;
+    use alloc::string::ToString;
+    use core::fmt::{Display, Formatter};
+
+    #[derive(Debug)]
+    struct FlashError;
+
+    impl Display for FlashError {
+        fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+            f.write_str("flash write failed")
+        }
+    }
+
+    impl core::error::Error for FlashError {}
+
+    #[test]
+    fn other_is_reported_as_a_backend_error() {
+        let err = StorageError::from(BackendError::Other(Box::new(FlashError)));
+        assert_eq!(err.to_string(), "Storage backend error: flash write failed");
+        let Error::Backend(inner) = Error::from(err) else {
+            panic!("not a backend error");
+        };
+        assert!(inner.is::<FlashError>());
+    }
+
+    // However the backend wrapped it, an io::Error is reported as one
+    #[cfg(not(redb_no_std))]
+    #[test]
+    fn other_holding_an_io_error_is_an_io_error() {
+        use std::io::ErrorKind;
+
+        let other = || BackendError::Other(Box::new(std::io::Error::from(ErrorKind::NotFound)));
+        assert!(matches!(
+            StorageError::from(other()),
+            StorageError::Io(err) if err.kind() == ErrorKind::NotFound
+        ));
+        assert_eq!(std::io::Error::from(other()).kind(), ErrorKind::NotFound);
+    }
+}
