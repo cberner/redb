@@ -92,10 +92,17 @@ pub use multimap_table::{
     ReadOnlyMultimapTable, ReadOnlyUntypedMultimapTable, ReadableMultimapTable,
 };
 pub use table::{
-    Cursor, CursorMut, Entry, ExtractIf, OccupiedEntry, OwnedAccessGuard, OwnedRange, Range,
-    ReadOnlyTable, ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats,
-    VacantEntry,
+    Cursor, CursorMut, Entry, ExtractIf, OwnedAccessGuard, OwnedRange, Range, ReadOnlyTable,
+    ReadOnlyUntypedTable, ReadableTable, ReadableTableMetadata, Table, TableStats,
 };
+#[cfg(feature = "experimental-api-5")]
+pub use table::{OccupiedEntry, VacantEntry};
+/// A view into an occupied entry in a [`Table`]. It is part of the [`Entry`] enum.
+#[cfg(not(feature = "experimental-api-5"))]
+pub type OccupiedEntry<'a, K, V> = table::OccupiedEntry<'a, 'a, K, V>;
+/// A view into a vacant entry in a [`Table`]. It is part of the [`Entry`] enum.
+#[cfg(not(feature = "experimental-api-5"))]
+pub type VacantEntry<'a, K, V> = table::VacantEntry<'a, 'a, K, V>;
 pub use transactions::{DatabaseStats, Durability, ReadTransaction, WriteTransaction};
 pub use tree_store::{AccessGuard, AccessGuardMut, AccessGuardMutInPlace, Savepoint};
 pub use types::{Key, MutInPlaceValue, TypeName, Value};

@@ -2065,10 +2065,8 @@ fn entry_or_insert() {
 
 #[test]
 fn entry_borrowed_key() {
-    // Exercises the ergonomics of `entry()` with a borrowed key type (`&[u8]`).
-    // The single `'a` lifetime on `entry<'a>(&'a mut self, key: K::SelfType<'a>)`
-    // means the key just needs to live across the `entry()` call; it does not need
-    // to outlive the table.
+    // Exercises the ergonomics of `entry()` with a borrowed key type (`&[u8]`). The key just
+    // needs to live across the `entry()` call; it does not need to outlive the table.
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
 
@@ -2122,9 +2120,8 @@ fn entry_borrowed_key() {
 
 #[test]
 fn entry_borrowed_key_in_loop() {
-    // Each loop iteration constructs a fresh borrowed key whose lifetime is bounded
-    // by the iteration. Without a single-lifetime API, the borrow checker would
-    // complain that the key does not outlive the table.
+    // Each loop iteration constructs a fresh borrowed key whose lifetime is bounded by the
+    // iteration, and does not outlive the table.
     let tmpfile = create_tempfile();
     let db = Database::create(tmpfile.path()).unwrap();
     let inputs: Vec<Vec<u8>> = (0..5u8).map(|i| vec![i, i + 1, i + 2]).collect();
@@ -2151,6 +2148,66 @@ fn entry_borrowed_key_in_loop() {
             &[i as u8]
         );
     }
+}
+
+// The key has its own lifetime, so the guard an entry returns can outlive the key
+#[cfg(feature = "experimental-api-5")]
+#[test]
+fn entry_guard_outlives_key() {
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        let mut guard = {
+            let key = String::from("key");
+            table
+                .entry(key.as_str())
+                .unwrap()
+                .or_insert("first")
+                .unwrap()
+        };
+        guard.insert("second").unwrap();
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(STR_TABLE).unwrap();
+    assert_eq!(table.get("key").unwrap().unwrap().value(), "second");
+}
+
+// Generic code can call entry() repeatedly with keys whose lifetime is unrelated to the table
+// borrow
+#[cfg(feature = "experimental-api-5")]
+#[test]
+fn entry_in_generic_code() {
+    fn count<'k, K: Key + 'static>(
+        table: &mut redb::Table<K, u64>,
+        keys: impl IntoIterator<Item = K::SelfType<'k>>,
+    ) {
+        for key in keys {
+            let mut guard = table.entry(key).unwrap().or_insert(0).unwrap();
+            let next = guard.value() + 1;
+            guard.insert(next).unwrap();
+        }
+    }
+
+    const COUNTS: TableDefinition<&str, u64> = TableDefinition::new("counts");
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(COUNTS).unwrap();
+        count::<&str>(&mut table, ["a", "b", "a"]);
+    }
+    write_txn.commit().unwrap();
+
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(COUNTS).unwrap();
+    assert_eq!(table.get("a").unwrap().unwrap().value(), 2);
+    assert_eq!(table.get("b").unwrap().unwrap().value(), 1);
 }
 
 #[test]

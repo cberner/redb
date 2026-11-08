@@ -432,6 +432,30 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     ///
     /// This is analogous to [`std::collections::BTreeMap::entry`], and avoids the double
     /// lookup that a `get` followed by `insert` would require when updating a value.
+    #[cfg(feature = "experimental-api-5")]
+    pub fn entry<'a, 'k>(&'a mut self, key: K::SelfType<'k>) -> Result<Entry<'a, 'k, K, V>> {
+        let key_len = K::as_bytes(&key).as_ref().len();
+        if key_len > MAX_VALUE_LENGTH {
+            return Err(StorageError::ValueTooLarge(key_len));
+        }
+        if self.tree.get(&key)?.is_some() {
+            Ok(Entry::Occupied(OccupiedEntry {
+                tree: &mut self.tree,
+                key,
+            }))
+        } else {
+            Ok(Entry::Vacant(VacantEntry {
+                tree: &mut self.tree,
+                key,
+            }))
+        }
+    }
+
+    /// Gets the given key's corresponding entry in the table for in-place manipulation.
+    ///
+    /// This is analogous to [`std::collections::BTreeMap::entry`], and avoids the double
+    /// lookup that a `get` followed by `insert` would require when updating a value.
+    #[cfg(not(feature = "experimental-api-5"))]
     pub fn entry<'a>(&'a mut self, key: K::SelfType<'a>) -> Result<Entry<'a, K, V>> {
         let key_len = K::as_bytes(&key).as_ref().len();
         if key_len > MAX_VALUE_LENGTH {
@@ -1284,16 +1308,18 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for OwnedRange<K,
 /// produce a "reference to the value" return an [`AccessGuardMut`] instead of `&mut V`.
 ///
 /// [`entry`]: Table::entry
-pub enum Entry<'a, K: Key + 'static, V: Value + 'static> {
+#[cfg(feature = "experimental-api-5")]
+pub enum Entry<'a, 'k, K: Key + 'static, V: Value + 'static> {
     /// An occupied entry.
-    Occupied(OccupiedEntry<'a, K, V>),
+    Occupied(OccupiedEntry<'a, 'k, K, V>),
     /// A vacant entry.
-    Vacant(VacantEntry<'a, K, V>),
+    Vacant(VacantEntry<'a, 'k, K, V>),
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
+#[cfg(feature = "experimental-api-5")]
+impl<'a, 'k, K: Key + 'static, V: Value + 'static> Entry<'a, 'k, K, V> {
     /// Returns a view of this entry's key.
-    pub fn key(&self) -> &K::SelfType<'a> {
+    pub fn key(&self) -> &K::SelfType<'k> {
         match self {
             Entry::Occupied(entry) => entry.key(),
             Entry::Vacant(entry) => entry.key(),
@@ -1332,7 +1358,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
     /// function, which is given a view of the key.
     pub fn or_insert_with_key<'v, F, B>(self, default: F) -> Result<AccessGuardMut<'a, V>>
     where
-        F: FnOnce(&K::SelfType<'a>) -> B,
+        F: FnOnce(&K::SelfType<'k>) -> B,
         B: Borrow<V::SelfType<'v>>,
     {
         match self {
@@ -1366,15 +1392,117 @@ impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
     }
 }
 
-/// A view into an occupied entry in a [`Table`]. It is part of the [`Entry`] enum.
-pub struct OccupiedEntry<'a, K: Key + 'static, V: Value + 'static> {
-    tree: &'a mut BtreeMut<K, V>,
-    key: K::SelfType<'a>,
+// The 4.x form of Entry, in which the key shares the lifetime of the table borrow
+#[cfg(not(feature = "experimental-api-5"))]
+mod entry_api4 {
+    use super::{AccessGuardMut, Borrow, Key, Result, Value};
+    use crate::{OccupiedEntry, VacantEntry};
+
+    /// A view into a single entry in a [`Table`], which may either be vacant or occupied.
+    ///
+    /// This `enum` is constructed from the [`entry`] method on [`Table`], and mirrors
+    /// [`std::collections::btree_map::Entry`] as closely as the redb data model allows.
+    ///
+    /// Unlike the in-memory `BTreeMap`, redb values are stored serialized, so methods that
+    /// produce a "reference to the value" return an [`AccessGuardMut`] instead of `&mut V`.
+    ///
+    /// [`entry`]: super::Table::entry
+    /// [`Table`]: super::Table
+    pub enum Entry<'a, K: Key + 'static, V: Value + 'static> {
+        /// An occupied entry.
+        Occupied(OccupiedEntry<'a, K, V>),
+        /// A vacant entry.
+        Vacant(VacantEntry<'a, K, V>),
+    }
+
+    impl<'a, K: Key + 'static, V: Value + 'static> Entry<'a, K, V> {
+        /// Returns a view of this entry's key.
+        pub fn key(&self) -> &K::SelfType<'a> {
+            match self {
+                Entry::Occupied(entry) => entry.key(),
+                Entry::Vacant(entry) => entry.key(),
+            }
+        }
+
+        /// Ensures a value is in the entry by inserting the provided `default` if empty,
+        /// and returns a mutable accessor to the value in the entry.
+        pub fn or_insert<'v>(
+            self,
+            default: impl Borrow<V::SelfType<'v>>,
+        ) -> Result<AccessGuardMut<'a, V>> {
+            match self {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(default),
+            }
+        }
+
+        /// Ensures a value is in the entry by inserting the result of `default` if empty,
+        /// and returns a mutable accessor to the value in the entry.
+        ///
+        /// Unlike [`or_insert`](Self::or_insert), the default value is only computed if the
+        /// entry is vacant.
+        pub fn or_insert_with<'v, F, B>(self, default: F) -> Result<AccessGuardMut<'a, V>>
+        where
+            F: FnOnce() -> B,
+            B: Borrow<V::SelfType<'v>>,
+        {
+            match self {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(default()),
+            }
+        }
+
+        /// Ensures a value is in the entry by inserting, if empty, the result of the `default`
+        /// function, which is given a view of the key.
+        pub fn or_insert_with_key<'v, F, B>(self, default: F) -> Result<AccessGuardMut<'a, V>>
+        where
+            F: FnOnce(&K::SelfType<'a>) -> B,
+            B: Borrow<V::SelfType<'v>>,
+        {
+            match self {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let value = default(&entry.key);
+                    entry.insert(value)
+                }
+            }
+        }
+
+        /// Provides in-place mutable access to an occupied entry before any potential inserts
+        /// into the table.
+        ///
+        /// The closure receives an [`AccessGuardMut`] and may replace the stored value via
+        /// [`AccessGuardMut::insert`]. Any errors returned by the closure are propagated.
+        pub fn and_modify<F>(self, f: F) -> Result<Self>
+        where
+            F: FnOnce(&mut AccessGuardMut<'_, V>) -> Result<()>,
+        {
+            match self {
+                Entry::Occupied(mut entry) => {
+                    {
+                        let mut guard = entry.get_mut()?;
+                        f(&mut guard)?;
+                    }
+                    Ok(Entry::Occupied(entry))
+                }
+                Entry::Vacant(entry) => Ok(Entry::Vacant(entry)),
+            }
+        }
+    }
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
+#[cfg(not(feature = "experimental-api-5"))]
+pub use entry_api4::Entry;
+
+/// A view into an occupied entry in a [`Table`]. It is part of the [`Entry`] enum.
+pub struct OccupiedEntry<'a, 'k, K: Key + 'static, V: Value + 'static> {
+    tree: &'a mut BtreeMut<K, V>,
+    key: K::SelfType<'k>,
+}
+
+impl<'a, 'k, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, 'k, K, V> {
     /// Returns a view of this entry's key.
-    pub fn key(&self) -> &K::SelfType<'a> {
+    pub fn key(&self) -> &K::SelfType<'k> {
         &self.key
     }
 
@@ -1436,7 +1564,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
     }
 
     /// Takes the entry out of the table, returning the key and the value.
-    pub fn remove_entry(self) -> Result<(K::SelfType<'a>, AccessGuard<'a, V>)> {
+    pub fn remove_entry(self) -> Result<(K::SelfType<'k>, AccessGuard<'a, V>)> {
         let OccupiedEntry { tree, key } = self;
         let value = tree.remove(&key)?.ok_or_else(|| {
             StorageError::Corrupted(
@@ -1448,19 +1576,19 @@ impl<'a, K: Key + 'static, V: Value + 'static> OccupiedEntry<'a, K, V> {
 }
 
 /// A view into a vacant entry in a [`Table`]. It is part of the [`Entry`] enum.
-pub struct VacantEntry<'a, K: Key + 'static, V: Value + 'static> {
+pub struct VacantEntry<'a, 'k, K: Key + 'static, V: Value + 'static> {
     tree: &'a mut BtreeMut<K, V>,
-    key: K::SelfType<'a>,
+    key: K::SelfType<'k>,
 }
 
-impl<'a, K: Key + 'static, V: Value + 'static> VacantEntry<'a, K, V> {
+impl<'a, 'k, K: Key + 'static, V: Value + 'static> VacantEntry<'a, 'k, K, V> {
     /// Returns a view of this entry's key.
-    pub fn key(&self) -> &K::SelfType<'a> {
+    pub fn key(&self) -> &K::SelfType<'k> {
         &self.key
     }
 
     /// Consumes the entry and returns the key that was used to construct it.
-    pub fn into_key(self) -> K::SelfType<'a> {
+    pub fn into_key(self) -> K::SelfType<'k> {
         self.key
     }
 
