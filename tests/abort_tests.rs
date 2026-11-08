@@ -1,3 +1,6 @@
+// Converting into BackendIoError is the identity without experimental-api-5
+#![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+
 #[cfg(feature = "experimental-api-5")]
 use redb::ReadableTable;
 use redb::backends::InMemoryBackend;
@@ -5,6 +8,12 @@ use redb::{Database, Durability, ReadableDatabase, TableDefinition, WriteTransac
 use redb::{StorageBackend, StorageError, TransactionError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// The error type of StorageBackend's I/O methods
+#[cfg(feature = "experimental-api-5")]
+type BackendIoError = redb::BackendError;
+#[cfg(not(feature = "experimental-api-5"))]
+type BackendIoError = std::io::Error;
 
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -111,26 +120,26 @@ struct TestBackend {
 }
 
 impl StorageBackend for TestBackend {
-    fn len(&self) -> std::io::Result<u64> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> std::io::Result<()> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         self.inner.read(offset, out)
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
         self.inner.write(offset, data)
     }
 
-    fn set_len(&self, len: u64) -> std::io::Result<()> {
+    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
         if len < self.inner.len()? && self.fail_truncate.load(Ordering::SeqCst) {
-            return Err(std::io::Error::other("truncate failed"));
+            return Err(std::io::Error::other("truncate failed").into());
         }
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self) -> std::io::Result<()> {
+    fn sync_data(&self) -> Result<(), BackendIoError> {
         self.inner.sync_data()
     }
 }

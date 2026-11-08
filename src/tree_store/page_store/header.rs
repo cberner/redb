@@ -629,7 +629,7 @@ mod test {
     #[cfg(feature = "experimental-api-5")]
     use crate::ReadableTable;
     use crate::backends::FileBackend;
-    use crate::db::TableDefinition;
+    use crate::db::{BackendIoError, TableDefinition};
     use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
         DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
@@ -643,7 +643,7 @@ mod test {
     use core::mem::size_of;
     use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
     use std::fs::OpenOptions;
-    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom, Write};
+    use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 
     const X: TableDefinition<&str, &str> = TableDefinition::new("x");
 
@@ -693,7 +693,8 @@ mod test {
             &self,
             header: &[u8; DB_HEADER_SIZE],
         ) -> Result<(), std::io::Error> {
-            self.inner.write(0, header)
+            self.inner.write(0, header)?;
+            Ok(())
         }
 
         fn fail_after_primary_swap(&self) -> Result<(), std::io::Error> {
@@ -767,32 +768,32 @@ mod test {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             self.fail_if_armed()?;
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             self.fail_if_armed()?;
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
             self.fail_if_armed()?;
             self.inner.write(offset, data)?;
             self.arm_failure_if_primary_swapped(offset, data);
             Ok(())
         }
 
-        fn close(&self) -> Result<(), Error> {
+        fn close(&self) -> Result<(), BackendIoError> {
             self.inner.close()
         }
     }
@@ -1345,7 +1346,7 @@ mod test {
     }
 
     impl StorageBackend for LenOverrideBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             let fake = self.fake_len.load(core::sync::atomic::Ordering::Acquire);
             if fake == 0 {
                 Ok(self.data.lock().unwrap().len() as u64)
@@ -1354,7 +1355,7 @@ mod test {
             }
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             let data = self.data.lock().unwrap();
             let offset = usize::try_from(offset).unwrap();
             for (i, b) in out.iter_mut().enumerate() {
@@ -1363,7 +1364,7 @@ mod test {
             Ok(())
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             self.data
                 .lock()
                 .unwrap()
@@ -1371,11 +1372,11 @@ mod test {
             Ok(())
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             Ok(())
         }
 
-        fn write(&self, offset: u64, src: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, src: &[u8]) -> Result<(), BackendIoError> {
             let mut data = self.data.lock().unwrap();
             let offset = usize::try_from(offset).unwrap();
             if offset + src.len() > data.len() {

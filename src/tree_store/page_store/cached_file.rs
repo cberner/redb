@@ -1010,6 +1010,7 @@ impl PagedCachedFile {
 mod test {
     use crate::StorageBackend;
     use crate::backends::InMemoryBackend;
+    use crate::db::BackendIoError;
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use alloc::sync::Arc;
@@ -1039,26 +1040,28 @@ mod test {
     }
 
     impl StorageBackend for CountingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        // The conversion is the identity without experimental-api-5
+        #[cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             if self.fail_truncate && len < self.inner.len()? {
-                return Err(std::io::Error::other("truncate failed"));
+                return Err(std::io::Error::other("truncate failed").into());
             }
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             self.inner.write(offset, data)
         }

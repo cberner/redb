@@ -19,6 +19,8 @@
 * `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` have no default
   implementation, so implementations of `ReadableTable` must provide them.
 * `ReadableDatabase` is sealed, and can no longer be implemented outside of redb.
+* The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
+  methods already do. `?` still converts an `io::Error`.
 * `Range` and `MultimapRange` keep the table borrowed until they are dropped, rather than until
   their last use. Mutating the table while a range over it is still in scope, which could panic,
   no longer compiles.
@@ -45,8 +47,8 @@
   `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above, but
   not Cortex-M0. Storage is supplied through `Builder::create_with_backend()`; the file backend,
   `ReadOnlyDatabase`, and everything that opens a database from a path or a `File` are
-  unavailable. `StorageBackend` reports failures as `redb::io::Error`, which is `std::io::Error`
-  with std, and without it a stand-in whose methods match their `std::io::Error` namesakes. The
+  unavailable. `BackendError::Io` holds a `redb::io::Error`, which is `std::io::Error` with
+  std, and without it a stand-in whose methods match their `std::io::Error` namesakes. The
   `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
   atomics.
 

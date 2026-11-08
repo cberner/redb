@@ -3595,7 +3595,7 @@ mod lock_protocol_test {
 mod lock_failure_test {
     use super::TransactionalMemory;
     use crate::db::{
-        BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
+        BACKEND_LOCK_RANGE, BackendIoError, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
         PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
     };
     use crate::io;
@@ -3758,7 +3758,7 @@ mod lock_failure_test {
             self.querying.result()
         }
 
-        fn close(&self) -> Result<(), io::Error> {
+        fn close(&self) -> Result<(), BackendIoError> {
             assert!(!self.closed.swap(true, Ordering::AcqRel), "closed twice");
             for range in self.held.lock().unwrap().drain(..) {
                 self.released.lock().unwrap().push(range);
@@ -3767,23 +3767,23 @@ mod lock_failure_test {
             Ok(())
         }
 
-        fn len(&self) -> Result<u64, io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
             self.inner.write(offset, data)
         }
     }

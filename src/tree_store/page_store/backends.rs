@@ -1,9 +1,8 @@
 #[cfg(not(redb_no_std))]
 use crate::BackendError;
 use crate::StorageBackend;
+use crate::db::BackendIoError;
 use crate::io;
-#[cfg(not(redb_no_std))]
-use crate::io::Error;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
@@ -55,27 +54,27 @@ impl StorageBackend for ReadOnlyBackend {
         self.inner.query_lock_range(start, end)
     }
 
-    fn len(&self) -> Result<u64, Error> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, _len: u64) -> Result<(), Error> {
+    fn set_len(&self, _len: u64) -> Result<(), BackendIoError> {
         unreachable!()
     }
 
-    fn sync_data(&self) -> Result<(), Error> {
+    fn sync_data(&self) -> Result<(), BackendIoError> {
         unreachable!()
     }
 
-    fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+    fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendIoError> {
         unreachable!()
     }
 
-    fn close(&self) -> Result<(), Error> {
+    fn close(&self) -> Result<(), BackendIoError> {
         self.inner.close()
     }
 }
@@ -120,41 +119,39 @@ impl InMemoryBackend {
 }
 
 impl StorageBackend for InMemoryBackend {
-    fn len(&self) -> Result<u64, io::Error> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         Ok(self.read().len() as u64)
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         let guard = self.read();
         let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
-        if offset + out.len() <= guard.len() {
-            out.copy_from_slice(&guard[offset..offset + out.len()]);
-            Ok(())
-        } else {
-            Err(Self::out_of_range())
-        }
+        let source = guard
+            .get(offset..offset + out.len())
+            .ok_or_else(Self::out_of_range)?;
+        out.copy_from_slice(source);
+        Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
         let mut guard = self.write();
         let len = usize::try_from(len).map_err(|_| Self::out_of_range())?;
         guard.resize(len, 0);
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), BackendIoError> {
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
         let mut guard = self.write();
         let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
-        if offset + data.len() <= guard.len() {
-            guard[offset..offset + data.len()].copy_from_slice(data);
-            Ok(())
-        } else {
-            Err(Self::out_of_range())
-        }
+        let target = guard
+            .get_mut(offset..offset + data.len())
+            .ok_or_else(Self::out_of_range)?;
+        target.copy_from_slice(data);
+        Ok(())
     }
 }
 
