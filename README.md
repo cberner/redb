@@ -12,7 +12,7 @@ redb is written in pure Rust and is loosely inspired by [lmdb](http://www.lmdb.t
 of copy-on-write B+trees. For more details, see the [design doc](docs/design.md)
 
 ```rust
-use redb::{Database, Error, ReadableDatabase, TableDefinition};
+use redb::{Database, Error, ReadableDatabase, ReadableTable, TableDefinition};
 
 const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
 
@@ -52,8 +52,8 @@ are any future changes to it.
 Turning off the `std` feature, with `experimental-api-5` on, builds redb without the standard
 library. It needs `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3
 and above, but not Cortex-M0. There is no filesystem, so storage is supplied by implementing
-`StorageBackend` and passing it to `Builder::create_with_backend()`. The `cache_metrics`,
-`chrono_v0_4` and `uuid` features are unavailable.
+`StorageBackend` and passing it to `Builder::create_with_backend()`. The `chrono_v0_4` and `uuid`
+features require std, and `cache_metrics` requires a target with 64-bit atomics.
 
 ## Development
 
