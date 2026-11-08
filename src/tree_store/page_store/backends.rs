@@ -1,8 +1,6 @@
-#[cfg(not(redb_no_std))]
 use crate::BackendError;
 use crate::StorageBackend;
 use crate::db::BackendIoError;
-use crate::io;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
@@ -96,8 +94,8 @@ impl Debug for InMemoryBackend {
 }
 
 impl InMemoryBackend {
-    fn out_of_range() -> io::Error {
-        io::invalid_input("Index out-of-range.")
+    fn out_of_range() -> BackendError {
+        BackendError::invalid_input("Index out-of-range.")
     }
 }
 

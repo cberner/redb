@@ -4,7 +4,6 @@ use crate::db::{
     PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE,
     TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
 };
-use crate::io;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
@@ -21,7 +20,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, ScopedBorrow, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
-use crate::{DatabaseError, Result, StorageBackend, StorageError};
+use crate::{BackendError, DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -1160,17 +1159,17 @@ impl TransactionalMemory {
         if initial_storage_len > 0 {
             // File already exists check that the magic number matches
             if magic_number != MAGICNUMBER {
-                return Err(StorageError::Io(io::invalid_data(
+                return Err(BackendError::invalid_data(
                     "Not a redb database: magic number mismatch",
-                ))
+                )
                 .into());
             }
         } else {
             // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
             if !allow_initialize {
-                return Err(StorageError::Io(io::invalid_data(
+                return Err(BackendError::invalid_data(
                     "Database file is empty and creating a new database was not requested",
-                ))
+                )
                 .into());
             }
         }
@@ -3598,7 +3597,6 @@ mod lock_failure_test {
         BACKEND_LOCK_RANGE, BackendIoError, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
         PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
     };
-    use crate::io;
     use crate::sync::Mutex;
     use crate::tree_store::InMemoryBackend;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
@@ -3624,7 +3622,7 @@ mod lock_failure_test {
                 Answer::Acquired => Ok(true),
                 Answer::Refused => Ok(false),
                 Answer::Unsupported => Err(BackendError::Unsupported),
-                Answer::Failed => Err(io::invalid_input("the lock could not be taken").into()),
+                Answer::Failed => Err(BackendError::invalid_input("the lock could not be taken")),
             }
         }
     }
@@ -3716,7 +3714,7 @@ mod lock_failure_test {
         fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
             assert!(!self.closed.load(Ordering::Acquire), "unlock after close");
             if self.fail_unlock {
-                return Err(io::invalid_input("unlock failed").into());
+                return Err(BackendError::invalid_input("unlock failed"));
             }
             let mut held = self.held.lock().unwrap();
             let index = held

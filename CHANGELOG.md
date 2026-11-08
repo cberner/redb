@@ -49,10 +49,9 @@
   `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above, but
   not Cortex-M0. Storage is supplied through `Builder::create_with_backend()`; the file backend,
   `ReadOnlyDatabase`, and everything that opens a database from a path or a `File` are
-  unavailable. `BackendError::Io` holds a `redb::io::Error`, which is `std::io::Error` with
-  std, and without it a stand-in whose methods match their `std::io::Error` namesakes. The
-  `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
-  atomics.
+  unavailable. The `Io` variants of `BackendError`, `StorageError` and `Error` require std;
+  without it, a backend reports its failures with `BackendError::Other`. The `chrono_v0_4` and
+  `uuid` features require std, and `cache_metrics` requires a target with 64-bit atomics.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support

@@ -106,12 +106,6 @@ pub mod backends;
 mod complex_types;
 mod db;
 mod error;
-// Public under the redb 5 API preview, so a backend author can name the error type in both
-// modes; with std it is a re-export of `std::io`
-#[cfg(feature = "experimental-api-5")]
-pub mod io;
-#[cfg(not(feature = "experimental-api-5"))]
-mod io;
 #[cfg(feature = "experimental-api-5")]
 mod key_range;
 #[cfg(feature = "experimental-niches")]
