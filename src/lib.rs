@@ -131,9 +131,9 @@ mod types;
 // where nothing unwinds and panicking() below is vacuously correct.
 #[cfg(all(redb_no_std, panic = "unwind"))]
 compile_error!(
-    "redb without the standard library requires panic = \"abort\": it cannot detect unwinding, \
-     and its Drop impls depend on being able to. Set panic = \"abort\" in the profile, or enable \
-     the \"std\" feature."
+    "redb is being built without the standard library, because its \"std\" feature is disabled \
+     (for example by `default-features = false`). Enable the \"std\" feature, or set \
+     panic = \"abort\" to build without it."
 );
 
 // Rejected here rather than at the AtomicU64 use site, so that the error names the feature
