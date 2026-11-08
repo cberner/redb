@@ -34,6 +34,12 @@ mod shared_reader {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    // The error type of StorageBackend's I/O methods
+    #[cfg(feature = "experimental-api-5")]
+    type BackendIoError = redb::BackendError;
+    #[cfg(not(feature = "experimental-api-5"))]
+    type BackendIoError = std::io::Error;
+
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
     fn shared(mode: ConcurrencyMode) -> redb::Builder {
@@ -128,25 +134,25 @@ mod shared_reader {
     }
 
     impl redb::StorageBackend for CrashBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             self.inner.read(offset, out)
         }
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.set_len(len)
         }
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.sync_data()
         }
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }

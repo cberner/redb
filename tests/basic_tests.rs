@@ -15,6 +15,12 @@ use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
 use std::sync;
 
+// The error type of StorageBackend's I/O methods
+#[cfg(feature = "experimental-api-5")]
+type BackendIoError = redb::BackendError;
+#[cfg(not(feature = "experimental-api-5"))]
+type BackendIoError = std::io::Error;
+
 const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
@@ -4611,25 +4617,25 @@ fn multi_table_commit_writes_are_deterministic() {
     }
 
     impl StorageBackend for RecordingBackend {
-        fn len(&self) -> Result<u64, std::io::Error> {
+        fn len(&self) -> Result<u64, BackendIoError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
             self.log.lock().unwrap().push(BackendEvent::SetLen(len));
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), std::io::Error> {
+        fn sync_data(&self) -> Result<(), BackendIoError> {
             self.log.lock().unwrap().push(BackendEvent::Sync);
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
             self.log.lock().unwrap().push(BackendEvent::Write {
                 offset,
                 data: data.to_vec(),

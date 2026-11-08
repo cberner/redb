@@ -3,6 +3,7 @@ use crate::BackendError;
 use crate::DatabaseError;
 #[cfg(any(windows, target_os = "linux", all(test, target_vendor = "apple")))]
 use crate::db::BACKEND_LOCK_RANGE;
+use crate::db::BackendIoError;
 #[cfg(any(
     windows,
     all(test, any(target_os = "linux", target_vendor = "apple")),
@@ -357,28 +358,31 @@ impl StorageBackend for FileBackend {
             .map_err(BackendError::from)
     }
 
-    fn close(&self) -> Result<(), io::Error> {
-        self.release_all_locks()
+    fn close(&self) -> Result<(), BackendIoError> {
+        self.release_all_locks()?;
+        Ok(())
     }
 
-    fn len(&self) -> Result<u64, io::Error> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         Ok(self.file.metadata()?.len())
     }
 
     #[cfg(unix)]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         self.file.read_exact_at(out, offset)?;
         Ok(())
     }
 
     #[cfg(target_os = "wasi")]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         read_exact_at(&self.file, out, offset)?;
         Ok(())
     }
 
+    // The conversion is the identity without experimental-api-5
     #[cfg(windows)]
-    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    #[cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         let mut data_offset = 0;
         while data_offset < out.len() {
             let read = self.file.seek_read(&mut out[data_offset..], offset)?;
@@ -388,7 +392,8 @@ impl StorageBackend for FileBackend {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "failed to fill whole buffer",
-                ));
+                )
+                .into());
             }
             offset += read as u64;
             data_offset += read;
@@ -396,26 +401,31 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
-        self.file.set_len(len)
+    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        self.file.set_len(len)?;
+        Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), io::Error> {
-        self.file.sync_data()
+    fn sync_data(&self) -> Result<(), BackendIoError> {
+        self.file.sync_data()?;
+        Ok(())
     }
 
     #[cfg(unix)]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        self.file.write_all_at(data, offset)
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        self.file.write_all_at(data, offset)?;
+        Ok(())
     }
 
     #[cfg(target_os = "wasi")]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
-        write_all_at(&self.file, data, offset)
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        write_all_at(&self.file, data, offset)?;
+        Ok(())
     }
 
     #[cfg(windows)]
-    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    #[cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
         let mut data_offset = 0;
         while data_offset < data.len() {
             let written = self.file.seek_write(&data[data_offset..], offset)?;
@@ -425,7 +435,8 @@ impl StorageBackend for FileBackend {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
                     "failed to write whole buffer",
-                ));
+                )
+                .into());
             }
             offset += written as u64;
             data_offset += written;

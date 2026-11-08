@@ -2,10 +2,19 @@
 //! the allocator state, so a failure part way through leaves one that no longer describes the file.
 //! The database must refuse to write rather than allocate against it.
 
+// Converting into BackendIoError is the identity without experimental-api-5
+#![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+
 use redb::{
     Database, DatabaseError, ReadableDatabase, StorageBackend, StorageError, TableDefinition,
 };
 use std::sync::{Arc, RwLock};
+
+// The error type of StorageBackend's I/O methods
+#[cfg(feature = "experimental-api-5")]
+type BackendIoError = redb::BackendError;
+#[cfg(not(feature = "experimental-api-5"))]
+type BackendIoError = std::io::Error;
 
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("t");
 
@@ -39,33 +48,33 @@ impl PatchBackend {
 }
 
 impl StorageBackend for PatchBackend {
-    fn len(&self) -> Result<u64, std::io::Error> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         Ok(self.inner.read().unwrap().len() as u64)
     }
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         let offset = usize::try_from(offset).unwrap();
         let guard = self.inner.read().unwrap();
         if offset + out.len() > guard.len() {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
         }
         out.copy_from_slice(&guard[offset..offset + out.len()]);
         Ok(())
     }
-    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
         self.inner
             .write()
             .unwrap()
             .resize(len.try_into().unwrap(), 0);
         Ok(())
     }
-    fn sync_data(&self) -> Result<(), std::io::Error> {
+    fn sync_data(&self) -> Result<(), BackendIoError> {
         Ok(())
     }
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
         let offset = usize::try_from(offset).unwrap();
         let mut guard = self.inner.write().unwrap();
         if offset + data.len() > guard.len() {
-            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
         }
         guard[offset..offset + data.len()].copy_from_slice(data);
         Ok(())

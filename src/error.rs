@@ -8,7 +8,7 @@ use alloc::string::{String, ToString};
 use core::fmt::{Display, Formatter};
 use core::panic;
 
-/// Errors reported by a [`crate::StorageBackend`] locking operation.
+/// Errors reported by a [`crate::StorageBackend`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BackendError {

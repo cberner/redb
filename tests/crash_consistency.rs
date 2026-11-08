@@ -6,12 +6,21 @@
 //! `Corrupted("File truncated below stored layout")` -- permanent data loss -- even though the
 //! previous durable state was intact. The fix makes the file extension durable as the file grows.
 
+// Converting into BackendIoError is the identity without experimental-api-5
+#![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
+
 #[cfg(feature = "experimental-api-5")]
 use redb::ReadableTable;
 use redb::backends::InMemoryBackend;
 use redb::{Database, ReadableDatabase, StorageBackend, TableDefinition};
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
+
+// The error type of StorageBackend's I/O methods
+#[cfg(feature = "experimental-api-5")]
+type BackendIoError = redb::BackendError;
+#[cfg(not(feature = "experimental-api-5"))]
+type BackendIoError = std::io::Error;
 
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
 
@@ -58,21 +67,21 @@ impl CrashBackend {
 }
 
 impl StorageBackend for CrashBackend {
-    fn len(&self) -> Result<u64, std::io::Error> {
+    fn len(&self) -> Result<u64, BackendIoError> {
         Ok(self.state.lock().unwrap().live.len() as u64)
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
         let state = self.state.lock().unwrap();
         let offset = usize::try_from(offset).unwrap();
         if offset + out.len() > state.live.len() {
-            return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+            return Err(std::io::Error::from(ErrorKind::UnexpectedEof).into());
         }
         out.copy_from_slice(&state.live[offset..offset + out.len()]);
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
         self.state
             .lock()
             .unwrap()
@@ -81,7 +90,7 @@ impl StorageBackend for CrashBackend {
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), std::io::Error> {
+    fn sync_data(&self) -> Result<(), BackendIoError> {
         let mut state = self.state.lock().unwrap();
         state.syncs += 1;
         if state.freeze_from.is_none_or(|f| state.syncs < f) {
@@ -90,7 +99,7 @@ impl StorageBackend for CrashBackend {
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
         let mut state = self.state.lock().unwrap();
         let offset = usize::try_from(offset).unwrap();
         if offset + data.len() > state.live.len() {
