@@ -65,6 +65,11 @@
   bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
   of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
   copying it into a new table. The file format is unchanged.
+* The type check cannot detect a `Value` implementation of your own whose encoding goes through
+  `Option<&str>`, `Option<String>`, `Option<bool>` or `Option<char>`, including inside a `Vec`,
+  array or tuple, while its `TypeName` stays the same: redb 5 silently misreads its existing
+  tables. Read them with a version of the type that encodes through `Option<Legacy<T>>` instead,
+  and give the new encoding a new `TypeName`.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
