@@ -169,8 +169,8 @@ jobs:
             rustup target add thumbv7em-none-eabihf
             # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
             cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
-            # The features that are supported alongside no_std. cache_metrics needs 64-bit atomics,
-            # and chrono_v0_4/uuid need std, so all three are refused at compile time instead.
+            # The features that are supported alongside no_std. chrono_v0_4 and uuid need std, and
+            # cache_metrics needs 64-bit atomics, which this target lacks.
             cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5,logging
             rustup target remove thumbv7em-none-eabihf
 

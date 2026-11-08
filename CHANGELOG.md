@@ -1,75 +1,54 @@
 # redb - Changelog
 
 ## 5.0.0 - 2026-XX-XX
-* Under the `experimental-api-5` feature flag, turning off the `std` feature now builds redb as a
-  `no_std` crate, for embedded targets. `alloc` is still required, as is `panic = "abort"` and a
-  target with atomic compare-and-swap -- Cortex-M3 and above, but not Cortex-M0. The file backend
-  and everything that opens a database from a path or a `File` are unavailable in that mode, as is
-  `ReadOnlyDatabase`; storage is supplied through `Builder::create_with_backend()`, and
-  `StorageBackend` reports failures as `redb::io::Error`; the `io` module is public whenever
-  `experimental-api-5` is enabled, and with std it re-exports `std::io::Error`; without std, its
-  methods match their `std::io::Error` namesakes, and `other()` wraps any error. The `cache_metrics`,
-  `chrono_v0_4` and `uuid` features are unavailable there: the first needs 64-bit atomics, and the
-  other two link against the standard library. Leaving `experimental-api-5` off keeps the std build
-  regardless of the `std` feature, as before.
-* Behind the `experimental-api-5` feature flag, the range taking methods --
-  `ReadableTable::range()`, `ReadOnlyTable::range_owned()`, `Table::retain_in()`,
-  `Table::extract_if()`, and their multimap equivalents -- take a `KeyRange` instead of a
-  `RangeBounds` over a borrowed key type, so ranges that carry no key type no longer need one
-  named: `table.range(..)` replaces `table.range::<KeyType>(..)`. Calls that named the key type in
-  a turbofish must drop it, and implementations of `ReadableTable` or `ReadableMultimapTable` must
-  update their `range()` signature. The inherent `ReadOnlyTable::range()` and
-  `ReadOnlyMultimapTable::range()`, whose `'static` iterators do not keep the transaction alive,
-  are removed under the flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
-  `range_owned()` variants when the iterator must outlive the table.
-* Under the `experimental-api-5` feature flag, `Table::extract_if()` takes a range before the
-  predicate, as `BTreeMap::extract_if()` does, and `Table::extract_from_if()` is removed. Use
-  `extract_if(.., predicate)` for the whole table, and `extract_if(range, predicate)` in place of
-  `extract_from_if(range, predicate)`.
-* The inherent `ReadOnlyTable::get()` and `ReadOnlyMultimapTable::get()`, whose `'static` guards
-  and iterators likewise do not keep the transaction alive, are also removed under the
-  `experimental-api-5` flag; use the `ReadableTable` and `ReadableMultimapTable` methods, or the
-  `get_owned()` variants when the guard must outlive the table.
-* Behind the `experimental-api-5` feature flag, `ReadableTable::lower_bound()` and
-  `ReadableTable::upper_bound()` have no default implementation, so implementations of
-  `ReadableTable` must provide them.
-* Under the `experimental-api-5` feature flag, `WriteTransaction::print_allocated_page_debug()`, an
-  internal debugging aid present only in debug builds, is removed.
-* Behind the `experimental-api-5` feature flag, `Range` and `MultimapRange` keep the table
-  borrowed until they are dropped, rather than until their last use. Mutating the table while a
-  range over it is still in scope, which could panic, no longer compiles.
-* Under the `experimental-api-5` feature flag, a database file is locked with byte-range locks
-  alone, rather than also with the whole-file lock earlier versions take. On Linux, do not use redb
-  4.2 or earlier on a database that redb 5 has open: only an `ExclusiveWriter` writer detects them.
-* Under the `experimental-api-5` feature flag, `Builder::create_file()` is removed; use
-  `Builder::create_with_backend(FileBackend::new(file))` instead.
-* Under the `experimental-api-5` feature flag, `FileBackend::new()` returns `FileBackend` instead
-  of `Result<FileBackend, DatabaseError>`, since it cannot fail.
-* Add the `experimental-niches` feature flag, which requires `experimental-api-5`, and under it
-  `Legacy<T>`, which is `T` without the niche it declares: a table of `Option<T>` written before
-  the niche opens as `Option<Legacy<T>>`, however deeply nested.
-* Under `experimental-niches`, `&str` declares a `NICHE`, so `Option<&str>` is stored without a
-  tag byte, and is no longer equivalent to `Option<&str>` without the flag. A table of
-  `Option<&str>` written without the flag keeps its type name and its tag byte encoding, so it no
-  longer opens as `Option<&str>`: it opens as `Option<Legacy<&str>>`, and is migrated by copying
-  it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `String` declares the same `NICHE` as `&str`, so `Option<String>`
-  is stored without a tag byte, and is no longer equivalent to `Option<String>` without the flag.
-  A table of `Option<String>` written without the flag opens as `Option<Legacy<String>>`, and is
-  migrated by copying it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `bool` declares a `NICHE`, so `Option<bool>` is stored in one byte
-  rather than two, and is no longer equivalent to `Option<bool>` without the flag. A table of
-  `Option<bool>` written without the flag opens as `Option<Legacy<bool>>`, and is migrated by
-  copying it into a new table. The file format is unchanged.
-* Under `experimental-niches`, `char` declares a `NICHE`, so `Option<char>` is stored in three
-  bytes rather than four, and is no longer equivalent to `Option<char>` without the flag. A table
-  of `Option<char>` written without the flag opens as `Option<Legacy<char>>`, and is migrated by
-  copying it into a new table. The file format is unchanged.
+### Breaking changes
+* Turning off the `std` feature now builds redb without the standard library (see below). If you
+  depend on redb with `default-features = false`, add `features = ["std"]` to keep the std build.
+* The range taking methods -- `ReadableTable::range()`, `ReadOnlyTable::range_owned()`,
+  `Table::retain_in()`, `Table::extract_if()`, and their multimap equivalents -- take a `KeyRange`
+  instead of a `RangeBounds` over a borrowed key type, so `table.range(..)` replaces
+  `table.range::<KeyType>(..)`. Calls that named the key type in a turbofish must drop it, and
+  implementations of `ReadableTable` or `ReadableMultimapTable` must update their `range()`
+  signature.
+* `Table::extract_if()` takes a range before the predicate, as `BTreeMap::extract_if()` does, and
+  `Table::extract_from_if()` is removed. Use `extract_if(.., predicate)` for the whole table.
+* The inherent `get()` and `range()` of `ReadOnlyTable` and `ReadOnlyMultimapTable` are removed,
+  since their `'static` guards and iterators did not keep the transaction alive. Use the
+  `ReadableTable` and `ReadableMultimapTable` methods, or `get_owned()` and `range_owned()` when
+  the result must outlive the table.
+* `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` have no default
+  implementation, so implementations of `ReadableTable` must provide them.
+* `ReadableDatabase` is sealed, and can no longer be implemented outside of redb.
+* `Range` and `MultimapRange` keep the table borrowed until they are dropped, rather than until
+  their last use. Mutating the table while a range over it is still in scope, which could panic,
+  no longer compiles.
+* `Builder::create_file()` is removed; use `Builder::create_with_backend(FileBackend::new(file))`.
+* `FileBackend::new()` returns `FileBackend` instead of `Result<FileBackend, DatabaseError>`.
+* `WriteTransaction::print_allocated_page_debug()`, an internal debugging aid, is removed.
+* A database file is locked with byte-range locks alone, rather than also with the whole-file lock
+  earlier versions take. On Linux, do not use redb 4.2 or earlier on a database that redb 5 has
+  open: only an `ExclusiveWriter` writer detects them.
+* `&str`, `String`, `bool` and `char` declare a `NICHE`, so `Option` of them is stored without a
+  tag byte. Tables of these `Option` types written by earlier versions no longer open as before:
+  open them as `Option<Legacy<T>>`, at any depth of nesting, and migrate by copying them into a
+  new table. The file format is unchanged.
 * The type check cannot detect a `Value` implementation of your own whose encoding goes through
   `Option<&str>`, `Option<String>`, `Option<bool>` or `Option<char>`, including inside a `Vec`,
   array or tuple, while its `TypeName` stays the same: redb 5 silently misreads its existing
   tables. Read them with a version of the type that encodes through `Option<Legacy<T>>` instead,
   and give the new encoding a new `TypeName`.
+
+### New features
+* Add `Legacy<T>`, which is `T` without the niche it declares, for opening tables written before
+  `T` declared one.
+* Turning off the `std` feature builds redb as a `no_std` crate, for embedded targets. It requires
+  `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above, but
+  not Cortex-M0. Storage is supplied through `Builder::create_with_backend()`; the file backend,
+  `ReadOnlyDatabase`, and everything that opens a database from a path or a `File` are
+  unavailable. `StorageBackend` reports failures as `redb::io::Error`, which is `std::io::Error`
+  with std, and without it a stand-in whose methods match their `std::io::Error` namesakes. The
+  `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
+  atomics.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
