@@ -2,27 +2,22 @@ use crate::BackendError;
 use crate::StorageBackend;
 use crate::db::BackendIoError;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-#[cfg(not(redb_no_std))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::fmt::{Debug, Formatter};
-#[cfg(not(redb_no_std))]
 use core::ops::Bound;
 
-#[cfg(not(redb_no_std))]
 #[derive(Debug)]
 pub(crate) struct ReadOnlyBackend {
     inner: Box<dyn StorageBackend>,
 }
 
-#[cfg(not(redb_no_std))]
 impl ReadOnlyBackend {
     pub fn new(inner: Box<dyn StorageBackend>) -> Self {
         Self { inner }
     }
 }
 
-#[cfg(not(redb_no_std))]
 impl StorageBackend for ReadOnlyBackend {
     fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
         self.inner.try_lock_range(start, end)

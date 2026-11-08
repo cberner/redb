@@ -72,12 +72,10 @@
 extern crate alloc;
 
 pub use db::ConcurrencyMode;
-#[cfg(not(redb_no_std))]
-pub use db::ReadOnlyDatabase;
 pub use db::{
-    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadableDatabase,
-    RepairSession, StorageBackend, TableDefinition, TableHandle, UntypedMultimapTableHandle,
-    UntypedTableHandle,
+    Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
+    ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
+    UntypedMultimapTableHandle, UntypedTableHandle,
 };
 pub use error::{
     BackendError, CommitError, CompactionError, CursorError, DatabaseError, Error, SavepointError,

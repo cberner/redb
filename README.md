@@ -53,8 +53,8 @@ Turning off the `std` feature, with `experimental-api-5` on, builds redb without
 library. It needs `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3
 and above, but not Cortex-M0. There is no filesystem, so storage is supplied by implementing
 `StorageBackend`, which reports failures with `BackendError::Other`, and passing it to
-`Builder::create_with_backend()`. The `chrono_v0_4` and `uuid` features require std, and
-`cache_metrics` requires a target with 64-bit atomics.
+`Builder::create_with_backend()` or `Builder::open_read_only_with_backend()`. The `chrono_v0_4` and
+`uuid` features require std, and `cache_metrics` requires a target with 64-bit atomics.
 
 ## Development
 
