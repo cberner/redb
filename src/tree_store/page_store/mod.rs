@@ -17,7 +17,6 @@ mod savepoint;
 mod xxh3;
 
 pub use backends::InMemoryBackend;
-#[cfg(not(redb_no_std))]
 pub(crate) use backends::ReadOnlyBackend;
 pub(crate) use base::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageHint, PageNumber, PageTracker, ScopedBorrow,

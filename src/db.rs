@@ -1,7 +1,6 @@
 use crate::BackendError;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::transactions::AllocatorStateLatch;
-#[cfg(not(redb_no_std))]
 use crate::tree_store::ReadOnlyBackend;
 use crate::tree_store::{
     AllocationPolicy, BtreeHeader, HeaderGuard, InternalTableDefinition, PAGE_SIZE, PageHint,
@@ -662,16 +661,13 @@ pub trait ReadableDatabase: SealedInApi5 {
 /// # Ok(())
 /// # }
 /// ```
-#[cfg(not(redb_no_std))]
 pub struct ReadOnlyDatabase {
     mem: Arc<TransactionalMemory>,
     transaction_tracker: Arc<TransactionTracker>,
 }
 
-#[cfg(not(redb_no_std))]
 impl Sealed for ReadOnlyDatabase {}
 
-#[cfg(not(redb_no_std))]
 impl ReadableDatabase for ReadOnlyDatabase {
     fn begin_read(&self) -> Result<ReadTransaction, TransactionError> {
         let (guard, root) =
@@ -687,7 +683,6 @@ impl ReadableDatabase for ReadOnlyDatabase {
     }
 }
 
-#[cfg(not(redb_no_std))]
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
     #[cfg(not(redb_no_std))]
@@ -2430,7 +2425,6 @@ impl Builder {
     /// another database handle: they can share the same open file description and its locks.
     /// Closing either database can release the other's locks, allowing a writer to invalidate its
     /// read-only snapshot.
-    #[cfg(not(redb_no_std))]
     pub fn open_read_only_with_backend(
         &self,
         backend: impl StorageBackend,

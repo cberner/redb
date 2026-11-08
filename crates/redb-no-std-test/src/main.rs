@@ -3,6 +3,33 @@ use redb::{
     BackendError, Database, DatabaseError, ReadableDatabase, ReadableTable, StorageBackend,
     StorageError, TableDefinition,
 };
+use std::sync::Arc;
+
+// Storage that outlives a Database, so that it can be opened again read-only
+#[derive(Debug, Clone)]
+struct Shared(Arc<InMemoryBackend>);
+
+impl StorageBackend for Shared {
+    fn len(&self) -> Result<u64, BackendError> {
+        self.0.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
+        self.0.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
+        self.0.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), BackendError> {
+        self.0.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        self.0.write(offset, data)
+    }
+}
 
 // Without std, a backend reports its failures with BackendError::Other
 #[derive(Debug)]
@@ -45,13 +72,32 @@ fn main() {
     }
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("test");
-    let db = Database::builder().create_with_backend(backend).unwrap();
+    let storage = Shared(Arc::new(backend));
+    let db = Database::builder()
+        .create_with_backend(storage.clone())
+        .unwrap();
     let write = db.begin_write().unwrap();
     {
         let mut table = write.open_table(TABLE).unwrap();
         table.insert(1, 2).unwrap();
     }
     write.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    assert_eq!(
+        read.open_table(TABLE)
+            .unwrap()
+            .get(1)
+            .unwrap()
+            .unwrap()
+            .value(),
+        2
+    );
+    drop(read);
+    db.close().unwrap();
+
+    let db = Database::builder()
+        .open_read_only_with_backend(storage)
+        .unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(
         read.open_table(TABLE)

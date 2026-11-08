@@ -49,12 +49,13 @@
 * Add `BackendError::Other`, for a storage backend failure that is not an `io::Error`. It is
   reported as `StorageError::Backend` and `Error::Backend`.
 * Turning off the `std` feature builds redb as a `no_std` crate, for embedded targets. It requires
-  `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above, but
-  not Cortex-M0. Storage is supplied through `Builder::create_with_backend()`; the file backend,
-  `ReadOnlyDatabase`, and everything that opens a database from a path or a `File` are
-  unavailable. The `Io` variants of `BackendError`, `StorageError` and `Error` require std;
-  without it, a backend reports its failures with `BackendError::Other`. The `chrono_v0_4` and
-  `uuid` features require std, and `cache_metrics` requires a target with 64-bit atomics.
+  `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above,
+  but not Cortex-M0. Storage is supplied through `Builder::create_with_backend()` or
+  `Builder::open_read_only_with_backend()`; the file backend and everything that opens a database
+  from a path or a `File` are unavailable. The `Io` variants of `BackendError`, `StorageError` and
+  `Error` require std; without it, a backend reports its failures with `BackendError::Other`. The
+  `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
+  atomics.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
