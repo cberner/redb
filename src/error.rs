@@ -1,4 +1,3 @@
-use crate::io;
 use crate::sync::PoisonError;
 use crate::tree_store::{FILE_FORMAT_VERSION3, MAX_VALUE_LENGTH};
 use crate::{ReadTransaction, TypeName};
@@ -12,8 +11,9 @@ use core::panic;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum BackendError {
-    /// The underlying storage operation failed.
-    Io(io::Error),
+    /// The underlying storage operation failed. Not available without std.
+    #[cfg(not(redb_no_std))]
+    Io(std::io::Error),
     /// The backend failed with an error that is not an I/O error.
     Other(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support the requested operation.
@@ -21,6 +21,35 @@ pub enum BackendError {
 }
 
 impl BackendError {
+    // With std, an io::Error of the matching kind. Without it the kind is dropped
+    pub(crate) fn invalid_input(message: &'static str) -> Self {
+        #[cfg(not(redb_no_std))]
+        {
+            Self::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                message,
+            ))
+        }
+        #[cfg(redb_no_std)]
+        {
+            Self::Other(message.into())
+        }
+    }
+
+    pub(crate) fn invalid_data(message: &'static str) -> Self {
+        #[cfg(not(redb_no_std))]
+        {
+            Self::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            ))
+        }
+        #[cfg(redb_no_std)]
+        {
+            Self::Other(message.into())
+        }
+    }
+
     // An I/O error wrapped in Other is unwrapped, so that it is matched as one
     fn normalize(self) -> Self {
         #[cfg(not(redb_no_std))]
@@ -34,10 +63,10 @@ impl BackendError {
     }
 }
 
-impl From<io::Error> for BackendError {
-    /// Preserves unsupported-operation errors as [`Self::Unsupported`] when std is available.
-    fn from(err: io::Error) -> Self {
-        #[cfg(not(redb_no_std))]
+#[cfg(not(redb_no_std))]
+impl From<std::io::Error> for BackendError {
+    /// Preserves unsupported-operation errors as [`Self::Unsupported`].
+    fn from(err: std::io::Error) -> Self {
         if err.kind() == std::io::ErrorKind::Unsupported {
             return Self::Unsupported;
         }
@@ -45,14 +74,16 @@ impl From<io::Error> for BackendError {
     }
 }
 
-impl From<BackendError> for io::Error {
+#[cfg(not(redb_no_std))]
+impl From<BackendError> for std::io::Error {
     fn from(err: BackendError) -> Self {
         match err.normalize() {
             BackendError::Io(err) => err,
-            BackendError::Other(err) => io::Error::other(err),
-            BackendError::Unsupported => {
-                io::unsupported("the storage backend does not support this operation")
-            }
+            BackendError::Other(err) => std::io::Error::other(err),
+            BackendError::Unsupported => std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the storage backend does not support this operation",
+            ),
         }
     }
 }
@@ -66,6 +97,7 @@ impl From<BackendError> for Error {
 impl Display for BackendError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            #[cfg(not(redb_no_std))]
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Other(err) => write!(f, "Storage backend error: {err}"),
             Self::Unsupported => f.write_str("The storage backend does not support this operation"),
@@ -76,6 +108,7 @@ impl Display for BackendError {
 impl core::error::Error for BackendError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
+            #[cfg(not(redb_no_std))]
             Self::Io(err) => Some(err),
             Self::Other(err) => Some(&**err),
             Self::Unsupported => None,
@@ -91,7 +124,9 @@ pub enum StorageError {
     Corrupted(String),
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
-    Io(io::Error),
+    /// An I/O error from the storage backend. Not available without std.
+    #[cfg(not(redb_no_std))]
+    Io(std::io::Error),
     /// The storage backend failed with an error that is not an I/O error.
     Backend(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support a required storage operation.
@@ -121,8 +156,9 @@ impl<T> From<PoisonError<T>> for StorageError {
     }
 }
 
-impl From<io::Error> for StorageError {
-    fn from(err: io::Error) -> StorageError {
+#[cfg(not(redb_no_std))]
+impl From<std::io::Error> for StorageError {
+    fn from(err: std::io::Error) -> StorageError {
         StorageError::Io(err)
     }
 }
@@ -130,6 +166,7 @@ impl From<io::Error> for StorageError {
 impl From<BackendError> for StorageError {
     fn from(err: BackendError) -> Self {
         match err.normalize() {
+            #[cfg(not(redb_no_std))]
             BackendError::Io(err) => Self::Io(err),
             BackendError::Other(err) => Self::Backend(err),
             BackendError::Unsupported => Self::Unsupported,
@@ -142,6 +179,7 @@ impl From<StorageError> for Error {
         match err {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
+            #[cfg(not(redb_no_std))]
             StorageError::Io(x) => Error::Io(x),
             StorageError::Backend(x) => Error::Backend(x),
             StorageError::Unsupported => Error::Unsupported,
@@ -165,6 +203,7 @@ impl Display for StorageError {
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
                 )
             }
+            #[cfg(not(redb_no_std))]
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
@@ -346,8 +385,9 @@ impl From<DatabaseError> for Error {
     }
 }
 
-impl From<io::Error> for DatabaseError {
-    fn from(err: io::Error) -> DatabaseError {
+#[cfg(not(redb_no_std))]
+impl From<std::io::Error> for DatabaseError {
+    fn from(err: std::io::Error) -> DatabaseError {
         DatabaseError::Storage(StorageError::Io(err))
     }
 }
@@ -782,7 +822,9 @@ pub enum Error {
     // Tables cannot be opened for writing multiple times, since they could retrieve immutable &
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
-    Io(io::Error),
+    /// An I/O error from the storage backend. Not available without std.
+    #[cfg(not(redb_no_std))]
+    Io(std::io::Error),
     /// The storage backend failed with an error that is not an I/O error.
     Backend(Box<dyn core::error::Error + Send + Sync>),
     /// The backend does not support a required storage operation.
@@ -804,8 +846,9 @@ impl<T> From<PoisonError<T>> for Error {
     }
 }
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Error {
+#[cfg(not(redb_no_std))]
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Error {
         Error::Io(err)
     }
 }
@@ -884,6 +927,7 @@ impl Display for Error {
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{name}' already opened at: {location}")
             }
+            #[cfg(not(redb_no_std))]
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
             }

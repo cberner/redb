@@ -1,6 +1,4 @@
 use crate::BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-use crate::io;
 use crate::transaction_tracker::{SavepointId, TransactionId, TransactionTracker};
 use crate::transactions::AllocatorStateLatch;
 #[cfg(not(redb_no_std))]
@@ -49,7 +47,7 @@ use log::{debug, warn};
 #[cfg(feature = "experimental-api-5")]
 pub(crate) type BackendIoError = BackendError;
 #[cfg(not(feature = "experimental-api-5"))]
-pub(crate) type BackendIoError = io::Error;
+pub(crate) type BackendIoError = std::io::Error;
 
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
