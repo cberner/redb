@@ -618,8 +618,6 @@ pub trait ReadableDatabase: SealedInApi5 {
     fn cache_stats(&self) -> CacheStats;
 }
 
-// Unavailable without std: every route to one goes through a path, and the file-backed API is
-// gated out below.
 /// A redb database opened in read-only mode
 ///
 /// Use [`Self::begin_read`] to get a [`ReadTransaction`] object that can be used to read from the database

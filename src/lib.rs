@@ -134,7 +134,8 @@ mod types;
 compile_error!(
     "redb is being built without the standard library, because its \"std\" feature is disabled \
      (for example by `default-features = false`). Enable the \"std\" feature, or set \
-     panic = \"abort\" to build without it."
+     panic = \"abort\" to build without it. Tests always unwind, so to test on the host, enable \
+     \"std\" there, for example through a dev-dependency."
 );
 
 // Rejected here rather than at the AtomicU64 use site, so that the error names the feature
