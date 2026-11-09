@@ -172,6 +172,8 @@ jobs:
             # The features that are supported alongside no_std. chrono_v0_4 and uuid need std, and
             # cache_metrics needs 64-bit atomics, which this target lacks.
             cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5,logging
+            # The docs, so that they link only to items that exist without std
+            RUSTDOCFLAGS="--deny warnings" cargo doc -p $(cargo pkgid) --no-deps --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
             rustup target remove thumbv7em-none-eabihf
 
       - name: Run no_std backend regression
