@@ -21,7 +21,7 @@ use crate::tree_store::page_store::layout::DatabaseLayout;
 use crate::tree_store::page_store::region::{Allocators, RegionTracker};
 use crate::tree_store::page_store::{PageImpl, PageMut, ScopedBorrow, hash128_with_seed};
 use crate::tree_store::{Page, PageNumber, PageTracker};
-use crate::{BackendError, DatabaseError, Result, StorageBackend, StorageError};
+use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -1160,7 +1160,7 @@ impl TransactionalMemory {
         if initial_storage_len > 0 {
             // File already exists check that the magic number matches
             if magic_number != MAGICNUMBER {
-                return Err(BackendError::invalid_data(
+                return Err(StorageError::not_a_database(
                     "Not a redb database: magic number mismatch",
                 )
                 .into());
@@ -1168,7 +1168,7 @@ impl TransactionalMemory {
         } else {
             // File is empty, check that we're allowed to initialize a new database (i.e. the caller is Database::create() and not open())
             if !allow_initialize {
-                return Err(BackendError::invalid_data(
+                return Err(StorageError::not_a_database(
                     "Database file is empty and creating a new database was not requested",
                 )
                 .into());
