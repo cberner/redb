@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 redb = { path = "../..", default-features = false, features = ["experimental-api-5"] }
+redb-derive = { path = "../redb-derive" }
 
 [profile.dev]
 panic = "abort"

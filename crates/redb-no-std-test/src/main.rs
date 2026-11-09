@@ -3,6 +3,7 @@ use redb::{
     BackendError, Database, DatabaseError, ReadableDatabase, ReadableTable, StorageBackend,
     StorageError, TableDefinition,
 };
+use redb_no_std_test::{Named, Point};
 use std::sync::Arc;
 
 // Storage that outlives a Database, so that it can be opened again read-only
@@ -108,4 +109,22 @@ fn main() {
             .value(),
         2
     );
+
+    // Types whose implementations were derived in a no_std crate
+    const DERIVED: TableDefinition<Point, Named> = TableDefinition::new("derived");
+    let db = Database::builder()
+        .create_with_backend(InMemoryBackend::new())
+        .unwrap();
+    let write = db.begin_write().unwrap();
+    {
+        let mut table = write.open_table(DERIVED).unwrap();
+        table
+            .insert(Point { x: 1, y: 2 }, Named { name: "a", id: 3 })
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let read = db.begin_read().unwrap();
+    let table = read.open_table(DERIVED).unwrap();
+    let value = table.get(Point { x: 1, y: 2 }).unwrap().unwrap();
+    assert_eq!((value.value().name, value.value().id), ("a", 3));
 }
