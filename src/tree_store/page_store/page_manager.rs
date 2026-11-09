@@ -4,6 +4,7 @@ use crate::db::{
     PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE,
     TXN_BASE, WHOLE_FILE_READER_BYTE, WRITER_BYTE, byte_range,
 };
+use crate::error::LockResultExt;
 use crate::sync::Mutex;
 use crate::transaction_tracker::TransactionId;
 use crate::transactions::{AllocatorStateKey, AllocatorStateTree, AllocatorStateTreeMut};
@@ -1386,7 +1387,7 @@ impl TransactionalMemory {
             return self.read_snapshot_from_file(header);
         }
         // Local commits can publish their in-memory state without holding the header lock.
-        let state = self.state.lock()?;
+        let state = self.state.lock().or_poisoned()?;
         let slot = state.latest_slot();
         Ok((slot.transaction_id, slot.user_root))
     }
@@ -1585,7 +1586,7 @@ impl TransactionalMemory {
     // page numbers are validated.
     pub(crate) fn mark_page_allocated(&self, page_number: PageNumber) -> Result<()> {
         Self::check_page_order(page_number)?;
-        let mut state = self.state.lock()?;
+        let mut state = self.state.lock().or_poisoned()?;
         // Unlike the read path, this is only reached while rebuilding the allocator state, and the
         // state lock is already held, so validating against the layout costs nothing here
         let layout = state.header.layout();
@@ -2014,12 +2015,12 @@ impl TransactionalMemory {
     }
 
     pub(crate) fn get_last_committed_transaction_id(&self) -> Result<TransactionId> {
-        let state = self.state.lock()?;
+        let state = self.state.lock().or_poisoned()?;
         Ok(state.latest_slot().transaction_id)
     }
 
     pub(crate) fn get_last_durable_transaction_id(&self) -> Result<TransactionId> {
-        let state = self.state.lock()?;
+        let state = self.state.lock().or_poisoned()?;
         Ok(state.header.primary_slot().transaction_id)
     }
 
@@ -2506,7 +2507,7 @@ impl TransactionalMemory {
     fn flush_shutdown_header(&self) -> Result {
         if self.storage.check_io_errors().is_ok() && !crate::panicking() {
             let header_lock = self.lock_header_exclusive()?;
-            let mut state = self.state.lock()?;
+            let mut state = self.state.lock().or_poisoned()?;
             // Clearing the flag asserts that this process left the file consistent, which requires
             // an allocator state describing what it wrote, and one not marked for repair.
             if state.allocators.is_loaded() && !self.needs_repair() {

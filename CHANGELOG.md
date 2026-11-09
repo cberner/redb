@@ -19,6 +19,7 @@
 * `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` have no default
   implementation, so implementations of `ReadableTable` must provide them.
 * `ReadableDatabase` is sealed, and can no longer be implemented outside of redb.
+* `StorageError` and `Error` no longer implement `From<PoisonError<T>>`.
 * The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
   methods already do. `?` still converts an `io::Error`.
 * `Entry`, `OccupiedEntry` and `VacantEntry` take a second lifetime, for the key, which no longer

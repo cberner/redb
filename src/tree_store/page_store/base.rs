@@ -1,4 +1,5 @@
 use crate::Result;
+use crate::error::LockResultExt;
 use crate::sync::Mutex;
 use crate::tree_store::page_store::cached_file::WritablePage;
 #[cfg(debug_assertions)]
@@ -427,7 +428,7 @@ impl PageTracker {
     // set so that those uses reach the policy rather than being skipped.
     pub(crate) fn close(&self) -> Result<PageNumberHashSet> {
         self.tracking.store(true, AtomicOrdering::Relaxed);
-        Ok(self.policy.lock()?.close())
+        Ok(self.policy.lock().or_poisoned()?.close())
     }
 
     pub(crate) fn reset(&self) -> PageNumberHashSet {

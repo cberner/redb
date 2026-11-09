@@ -1,4 +1,5 @@
 use crate::StorageError;
+use crate::error::LockResultExt;
 use crate::sync::{Condvar, Mutex};
 use crate::tree_store::{BtreeHeader, HeaderGuard, TransactionalMemory, WriterLock};
 use crate::{Key, Result, TypeName, Value};
@@ -500,7 +501,7 @@ impl TransactionTracker {
         let header = mem.lock_header_shared()?;
         // Hold the tracker across snapshot capture and registration so reclamation cannot
         // miss this reader. The header lock also excludes peer commits and local reloads.
-        let mut state = self.state.lock()?;
+        let mut state = self.state.lock().or_poisoned()?;
         let (id, root) = mem.latest_committed_snapshot(&header)?;
         state.add_active_transaction_lock_reference(mem, id, &header)?;
 

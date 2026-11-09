@@ -150,9 +150,26 @@ impl StorageError {
     }
 }
 
+#[cfg(not(feature = "experimental-api-5"))]
 impl<T> From<PoisonError<T>> for StorageError {
+    #[track_caller]
     fn from(_: PoisonError<T>) -> StorageError {
         StorageError::LockPoisoned(panic::Location::caller())
+    }
+}
+
+// Reports a poisoned lock as LockPoisoned, at the location where the lock was taken
+pub(crate) trait LockResultExt<G> {
+    fn or_poisoned(self) -> Result<G, StorageError>;
+}
+
+impl<G> LockResultExt<G> for Result<G, PoisonError<G>> {
+    #[track_caller]
+    fn or_poisoned(self) -> Result<G, StorageError> {
+        match self {
+            Ok(guard) => Ok(guard),
+            Err(_) => Err(StorageError::LockPoisoned(panic::Location::caller())),
+        }
     }
 }
 
@@ -840,7 +857,9 @@ pub enum Error {
     WouldBlock,
 }
 
+#[cfg(not(feature = "experimental-api-5"))]
 impl<T> From<PoisonError<T>> for Error {
+    #[track_caller]
     fn from(_: PoisonError<T>) -> Error {
         Error::LockPoisoned(panic::Location::caller())
     }
@@ -1035,6 +1054,26 @@ mod test {
             panic!("not a backend error");
         };
         assert!(inner.is::<FlashError>());
+    }
+
+    // A poisoned lock is reported at the line that took it, not inside this module
+    #[cfg(all(not(redb_no_std), panic = "unwind"))]
+    #[test]
+    fn lock_poisoned_reports_the_lock_site() {
+        use super::LockResultExt;
+        use std::sync::Mutex;
+
+        let lock = Mutex::new(());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = lock.lock().unwrap();
+            panic!("poison the lock");
+        });
+        let line = line!() + 1;
+        let err = lock.lock().or_poisoned().unwrap_err();
+        let StorageError::LockPoisoned(location) = err else {
+            panic!("not LockPoisoned: {err:?}");
+        };
+        assert_eq!((location.file(), location.line()), (file!(), line));
     }
 
     // However the backend wrapped it, an io::Error is reported as one
