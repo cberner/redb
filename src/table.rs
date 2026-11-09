@@ -361,7 +361,9 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// before the smallest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::lower_bound_mut`].
+    /// This is analogous to [`BTreeMap::lower_bound_mut`].
+    ///
+    /// [`BTreeMap::lower_bound_mut`]: alloc::collections::BTreeMap::lower_bound_mut
     pub fn lower_bound_mut<'a>(
         &mut self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
@@ -384,7 +386,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// after the greatest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::upper_bound_mut`].
+    /// This is analogous to [`BTreeMap::upper_bound_mut`].
     ///
     /// # Examples
     ///
@@ -418,6 +420,8 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// [`BTreeMap::upper_bound_mut`]: alloc::collections::BTreeMap::upper_bound_mut
     pub fn upper_bound_mut<'a>(
         &mut self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
@@ -430,8 +434,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
     /// Gets the given key's corresponding entry in the table for in-place manipulation.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::entry`], and avoids the double
+    /// This is analogous to [`BTreeMap::entry`], and avoids the double
     /// lookup that a `get` followed by `insert` would require when updating a value.
+    ///
+    /// [`BTreeMap::entry`]: alloc::collections::BTreeMap::entry
     #[cfg(feature = "experimental-api-5")]
     pub fn entry<'a, 'k>(&'a mut self, key: K::SelfType<'k>) -> Result<Entry<'a, 'k, K, V>> {
         let key_len = K::as_bytes(&key).as_ref().len();
@@ -453,8 +459,10 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
 
     /// Gets the given key's corresponding entry in the table for in-place manipulation.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::entry`], and avoids the double
+    /// This is analogous to [`BTreeMap::entry`], and avoids the double
     /// lookup that a `get` followed by `insert` would require when updating a value.
+    ///
+    /// [`BTreeMap::entry`]: alloc::collections::BTreeMap::entry
     #[cfg(not(feature = "experimental-api-5"))]
     pub fn entry<'a>(&'a mut self, key: K::SelfType<'a>) -> Result<Entry<'a, K, V>> {
         let key_len = K::as_bytes(&key).as_ref().len();
@@ -742,7 +750,9 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// before the smallest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::lower_bound`].
+    /// This is analogous to [`BTreeMap::lower_bound`].
+    ///
+    /// [`BTreeMap::lower_bound`]: alloc::collections::BTreeMap::lower_bound
     #[cfg(feature = "experimental-api-5")]
     fn lower_bound<'a>(
         &self,
@@ -761,7 +771,9 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// before the smallest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::lower_bound`].
+    /// This is analogous to [`BTreeMap::lower_bound`].
+    ///
+    /// [`BTreeMap::lower_bound`]: alloc::collections::BTreeMap::lower_bound
     #[cfg(not(feature = "experimental-api-5"))]
     #[allow(unused_variables)]
     fn lower_bound<'a>(
@@ -783,7 +795,9 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// after the greatest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::upper_bound`].
+    /// This is analogous to [`BTreeMap::upper_bound`].
+    ///
+    /// [`BTreeMap::upper_bound`]: alloc::collections::BTreeMap::upper_bound
     #[cfg(feature = "experimental-api-5")]
     fn upper_bound<'a>(
         &self,
@@ -802,7 +816,9 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
     /// after the greatest key in the table.
     ///
-    /// This is analogous to [`std::collections::BTreeMap::upper_bound`].
+    /// This is analogous to [`BTreeMap::upper_bound`].
+    ///
+    /// [`BTreeMap::upper_bound`]: alloc::collections::BTreeMap::upper_bound
     #[cfg(not(feature = "experimental-api-5"))]
     #[allow(unused_variables)]
     fn upper_bound<'a>(
@@ -1302,12 +1318,13 @@ impl<K: Key + 'static, V: Value + 'static> DoubleEndedIterator for OwnedRange<K,
 /// A view into a single entry in a [`Table`], which may either be vacant or occupied.
 ///
 /// This `enum` is constructed from the [`entry`] method on [`Table`], and mirrors
-/// [`std::collections::btree_map::Entry`] as closely as the redb data model allows.
+/// [`btree_map::Entry`] as closely as the redb data model allows.
 ///
 /// Unlike the in-memory `BTreeMap`, redb values are stored serialized, so methods that
 /// produce a "reference to the value" return an [`AccessGuardMut`] instead of `&mut V`.
 ///
 /// [`entry`]: Table::entry
+/// [`btree_map::Entry`]: alloc::collections::btree_map::Entry
 #[cfg(feature = "experimental-api-5")]
 pub enum Entry<'a, 'k, K: Key + 'static, V: Value + 'static> {
     /// An occupied entry.
@@ -1401,13 +1418,14 @@ mod entry_api4 {
     /// A view into a single entry in a [`Table`], which may either be vacant or occupied.
     ///
     /// This `enum` is constructed from the [`entry`] method on [`Table`], and mirrors
-    /// [`std::collections::btree_map::Entry`] as closely as the redb data model allows.
+    /// [`btree_map::Entry`] as closely as the redb data model allows.
     ///
     /// Unlike the in-memory `BTreeMap`, redb values are stored serialized, so methods that
     /// produce a "reference to the value" return an [`AccessGuardMut`] instead of `&mut V`.
     ///
     /// [`entry`]: super::Table::entry
     /// [`Table`]: super::Table
+    /// [`btree_map::Entry`]: alloc::collections::btree_map::Entry
     pub enum Entry<'a, K: Key + 'static, V: Value + 'static> {
         /// An occupied entry.
         Occupied(OccupiedEntry<'a, K, V>),
@@ -1625,7 +1643,9 @@ pub(crate) fn bound_to_bytes<'a, K: Key + 'a, KR: Borrow<K::SelfType<'a>>>(
 ///
 /// Cursors are constructed with [`ReadableTable::lower_bound`] and
 /// [`ReadableTable::upper_bound`], and are similar to the nightly
-/// [`std::collections::btree_map::Cursor`].
+/// [`btree_map::Cursor`].
+///
+/// [`btree_map::Cursor`]: alloc::collections::btree_map::Cursor
 pub struct Cursor<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursor<K, V>,
     // The cursor owns page handles, so it keeps the transaction registered for as long as it is
@@ -1698,9 +1718,11 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
     /// table.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::Cursor::next`]. The cursor is not an
+    /// [`btree_map::Cursor::next`]. The cursor is not an
     /// [`Iterator`], since every step can report a storage error; use
     /// [`ReadableTable::range`] for iteration.
+    ///
+    /// [`btree_map::Cursor::next`]: alloc::collections::btree_map::Cursor::next
     #[allow(clippy::should_implement_trait, clippy::type_complexity)]
     pub fn next(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
         self.inner.next()
@@ -1713,7 +1735,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
     /// table.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::Cursor::prev`].
+    /// [`btree_map::Cursor::prev`].
+    ///
+    /// [`btree_map::Cursor::prev`]: alloc::collections::btree_map::Cursor::prev
     #[allow(clippy::type_complexity)]
     pub fn prev(&mut self) -> Result<Option<(AccessGuard<'a, K>, AccessGuard<'a, V>)>> {
         self.inner.prev()
@@ -1726,7 +1750,7 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
 ///
 /// Cursors are constructed with [`Table::lower_bound_mut`] and
 /// [`Table::upper_bound_mut`], and mirror the nightly
-/// [`std::collections::btree_map::CursorMut`] as closely as the redb data
+/// [`btree_map::CursorMut`] as closely as the redb data
 /// model allows: values are stored serialized, so inspecting the entries
 /// around the gap returns [`AccessGuard`]s instead of references, and every
 /// operation can report a storage error.
@@ -1736,6 +1760,8 @@ impl<'a, K: Key + 'static, V: Value + 'static> Cursor<'a, K, V> {
 ///
 /// The cursor mutably borrows the [`Table`]: the table cannot be used while
 /// a cursor into it exists.
+///
+/// [`btree_map::CursorMut`]: alloc::collections::btree_map::CursorMut
 pub struct CursorMut<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursorMut<'a, K, V>,
     transaction: &'a WriteTransaction,
@@ -1797,9 +1823,11 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// closes the buffered run.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::next`]. The cursor is not
+    /// [`btree_map::CursorMut::next`]. The cursor is not
     /// an [`Iterator`], since every step can report a storage error; use
     /// [`ReadableTable::range`] for iteration.
+    ///
+    /// [`btree_map::CursorMut::next`]: alloc::collections::btree_map::CursorMut::next
     #[allow(clippy::should_implement_trait, clippy::type_complexity)]
     pub fn next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.check_usable()?;
@@ -1826,7 +1854,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// closes the buffered run.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::prev`].
+    /// [`btree_map::CursorMut::prev`].
+    ///
+    /// [`btree_map::CursorMut::prev`]: alloc::collections::btree_map::CursorMut::prev
     #[allow(clippy::type_complexity)]
     pub fn prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.check_usable()?;
@@ -1860,7 +1890,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// applies the other direction's pending inserts first.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::insert_before`].
+    /// [`btree_map::CursorMut::insert_before`].
+    ///
+    /// [`btree_map::CursorMut::insert_before`]: alloc::collections::btree_map::CursorMut::insert_before
     pub fn insert_before<'k, 'v>(
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
@@ -1895,7 +1927,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// applies the other direction's pending inserts first.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::insert_after`].
+    /// [`btree_map::CursorMut::insert_after`].
+    ///
+    /// [`btree_map::CursorMut::insert_after`]: alloc::collections::btree_map::CursorMut::insert_after
     pub fn insert_after<'k, 'v>(
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
@@ -1924,7 +1958,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// table already had.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::remove_next`].
+    /// [`btree_map::CursorMut::remove_next`].
+    ///
+    /// [`btree_map::CursorMut::remove_next`]: alloc::collections::btree_map::CursorMut::remove_next
     #[allow(clippy::type_complexity)]
     pub fn remove_next(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.check_usable()?;
@@ -1952,7 +1988,9 @@ impl<'a, K: Key + 'static, V: Value + 'static> CursorMut<'a, K, V> {
     /// table already had.
     ///
     /// This is analogous to the nightly
-    /// [`std::collections::btree_map::CursorMut::remove_prev`].
+    /// [`btree_map::CursorMut::remove_prev`].
+    ///
+    /// [`btree_map::CursorMut::remove_prev`]: alloc::collections::btree_map::CursorMut::remove_prev
     #[allow(clippy::type_complexity)]
     pub fn remove_prev(&mut self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>> {
         self.check_usable()?;

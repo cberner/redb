@@ -52,7 +52,7 @@ pub(crate) type BackendIoError = std::io::Error;
 /// Implements persistent storage for a database.
 ///
 /// Failures are reported as [`BackendError`]. Without `experimental-api-5`, the I/O methods report
-/// [`std::io::Error`] instead.
+/// [`std::io::Error`](https://doc.rust-lang.org/std/io/struct.Error.html) instead.
 ///
 /// Locking is optional. Backends that implement it must override the lock methods. Locks belong to
 /// a backend instance and must conflict with locks held by independently opened instances,
@@ -63,7 +63,7 @@ pub(crate) type BackendIoError = std::io::Error;
 /// Lock bounds refer to byte offsets and may extend beyond the current length of the storage.
 /// An unbounded start means offset zero; an unbounded end includes all future growth. Bounds
 /// must describe a nonempty range. Implementations may reject offsets or lengths that their
-/// underlying locking API cannot represent with [`BackendError::Io`].
+/// underlying locking API cannot represent, with an error other than [`BackendError::Unsupported`].
 ///
 /// redb never queries backend-reserved ranges and only locks them during whole-storage fallback.
 /// See the [design document](https://github.com/cberner/redb/blob/master/docs/design.md#lock-bytes).
@@ -2185,7 +2185,8 @@ impl RepairSession {
         self.aborted
     }
 
-    /// Abort the repair process. The coorresponding call to [`Builder::open`] or [`Builder::create`] will return an error
+    /// Abort the repair process. The open that is repairing the database returns
+    /// [`DatabaseError::RepairAborted`].
     pub fn abort(&mut self) {
         self.aborted = true;
     }
@@ -2334,8 +2335,7 @@ impl Builder {
     /// rebuilt. A file altered since redb last wrote it fails to open with
     /// [`StorageError::Corrupted`] instead of being trusted, where a plain open may panic.
     ///
-    /// The check reads the whole file and commits, so it does not apply to
-    /// [`Self::open_read_only`].
+    /// The check reads the whole file and commits, so it does not apply to read-only opens.
     ///
     /// Defaults to `false`.
     pub fn set_check_integrity_on_open(&mut self, enabled: bool) -> &mut Self {
@@ -2417,14 +2417,7 @@ impl Builder {
     /// Opens an existing redb database with the given backend, without modifying it.
     ///
     /// A database requiring recovery is rejected rather than repaired. The locking and concurrency
-    /// rules of [`Self::open_read_only`] also apply to this method.
-    ///
-    /// When using a [`FileBackend`], the supplied file is used without reopening its pathname.
-    /// Each database handle must use an independently opened file. Do not use
-    /// [`File::try_clone`](std::fs::File::try_clone) or a duplicated file descriptor to open
-    /// another database handle: they can share the same open file description and its locks.
-    /// Closing either database can release the other's locks, allowing a writer to invalidate its
-    /// read-only snapshot.
+    /// rules of `open_read_only()` also apply to this method.
     pub fn open_read_only_with_backend(
         &self,
         backend: impl StorageBackend,

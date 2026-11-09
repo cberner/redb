@@ -10,10 +10,12 @@ use core::ops::{Bound, Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, Ran
 /// Implemented for the standard range types over any type that borrows the table's key type, so
 /// `5..10`, `&5..&10`, and `(Bound::Excluded(5), Bound::Unbounded)` are all accepted, and for `..`.
 ///
-/// Unlike a plain [`std::ops::RangeBounds`] bound, the borrowed key type is a parameter of the implementing
+/// Unlike a plain [`RangeBounds`] bound, the borrowed key type is a parameter of the implementing
 /// range type rather than of the method, so `..` carries no type to infer and needs no annotation.
 ///
 /// This trait is sealed and cannot be implemented outside of redb.
+///
+/// [`RangeBounds`]: core::ops::RangeBounds
 pub trait KeyRange<K: Key>: Sealed {
     /// Returns the range's bounds, as encoded by [`Key::as_bytes`]
     #[doc(hidden)]
