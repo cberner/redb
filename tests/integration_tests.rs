@@ -1933,6 +1933,24 @@ fn large_keys() {
 }
 
 #[test]
+fn new_database_is_small() {
+    let tmpfile = create_tempfile();
+    let table_definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+    let db = Database::create(tmpfile.path()).unwrap();
+    assert!(tmpfile.as_file().metadata().unwrap().len() <= 128 * 1024);
+
+    for i in 0..10 {
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(table_definition).unwrap();
+            table.insert(&i, &i).unwrap();
+        }
+        txn.commit().unwrap();
+    }
+    assert!(tmpfile.as_file().metadata().unwrap().len() <= 128 * 1024);
+}
+
+#[test]
 fn dynamic_growth() {
     let tmpfile = create_tempfile();
     let table_definition: TableDefinition<u64, &[u8]> = TableDefinition::new("x");
