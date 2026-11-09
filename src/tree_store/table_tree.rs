@@ -1,5 +1,5 @@
 use crate::db::TransactionGuard;
-use crate::error::TableError;
+use crate::error::{LockResultExt, TableError};
 use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtreeMut, btree_stats};
 use crate::tree_store::btree_base::BtreeHeader;
@@ -337,7 +337,7 @@ impl TableTreeMut {
             Ok(header) => {
                 let allocated = self.allocated_pages.close()?;
                 let mut old = vec![];
-                let mut freed_pages = self.freed_pages.lock()?;
+                let mut freed_pages = self.freed_pages.lock().or_poisoned()?;
                 mem::swap(freed_pages.as_mut(), &mut old);
                 Ok((header, allocated, old))
             }
