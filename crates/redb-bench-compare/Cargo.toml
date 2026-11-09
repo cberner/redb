@@ -19,7 +19,7 @@ tempfile = "3.5.0"
 heed = { version = "0.22", default-features = false }
 rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "bindgen-runtime"] }
 fjall = "=3.1.6"
-rusqlite = { version = "0.38.0", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 ctrlc = "3.2.3"
 env_logger = "0.11"
 libc = "0.2.99"
