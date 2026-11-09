@@ -47,15 +47,30 @@ impl BackendError {
         }
         self
     }
-}
 
-#[cfg(not(redb_no_std))]
-impl From<std::io::Error> for BackendError {
-    /// Preserves unsupported-operation errors as [`Self::Unsupported`].
-    fn from(err: std::io::Error) -> Self {
+    // A lock method's error, with an unsupported operation reported as Self::Unsupported, as the
+    // StorageBackend docs specify
+    #[cfg(not(redb_no_std))]
+    pub(crate) fn from_lock_io(err: std::io::Error) -> Self {
         if err.kind() == std::io::ErrorKind::Unsupported {
             return Self::Unsupported;
         }
+        Self::Io(err)
+    }
+}
+
+#[cfg(not(feature = "experimental-api-5"))]
+impl From<std::io::Error> for BackendError {
+    /// Preserves unsupported-operation errors as [`Self::Unsupported`].
+    fn from(err: std::io::Error) -> Self {
+        Self::from_lock_io(err)
+    }
+}
+
+// Lossless, since the I/O methods report an io::Error through it too
+#[cfg(all(feature = "experimental-api-5", not(redb_no_std)))]
+impl From<std::io::Error> for BackendError {
+    fn from(err: std::io::Error) -> Self {
         Self::Io(err)
     }
 }
@@ -149,6 +164,16 @@ impl StorageError {
         #[cfg(redb_no_std)]
         {
             Self::Corrupted(message.to_string())
+        }
+    }
+
+    // A lock method's error. An I/O error of kind Unsupported is Unsupported however the backend
+    // wrapped it, since the callers fall back to a whole-storage lock only on Unsupported
+    pub(crate) fn from_lock_error(err: BackendError) -> Self {
+        match Self::from(err) {
+            #[cfg(not(redb_no_std))]
+            Self::Io(err) if err.kind() == std::io::ErrorKind::Unsupported => Self::Unsupported,
+            err => err,
         }
     }
 }

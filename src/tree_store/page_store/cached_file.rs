@@ -151,28 +151,28 @@ impl CheckedBackend {
         self.check_failure()?;
         self.file
             .try_lock_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn try_lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
         self.check_failure()?;
         self.file
             .try_lock_shared_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn lock_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.check_failure()?;
         self.file
             .lock_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn lock_shared_range(&self, range: impl RangeBounds<u64>) -> Result {
         self.check_failure()?;
         self.file
             .lock_shared_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn unlock_range(&self, range: impl RangeBounds<u64>) -> Result {
@@ -182,14 +182,14 @@ impl CheckedBackend {
         }
         self.file
             .unlock_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn query_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
         self.check_failure()?;
         self.file
             .query_lock_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from)
+            .map_err(StorageError::from_lock_error)
     }
 
     fn check_failure(&self) -> Result<()> {
