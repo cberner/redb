@@ -62,6 +62,10 @@
   `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
   atomics.
 
+## redb-derive 0.2.1 - 2026-XX-XX
+* The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
+  work in `#![no_std]` crates.
+
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
 Database files cannot be shared between processes using these modes and processes using the

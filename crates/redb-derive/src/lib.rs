@@ -10,12 +10,13 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, GenericParam, Ident, parse_macro_input};
 
-// All paths in the generated code must be fully qualified (`::std::...`, `#redb::...`, and
-// `<T as #redb::Value>::...` for trait methods, where `#redb` is the path returned by
-// `redb_crate_path_for()`). Method-call syntax and bare paths resolve inherent items before
-// trait items, so a field type with an inherent `from_bytes` or `as_bytes` (e.g. `uuid::Uuid`)
-// would otherwise hijack the generated encoding, and names shadowed at the derive site would
-// change what the code means.
+// All paths in the generated code must be fully qualified (`::core::...`, `__redb_alloc::...`,
+// `#redb::...`, and `<T as #redb::Value>::...` for trait methods, where `#redb` is the path
+// returned by `redb_crate_path_for()`). Method-call syntax and bare paths resolve inherent items
+// before trait items, so a field type with an inherent `from_bytes` or `as_bytes`
+// (e.g. `uuid::Uuid`) would otherwise hijack the generated encoding, and names shadowed at the
+// derive site would change what the code means. Nothing comes from std, so that the derives work
+// in no_std crates; alloc's items are named through `__redb_alloc` (see `generate_value_impl()`).
 
 // The path of the redb crate in generated code: `::redb`, unless an explicit
 // `#[redb(crate = "path")]` on the deriving struct names it otherwise, as when the dependency
@@ -79,12 +80,12 @@ fn generate_key_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
     Ok(quote! {
         impl #impl_generics #redb::Key for #name #ty_generics #where_clause {
             fn compare(
-                data1: &[::std::primitive::u8],
-                data2: &[::std::primitive::u8],
-            ) -> ::std::cmp::Ordering {
+                data1: &[::core::primitive::u8],
+                data2: &[::core::primitive::u8],
+            ) -> ::core::cmp::Ordering {
                 let value1 = <Self as #redb::Value>::from_bytes(data1);
                 let value2 = <Self as #redb::Value>::from_bytes(data2);
-                ::std::cmp::Ord::cmp(&value1, &value2)
+                ::core::cmp::Ord::cmp(&value1, &value2)
             }
         }
     })
@@ -138,43 +139,50 @@ fn generate_value_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStr
     let fixed_width_impl = generate_fixed_width(&data_struct.fields, &redb);
     let niche_impl = generate_niche(&data_struct.fields, &redb);
 
+    // `::alloc` resolves only in a crate that declares `extern crate alloc`, which std crates
+    // don't, so the impl declares it itself, under a name that can't shadow one of the user's.
+    // The anonymous const scopes that declaration, so that two derives in a module don't collide.
     Ok(quote! {
-        impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
-            type SelfType<'__redb_a> = #self_type
-            where
-                Self: '__redb_a;
-            type AsBytes<'__redb_a> = ::std::vec::Vec<::std::primitive::u8>
-            where
-                Self: '__redb_a;
+        const _: () = {
+            extern crate alloc as __redb_alloc;
 
-            #niche_impl
+            impl #impl_generics #redb::Value for #name #ty_generics #where_clause {
+                type SelfType<'__redb_a> = #self_type
+                where
+                    Self: '__redb_a;
+                type AsBytes<'__redb_a> = __redb_alloc::vec::Vec<::core::primitive::u8>
+                where
+                    Self: '__redb_a;
 
-            fn fixed_width() -> ::std::option::Option<::std::primitive::usize> {
-                #fixed_width_impl
+                #niche_impl
+
+                fn fixed_width() -> ::core::option::Option<::core::primitive::usize> {
+                    #fixed_width_impl
+                }
+
+                fn from_bytes<'__redb_a>(
+                    data: &'__redb_a [::core::primitive::u8],
+                ) -> Self::SelfType<'__redb_a>
+                where
+                    Self: '__redb_a,
+                {
+                    #from_bytes_impl
+                }
+
+                fn as_bytes<'__redb_a, '__redb_b: '__redb_a>(
+                    value: &'__redb_a Self::SelfType<'__redb_b>,
+                ) -> Self::AsBytes<'__redb_a>
+                where
+                    Self: '__redb_b,
+                {
+                    #as_bytes_impl
+                }
+
+                fn type_name() -> #redb::TypeName {
+                    #type_name_impl
+                }
             }
-
-            fn from_bytes<'__redb_a>(
-                data: &'__redb_a [::std::primitive::u8],
-            ) -> Self::SelfType<'__redb_a>
-            where
-                Self: '__redb_a,
-            {
-                #from_bytes_impl
-            }
-
-            fn as_bytes<'__redb_a, '__redb_b: '__redb_a>(
-                value: &'__redb_a Self::SelfType<'__redb_b>,
-            ) -> Self::AsBytes<'__redb_a>
-            where
-                Self: '__redb_b,
-            {
-                #as_bytes_impl
-            }
-
-            fn type_name() -> #redb::TypeName {
-                #type_name_impl
-            }
-        }
+        };
     })
 }
 
@@ -234,9 +242,9 @@ fn render_field_type_name(
         {
             let type_name = <#field_type as #redb::Value>::type_name();
             if type_name == #redb::TypeName::new(type_name.name()) {
-                ::std::format!("{}#user", type_name.name())
+                __redb_alloc::format!("{}#user", type_name.name())
             } else {
-                ::std::borrow::ToOwned::to_owned(type_name.name())
+                __redb_alloc::borrow::ToOwned::to_owned(type_name.name())
             }
         }
     }
@@ -256,21 +264,21 @@ fn generate_type_name(
                     let field_name = field.ident.as_ref().unwrap();
                     let rendered_type = render_field_type_name(&field.ty, redb);
                     quote! {
-                        ::std::format!("{}: {}", ::std::stringify!(#field_name), #rendered_type)
+                        __redb_alloc::format!("{}: {}", ::core::stringify!(#field_name), #rendered_type)
                     }
                 })
                 .collect();
 
             if field_strings.is_empty() {
                 quote! {
-                    #redb::TypeName::new(&::std::format!("{} {{}}",
-                        ::std::stringify!(#struct_name),
+                    #redb::TypeName::new(&__redb_alloc::format!("{} {{}}",
+                        ::core::stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    #redb::TypeName::new(&::std::format!("{} {{{}}}",
-                        ::std::stringify!(#struct_name),
+                    #redb::TypeName::new(&__redb_alloc::format!("{} {{{}}}",
+                        ::core::stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
                 }
@@ -285,14 +293,14 @@ fn generate_type_name(
 
             if field_strings.is_empty() {
                 quote! {
-                    #redb::TypeName::new(&::std::format!("{}()",
-                        ::std::stringify!(#struct_name),
+                    #redb::TypeName::new(&__redb_alloc::format!("{}()",
+                        ::core::stringify!(#struct_name),
                     ))
                 }
             } else {
                 quote! {
-                    #redb::TypeName::new(&::std::format!("{}({})",
-                        ::std::stringify!(#struct_name),
+                    #redb::TypeName::new(&__redb_alloc::format!("{}({})",
+                        ::core::stringify!(#struct_name),
                         [#(#field_strings),*].join(", ")
                     ))
                 }
@@ -300,7 +308,7 @@ fn generate_type_name(
         }
         Fields::Unit => {
             quote! {
-                #redb::TypeName::new(::std::stringify!(#struct_name))
+                #redb::TypeName::new(::core::stringify!(#struct_name))
             }
         }
     }
@@ -334,7 +342,7 @@ fn generate_niche(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_macr
         return quote! {};
     };
     quote! {
-        const NICHE: ::std::option::Option<&'static [::std::primitive::u8]> =
+        const NICHE: ::core::option::Option<&'static [::core::primitive::u8]> =
             <#field_type as #redb::Value>::NICHE;
     }
 }
@@ -349,7 +357,7 @@ fn generate_fixed_width(
         #(
             total_width += <#field_types as #redb::Value>::fixed_width()?;
         )*
-        ::std::option::Option::Some(total_width)
+        ::core::option::Option::Some(total_width)
     }
 }
 
@@ -376,14 +384,14 @@ fn generate_as_bytes(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_m
     let num_fields = field_types.len();
 
     if num_fields == 0 {
-        quote! { ::std::vec::Vec::new() }
+        quote! { __redb_alloc::vec::Vec::new() }
     } else if num_fields == 1 {
         let field_accessor = &field_accessors[0];
         let field_type = &field_types[0];
         quote! {
             {
                 let field_bytes = <#field_type as #redb::Value>::as_bytes(&value.#field_accessor);
-                let bytes: &[::std::primitive::u8] = ::std::convert::AsRef::as_ref(&field_bytes);
+                let bytes: &[::core::primitive::u8] = ::core::convert::AsRef::as_ref(&field_bytes);
                 bytes.to_vec()
             }
         }
@@ -393,33 +401,33 @@ fn generate_as_bytes(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_m
 
         quote! {
             {
-                let mut result = ::std::vec::Vec::new();
+                let mut result = __redb_alloc::vec::Vec::new();
 
                 #(
                     if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
                         let field_bytes = <#field_types_except_last as #redb::Value>::as_bytes(
                             &value.#field_accessors_except_last,
                         );
-                        let bytes: &[::std::primitive::u8] =
-                            ::std::convert::AsRef::as_ref(&field_bytes);
+                        let bytes: &[::core::primitive::u8] =
+                            ::core::convert::AsRef::as_ref(&field_bytes);
                         let len = bytes.len();
                         if len < 254 {
                             result.push(
-                                <::std::primitive::u8 as ::std::convert::TryFrom<
-                                    ::std::primitive::usize,
+                                <::core::primitive::u8 as ::core::convert::TryFrom<
+                                    ::core::primitive::usize,
                                 >>::try_from(len)
                                 .unwrap(),
                             );
-                        } else if let ::std::result::Result::Ok(u16_len) =
-                            <::std::primitive::u16 as ::std::convert::TryFrom<
-                                ::std::primitive::usize,
+                        } else if let ::core::result::Result::Ok(u16_len) =
+                            <::core::primitive::u16 as ::core::convert::TryFrom<
+                                ::core::primitive::usize,
                             >>::try_from(len)
                         {
                             result.push(254u8);
                             result.extend_from_slice(&u16_len.to_le_bytes());
                         } else {
-                            let u32_len = <::std::primitive::u32 as ::std::convert::TryFrom<
-                                ::std::primitive::usize,
+                            let u32_len = <::core::primitive::u32 as ::core::convert::TryFrom<
+                                ::core::primitive::usize,
                             >>::try_from(len)
                             .unwrap();
                             result.push(255u8);
@@ -433,8 +441,8 @@ fn generate_as_bytes(fields: &Fields, redb: &proc_macro2::TokenStream) -> proc_m
                         let field_bytes = <#field_types as #redb::Value>::as_bytes(
                             &value.#field_accessors,
                         );
-                        let bytes: &[::std::primitive::u8] =
-                            ::std::convert::AsRef::as_ref(&field_bytes);
+                        let bytes: &[::core::primitive::u8] =
+                            ::core::convert::AsRef::as_ref(&field_bytes);
                         result.extend_from_slice(bytes);
                     }
                 )*
@@ -472,26 +480,26 @@ fn generate_from_bytes(
 
         quote! {
             let mut offset = 0usize;
-            let mut var_lengths = ::std::vec::Vec::new();
+            let mut var_lengths = __redb_alloc::vec::Vec::new();
 
             #(
                 if <#field_types_except_last as #redb::Value>::fixed_width().is_none() {
                     let (len, bytes_read) = match data[offset] {
-                        0u8..=253u8 => (data[offset] as ::std::primitive::usize, 1usize),
+                        0u8..=253u8 => (data[offset] as ::core::primitive::usize, 1usize),
                         254u8 => (
-                            ::std::primitive::u16::from_le_bytes([
+                            ::core::primitive::u16::from_le_bytes([
                                 data[offset + 1],
                                 data[offset + 2],
-                            ]) as ::std::primitive::usize,
+                            ]) as ::core::primitive::usize,
                             3usize,
                         ),
                         255u8 => (
-                            ::std::primitive::u32::from_le_bytes([
+                            ::core::primitive::u32::from_le_bytes([
                                 data[offset + 1],
                                 data[offset + 2],
                                 data[offset + 3],
                                 data[offset + 4],
-                            ]) as ::std::primitive::usize,
+                            ]) as ::core::primitive::usize,
                             5usize,
                         ),
                     };
@@ -502,7 +510,7 @@ fn generate_from_bytes(
 
             let mut var_index = 0usize;
             #(
-                let #field_vars_except_last = if let ::std::option::Option::Some(fixed_width) =
+                let #field_vars_except_last = if let ::core::option::Option::Some(fixed_width) =
                     <#field_types_except_last as #redb::Value>::fixed_width()
                 {
                     let field_data = &data[offset..offset + fixed_width];
@@ -517,7 +525,7 @@ fn generate_from_bytes(
                 };
             )*
 
-            let #last_field_var = if let ::std::option::Option::Some(fixed_width) =
+            let #last_field_var = if let ::core::option::Option::Some(fixed_width) =
                 <#last_field_type as #redb::Value>::fixed_width()
             {
                 let field_data = &data[offset..offset + fixed_width];
