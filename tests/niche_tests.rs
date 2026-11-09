@@ -125,6 +125,12 @@ fn tables_written_without_the_niche_open_through_the_legacy_type() {
         txn.open_table(VALUES),
         Err(TableError::TableTypeMismatch { .. })
     ));
+    // The error names both spellings, which print the same without the type that was asked for
+    assert_eq!(
+        txn.open_table(VALUES).err().unwrap().to_string(),
+        "values has key type u64 and value type Option<&str>, but was opened with key type u64 \
+         and value type niche::Option<&str>"
+    );
     assert!(matches!(
         txn.open_table(KEYS),
         Err(TableError::TableTypeMismatch { .. })

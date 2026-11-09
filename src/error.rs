@@ -251,20 +251,28 @@ impl core::error::Error for StorageError {}
 #[non_exhaustive]
 pub enum TableError {
     /// Table types didn't match.
+    #[cfg(not(feature = "experimental-api-5"))]
     TableTypeMismatch {
         table: String,
         key: TypeName,
         value: TypeName,
     },
+    /// The table's types are not the ones it was opened with
+    #[cfg(feature = "experimental-api-5")]
+    TableTypeMismatch(Box<TableTypeMismatch>),
     /// The table is a multimap table
     TableIsMultimap(String),
     /// The table is not a multimap table
     TableIsNotMultimap(String),
+    #[cfg(not(feature = "experimental-api-5"))]
     TypeDefinitionChanged {
         name: TypeName,
         alignment: usize,
         width: Option<usize>,
     },
+    /// A type's fixed width or alignment differs from the one it is stored with
+    #[cfg(feature = "experimental-api-5")]
+    TypeDefinitionChanged(Box<TypeDefinitionInfo>),
     /// Table name does not match any table in database
     TableDoesNotExist(String),
     /// Table name already exists in the database
@@ -296,6 +304,7 @@ impl TableError {
 impl From<TableError> for Error {
     fn from(err: TableError) -> Error {
         match err {
+            #[cfg(not(feature = "experimental-api-5"))]
             TableError::TypeDefinitionChanged {
                 name,
                 alignment,
@@ -305,9 +314,14 @@ impl From<TableError> for Error {
                 alignment,
                 width,
             },
+            #[cfg(feature = "experimental-api-5")]
+            TableError::TypeDefinitionChanged(changed) => Error::TypeDefinitionChanged(changed),
+            #[cfg(not(feature = "experimental-api-5"))]
             TableError::TableTypeMismatch { table, key, value } => {
                 Error::TableTypeMismatch { table, key, value }
             }
+            #[cfg(feature = "experimental-api-5")]
+            TableError::TableTypeMismatch(mismatch) => Error::TableTypeMismatch(mismatch),
             TableError::TableIsMultimap(table) => Error::TableIsMultimap(table),
             TableError::TableIsNotMultimap(table) => Error::TableIsNotMultimap(table),
             TableError::TableDoesNotExist(table) => Error::TableDoesNotExist(table),
@@ -316,6 +330,185 @@ impl From<TableError> for Error {
             TableError::Storage(storage) => storage.into(),
         }
     }
+}
+
+impl TableError {
+    pub(crate) fn type_mismatch(
+        table: &str,
+        stored_key: TypeName,
+        stored_value: TypeName,
+        requested_key: TypeName,
+        requested_value: TypeName,
+    ) -> Self {
+        #[cfg(feature = "experimental-api-5")]
+        {
+            Self::TableTypeMismatch(Box::new(TableTypeMismatch {
+                table: table.to_string(),
+                stored_key,
+                stored_value,
+                requested_key,
+                requested_value,
+            }))
+        }
+        #[cfg(not(feature = "experimental-api-5"))]
+        {
+            let _ = (requested_key, requested_value);
+            Self::TableTypeMismatch {
+                table: table.to_string(),
+                key: stored_key,
+                value: stored_value,
+            }
+        }
+    }
+
+    pub(crate) fn type_definition_changed(
+        name: TypeName,
+        alignment: usize,
+        width: Option<usize>,
+    ) -> Self {
+        #[cfg(feature = "experimental-api-5")]
+        {
+            Self::TypeDefinitionChanged(Box::new(TypeDefinitionInfo {
+                name,
+                alignment,
+                width,
+            }))
+        }
+        #[cfg(not(feature = "experimental-api-5"))]
+        {
+            Self::TypeDefinitionChanged {
+                name,
+                alignment,
+                width,
+            }
+        }
+    }
+}
+
+/// A table opened with key or value types other than the ones it is stored with. See
+/// [`TableError::TableTypeMismatch`].
+#[cfg(feature = "experimental-api-5")]
+#[derive(Debug)]
+pub struct TableTypeMismatch {
+    table: String,
+    stored_key: TypeName,
+    stored_value: TypeName,
+    requested_key: TypeName,
+    requested_value: TypeName,
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl TableTypeMismatch {
+    /// The name of the table
+    pub fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// The key type the table is stored with
+    pub fn stored_key(&self) -> &TypeName {
+        &self.stored_key
+    }
+
+    /// The value type the table is stored with
+    pub fn stored_value(&self) -> &TypeName {
+        &self.stored_value
+    }
+
+    /// The key type the table was opened with
+    pub fn requested_key(&self) -> &TypeName {
+        &self.requested_key
+    }
+
+    /// The value type the table was opened with
+    pub fn requested_value(&self) -> &TypeName {
+        &self.requested_value
+    }
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl Display for TableTypeMismatch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        fmt_type_mismatch(
+            f,
+            &self.table,
+            &self.stored_key,
+            &self.stored_value,
+            Some((&self.requested_key, &self.requested_value)),
+        )
+    }
+}
+
+/// A key or value type whose fixed width or alignment differs from the one it is stored with. See
+/// [`TableError::TypeDefinitionChanged`].
+#[cfg(feature = "experimental-api-5")]
+#[derive(Debug)]
+pub struct TypeDefinitionInfo {
+    name: TypeName,
+    alignment: usize,
+    width: Option<usize>,
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl TypeDefinitionInfo {
+    /// The type whose definition changed
+    pub fn name(&self) -> &TypeName {
+        &self.name
+    }
+
+    /// The alignment the type is stored with
+    pub fn alignment(&self) -> usize {
+        self.alignment
+    }
+
+    /// The fixed width the type is stored with, or `None` if it is stored as variable width
+    pub fn width(&self) -> Option<usize> {
+        self.width
+    }
+}
+
+#[cfg(feature = "experimental-api-5")]
+impl Display for TypeDefinitionInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        fmt_type_definition_changed(f, &self.name, self.alignment, self.width)
+    }
+}
+
+fn fmt_type_definition_changed(
+    f: &mut Formatter<'_>,
+    name: &TypeName,
+    alignment: usize,
+    width: Option<usize>,
+) -> core::fmt::Result {
+    write!(
+        f,
+        "Current definition of {} does not match stored definition (width={width:?}, alignment={alignment})",
+        name.name(),
+    )
+}
+
+// Names neither Table nor MultimapTable, since the mismatch may be either
+fn fmt_type_mismatch(
+    f: &mut Formatter<'_>,
+    table: &str,
+    key: &TypeName,
+    value: &TypeName,
+    requested: Option<(&TypeName, &TypeName)>,
+) -> core::fmt::Result {
+    write!(
+        f,
+        "{table} has key type {} and value type {}",
+        key.name(),
+        value.name()
+    )?;
+    if let Some((requested_key, requested_value)) = requested {
+        write!(
+            f,
+            ", but was opened with key type {} and value type {}",
+            requested_key.name(),
+            requested_value.name()
+        )?;
+    }
+    Ok(())
 }
 
 impl From<StorageError> for TableError {
@@ -327,27 +520,20 @@ impl From<StorageError> for TableError {
 impl Display for TableError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            #[cfg(not(feature = "experimental-api-5"))]
             TableError::TypeDefinitionChanged {
                 name,
                 alignment,
                 width,
-            } => {
-                write!(
-                    f,
-                    "Current definition of {} does not match stored definition (width={:?}, alignment={})",
-                    name.name(),
-                    width,
-                    alignment,
-                )
-            }
+            } => fmt_type_definition_changed(f, name, *alignment, *width),
+            #[cfg(feature = "experimental-api-5")]
+            TableError::TypeDefinitionChanged(changed) => changed.fmt(f),
+            #[cfg(not(feature = "experimental-api-5"))]
             TableError::TableTypeMismatch { table, key, value } => {
-                write!(
-                    f,
-                    "{table} is of type Table<{}, {}>",
-                    key.name(),
-                    value.name(),
-                )
+                fmt_type_mismatch(f, table, key, value, None)
             }
+            #[cfg(feature = "experimental-api-5")]
+            TableError::TableTypeMismatch(mismatch) => mismatch.fmt(f),
             TableError::TableIsMultimap(table) => {
                 write!(f, "{table} is a multimap table")
             }
@@ -818,20 +1004,28 @@ pub enum Error {
     /// The key does not sort strictly between the entries adjacent to the cursor
     UnorderedKey,
     /// Table types didn't match.
+    #[cfg(not(feature = "experimental-api-5"))]
     TableTypeMismatch {
         table: String,
         key: TypeName,
         value: TypeName,
     },
+    /// The table's types are not the ones it was opened with
+    #[cfg(feature = "experimental-api-5")]
+    TableTypeMismatch(Box<TableTypeMismatch>),
     /// The table is a multimap table
     TableIsMultimap(String),
     /// The table is not a multimap table
     TableIsNotMultimap(String),
+    #[cfg(not(feature = "experimental-api-5"))]
     TypeDefinitionChanged {
         name: TypeName,
         alignment: usize,
         width: Option<usize>,
     },
+    /// A type's fixed width or alignment differs from the one it is stored with
+    #[cfg(feature = "experimental-api-5")]
+    TypeDefinitionChanged(Box<TypeDefinitionInfo>),
     /// Table name does not match any table in database
     TableDoesNotExist(String),
     /// Table name already exists in the database
@@ -910,27 +1104,20 @@ impl Display for Error {
                     "The key does not sort strictly between the entries adjacent to the cursor"
                 )
             }
+            #[cfg(not(feature = "experimental-api-5"))]
             Error::TypeDefinitionChanged {
                 name,
                 alignment,
                 width,
-            } => {
-                write!(
-                    f,
-                    "Current definition of {} does not match stored definition (width={:?}, alignment={})",
-                    name.name(),
-                    width,
-                    alignment,
-                )
-            }
+            } => fmt_type_definition_changed(f, name, *alignment, *width),
+            #[cfg(feature = "experimental-api-5")]
+            Error::TypeDefinitionChanged(changed) => changed.fmt(f),
+            #[cfg(not(feature = "experimental-api-5"))]
             Error::TableTypeMismatch { table, key, value } => {
-                write!(
-                    f,
-                    "{table} is of type Table<{}, {}>",
-                    key.name(),
-                    value.name(),
-                )
+                fmt_type_mismatch(f, table, key, value, None)
             }
+            #[cfg(feature = "experimental-api-5")]
+            Error::TableTypeMismatch(mismatch) => mismatch.fmt(f),
             Error::TableIsMultimap(table) => {
                 write!(f, "{table} is a multimap table")
             }
