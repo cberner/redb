@@ -72,6 +72,19 @@ fn main() {
         other => panic!("expected the backend's error, got {other:?}"),
     }
 
+    // Storage that holds no redb database is reported by redb, not as a failure of the backend
+    let garbage = InMemoryBackend::new();
+    garbage.set_len(4096).unwrap();
+    garbage.write(0, &[0xAB; 4096]).unwrap();
+    assert!(matches!(
+        Database::builder().create_with_backend(garbage),
+        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+    ));
+    assert!(matches!(
+        Database::builder().open_read_only_with_backend(InMemoryBackend::new()),
+        Err(DatabaseError::Storage(StorageError::Corrupted(_)))
+    ));
+
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("test");
     let storage = Shared(Arc::new(backend));
     let db = Database::builder()

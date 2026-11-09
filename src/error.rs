@@ -36,20 +36,6 @@ impl BackendError {
         }
     }
 
-    pub(crate) fn invalid_data(message: &'static str) -> Self {
-        #[cfg(not(redb_no_std))]
-        {
-            Self::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                message,
-            ))
-        }
-        #[cfg(redb_no_std)]
-        {
-            Self::Other(message.into())
-        }
-    }
-
     // An I/O error wrapped in Other is unwrapped, so that it is matched as one
     fn normalize(self) -> Self {
         #[cfg(not(redb_no_std))]
@@ -147,6 +133,23 @@ impl StorageError {
         #[cfg(not(fuzzing))]
         debug_assert!(false, "{message}");
         Self::Corrupted(message.to_string())
+    }
+
+    // The storage does not hold a redb database. With std, an I/O error of kind InvalidData, as
+    // open() and create() have reported it since 2.4. Without std, Corrupted, so that it is not
+    // mistaken for a failure of the backend
+    pub(crate) fn not_a_database(message: &'static str) -> Self {
+        #[cfg(not(redb_no_std))]
+        {
+            Self::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            ))
+        }
+        #[cfg(redb_no_std)]
+        {
+            Self::Corrupted(message.to_string())
+        }
     }
 }
 
