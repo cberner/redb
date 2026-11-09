@@ -75,6 +75,9 @@ pub(crate) type BackendIoError = std::io::Error;
 ///    concurrency mode will work.
 /// 3) All inputs return [`BackendError::Unsupported`]. Only the `ExclusiveWriter` concurrency
 ///    mode will work, and redb will log a warning on open if logging is enabled.
+///
+/// A lock method's I/O error of kind `Unsupported` counts as [`BackendError::Unsupported`],
+/// whether it is returned as `BackendError::Io` or wrapped in `BackendError::Other`.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
     fn len(&self) -> core::result::Result<u64, BackendIoError>;

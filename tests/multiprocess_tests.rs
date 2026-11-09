@@ -930,6 +930,160 @@ fn sharing_a_backend_without_locks_is_unsupported() {
         .unwrap();
 }
 
+/// An unsupported lock reported as an I/O error, rather than as `BackendError::Unsupported`
+mod unsupported_io_error {
+    use super::*;
+    use redb::{BackendError, StorageBackend};
+    use std::io;
+    use std::ops::Bound;
+
+    // The error type of StorageBackend's I/O methods
+    #[cfg(feature = "experimental-api-5")]
+    type BackendIoError = redb::BackendError;
+    #[cfg(not(feature = "experimental-api-5"))]
+    type BackendIoError = std::io::Error;
+
+    #[derive(Debug)]
+    struct NoLocks {
+        inner: InMemoryBackend,
+        wrap_in_other: bool,
+    }
+
+    impl NoLocks {
+        fn unsupported<T>(&self) -> Result<T, BackendError> {
+            let err = io::Error::new(io::ErrorKind::Unsupported, "no locks here");
+            if self.wrap_in_other {
+                Err(BackendError::Other(Box::new(err)))
+            } else {
+                Err(BackendError::Io(err))
+            }
+        }
+    }
+
+    impl StorageBackend for NoLocks {
+        fn len(&self) -> Result<u64, BackendIoError> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), BackendIoError> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+            self.inner.write(offset, data)
+        }
+
+        fn try_lock_range(&self, _: Bound<u64>, _: Bound<u64>) -> Result<bool, BackendError> {
+            self.unsupported()
+        }
+
+        fn try_lock_shared_range(
+            &self,
+            _: Bound<u64>,
+            _: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.unsupported()
+        }
+
+        fn lock_range(&self, _: Bound<u64>, _: Bound<u64>) -> Result<(), BackendError> {
+            self.unsupported()
+        }
+
+        fn lock_shared_range(&self, _: Bound<u64>, _: Bound<u64>) -> Result<(), BackendError> {
+            self.unsupported()
+        }
+
+        fn unlock_range(&self, _: Bound<u64>, _: Bound<u64>) -> Result<(), BackendError> {
+            self.unsupported()
+        }
+
+        fn query_lock_range(&self, _: Bound<u64>, _: Bound<u64>) -> Result<bool, BackendError> {
+            self.unsupported()
+        }
+    }
+
+    fn no_locks(wrap_in_other: bool) -> NoLocks {
+        NoLocks {
+            inner: InMemoryBackend::new(),
+            wrap_in_other,
+        }
+    }
+
+    /// It is treated as `BackendError::Unsupported`, as `BackendError::Io` and wrapped in
+    /// `BackendError::Other`
+    #[test]
+    fn is_unsupported() {
+        for wrap_in_other in [false, true] {
+            for &mode in shared_modes() {
+                let mut builder = Database::builder();
+                builder.set_concurrency_mode(mode);
+                let err = builder
+                    .create_with_backend(no_locks(wrap_in_other))
+                    .unwrap_err();
+                assert!(
+                    matches!(err, DatabaseError::Storage(StorageError::Unsupported)),
+                    "{mode:?}, wrapped in Other: {wrap_in_other}: {err:?}"
+                );
+            }
+
+            Database::builder()
+                .create_with_backend(no_locks(wrap_in_other))
+                .unwrap();
+        }
+    }
+
+    #[derive(Debug)]
+    struct UnsupportedSync(InMemoryBackend);
+
+    impl StorageBackend for UnsupportedSync {
+        fn len(&self) -> Result<u64, BackendIoError> {
+            self.0.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+            self.0.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+            self.0.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), BackendIoError> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "fdatasync is not supported",
+            ))?
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+            self.0.write(offset, data)
+        }
+    }
+
+    /// An I/O method's error keeps its message
+    #[test]
+    fn io_method_error_keeps_message() {
+        let err = Database::builder()
+            .create_with_backend(UnsupportedSync(InMemoryBackend::new()))
+            .unwrap_err();
+        match err {
+            DatabaseError::Storage(StorageError::Io(err)) => {
+                assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+                assert_eq!(err.to_string(), "fdatasync is not supported");
+            }
+            err => panic!("expected the backend's I/O error, got {err:?}"),
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod reclamation {
     use super::*;

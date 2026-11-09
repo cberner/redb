@@ -62,7 +62,8 @@ impl FileBackend {
 impl StorageBackend for FileBackend {
     fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
         if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
-            self.lock_whole_file(false).map_err(BackendError::from)
+            self.lock_whole_file(false)
+                .map_err(BackendError::from_lock_io)
         } else {
             Err(BackendError::Unsupported)
         }
@@ -74,7 +75,8 @@ impl StorageBackend for FileBackend {
         end: Bound<u64>,
     ) -> Result<bool, BackendError> {
         if matches!(start, Bound::Unbounded | Bound::Included(0)) && end == Bound::Unbounded {
-            self.lock_whole_file(true).map_err(BackendError::from)
+            self.lock_whole_file(true)
+                .map_err(BackendError::from_lock_io)
         } else {
             Err(BackendError::Unsupported)
         }
@@ -85,7 +87,11 @@ impl StorageBackend for FileBackend {
             return Err(BackendError::Unsupported);
         }
         if self.whole_file_locked.swap(false, Ordering::AcqRel) {
-            self.file.lock().unwrap().unlock()?;
+            self.file
+                .lock()
+                .unwrap()
+                .unlock()
+                .map_err(BackendError::from_lock_io)?;
         }
 
         Ok(())

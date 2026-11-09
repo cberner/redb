@@ -25,7 +25,9 @@
   A `TableTypeMismatch` also reports the types the table was opened with. `TypeDefinitionInfo` has
   no counterpart to `alignment`, which was always 1.
 * The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
-  methods already do. `?` still converts an `io::Error`.
+  methods already do. `?` still converts an `io::Error`, now always into `BackendError::Io`, so
+  that one of kind `Unsupported` keeps its message. A lock method may report an unsupported lock
+  either way.
 * `Entry`, `OccupiedEntry` and `VacantEntry` take a second lifetime, for the key, which no longer
   has to live as long as the table borrow. Code that names these types must add it, as in
   `Entry<'_, '_, K, V>`.

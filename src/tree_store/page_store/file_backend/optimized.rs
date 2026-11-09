@@ -306,7 +306,7 @@ impl FileBackend {
 impl StorageBackend for FileBackend {
     fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
         self.try_lock((start, end), false)
-            .map_err(BackendError::from)
+            .map_err(BackendError::from_lock_io)
     }
 
     fn try_lock_shared_range(
@@ -315,19 +315,21 @@ impl StorageBackend for FileBackend {
         end: Bound<u64>,
     ) -> Result<bool, BackendError> {
         self.try_lock((start, end), true)
-            .map_err(BackendError::from)
+            .map_err(BackendError::from_lock_io)
     }
 
     fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
         #[cfg(windows)]
-        validate_query_mutex_range((start, end), true)?;
-        self.lock((start, end), false).map_err(BackendError::from)
+        validate_query_mutex_range((start, end), true).map_err(BackendError::from_lock_io)?;
+        self.lock((start, end), false)
+            .map_err(BackendError::from_lock_io)
     }
 
     fn lock_shared_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
         #[cfg(windows)]
-        validate_query_mutex_range((start, end), true)?;
-        self.lock((start, end), true).map_err(BackendError::from)
+        validate_query_mutex_range((start, end), true).map_err(BackendError::from_lock_io)?;
+        self.lock((start, end), true)
+            .map_err(BackendError::from_lock_io)
     }
 
     fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
@@ -336,10 +338,11 @@ impl StorageBackend for FileBackend {
             && self.whole_file_locked.load(Ordering::Acquire)
             && !self.locked_ranges.lock().unwrap().contains(&range)
         {
-            return self.unlock_whole_file().map_err(BackendError::from);
+            return self.unlock_whole_file().map_err(BackendError::from_lock_io);
         }
 
-        self.unlock_native_range(range)?;
+        self.unlock_native_range(range)
+            .map_err(BackendError::from_lock_io)?;
         #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
         if needs_legacy_lock(range) {
             self.unlock_whole_file()?;
@@ -351,11 +354,11 @@ impl StorageBackend for FileBackend {
         #[cfg(windows)]
         return self
             .query_lock_with_mutex((start, end))
-            .map_err(BackendError::from);
+            .map_err(BackendError::from_lock_io);
         #[cfg(not(windows))]
         self.file
             .query_lock((start, end))
-            .map_err(BackendError::from)
+            .map_err(BackendError::from_lock_io)
     }
 
     fn close(&self) -> Result<(), BackendIoError> {
