@@ -4558,6 +4558,75 @@ fn option_nonzero_table_reopens() {
     assert_eq!(stored, expected);
 }
 
+// A type that keeps its name but changes its fixed width does not open the table it was stored in
+#[test]
+fn changed_fixed_width_is_refused() {
+    #[derive(Debug)]
+    struct Fixed<const N: usize>;
+
+    impl<const N: usize> Value for Fixed<N> {
+        type SelfType<'a>
+            = [u8; N]
+        where
+            Self: 'a;
+        type AsBytes<'a>
+            = [u8; N]
+        where
+            Self: 'a;
+
+        fn fixed_width() -> Option<usize> {
+            Some(N)
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> [u8; N]
+        where
+            Self: 'a,
+        {
+            data.try_into().unwrap()
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a [u8; N]) -> [u8; N]
+        where
+            Self: 'b,
+        {
+            *value
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("test::Fixed")
+        }
+    }
+
+    let narrow: TableDefinition<u64, Fixed<4>> = TableDefinition::new("x");
+    let wide: TableDefinition<u64, Fixed<8>> = TableDefinition::new("x");
+    let tmpfile = create_tempfile();
+    let db = Database::create(tmpfile.path()).unwrap();
+    let write_txn = db.begin_write().unwrap();
+    write_txn
+        .open_table(narrow)
+        .unwrap()
+        .insert(0, [0; 4])
+        .unwrap();
+    write_txn.commit().unwrap();
+
+    let write_txn = db.begin_write().unwrap();
+    let err = write_txn.open_table(wide).err().unwrap();
+    #[cfg(feature = "experimental-api-5")]
+    let expected =
+        "Current definition of test::Fixed does not match stored definition (width=Some(4))";
+    #[cfg(not(feature = "experimental-api-5"))]
+    let expected = "Current definition of test::Fixed does not match stored definition (width=Some(4), alignment=1)";
+    assert_eq!(err.to_string(), expected);
+    #[cfg(feature = "experimental-api-5")]
+    {
+        let TableError::TypeDefinitionChanged(info) = err else {
+            panic!("expected a changed type definition");
+        };
+        assert_eq!(info.name().name(), "test::Fixed");
+        assert_eq!(info.width(), Some(4));
+    }
+}
+
 #[test]
 fn nonzero_type_does_not_alias_its_primitive() {
     // A `u32` table may hold zeros, which `NonZeroU32` cannot, so it must not open as one, in

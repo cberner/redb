@@ -368,11 +368,9 @@ impl TableError {
     ) -> Self {
         #[cfg(feature = "experimental-api-5")]
         {
-            Self::TypeDefinitionChanged(Box::new(TypeDefinitionInfo {
-                name,
-                alignment,
-                width,
-            }))
+            // Always 1, since redb supports no other alignment, so it is not reported
+            let _ = alignment;
+            Self::TypeDefinitionChanged(Box::new(TypeDefinitionInfo { name, width }))
         }
         #[cfg(not(feature = "experimental-api-5"))]
         {
@@ -438,13 +436,12 @@ impl Display for TableTypeMismatch {
     }
 }
 
-/// A key or value type whose fixed width or alignment differs from the one it is stored with. See
+/// A key or value type whose fixed width differs from the one it is stored with. See
 /// [`TableError::TypeDefinitionChanged`].
 #[cfg(feature = "experimental-api-5")]
 #[derive(Debug)]
 pub struct TypeDefinitionInfo {
     name: TypeName,
-    alignment: usize,
     width: Option<usize>,
 }
 
@@ -453,11 +450,6 @@ impl TypeDefinitionInfo {
     /// The type whose definition changed
     pub fn name(&self) -> &TypeName {
         &self.name
-    }
-
-    /// The alignment the type is stored with
-    pub fn alignment(&self) -> usize {
-        self.alignment
     }
 
     /// The fixed width the type is stored with, or `None` if it is stored as variable width
@@ -469,21 +461,25 @@ impl TypeDefinitionInfo {
 #[cfg(feature = "experimental-api-5")]
 impl Display for TypeDefinitionInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
-        fmt_type_definition_changed(f, &self.name, self.alignment, self.width)
+        fmt_type_definition_changed(f, &self.name, self.width, None)
     }
 }
 
 fn fmt_type_definition_changed(
     f: &mut Formatter<'_>,
     name: &TypeName,
-    alignment: usize,
     width: Option<usize>,
+    alignment: Option<usize>,
 ) -> core::fmt::Result {
     write!(
         f,
-        "Current definition of {} does not match stored definition (width={width:?}, alignment={alignment})",
+        "Current definition of {} does not match stored definition (width={width:?}",
         name.name(),
-    )
+    )?;
+    if let Some(alignment) = alignment {
+        write!(f, ", alignment={alignment}")?;
+    }
+    f.write_str(")")
 }
 
 // Names neither Table nor MultimapTable, since the mismatch may be either
@@ -525,7 +521,7 @@ impl Display for TableError {
                 name,
                 alignment,
                 width,
-            } => fmt_type_definition_changed(f, name, *alignment, *width),
+            } => fmt_type_definition_changed(f, name, *width, Some(*alignment)),
             #[cfg(feature = "experimental-api-5")]
             TableError::TypeDefinitionChanged(changed) => changed.fmt(f),
             #[cfg(not(feature = "experimental-api-5"))]
@@ -1109,7 +1105,7 @@ impl Display for Error {
                 name,
                 alignment,
                 width,
-            } => fmt_type_definition_changed(f, name, *alignment, *width),
+            } => fmt_type_definition_changed(f, name, *width, Some(*alignment)),
             #[cfg(feature = "experimental-api-5")]
             Error::TypeDefinitionChanged(changed) => changed.fmt(f),
             #[cfg(not(feature = "experimental-api-5"))]

@@ -22,7 +22,8 @@
 * `StorageError` and `Error` no longer implement `From<PoisonError<T>>`.
 * The `TableTypeMismatch` and `TypeDefinitionChanged` variants of `TableError` and `Error` hold a
   boxed `TableTypeMismatch` or `TypeDefinitionInfo`, whose accessors replace the variants' fields.
-  A `TableTypeMismatch` also reports the types the table was opened with.
+  A `TableTypeMismatch` also reports the types the table was opened with. `TypeDefinitionInfo` has
+  no counterpart to `alignment`, which was always 1.
 * The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
   methods already do. `?` still converts an `io::Error`.
 * `Entry`, `OccupiedEntry` and `VacantEntry` take a second lifetime, for the key, which no longer
