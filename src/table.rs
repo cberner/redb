@@ -1073,6 +1073,8 @@ impl<K: Key + 'static, V: Value + 'static> Debug for ReadOnlyTable<K, V> {
     }
 }
 
+#[must_use = "iterators are lazy and remove nothing unless consumed; use retain() to remove \
+              entries without reading them"]
 pub struct ExtractIf<
     'a,
     K: Key + 'static,
