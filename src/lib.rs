@@ -82,6 +82,8 @@ pub use error::{
     SetDurabilityError, StorageError, TableError, TransactionError,
 };
 #[cfg(feature = "experimental-api-5")]
+pub use error::{TableTypeMismatch, TypeDefinitionInfo};
+#[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
 #[cfg(feature = "experimental-niches")]
 pub use legacy_types::Legacy;

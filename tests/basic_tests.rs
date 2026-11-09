@@ -4582,6 +4582,22 @@ fn nonzero_type_does_not_alias_its_primitive() {
         write_txn.open_table(nonzero_key),
         Err(TableError::TableTypeMismatch { .. })
     ));
+    #[cfg(feature = "experimental-api-5")]
+    {
+        let Err(TableError::TableTypeMismatch(mismatch)) = write_txn.open_table(nonzero_key) else {
+            panic!("expected a type mismatch");
+        };
+        assert_eq!(mismatch.table(), "x");
+        assert_eq!(mismatch.stored_key().name(), "u32");
+        assert_eq!(mismatch.requested_key().name(), "NonZeroU32");
+        assert_eq!(mismatch.requested_value().name(), "u32");
+    }
+    #[cfg(feature = "experimental-api-5")]
+    assert_eq!(
+        write_txn.open_table(nonzero_key).err().unwrap().to_string(),
+        "x has key type u32 and value type u32, but was opened with key type NonZeroU32 and \
+         value type u32"
+    );
     assert!(matches!(
         write_txn.open_table(nonzero_value),
         Err(TableError::TableTypeMismatch { .. })

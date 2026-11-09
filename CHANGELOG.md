@@ -20,6 +20,9 @@
   implementation, so implementations of `ReadableTable` must provide them.
 * `ReadableDatabase` is sealed, and can no longer be implemented outside of redb.
 * `StorageError` and `Error` no longer implement `From<PoisonError<T>>`.
+* The `TableTypeMismatch` and `TypeDefinitionChanged` variants of `TableError` and `Error` hold a
+  boxed `TableTypeMismatch` or `TypeDefinitionInfo`, whose accessors replace the variants' fields.
+  A `TableTypeMismatch` also reports the types the table was opened with.
 * The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
   methods already do. `?` still converts an `io::Error`.
 * `Entry`, `OccupiedEntry` and `VacantEntry` take a second lifetime, for the key, which no longer

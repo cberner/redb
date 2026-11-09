@@ -135,18 +135,18 @@ impl InternalTableDefinition {
             };
         }
         if self.private_get_key_alignment() != ALIGNMENT {
-            return Err(TableError::TypeDefinitionChanged {
-                name: self.private_key_type(),
-                alignment: self.private_get_key_alignment(),
-                width: self.private_get_fixed_key_size(),
-            });
+            return Err(TableError::type_definition_changed(
+                self.private_key_type(),
+                self.private_get_key_alignment(),
+                self.private_get_fixed_key_size(),
+            ));
         }
         if self.private_get_value_alignment() != ALIGNMENT {
-            return Err(TableError::TypeDefinitionChanged {
-                name: self.private_value_type(),
-                alignment: self.private_get_value_alignment(),
-                width: self.private_get_fixed_value_size(),
-            });
+            return Err(TableError::type_definition_changed(
+                self.private_value_type(),
+                self.private_get_value_alignment(),
+                self.private_get_fixed_value_size(),
+            ));
         }
 
         Ok(())
@@ -169,25 +169,27 @@ impl InternalTableDefinition {
         let value_matches =
             stored_value == expected_value || expected_value.matches_legacy(&stored_value);
         if !key_matches || !value_matches {
-            return Err(TableError::TableTypeMismatch {
-                table: name.to_string(),
-                key: stored_key,
-                value: stored_value,
-            });
+            return Err(TableError::type_mismatch(
+                name,
+                stored_key,
+                stored_value,
+                expected_key,
+                expected_value,
+            ));
         }
         if self.private_get_fixed_key_size() != K::fixed_width() {
-            return Err(TableError::TypeDefinitionChanged {
-                name: K::type_name(),
-                alignment: self.private_get_key_alignment(),
-                width: self.private_get_fixed_key_size(),
-            });
+            return Err(TableError::type_definition_changed(
+                K::type_name(),
+                self.private_get_key_alignment(),
+                self.private_get_fixed_key_size(),
+            ));
         }
         if self.private_get_fixed_value_size() != V::fixed_width() {
-            return Err(TableError::TypeDefinitionChanged {
-                name: V::type_name(),
-                alignment: self.private_get_value_alignment(),
-                width: self.private_get_fixed_value_size(),
-            });
+            return Err(TableError::type_definition_changed(
+                V::type_name(),
+                self.private_get_value_alignment(),
+                self.private_get_fixed_value_size(),
+            ));
         }
 
         Ok(())
