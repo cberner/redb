@@ -4,7 +4,7 @@ use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
-use crate::table::{CompatBorrow, OwnedAccessGuard, ReadableTableMetadata, TableStats};
+use crate::table::{CompatBorrow, OwnedAccessGuard, PanicGuard, ReadableTableMetadata, TableStats};
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::tree_store::encode_bounds;
 use crate::tree_store::{
@@ -584,6 +584,19 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,
     ) -> Result<bool> {
+        // The key's values are updated before the entry that names them, so a panic in between,
+        // from the key or value type, must not leave a transaction that can commit
+        let mut panic_guard = PanicGuard::new(self.transaction);
+        let result = self.insert_inner(key, value);
+        panic_guard.disarm();
+        result
+    }
+
+    fn insert_inner<'k, 'v>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<bool> {
         let value_bytes = V::as_bytes(value.borrow());
         let value_bytes_ref = value_bytes.as_ref();
         if value_bytes_ref.len() > MAX_VALUE_LENGTH {
@@ -753,6 +766,18 @@ impl<'txn, K: Key + 'static, V: Key + 'static> MultimapTable<'txn, K, V> {
     ///
     /// Returns `true` if the key-value pair was present
     pub fn remove<'k, 'v>(
+        &mut self,
+        key: impl Borrow<K::SelfType<'k>>,
+        value: impl Borrow<V::SelfType<'v>>,
+    ) -> Result<bool> {
+        // See insert()
+        let mut panic_guard = PanicGuard::new(self.transaction);
+        let result = self.remove_inner(key, value);
+        panic_guard.disarm();
+        result
+    }
+
+    fn remove_inner<'k, 'v>(
         &mut self,
         key: impl Borrow<K::SelfType<'k>>,
         value: impl Borrow<V::SelfType<'v>>,

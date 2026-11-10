@@ -760,3 +760,121 @@ fn read_only_range_entries_keep_transaction_alive() {
     assert_eq!(back_key.value(), 1);
     assert_eq!(back_value.value(), 2);
 }
+
+// insert() and remove() update a key's values before the entry that names them, so a panic in
+// between, from the key type, must not leave a transaction that can commit
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn a_panic_in_insert_or_remove_poisons_the_transaction() {
+    use redb::{CommitError, Key, MultimapTable, TypeName, Value};
+    use std::cmp::Ordering;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering as AtomicOrdering};
+
+    static COMPARES: AtomicU64 = AtomicU64::new(0);
+    static PANIC_AT: AtomicI64 = AtomicI64::new(-1);
+
+    // A u64 whose comparison panics on the chosen call
+    #[derive(Debug)]
+    struct PanickingKey;
+
+    impl Value for PanickingKey {
+        type SelfType<'a> = u64;
+        type AsBytes<'a> = [u8; 8];
+
+        fn fixed_width() -> Option<usize> {
+            Some(8)
+        }
+
+        fn from_bytes<'a>(data: &'a [u8]) -> u64
+        where
+            Self: 'a,
+        {
+            u64::from_le_bytes(data.try_into().unwrap())
+        }
+
+        fn as_bytes<'a, 'b: 'a>(value: &'a u64) -> [u8; 8]
+        where
+            Self: 'b,
+        {
+            value.to_le_bytes()
+        }
+
+        fn type_name() -> TypeName {
+            TypeName::new("PanickingKey")
+        }
+    }
+
+    impl Key for PanickingKey {
+        fn compare(data1: &[u8], data2: &[u8]) -> Ordering {
+            let call = COMPARES.fetch_add(1, AtomicOrdering::Relaxed);
+            assert_ne!(
+                PANIC_AT.load(AtomicOrdering::Relaxed),
+                i64::try_from(call).unwrap(),
+                "compare panic"
+            );
+            Self::from_bytes(data1).cmp(&Self::from_bytes(data2))
+        }
+    }
+
+    const TABLE: MultimapTableDefinition<PanickingKey, u64> = MultimapTableDefinition::new("x");
+    // Enough values for the key to keep them in a subtree
+    const VALUES: u64 = 2000;
+
+    for remove in [false, true] {
+        let operation = |table: &mut MultimapTable<PanickingKey, u64>| {
+            if remove {
+                table.remove(7, 1000).unwrap();
+            } else {
+                table.insert(7, 1001).unwrap();
+            }
+        };
+
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_multimap_table(TABLE).unwrap();
+            for value in 0..VALUES {
+                table.insert(7, value * 2).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+
+        // Count the operation's comparisons, so that its last one can panic
+        let write_txn = db.begin_write().unwrap();
+        let comparisons = {
+            let mut table = write_txn.open_multimap_table(TABLE).unwrap();
+            COMPARES.store(0, AtomicOrdering::Relaxed);
+            operation(&mut table);
+            COMPARES.load(AtomicOrdering::Relaxed)
+        };
+        write_txn.abort().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_multimap_table(TABLE).unwrap();
+            COMPARES.store(0, AtomicOrdering::Relaxed);
+            PANIC_AT.store(
+                i64::try_from(comparisons).unwrap() - 1,
+                AtomicOrdering::Relaxed,
+            );
+            let result = catch_unwind(AssertUnwindSafe(|| operation(&mut table)));
+            PANIC_AT.store(-1, AtomicOrdering::Relaxed);
+            assert!(result.is_err());
+        }
+        assert!(matches!(
+            write_txn.commit(),
+            Err(CommitError::TransactionPoisoned)
+        ));
+
+        {
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_multimap_table(TABLE).unwrap();
+            let values = table.get(7).unwrap();
+            assert_eq!(values.len(), VALUES);
+            assert_eq!(values.count(), usize::try_from(VALUES).unwrap());
+        }
+        assert!(db.check_integrity().unwrap());
+    }
+}
