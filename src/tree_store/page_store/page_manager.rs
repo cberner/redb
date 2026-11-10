@@ -1,4 +1,6 @@
 use crate::CacheStats;
+#[cfg(feature = "experimental-api-5")]
+use crate::db::MODE_RANGE;
 use crate::db::{
     BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
     PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_READER_BYTE, SHARED_WRITER_BYTE,
@@ -712,6 +714,19 @@ impl TransactionalMemory {
             }
         };
         let suffix_range = (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
+        // The suffix is the active transaction range, where a lock reads as a transaction in
+        // progress. Every shared-mode handle holds the shared writer byte or the shared reader
+        // byte, so a writer first takes the range that starts with those: one that such a handle
+        // refuses then never holds the suffix
+        #[cfg(feature = "experimental-api-5")]
+        let writer_ranges = [
+            MODE_RANGE,
+            suffix_range,
+            (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
+        ];
+        // The ranges of 4.x in its order, where the file backend ties its whole-file lock to the
+        // suffix
+        #[cfg(not(feature = "experimental-api-5"))]
         let writer_ranges = [
             suffix_range,
             (
@@ -1085,8 +1100,9 @@ impl TransactionalMemory {
         }
         let byte = Self::active_transaction_byte(id)?;
         // Refused only by an exclusive holder. That is never an exclusive writer, which this
-        // handle's own lock bytes exclude. It is an exclusive-writer open in progress, which takes
-        // the range holding these bytes first, and gives it back when those bytes refuse it
+        // handle's own lock bytes exclude. It is an exclusive-writer open of redb 4 in progress,
+        // which takes the range holding these bytes first, and gives it back when those bytes
+        // refuse it
         if !self.storage.try_lock_shared_range(byte_range(byte))? {
             self.storage.lock_shared_range(byte_range(byte))?;
         }
@@ -3601,6 +3617,8 @@ mod lock_protocol_test {
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
+    #[cfg(feature = "experimental-api-5")]
+    use crate::db::MODE_RANGE;
     use crate::db::{
         BACKEND_LOCK_RANGE, BackendIoError, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
         PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
@@ -3830,6 +3848,29 @@ mod lock_failure_test {
         (PagedCachedFile::new(Box::new(backend), 4096, 0), released)
     }
 
+    // In the order an exclusive writer takes them. The range that starts with the shared writer
+    // and shared reader bytes comes before the suffix, so that an open a shared-mode handle
+    // refuses holds no active transaction byte. 4.x takes the suffix first
+    fn exclusive_writer_ranges() -> Vec<(Bound<u64>, Bound<u64>)> {
+        let suffix = (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
+        #[cfg(feature = "experimental-api-5")]
+        let ranges = [
+            MODE_RANGE,
+            suffix,
+            (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
+        ];
+        #[cfg(not(feature = "experimental-api-5"))]
+        let ranges = [
+            suffix,
+            (
+                Bound::Excluded(SHARED_WRITER_BYTE),
+                Bound::Excluded(BACKEND_LOCK_RANGE.start),
+            ),
+            (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
+        ];
+        ranges.to_vec()
+    }
+
     #[test]
     fn caller_supplied_lock_results_control_the_open() {
         for taking in [
@@ -3852,14 +3893,7 @@ mod lock_failure_test {
                 )),
             }
             let expected = if taking == Answer::Acquired {
-                vec![
-                    (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded),
-                    (
-                        Bound::Excluded(SHARED_WRITER_BYTE),
-                        Bound::Excluded(BACKEND_LOCK_RANGE.start),
-                    ),
-                    (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
-                ]
+                exclusive_writer_ranges()
             } else {
                 vec![]
             };
@@ -4041,14 +4075,7 @@ mod lock_failure_test {
             storage.close().unwrap();
 
             let expected: Vec<(Bound<u64>, Bound<u64>)> = if taking == Answer::Acquired {
-                vec![
-                    (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded),
-                    (
-                        Bound::Excluded(SHARED_WRITER_BYTE),
-                        Bound::Excluded(BACKEND_LOCK_RANGE.start),
-                    ),
-                    (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
-                ]
+                exclusive_writer_ranges()
             } else {
                 vec![]
             };

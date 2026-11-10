@@ -200,6 +200,15 @@ pub(crate) const SHARED_WRITER_BYTE: u64 = LOCK_BASE + 1;
 /// Held shared by every read-only multi-process handle while the database is open, so that a
 /// exclusive-writer open conflicts with a live reader no matter what the reader is doing.
 pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
+/// The first range an exclusive writer takes of its whole-file lock: from the shared writer byte
+/// up to the backend's bytes. It starts with the shared writer byte and the shared reader byte.
+/// Every shared-mode handle holds one of the two, so it refuses the writer whichever of them has
+/// the database open.
+#[cfg(feature = "experimental-api-5")]
+pub(crate) const MODE_RANGE: (Bound<u64>, Bound<u64>) = (
+    Bound::Included(SHARED_WRITER_BYTE),
+    Bound::Excluded(BACKEND_LOCK_RANGE.start),
+);
 /// Held shared by a read-only exclusive-writer handle as part of its whole-file lock. Such a
 /// handle leaves `SHARED_WRITER_BYTE` free, so a multi-writer open, which takes only that byte,
 /// must probe this one to find it.

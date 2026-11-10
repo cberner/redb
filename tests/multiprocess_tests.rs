@@ -220,8 +220,9 @@ mod shared_reader {
         }
     }
 
-    /// An exclusive-writer open is refused by a shared-mode handle only after it has taken the
-    /// range that holds the active transaction bytes, so a read that begins meanwhile waits for it
+    /// Without `experimental-api-5`, as in redb 4, an exclusive-writer open is refused by a
+    /// shared-mode handle only after it has taken the range that holds the active transaction
+    /// bytes, so a read that begins meanwhile waits for it
     #[test]
     fn a_refused_exclusive_open_does_not_fail_a_read() {
         use std::sync::atomic::AtomicU64;
@@ -361,6 +362,47 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     drop(peer);
     drop(db);
     Database::open(tmpfile.path()).unwrap();
+}
+
+/// An exclusive-writer open that a shared-mode handle refuses takes no active transaction byte,
+/// where its lock would read as a transaction in progress. 4.x takes those bytes first
+#[cfg(all(
+    any(target_os = "linux", target_vendor = "apple", windows),
+    feature = "experimental-api-5"
+))]
+#[test]
+fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    for &mode in shared_modes() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(mode);
+        let mut db = builder.create(tmpfile.path()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let refused = Arc::new(AtomicU64::new(0));
+        let opener = {
+            let (stop, refused) = (stop.clone(), refused.clone());
+            let path = tmpfile.path().to_path_buf();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    assert!(matches!(
+                        Database::create(&path),
+                        Err(DatabaseError::DatabaseAlreadyOpen)
+                    ));
+                    refused.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
+        while refused.load(Ordering::Relaxed) == 0 {
+            std::thread::yield_now();
+        }
+        let compacted = (0..300).try_for_each(|_| db.compact().map(|_| ()));
+        stop.store(true, Ordering::Relaxed);
+        opener.join().unwrap();
+        compacted.unwrap_or_else(|err| panic!("{mode:?}: {err:?}"));
+    }
 }
 
 /// A multi-writer check runs on the file as another process last committed it, and the handle
