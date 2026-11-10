@@ -3471,6 +3471,64 @@ fn retain_predicate_panic_poisons_transaction() {
     assert!(table.get(4).unwrap().is_none());
 }
 
+// A table that is leaked never records its root, so committing would publish the root it was
+// opened with, whose pages it has freed
+#[test]
+#[cfg(not(target_os = "wasi"))]
+fn commit_with_a_leaked_table_is_refused() {
+    let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    for reopened in [false, true] {
+        let tmpfile = create_tempfile();
+        let db = Database::create(tmpfile.path()).unwrap();
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(definition).unwrap();
+            for i in 0..2000 {
+                table.insert(i, i).unwrap();
+            }
+        }
+        write_txn.commit().unwrap();
+
+        let write_txn = db.begin_write().unwrap();
+        let mut table = write_txn.open_table(definition).unwrap();
+        for i in 0..2000 {
+            table.insert(i, i + 1).unwrap();
+        }
+        if reopened {
+            // Opening the table again discards the root that the first handle recorded
+            drop(table);
+            table = write_txn.open_table(definition).unwrap();
+        }
+        std::mem::forget(table);
+        assert!(matches!(
+            write_txn.commit(),
+            Err(CommitError::TransactionPoisoned)
+        ));
+
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(definition).unwrap();
+        assert_eq!(table.len().unwrap(), 2000);
+        for i in 0..2000 {
+            assert_eq!(table.get(i).unwrap().unwrap().value(), i);
+        }
+
+        // The leaked table keeps the database's file open, so check a copy of it. Windows does
+        // not let a locked file be read
+        #[cfg(not(windows))]
+        {
+            let copy = create_tempfile();
+            std::fs::copy(tmpfile.path(), copy.path()).unwrap();
+            let mut db = Database::open(copy.path()).unwrap();
+            assert!(db.check_integrity().unwrap());
+            let read_txn = db.begin_read().unwrap();
+            let table = read_txn.open_table(definition).unwrap();
+            assert_eq!(table.len().unwrap(), 2000);
+            assert_eq!(table.get(5).unwrap().unwrap().value(), 5);
+        }
+    }
+}
+
 // An insert past the table's last key starts a new leaf, instead of splitting the full
 // one evenly. An ascending load never returns to a leaf it has moved past, so an even
 // split would strand half of every leaf behind it.

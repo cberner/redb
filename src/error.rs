@@ -900,7 +900,7 @@ pub enum CommitError {
     /// Error from underlying storage
     Storage(StorageError),
     /// The transaction was poisoned and can no longer be committed: an operation panicked, or
-    /// failed part way through modifying the transaction
+    /// failed part way through modifying the transaction, or a table was leaked
     TransactionPoisoned,
 }
 
@@ -935,7 +935,7 @@ impl Display for CommitError {
             CommitError::TransactionPoisoned => {
                 write!(
                     f,
-                    "Transaction was poisoned by a panic or a failed operation"
+                    "Transaction was poisoned by a panic, a failed operation, or a leaked table"
                 )
             }
         }
@@ -1017,7 +1017,7 @@ pub enum Error {
     /// A transaction is still in-progress
     TransactionInProgress,
     /// The transaction was poisoned and can no longer be committed: an operation panicked, or
-    /// failed part way through modifying the transaction
+    /// failed part way through modifying the transaction, or a table was leaked
     TransactionPoisoned,
     /// The Database is corrupted
     Corrupted(String),
@@ -1215,7 +1215,7 @@ impl Display for Error {
             Error::TransactionPoisoned => {
                 write!(
                     f,
-                    "Transaction was poisoned by a panic or a failed operation"
+                    "Transaction was poisoned by a panic, a failed operation, or a leaked table"
                 )
             }
             Error::InvalidSavepoint => {
