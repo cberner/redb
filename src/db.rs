@@ -1561,12 +1561,12 @@ impl Database {
                 return Err(DatabaseError::RepairAborted);
             }
 
-            mem.repair_primary_corrupted();
+            let fell_back = mem.repair_primary_corrupted();
             // We need to invalidate the userspace cache, because walking the tree in verify_primary_checksums() may
             // have poisoned it with pages that just got rolled back by repair_primary_corrupted(), since
             // that rolls back a partially committed transaction.
             mem.clear_read_cache();
-            if !Self::primary_verifies(mem)? {
+            if !fell_back || !Self::primary_verifies(mem)? {
                 return Err(DatabaseError::Storage(StorageError::Corrupted(
                     "Failed to repair database. All roots are corrupted".to_string(),
                 )));

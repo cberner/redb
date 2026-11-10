@@ -481,6 +481,11 @@ impl DatabaseHeader {
         self.primary_slot ^= 1;
     }
 
+    // Whether the secondary slot failed its checksum, so that its roots are not a commit's
+    pub(super) fn secondary_slot_corrupted(&self) -> bool {
+        self.secondary_slot().corrupt_bytes.is_some()
+    }
+
     pub(super) fn to_bytes(&self, include_magic_number: bool) -> [u8; DB_HEADER_SIZE] {
         let mut result = [0; DB_HEADER_SIZE];
         if include_magic_number {
@@ -1312,6 +1317,47 @@ mod test {
         let table = txn.open_table(X).unwrap();
         assert_eq!(table.get("k").unwrap().unwrap().value(), "v");
         assert_eq!(table.get("k2").unwrap().unwrap().value(), "v2");
+    }
+
+    // A secondary slot that failed its checksum is no fallback. Its roots are not a commit's, and
+    // may still verify: here the slot is torn to say that there is no user root.
+    #[test]
+    fn repair_does_not_fall_back_to_a_torn_secondary() {
+        let tmpfile = crate::create_tempfile();
+        {
+            let db = Database::create(tmpfile.path()).unwrap();
+            for (key, value) in [("k", "v"), ("k2", "v2")] {
+                let txn = db.begin_write().unwrap();
+                txn.open_table(X).unwrap().insert(key, value).unwrap();
+                txn.commit().unwrap();
+            }
+        }
+        overwrite_root_page_order(tmpfile.path(), super::USER_ROOT_OFFSET, 31);
+        patch_god_byte(tmpfile.path(), |god_byte| {
+            *god_byte |= RECOVERY_REQUIRED;
+            *god_byte &= !TWO_PHASE_COMMIT;
+        });
+        {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(tmpfile.path())
+                .unwrap();
+            let mut header = [0u8; DB_HEADER_SIZE];
+            file.read_exact(&mut header).unwrap();
+            let secondary = TRANSACTION_0_OFFSET + TRANSACTION_1_OFFSET
+                - primary_slot_offset(header[GOD_BYTE_OFFSET]);
+            header[secondary + super::USER_ROOT_NON_NULL_OFFSET] = 0;
+            file.seek(SeekFrom::Start(0)).unwrap();
+            file.write_all(&header).unwrap();
+            file.sync_all().unwrap();
+        }
+
+        let err = Database::create(tmpfile.path()).err().unwrap();
+        assert!(
+            matches!(err, DatabaseError::Storage(StorageError::Corrupted(_))),
+            "expected Corrupted, got {err:?}"
+        );
     }
 
     // The read-only open walks the system tree to load the allocator state

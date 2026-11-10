@@ -67,6 +67,10 @@
 ### Minor improvements
 * A new database starts at 72 KiB instead of about 1 MiB, and grows as it is written to.
 
+### Bug fixes
+* Fix repair falling back to a commit slot that failed its checksum, which could open a damaged
+  database as an empty one instead of returning `StorageError::Corrupted`.
+
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
   work in `#![no_std]` crates.
