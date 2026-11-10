@@ -219,6 +219,42 @@ mod shared_reader {
             drop(repaired);
         }
     }
+
+    /// An exclusive-writer open is refused by a shared-mode handle only after it has taken the
+    /// range that holds the active transaction bytes, so a read that begins meanwhile waits for it
+    #[test]
+    fn a_refused_exclusive_open_does_not_fail_a_read() {
+        use std::sync::atomic::AtomicU64;
+
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let db = Arc::new(create(tmpfile.path(), mode));
+            let stop = Arc::new(AtomicBool::new(false));
+            let reads = Arc::new(AtomicU64::new(0));
+            let reader = {
+                let (db, stop, reads) = (db.clone(), stop.clone(), reads.clone());
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        assert_eq!(value(&*db), 0);
+                        reads.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            };
+            while reads.load(Ordering::Relaxed) == 0 {
+                std::thread::yield_now();
+            }
+            for _ in 0..2000 {
+                assert!(matches!(
+                    Database::create(tmpfile.path()),
+                    Err(DatabaseError::DatabaseAlreadyOpen)
+                ));
+            }
+            stop.store(true, Ordering::Relaxed);
+            reader
+                .join()
+                .unwrap_or_else(|_| panic!("{mode:?}: a read failed"));
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
