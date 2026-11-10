@@ -72,6 +72,9 @@
   database as an empty one instead of returning `StorageError::Corrupted`.
 * `commit()` returns `CommitError::TransactionPoisoned` when a table opened in the transaction was
   leaked, for example with `mem::forget()`, instead of committing a corrupted database.
+* `MultimapTable::insert()` and `MultimapTable::remove()` poison the write transaction if the key
+  or value type panics part way through, instead of leaving a transaction that commits a corrupted
+  table.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`

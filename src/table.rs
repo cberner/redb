@@ -82,25 +82,26 @@ impl<K: Key + 'static, V: Value + 'static> TableHandle for Table<'_, K, V> {
     }
 }
 
-struct RetainPanicGuard<'txn> {
+// Poisons the transaction if a panic unwinds through an operation that is not atomic
+pub(crate) struct PanicGuard<'txn> {
     transaction: &'txn WriteTransaction,
     disarmed: bool,
 }
 
-impl<'txn> RetainPanicGuard<'txn> {
-    fn new(transaction: &'txn WriteTransaction) -> Self {
+impl<'txn> PanicGuard<'txn> {
+    pub(crate) fn new(transaction: &'txn WriteTransaction) -> Self {
         Self {
             transaction,
             disarmed: false,
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.disarmed = true;
     }
 }
 
-impl Drop for RetainPanicGuard<'_> {
+impl Drop for PanicGuard<'_> {
     fn drop(&mut self) {
         if !self.disarmed && crate::panicking() {
             self.transaction.poison();
@@ -303,7 +304,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         upper: Bound<Vec<u8>>,
         predicate: F,
     ) -> Result {
-        let mut panic_guard = RetainPanicGuard::new(self.transaction);
+        let mut panic_guard = PanicGuard::new(self.transaction);
         let mut poisoned = false;
         let result = self
             .tree
