@@ -1507,9 +1507,15 @@ impl TransactionalMemory {
         self.storage.check_io_errors().is_err()
     }
 
-    pub(crate) fn repair_primary_corrupted(&self) {
+    // Falls back to the secondary slot. Returns false, without falling back, if that slot failed
+    // its checksum
+    pub(crate) fn repair_primary_corrupted(&self) -> bool {
         let mut state = self.state.lock().unwrap();
+        if state.header.secondary_slot_corrupted() {
+            return false;
+        }
         state.header.swap_primary_slot();
+        true
     }
 
     // Replaces the in-memory allocator state with a fresh, empty one sized to the current
