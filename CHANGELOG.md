@@ -77,6 +77,9 @@
   table.
 * Fix `begin_read()` on a `SingleWriter` or `MultiWriter` database failing with
   `StorageError::Corrupted` while an `ExclusiveWriter` open of the same file was being refused.
+* Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
+  `CompactionError::TransactionInProgress` while an `ExclusiveWriter` open of the same file was
+  being refused.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
