@@ -1743,9 +1743,10 @@ impl WriteTransaction {
     /// durable as consistent with the [`Durability`] level set by [`Self::set_durability`]
     ///
     /// Returns [`CommitError::TransactionPoisoned`] if a previous operation panicked, or failed
-    /// part way through modifying the transaction, and left it unable to commit. The transaction
-    /// is then rolled back and new transactions may begin, though a corruption error that caused
-    /// the poisoning is in the database itself, and is not repaired by the rollback.
+    /// part way through modifying the transaction, and left it unable to commit, or if a table
+    /// opened in the transaction was leaked rather than dropped. The transaction is then rolled
+    /// back and new transactions may begin, though a corruption error that caused the poisoning is
+    /// in the database itself, and is not repaired by the rollback.
     ///
     /// On any other error the commit did not complete cleanly: the transaction's changes are
     /// applied atomically -- fully or not at all -- but may already have become durable, so they
@@ -1762,7 +1763,10 @@ impl WriteTransaction {
     ) -> Result<(), CommitError> {
         // Set completed flag first, so that we don't go through the abort() path on drop, if this fails
         self.completed = true;
-        if self.is_poisoned() {
+        // A table still open here was leaked rather than dropped, as by mem::forget(), so it
+        // never recorded its root. Committing would publish the root it was opened with, whose
+        // pages it has freed
+        if self.is_poisoned() || !self.tables.lock().unwrap().open_tables.is_empty() {
             self.abort_inner()?;
             return Err(CommitError::TransactionPoisoned);
         }
