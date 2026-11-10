@@ -75,6 +75,8 @@
 * `MultimapTable::insert()` and `MultimapTable::remove()` poison the write transaction if the key
   or value type panics part way through, instead of leaving a transaction that commits a corrupted
   table.
+* Fix `begin_read()` on a `SingleWriter` or `MultiWriter` database failing with
+  `StorageError::Corrupted` while an `ExclusiveWriter` open of the same file was being refused.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`

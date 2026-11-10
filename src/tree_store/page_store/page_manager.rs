@@ -25,7 +25,6 @@ use crate::{DatabaseError, Result, StorageBackend, StorageError};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -1085,11 +1084,11 @@ impl TransactionalMemory {
             return Ok(());
         }
         let byte = Self::active_transaction_byte(id)?;
-        // Refused only by an exclusive holder, which the caller's shared header hold excludes
+        // Refused only by an exclusive holder. That is never an exclusive writer, which this
+        // handle's own lock bytes exclude. It is an exclusive-writer open in progress, which takes
+        // the range holding these bytes first, and gives it back when those bytes refuse it
         if !self.storage.try_lock_shared_range(byte_range(byte))? {
-            return Err(StorageError::Corrupted(
-                "another process holds an active transaction byte exclusively".to_string(),
-            ));
+            self.storage.lock_shared_range(byte_range(byte))?;
         }
 
         Ok(())
