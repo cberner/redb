@@ -160,34 +160,37 @@ mod shared_reader {
         }
     }
 
+    /// Leaves a database that crashed after a commit, so the next open has to repair it
+    fn crash_after_commit(path: &Path) {
+        let dead = Arc::new(AtomicBool::new(false));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        let db = Database::builder()
+            .create_with_backend(CrashBackend {
+                inner: file_backend(file),
+                dead: Arc::clone(&dead),
+            })
+            .unwrap();
+        let write = db.begin_write().unwrap();
+        {
+            let mut table = write.open_table(TABLE).unwrap();
+            table.insert(0, 9).unwrap();
+        }
+        write.commit().unwrap();
+        dead.store(true, Ordering::SeqCst);
+        drop(db);
+    }
+
     /// A writer takes `SHARED_WRITER_BYTE` before `do_repair()` runs, so a reader admitted on that
     /// byte alone would walk a tree the repair is discarding. The consistent byte keeps it out
     #[test]
     fn a_repairing_writer_does_not_admit_a_shared_reader() {
         for &mode in shared_modes() {
             let tmpfile = tempfile::NamedTempFile::new().unwrap();
-
-            // Crashed after a commit, so the next open has to repair it
-            let dead = Arc::new(AtomicBool::new(false));
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(tmpfile.path())
-                .unwrap();
-            let db = Database::builder()
-                .create_with_backend(CrashBackend {
-                    inner: file_backend(file),
-                    dead: Arc::clone(&dead),
-                })
-                .unwrap();
-            let write = db.begin_write().unwrap();
-            {
-                let mut table = write.open_table(TABLE).unwrap();
-                table.insert(0, 9).unwrap();
-            }
-            write.commit().unwrap();
-            dead.store(true, Ordering::SeqCst);
-            drop(db);
+            crash_after_commit(tmpfile.path());
 
             // The repair callback fires inside do_repair()
             let path = tmpfile.path().to_path_buf();
@@ -217,6 +220,46 @@ mod shared_reader {
             let reader = shared(mode).open_read_only(tmpfile.path()).unwrap();
             assert_eq!(value(&reader), 9);
             drop(repaired);
+        }
+    }
+
+    /// A read-only exclusive-writer open is not a writer, so it leaves the consistent byte free:
+    /// a shared reader that opens while it is under way still finds the database unrepaired
+    #[test]
+    fn a_read_only_exclusive_open_does_not_admit_a_shared_reader() {
+        use std::sync::atomic::AtomicU64;
+
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            crash_after_commit(tmpfile.path());
+
+            let stop = Arc::new(AtomicBool::new(false));
+            let attempts = Arc::new(AtomicU64::new(0));
+            let opener = {
+                let (stop, attempts) = (stop.clone(), attempts.clone());
+                let path = tmpfile.path().to_path_buf();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        assert!(matches!(
+                            redb::ReadOnlyDatabase::open(&path),
+                            Err(DatabaseError::RepairAborted)
+                        ));
+                        attempts.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            };
+            while attempts.load(Ordering::Relaxed) == 0 {
+                std::thread::yield_now();
+            }
+            let admitted = (0..2000)
+                .filter(|_| shared(mode).open_read_only(tmpfile.path()).is_ok())
+                .count();
+            stop.store(true, Ordering::Relaxed);
+            opener.join().unwrap();
+            assert_eq!(
+                admitted, 0,
+                "{mode:?}: a shared reader was admitted to a database that needs repair"
+            );
         }
     }
 

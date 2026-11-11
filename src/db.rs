@@ -220,7 +220,8 @@ pub(crate) const WHOLE_FILE_READER_BYTE: u64 = LOCK_BASE + 3;
 /// Held shared by a writing process from the moment its open is complete -- past recovery and
 /// the allocator load -- until it closes: the file is consistent, and the recovery flag, set from
 /// here on, means only that a writer is live. `SHARED_WRITER_BYTE` is taken before recovery, so
-/// it cannot say that; this byte can.
+/// it cannot say that; this byte can. Only a writer holds it: a read-only exclusive-writer handle
+/// leaves it out of its whole-file lock.
 pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// One byte per generation of the locking protocol. A handle holds a shared lock on the byte of
 /// the generation it implements while the database is open, and an open fails while a byte of

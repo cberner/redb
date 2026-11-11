@@ -736,9 +736,10 @@ impl TransactionalMemory {
             (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
         ];
         // A read-only handle leaves the shared writer byte, the other generations' protocol bytes
-        // and the legacy reader byte unlocked, because it queries them below. It takes its own
-        // generation byte first, so that the generation query runs before any range that a writer
-        // of another generation would hold exclusively.
+        // and the legacy reader byte unlocked, because it queries them below, and the consistent
+        // byte, which only a writer may hold. It takes its own generation byte first, so that the
+        // generation query runs before any range that a writer of another generation would hold
+        // exclusively.
         let read_only_ranges = [
             byte_range(PROTOCOL_GENERATION_BYTE),
             suffix_range,
@@ -748,7 +749,7 @@ impl TransactionalMemory {
             ),
             (
                 Bound::Excluded(SHARED_WRITER_BYTE),
-                Bound::Excluded(PROTOCOL_GENERATION_BYTES.start),
+                Bound::Excluded(CONSISTENT_BYTE),
             ),
             (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
         ];
@@ -3159,6 +3160,23 @@ mod lock_protocol_test {
             assert!(observer.try_lock_range(..).unwrap());
             observer.unlock_range(..).unwrap();
         }
+    }
+
+    /// A shared reader takes a lock on the consistent byte to mean a live writer, so a read-only
+    /// handle leaves it free. It still keeps every writer out
+    #[test]
+    fn a_read_only_exclusive_writer_handle_leaves_the_consistent_byte_free() {
+        use crate::db::{CONSISTENT_BYTE, byte_range};
+
+        let tmpfile = crate::create_tempfile();
+        let observer = reopen(tmpfile.path());
+        let reader = exclusive_writer(tmpfile.path(), true).unwrap();
+        assert!(!observer.query_lock(byte_range(CONSISTENT_BYTE)).unwrap());
+        assert!(refused(exclusive_writer(tmpfile.path(), false)));
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+            assert!(refused(open(tmpfile.path(), false, mode)), "{mode:?}");
+        }
+        reader.close().unwrap();
     }
 
     #[test]
