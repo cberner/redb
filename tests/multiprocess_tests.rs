@@ -407,14 +407,9 @@ fn the_concurrency_mode_excludes_incompatible_opens() {
     Database::open(tmpfile.path()).unwrap();
 }
 
-/// An exclusive-writer open that a shared-mode handle refuses takes no active transaction byte,
-/// where its lock would read as a transaction in progress. 4.x takes those bytes first
-#[cfg(all(
-    any(target_os = "linux", target_vendor = "apple", windows),
-    feature = "experimental-api-5"
-))]
-#[test]
-fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
+/// Compacts a shared-mode database while another thread loops on `open`, which it refuses
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+fn compact_beside_refused_opens(open: fn(&std::path::Path) -> Result<(), DatabaseError>) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -431,7 +426,7 @@ fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     assert!(matches!(
-                        Database::create(&path),
+                        open(&path),
                         Err(DatabaseError::DatabaseAlreadyOpen)
                     ));
                     refused.fetch_add(1, Ordering::Relaxed);
@@ -446,6 +441,24 @@ fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
         opener.join().unwrap();
         compacted.unwrap_or_else(|err| panic!("{mode:?}: {err:?}"));
     }
+}
+
+/// An exclusive-writer open that a shared-mode handle refuses takes no active transaction byte,
+/// where its lock would read as a transaction in progress. 4.x takes those bytes first
+#[cfg(all(
+    any(target_os = "linux", target_vendor = "apple", windows),
+    feature = "experimental-api-5"
+))]
+#[test]
+fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
+    compact_beside_refused_opens(|path| Database::create(path).map(drop));
+}
+
+/// Nor does a read-only one, which looks for a shared-mode writer before it takes those bytes
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+#[test]
+fn a_refused_read_only_open_does_not_refuse_a_compaction() {
+    compact_beside_refused_opens(|path| redb::ReadOnlyDatabase::open(path).map(drop));
 }
 
 /// A multi-writer check runs on the file as another process last committed it, and the handle
