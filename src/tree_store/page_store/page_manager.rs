@@ -794,10 +794,17 @@ impl TransactionalMemory {
             {
                 return Err(DatabaseError::LockProtocolMismatch);
             }
+            // The later ranges hold the active transaction range and the writer byte, where a
+            // shared-mode handle reads a lock as a transaction in progress, so a read-only open
+            // looks for a shared-mode writer before it takes them
+            if read_only && taken == 0 && Self::locked_for_multi_process_writing(storage)? {
+                return Err(DatabaseError::DatabaseAlreadyOpen);
+            }
         }
 
         // A multi-writer cohort holds nothing a read-only open's shared locks conflict with, so
-        // the open probes for one, which its own ranges leave uncovered for the purpose
+        // the open probes for one, which its own ranges leave uncovered for the purpose. It probes
+        // again here for one that formed while it took them
         if read_only && Self::locked_for_multi_process_writing(storage)? {
             return Err(DatabaseError::DatabaseAlreadyOpen);
         }
@@ -839,6 +846,11 @@ impl TransactionalMemory {
         }
         if Self::another_protocol_generation_open(storage)? {
             return Err(DatabaseError::LockProtocolMismatch);
+        }
+        // A writer refused by a read-only exclusive-writer handle is refused before it takes the
+        // shared writer byte, which a read-only open beside that handle probes
+        if !read_only && storage.query_lock_range(byte_range(WHOLE_FILE_READER_BYTE))? {
+            return Err(DatabaseError::DatabaseAlreadyOpen);
         }
         let acquired = if read_only {
             storage.try_lock_shared_range(byte_range(SHARED_READER_BYTE))?
@@ -4111,7 +4123,9 @@ mod lock_failure_test {
                     Answer::Unsupported,
                     Answer::Failed,
                 ] {
-                    let (mut backend, released) = backend(answer, Answer::Failed);
+                    // A read-only open queries once its first range is held. A query inside the
+                    // whole-storage lock would fail the backend's check that none overlaps a lock
+                    let (mut backend, released) = backend(answer, Answer::Refused);
                     backend.expected_shared = Some(read_only);
                     backend.partial_answers = Mutex::new(
                         core::iter::repeat_n(Answer::Acquired, partial_count)
@@ -4221,5 +4235,44 @@ mod lock_failure_test {
             open(true, Answer::Acquired, Answer::Acquired),
             Err(DatabaseError::DatabaseAlreadyOpen)
         ));
+    }
+
+    /// A writable open that a read-only exclusive-writer handle refuses holds nothing but its own
+    /// generation byte, so a read-only open beside that handle never sees its locks
+    #[test]
+    fn a_writable_open_refused_by_a_read_only_handle_takes_only_its_generation_byte() {
+        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
+            let (backend, _) = backend(Answer::Acquired, Answer::Acquired);
+            let held = backend.held.clone();
+            let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+            assert!(matches!(
+                TransactionalMemory::lock_for_open(&storage, false, mode),
+                Err(DatabaseError::DatabaseAlreadyOpen)
+            ));
+            assert_eq!(
+                *held.lock().unwrap(),
+                [byte_range(PROTOCOL_GENERATION_BYTE)],
+                "{mode:?}"
+            );
+            storage.close().unwrap();
+        }
+    }
+
+    /// A read-only open that a shared-mode writer refuses holds nothing but its own generation
+    /// byte, so the writer's handles never see its locks
+    #[test]
+    fn a_read_only_open_refused_by_a_shared_mode_writer_takes_only_its_generation_byte() {
+        let (backend, _) = backend(Answer::Acquired, Answer::Acquired);
+        let held = backend.held.clone();
+        let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+        assert!(matches!(
+            TransactionalMemory::lock_for_open(&storage, true, ConcurrencyMode::ExclusiveWriter),
+            Err(DatabaseError::DatabaseAlreadyOpen)
+        ));
+        assert_eq!(
+            *held.lock().unwrap(),
+            [byte_range(PROTOCOL_GENERATION_BYTE)]
+        );
+        storage.close().unwrap();
     }
 }

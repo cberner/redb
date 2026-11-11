@@ -78,14 +78,20 @@
 * Fix `begin_read()` on a `SingleWriter` or `MultiWriter` database failing with
   `StorageError::Corrupted` while an `ExclusiveWriter` open of the same file was being refused.
 * Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
-  `CompactionError::TransactionInProgress` while an `ExclusiveWriter` open of the same file was
-  being refused.
+  `CompactionError::TransactionInProgress` while an `ExclusiveWriter` open of the same file,
+  read-only or not, was being refused.
 * When a lock on a `SingleWriter` or `MultiWriter` database cannot be released, later operations
   on that database return `StorageError::PreviousIo` until it is closed, which releases the lock.
   Before, the database kept working while the other processes sharing the file were blocked.
 * Fix a read-only open in `SingleWriter` or `MultiWriter` mode accepting a database that needs
   repair, instead of returning `DatabaseError::RepairAborted`, while a read-only `ExclusiveWriter`
   open of the same file was in progress.
+* Fix a refused read-only `ExclusiveWriter` open disturbing the `SingleWriter` or `MultiWriter`
+  handles of the same file: `try_begin_write()` could return `TransactionError::WouldBlock`, a
+  `MultiWriter` open `DatabaseError::DatabaseAlreadyOpen`, and closing the last handle could leave
+  the database needing repair, so that read-only opens returned `DatabaseError::RepairAborted`.
+* Fix `ReadOnlyDatabase::open()` failing with `DatabaseError::DatabaseAlreadyOpen` beside another
+  read-only handle, while a `SingleWriter` or `MultiWriter` open of the same file was being refused.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
