@@ -161,6 +161,10 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     ///
     /// The range passed will exactly match a range successfully locked by one of the lock methods.
     ///
+    /// If it fails, the lock is taken to be still held: every later operation on the database
+    /// returns [`StorageError::PreviousIo`], until the database is closed and [`Self::close`]
+    /// releases the lock.
+    ///
     /// Defaults to [`BackendError::Unsupported`].
     fn unlock_range(
         &self,

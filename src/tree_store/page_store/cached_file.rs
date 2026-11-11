@@ -180,9 +180,15 @@ impl CheckedBackend {
         if self.closed.load(Ordering::Acquire) {
             return Err(StorageError::DatabaseClosed);
         }
-        self.file
-            .unlock_range(range.start_bound().cloned(), range.end_bound().cloned())
-            .map_err(StorageError::from_lock_error)
+        let result = self
+            .file
+            .unlock_range(range.start_bound().cloned(), range.end_bound().cloned());
+        // The lock is still held, where it blocks whoever shares the storage until the backend is
+        // closed. Failing every later operation is what tells the caller to close it
+        if result.is_err() {
+            self.io_failed.store(true, Ordering::Release);
+        }
+        result.map_err(StorageError::from_lock_error)
     }
 
     fn query_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
