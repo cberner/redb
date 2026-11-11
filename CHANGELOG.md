@@ -83,6 +83,9 @@
 * When a lock on a `SingleWriter` or `MultiWriter` database cannot be released, later operations
   on that database return `StorageError::PreviousIo` until it is closed, which releases the lock.
   Before, the database kept working while the other processes sharing the file were blocked.
+* Fix a read-only open in `SingleWriter` or `MultiWriter` mode accepting a database that needs
+  repair, instead of returning `DatabaseError::RepairAborted`, while a read-only `ExclusiveWriter`
+  open of the same file was in progress.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
