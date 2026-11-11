@@ -1162,6 +1162,166 @@ mod unsupported_io_error {
     }
 }
 
+/// A lock whose release fails is still held, where it blocks the processes that share the file
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
+mod failed_unlock {
+    use super::*;
+    use redb::{BackendError, ReadableDatabase, StorageBackend, TableDefinition, TransactionError};
+    use std::io;
+    use std::ops::Bound;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    // The error type of StorageBackend's I/O methods
+    #[cfg(feature = "experimental-api-5")]
+    type BackendIoError = redb::BackendError;
+    #[cfg(not(feature = "experimental-api-5"))]
+    type BackendIoError = std::io::Error;
+
+    const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
+
+    /// Fails to release the header lock while `stuck`, and leaves it held
+    #[derive(Debug)]
+    struct StuckHeaderLock {
+        inner: FileBackend,
+        stuck: Arc<AtomicBool>,
+    }
+
+    impl StorageBackend for StuckHeaderLock {
+        fn len(&self) -> Result<u64, BackendIoError> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), BackendIoError> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+            self.inner.write(offset, data)
+        }
+
+        fn close(&self) -> Result<(), BackendIoError> {
+            self.inner.close()
+        }
+
+        fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
+            self.inner.try_lock_range(start, end)
+        }
+
+        fn try_lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.try_lock_shared_range(start, end)
+        }
+
+        fn lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            self.inner.lock_range(start, end)
+        }
+
+        fn lock_shared_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<(), BackendError> {
+            self.inner.lock_shared_range(start, end)
+        }
+
+        fn unlock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<(), BackendError> {
+            // The header lock is the only one that starts at the first byte of the file
+            if start == Bound::Included(0) && self.stuck.load(Ordering::SeqCst) {
+                return Err(BackendError::Io(io::Error::other(
+                    "the lock could not be released",
+                )));
+            }
+            self.inner.unlock_range(start, end)
+        }
+
+        fn query_lock_range(
+            &self,
+            start: Bound<u64>,
+            end: Bound<u64>,
+        ) -> Result<bool, BackendError> {
+            self.inner.query_lock_range(start, end)
+        }
+    }
+
+    fn write(db: &Database) -> Result<(), redb::Error> {
+        let txn = db.begin_write()?;
+        {
+            let mut table = txn.open_table(TABLE)?;
+            table.insert(0, 0)?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// The database stops working, so that the application closes it, which releases the lock
+    #[test]
+    fn fails_the_database_until_it_is_closed() {
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let stuck = Arc::new(AtomicBool::new(false));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(tmpfile.path())
+            .unwrap();
+        let mut builder = Database::builder();
+        builder.set_concurrency_mode(ConcurrencyMode::MultiWriter);
+        let db = builder
+            .create_with_backend(StuckHeaderLock {
+                inner: file_backend(file),
+                stuck: stuck.clone(),
+            })
+            .unwrap();
+        let peer = builder.create(tmpfile.path()).unwrap();
+
+        // Every release of the header lock in this transaction fails. Whether the transaction
+        // itself reports that depends on which release came first
+        stuck.store(true, Ordering::SeqCst);
+        let _ = write(&db);
+        stuck.store(false, Ordering::SeqCst);
+
+        assert!(matches!(
+            db.begin_read(),
+            Err(TransactionError::Storage(StorageError::PreviousIo))
+        ));
+        assert!(matches!(
+            db.begin_write(),
+            Err(TransactionError::Storage(StorageError::PreviousIo))
+        ));
+
+        // The lock is still held, so the peer waits for it ...
+        let (tx, rx) = mpsc::channel();
+        let waiting = std::thread::spawn(move || {
+            let result = write(&peer);
+            tx.send(()).unwrap();
+            result.unwrap();
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the peer was not blocked by the lock that failed to release"
+        );
+
+        // ... until the database is closed
+        drop(db);
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the peer was still blocked after the database was closed");
+        waiting.join().unwrap();
+    }
+}
+
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod reclamation {
     use super::*;

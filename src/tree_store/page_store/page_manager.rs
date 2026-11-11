@@ -4171,6 +4171,31 @@ mod lock_failure_test {
         assert!(held.lock().unwrap().is_empty());
     }
 
+    /// The lock is still held, so the storage fails from then on. Closing it releases the lock
+    #[test]
+    fn a_failed_unlock_fails_the_storage_until_it_is_closed() {
+        let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
+        backend.fail_unlock = true;
+        let held = backend.held.clone();
+        let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
+        let range = byte_range(SHARED_WRITER_BYTE);
+        assert!(storage.try_lock_range(range).unwrap());
+        storage.check_io_errors().unwrap();
+
+        assert!(storage.unlock_range(range).is_err());
+        assert!(matches!(
+            storage.check_io_errors(),
+            Err(StorageError::PreviousIo)
+        ));
+        assert!(matches!(
+            storage.try_lock_shared_range(byte_range(PROTOCOL_GENERATION_BYTE)),
+            Err(StorageError::PreviousIo)
+        ));
+        assert_eq!(*held.lock().unwrap(), [range]);
+        storage.close().unwrap();
+        assert!(held.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn granular_read_only_open_queries_outside_its_locks() {
         open(true, Answer::Acquired, Answer::Refused).unwrap();

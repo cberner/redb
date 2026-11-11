@@ -80,6 +80,9 @@
 * Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
   `CompactionError::TransactionInProgress` while an `ExclusiveWriter` open of the same file was
   being refused.
+* When a lock on a `SingleWriter` or `MultiWriter` database cannot be released, later operations
+  on that database return `StorageError::PreviousIo` until it is closed, which releases the lock.
+  Before, the database kept working while the other processes sharing the file were blocked.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
