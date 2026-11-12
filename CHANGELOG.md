@@ -95,6 +95,8 @@
 * Fix a `MultiWriter` process aborting the next time its write transaction grew the file, after a
   write transaction in another process had grown it and then ended without a commit, because that
   process was killed or a panic dropped the transaction.
+* Fix `check_integrity()` returning `Ok(false)` for an undamaged database that had grown to exactly
+  one full region, which is 4 GiB with the default settings.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
