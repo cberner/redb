@@ -92,6 +92,9 @@
   the database needing repair, so that read-only opens returned `DatabaseError::RepairAborted`.
 * Fix `ReadOnlyDatabase::open()` failing with `DatabaseError::DatabaseAlreadyOpen` beside another
   read-only handle, while a `SingleWriter` or `MultiWriter` open of the same file was being refused.
+* Fix a `MultiWriter` process aborting the next time its write transaction grew the file, after a
+  write transaction in another process had grown it and then ended without a commit, because that
+  process was killed or a panic dropped the transaction.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
