@@ -661,7 +661,8 @@ fn an_integrity_check_waits_for_a_peers_write_transaction() {
 mod peer_commits {
     use super::*;
     use redb::{
-        CompactionError, ReadableDatabase, ReadableTable, TableDefinition, TransactionError,
+        CompactionError, ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefinition,
+        TransactionError,
     };
     use std::path::Path;
 
@@ -994,6 +995,41 @@ mod peer_commits {
             assert_eq!(value(&db, key), key);
         }
         assert!(db.check_integrity().unwrap());
+    }
+
+    /// A transaction dropped while a panic unwinds, like one in a process that was killed, leaves
+    /// the file as long as it grew it. The peer is still on the latest commit, and must adopt
+    /// the file's length all the same, or its own growth asks for a shorter file than there is
+    #[test]
+    fn a_write_transaction_grows_past_a_peers_uncommitted_growth() {
+        const BLOBS: TableDefinition<u64, &[u8]> = TableDefinition::new("blobs");
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        let (db, peer) = two_handles(tmpfile.path());
+        insert(&db, 0);
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let txn = peer.begin_write().unwrap();
+            let mut table = txn.open_table(BLOBS).unwrap();
+            let blob = vec![0; 1 << 20];
+            for key in 0..16 {
+                table.insert(key, blob.as_slice()).unwrap();
+            }
+            panic!("unwinding through the transaction");
+        }));
+        assert!(unwound.is_err());
+
+        // Grows the file in steps that start far below the peer's growth
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(BLOBS).unwrap();
+            let blob = vec![1; 1024];
+            for key in 0..1000 {
+                table.insert(key, blob.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let read = peer.begin_read().unwrap();
+        assert_eq!(read.open_table(BLOBS).unwrap().len().unwrap(), 1000);
     }
 
     /// A transaction dropped while a panic unwinds leaves its pages in the write buffer, and

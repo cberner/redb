@@ -1465,10 +1465,15 @@ impl TransactionalMemory {
         // Every writer holds the writer byte while it reloads, so transaction ids only move
         // forward, and comparing them says whether the file has moved on. A latched repair
         // syncs whatever the ids say: the pages it leaked are this handle's alone, and the
-        // allocator state the file's latest commit recorded does not include them.
+        // allocator state the file's latest commit recorded does not include them. A peer's
+        // transaction that grew the file and then never committed or cleaned up, because its
+        // process died or a panic dropped it, leaves the ids equal but the file longer than this
+        // handle's layout. Syncing adopts the file's length: growing from the shorter layout would
+        // shrink the file instead.
         if header.primary_slot().transaction_id == self.get_last_durable_transaction_id()?
             && !self.needs_repair()
             && !header.primary_unflushed
+            && self.file_len_matches_layout()?
         {
             return Ok(false);
         }
