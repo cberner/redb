@@ -158,7 +158,9 @@ impl DatabaseLayout {
         page_size: u32,
     ) -> Self {
         let full_region_layout = RegionLayout::new(page_capacity, region_header_pages, page_size);
-        if desired_usable_bytes <= full_region_layout.usable_bytes() {
+        // Exactly one region's worth is one full region, as `recalculate` reads it back from the
+        // file's length, not a trailing region of the full size
+        if desired_usable_bytes < full_region_layout.usable_bytes() {
             // Single region layout
             let region_layout = RegionLayout::calculate(
                 desired_usable_bytes,
@@ -245,6 +247,44 @@ impl DatabaseLayout {
             self.trailing_partial_region.unwrap()
         } else {
             self.full_region_layout
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::DatabaseLayout;
+
+    // A header read back while the file needs recovery, as it does while a writable handle has it
+    // open, gets its layout recalculated from the file's length, and a difference counts as damage
+    #[test]
+    fn a_calculated_layout_reads_back_from_the_file_length() {
+        let (page_size, region_pages, header_pages) = (4096, 256, 0);
+        let region_bytes = u64::from(region_pages) * u64::from(page_size);
+        for usable in [
+            region_bytes / 2,
+            region_bytes,
+            region_bytes + 4096,
+            2 * region_bytes,
+        ] {
+            let calculated =
+                DatabaseLayout::calculate(usable, region_pages, header_pages, page_size);
+            let recalculated = DatabaseLayout::recalculate(
+                calculated.len(),
+                header_pages,
+                region_pages,
+                page_size,
+            );
+            assert_eq!(
+                calculated.num_full_regions(),
+                recalculated.num_full_regions(),
+                "{usable} usable bytes"
+            );
+            assert_eq!(
+                calculated.trailing_region_layout(),
+                recalculated.trailing_region_layout(),
+                "{usable} usable bytes"
+            );
         }
     }
 }
