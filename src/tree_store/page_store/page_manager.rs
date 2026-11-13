@@ -119,6 +119,11 @@ impl PageResolver {
     pub(crate) fn count_allocated_pages(&self) -> Result<u64> {
         self.mem.count_allocated_pages()
     }
+
+    // The number of pages the database's layout holds, which no tree in it can exceed
+    pub(crate) fn page_capacity(&self) -> u64 {
+        self.mem.get_layout().usable_bytes() / u64::from(self.mem.page_size)
+    }
 }
 
 // Shards for `UncommittedPages`, padded to a cache line: the contention being removed is cores

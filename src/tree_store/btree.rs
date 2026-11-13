@@ -941,21 +941,26 @@ impl RawBtree {
     pub(crate) fn verify_checksum(&self) -> Result<bool> {
         if let Some(header) = self.root {
             let mut visited = Vec::new();
-            self.verify_checksum_helper(header.root, header.checksum, &mut visited)
+            let mut budget = self.mem.page_capacity();
+            self.verify_checksum_helper(header.root, header.checksum, &mut visited, &mut budget)
         } else {
             Ok(true)
         }
     }
 
+    // `visited` is the current path, which catches cycles. `budget` caps the visits at the page
+    // count, since a tree with shared pages could otherwise take exponential time to walk
     fn verify_checksum_helper(
         &self,
         page_number: PageNumber,
         expected_checksum: Checksum,
         visited: &mut Vec<PageNumber>,
+        budget: &mut u64,
     ) -> Result<bool> {
-        if visited.len() >= MAX_BTREE_DEPTH || visited.contains(&page_number) {
+        if visited.len() >= MAX_BTREE_DEPTH || visited.contains(&page_number) || *budget == 0 {
             return Ok(false);
         }
+        *budget -= 1;
         visited.push(page_number);
 
         let page = self.mem.get_page(page_number, self.hint)?;
@@ -984,6 +989,7 @@ impl RawBtree {
                         accessor.child_page(i).unwrap(),
                         accessor.child_checksum(i).unwrap(),
                         visited,
+                        budget,
                     )? {
                         return Ok(false);
                     }
@@ -1504,5 +1510,68 @@ mod tests {
             err_str.contains("Cycle detected in Btree pages"),
             "Expected cycle error, got: {err_str}"
         );
+    }
+
+    // Each branch has the next one as both of its children, so the walk visits 2^(levels + 1) - 1
+    // pages: more than the database holds
+    #[test]
+    fn verify_checksum_stops_a_walk_longer_than_the_database() {
+        use crate::tree_store::btree_base::{RawBranchBuilder, RawLeafBuilder};
+        use crate::tree_store::{
+            AllocationPolicy, InMemoryBackend, PAGE_SIZE, TransactionalMemory,
+        };
+
+        let (mem, _writer_lock) = TransactionalMemory::new(
+            Box::new(InMemoryBackend::new()),
+            true,
+            PAGE_SIZE,
+            None,
+            0,
+            false,
+            crate::db::ConcurrencyMode::ExclusiveWriter,
+        )
+        .unwrap();
+        mem.reset_allocator_state().unwrap();
+        let mem = Arc::new(mem);
+        let page_allocator = PageAllocator::new(mem.clone(), AllocationPolicy::Default);
+        let allocated_pages = PageTracker::new_tracking();
+
+        let mut leaf = page_allocator
+            .allocate(PAGE_SIZE, &allocated_pages)
+            .unwrap();
+        {
+            let mut builder = RawLeafBuilder::new(leaf.memory_mut(), 1, Some(8), Some(8), 8);
+            builder.append(b"key12345", b"value123");
+        }
+        let mut child = (
+            leaf.get_page_number(),
+            leaf_checksum(&leaf, Some(8), Some(8)).unwrap(),
+        );
+        drop(leaf);
+        let levels = 8;
+        for _ in 0..levels {
+            let mut branch = page_allocator
+                .allocate(PAGE_SIZE, &allocated_pages)
+                .unwrap();
+            {
+                let mut builder = RawBranchBuilder::new(branch.memory_mut(), 1, Some(8));
+                builder.write_first_page(child.0, child.1);
+                builder.write_nth_key(b"key12345", child.0, child.1, 0);
+            }
+            child = (
+                branch.get_page_number(),
+                branch_checksum(&branch, Some(8)).unwrap(),
+            );
+        }
+
+        let resolver = PageResolver::new(mem);
+        assert!(resolver.page_capacity() < (1 << (levels + 1)) - 1);
+        let header = BtreeHeader {
+            root: child.0,
+            checksum: child.1,
+            length: 1 << levels,
+        };
+        let raw_btree = RawBtree::new(Some(header), Some(8), Some(8), resolver, PageHint::None);
+        assert!(!raw_btree.verify_checksum().unwrap());
     }
 }
