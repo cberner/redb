@@ -1,6 +1,5 @@
 use crate::BackendError;
 use crate::StorageBackend;
-use crate::db::BackendIoError;
 use crate::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -47,27 +46,27 @@ impl StorageBackend for ReadOnlyBackend {
         self.inner.query_lock_range(start, end)
     }
 
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, _len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, _len: u64) -> Result<(), BackendError> {
         unreachable!()
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         unreachable!()
     }
 
-    fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendError> {
         unreachable!()
     }
 
-    fn close(&self) -> Result<(), BackendIoError> {
+    fn close(&self) -> Result<(), BackendError> {
         self.inner.close()
     }
 }
@@ -112,11 +111,11 @@ impl InMemoryBackend {
 }
 
 impl StorageBackend for InMemoryBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.read().len() as u64)
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let guard = self.read();
         let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
         let source = guard
@@ -126,18 +125,18 @@ impl StorageBackend for InMemoryBackend {
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         let mut guard = self.write();
         let len = usize::try_from(len).map_err(|_| Self::out_of_range())?;
         guard.resize(len, 0);
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let mut guard = self.write();
         let offset = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
         let target = guard

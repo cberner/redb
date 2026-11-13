@@ -631,9 +631,10 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
+    use crate::BackendError;
     use crate::ReadableTable;
     use crate::backends::FileBackend;
-    use crate::db::{BackendIoError, TableDefinition};
+    use crate::db::TableDefinition;
     use crate::tree_store::page_store::base::MAX_REGIONS;
     use crate::tree_store::page_store::header::{
         DB_HEADER_SIZE, GOD_BYTE_OFFSET, MAGICNUMBER, NUM_FULL_REGIONS_OFFSET, PAGE_SIZE_OFFSET,
@@ -772,32 +773,32 @@ mod test {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.fail_if_armed()?;
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.fail_if_armed()?;
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.fail_if_armed()?;
             self.inner.write(offset, data)?;
             self.arm_failure_if_primary_swapped(offset, data);
             Ok(())
         }
 
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.inner.close()
         }
     }
@@ -1391,7 +1392,7 @@ mod test {
     }
 
     impl StorageBackend for LenOverrideBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             let fake = self.fake_len.load(core::sync::atomic::Ordering::Acquire);
             if fake == 0 {
                 Ok(self.data.lock().unwrap().len() as u64)
@@ -1400,7 +1401,7 @@ mod test {
             }
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             let data = self.data.lock().unwrap();
             let offset = usize::try_from(offset).unwrap();
             for (i, b) in out.iter_mut().enumerate() {
@@ -1409,7 +1410,7 @@ mod test {
             Ok(())
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.data
                 .lock()
                 .unwrap()
@@ -1417,11 +1418,11 @@ mod test {
             Ok(())
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             Ok(())
         }
 
-        fn write(&self, offset: u64, src: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, src: &[u8]) -> Result<(), BackendError> {
             let mut data = self.data.lock().unwrap();
             let offset = usize::try_from(offset).unwrap();
             if offset + src.len() > data.len() {

@@ -5,20 +5,12 @@
 //! disk, so external modification is detected; pages still in the write buffer are authoritative
 //! in memory and are written out by the promoting commit.
 
-// Converting into BackendIoError is the identity without experimental-api-5
-#![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
-
 use redb::ReadableTable;
 use redb::{
-    Database, Durability, ReadableDatabase, ReadableTableMetadata, StorageBackend, TableDefinition,
+    BackendError, Database, Durability, ReadableDatabase, ReadableTableMetadata, StorageBackend,
+    TableDefinition,
 };
 use std::sync::{Arc, RwLock};
-
-// The error type of StorageBackend's I/O methods
-#[cfg(feature = "experimental-api-5")]
-type BackendIoError = redb::BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-type BackendIoError = std::io::Error;
 
 const TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("t");
 
@@ -59,10 +51,10 @@ impl PatchBackend {
 }
 
 impl StorageBackend for PatchBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.inner.read().unwrap().len() as u64)
     }
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let offset = usize::try_from(offset).unwrap();
         let guard = self.inner.read().unwrap();
         if offset + out.len() > guard.len() {
@@ -71,17 +63,17 @@ impl StorageBackend for PatchBackend {
         out.copy_from_slice(&guard[offset..offset + out.len()]);
         Ok(())
     }
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.inner
             .write()
             .unwrap()
             .resize(len.try_into().unwrap(), 0);
         Ok(())
     }
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         Ok(())
     }
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let offset = usize::try_from(offset).unwrap();
         let mut guard = self.inner.write().unwrap();
         if offset + data.len() > guard.len() {

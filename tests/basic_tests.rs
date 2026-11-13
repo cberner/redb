@@ -4,9 +4,10 @@ use redb::CommitError;
 use redb::DatabaseError;
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
-    Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange, ReadOnlyDatabase,
-    ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend, StorageError,
-    TableDefinition, TableError, TableHandle, TransactionError, TypeName, Value, WriteTransaction,
+    BackendError, Database, Key, MultimapTableDefinition, MultimapTableHandle, OwnedRange,
+    ReadOnlyDatabase, ReadableDatabase, ReadableTable, ReadableTableMetadata, StorageBackend,
+    StorageError, TableDefinition, TableError, TableHandle, TransactionError, TypeName, Value,
+    WriteTransaction,
 };
 use std::cmp::Ordering;
 use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
@@ -14,12 +15,6 @@ use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
 use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
 use std::sync;
-
-// The error type of StorageBackend's I/O methods
-#[cfg(feature = "experimental-api-5")]
-type BackendIoError = redb::BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-type BackendIoError = std::io::Error;
 
 const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice");
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
@@ -4811,25 +4806,25 @@ fn multi_table_commit_writes_are_deterministic() {
     }
 
     impl StorageBackend for RecordingBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.log.lock().unwrap().push(BackendEvent::SetLen(len));
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.log.lock().unwrap().push(BackendEvent::Sync);
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.log.lock().unwrap().push(BackendEvent::Write {
                 offset,
                 data: data.to_vec(),

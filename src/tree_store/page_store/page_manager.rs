@@ -3660,7 +3660,7 @@ mod lock_failure_test {
     #[cfg(feature = "experimental-api-5")]
     use crate::db::MODE_RANGE;
     use crate::db::{
-        BACKEND_LOCK_RANGE, BackendIoError, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
+        BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
         PROTOCOL_GENERATION_BYTE, PROTOCOL_GENERATION_BYTES, SHARED_WRITER_BYTE, byte_range,
     };
     use crate::sync::Mutex;
@@ -3822,7 +3822,7 @@ mod lock_failure_test {
             self.querying.result()
         }
 
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             assert!(!self.closed.swap(true, Ordering::AcqRel), "closed twice");
             for range in self.held.lock().unwrap().drain(..) {
                 self.released.lock().unwrap().push(range);
@@ -3831,23 +3831,23 @@ mod lock_failure_test {
             Ok(())
         }
 
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
     }
