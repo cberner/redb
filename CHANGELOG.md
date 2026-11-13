@@ -64,6 +64,17 @@
   `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
   atomics.
 
+### Bug fixes
+* Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
+  `CompactionError::TransactionInProgress` while a writable `ExclusiveWriter` open of the same file
+  was being refused.
+
+## redb-derive 0.2.1 - 2026-XX-XX
+* The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
+  work in `#![no_std]` crates.
+* The published package includes the license texts and a README.
+
+## 4.6.0 - 2026-XX-XX
 ### Minor improvements
 * A new database starts at 72 KiB instead of about 1 MiB, and grows as it is written to.
 
@@ -78,8 +89,8 @@
 * Fix `begin_read()` on a `SingleWriter` or `MultiWriter` database failing with
   `StorageError::Corrupted` while an `ExclusiveWriter` open of the same file was being refused.
 * Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
-  `CompactionError::TransactionInProgress` while an `ExclusiveWriter` open of the same file,
-  read-only or not, was being refused.
+  `CompactionError::TransactionInProgress` while a read-only `ExclusiveWriter` open of the same file
+  was being refused.
 * When a lock on a `SingleWriter` or `MultiWriter` database cannot be released, later operations
   on that database return `StorageError::PreviousIo` until it is closed, which releases the lock.
   Before, the database kept working while the other processes sharing the file were blocked.
@@ -102,11 +113,6 @@
   reads and writes in progress.
 * Fix `check_integrity()`, and opens that verify or repair, taking exponential time on a damaged
   B-tree whose pages are shared between several parents.
-
-## redb-derive 0.2.1 - 2026-XX-XX
-* The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
-  work in `#![no_std]` crates.
-* The published package includes the license texts and a README.
 
 ## 4.5.0 - 2026-11-05
 ### Multi-process support
