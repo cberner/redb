@@ -1,12 +1,9 @@
-#[cfg(feature = "experimental-api-5")]
 use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
 use crate::table::{CompatBorrow, OwnedAccessGuard, PanicGuard, ReadableTableMetadata, TableStats};
-#[cfg(not(feature = "experimental-api-5"))]
-use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
@@ -24,8 +21,6 @@ use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::marker::PhantomData;
 use core::mem;
-#[cfg(not(feature = "experimental-api-5"))]
-use core::ops::RangeBounds;
 use core::ops::{Bound, Range, RangeFull};
 
 pub(crate) struct LeafKeyIter<'a, V: Key + 'static> {
@@ -1018,18 +1013,8 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V> for Multima
         Ok(iter)
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
-        self.range_in_bounds(lower, upper)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
 }
@@ -1063,23 +1048,12 @@ pub trait ReadableMultimapTable<K: Key + 'static, V: Key + 'static>: ReadableTab
     fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'_, V>>;
 
     /// Returns a double-ended iterator over a range of elements in the table
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>>;
-
-    /// Returns a double-ended iterator over a range of elements in the table
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns an double-ended iterator over all elements in the table. Values are in ascending
     /// order.
     fn iter(&self) -> Result<MultimapRange<'_, K, V>> {
-        #[cfg(feature = "experimental-api-5")]
-        let range = self.range(..);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let range = self.range::<K::SelfType<'_>>(..);
-        range
+        self.range(..)
     }
 }
 
@@ -1250,27 +1224,8 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
     /// This method is like [`ReadableMultimapTable::range()`], but the returned iterator is
     /// reference counted and keeps the transaction alive until it is dropped, as do the entries
     /// it yields.
-    #[cfg(feature = "experimental-api-5")]
     pub fn range_owned(&self, range: impl KeyRange<K>) -> Result<OwnedMultimapRange<K, V>> {
         let (lower, upper) = range.key_bounds();
-        Ok(OwnedMultimapRange::new(
-            self.range_in_bounds(lower, upper)?,
-            self.transaction_guard.clone(),
-        ))
-    }
-
-    /// This method is like [`ReadableMultimapTable::range()`], but the returned iterator is
-    /// reference counted and keeps the transaction alive until it is dropped, as do the entries
-    /// it yields.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn range_owned<'a, KR>(
-        &self,
-        range: impl RangeBounds<KR>,
-    ) -> Result<OwnedMultimapRange<K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>>,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         Ok(OwnedMultimapRange::new(
             self.range_in_bounds(lower, upper)?,
             self.transaction_guard.clone(),
@@ -1330,18 +1285,8 @@ impl<K: Key + 'static, V: Key + 'static> ReadableMultimapTable<K, V>
         Ok(iter)
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<MultimapRange<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
-        self.range_in_bounds(lower, upper)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<MultimapRange<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
 }
