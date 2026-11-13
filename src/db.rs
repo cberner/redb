@@ -31,7 +31,7 @@ use std::fs::OpenOptions;
 use std::path::Path;
 
 use crate::error::TransactionError;
-use crate::sealed::{Sealed, SealedInApi5};
+use crate::sealed::Sealed;
 use crate::transactions::{
     ALLOCATOR_STATE_TABLE_NAME, AllocatorStateKey, AllocatorStateTree, DATA_ALLOCATED_TABLE,
     DATA_FREED_TABLE, PageList, SAVEPOINT_TABLE, SYSTEM_FREED_TABLE, SystemTableDefinition,
@@ -616,7 +616,7 @@ impl Drop for TransactionGuard {
     }
 }
 
-pub trait ReadableDatabase: SealedInApi5 {
+pub trait ReadableDatabase: Sealed {
     /// Begins a read transaction
     ///
     /// Captures a snapshot of the database, so that only data committed before calling this method
