@@ -170,14 +170,6 @@ impl StorageError {
     }
 }
 
-#[cfg(not(feature = "experimental-api-5"))]
-impl<T> From<PoisonError<T>> for StorageError {
-    #[track_caller]
-    fn from(_: PoisonError<T>) -> StorageError {
-        StorageError::LockPoisoned(panic::Location::caller())
-    }
-}
-
 // Reports a poisoned lock as LockPoisoned, at the location where the lock was taken
 pub(crate) trait LockResultExt<G> {
     fn or_poisoned(self) -> Result<G, StorageError>;
@@ -1065,14 +1057,6 @@ pub enum Error {
     /// Another write transaction is in progress, which [`crate::Database::try_begin_write`]
     /// does not wait for
     WouldBlock,
-}
-
-#[cfg(not(feature = "experimental-api-5"))]
-impl<T> From<PoisonError<T>> for Error {
-    #[track_caller]
-    fn from(_: PoisonError<T>) -> Error {
-        Error::LockPoisoned(panic::Location::caller())
-    }
 }
 
 #[cfg(not(redb_no_std))]
