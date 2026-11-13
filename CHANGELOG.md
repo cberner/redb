@@ -97,6 +97,9 @@
   process was killed or a panic dropped the transaction.
 * Fix `check_integrity()` returning `Ok(false)` for an undamaged database that had grown to exactly
   one full region, which is 4 GiB with the default settings.
+* Fix a read that was in progress when its database was closed returning data from a later commit,
+  instead of completing or returning `StorageError::DatabaseClosed`. Closing now waits for the
+  reads and writes in progress.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`

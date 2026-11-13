@@ -1,5 +1,5 @@
 use crate::db::StorageBackend;
-use crate::sync::{Mutex, MutexGuard, RwLock};
+use crate::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
@@ -126,6 +126,10 @@ struct CheckedBackend {
     file: Box<dyn StorageBackend>,
     io_failed: AtomicBool,
     closed: AtomicBool,
+    // Held shared by each read and write of the backend, and exclusively by close(), so that an
+    // access in progress when the handle closes completes before the backend releases its locks.
+    // Once they are released, another handle may rewrite the page being read
+    io_gate: RwLock<()>,
 }
 
 // Covers the open paths that fail before there is a Database to drop. Drop cannot report the
@@ -144,7 +148,18 @@ impl CheckedBackend {
             file,
             io_failed: AtomicBool::new(false),
             closed: AtomicBool::new(false),
+            io_gate: RwLock::new(()),
         }
+    }
+
+    // Admits an access of the backend's data. One that starts once close() has begun fails before
+    // it takes the gate, so it cannot hold close() up
+    fn enter(&self) -> Result<RwLockReadGuard<'_, ()>> {
+        self.check_failure()?;
+        let gate = self.io_gate.read().unwrap_or_else(PoisonError::into_inner);
+        // close() may have begun while this waited for the gate
+        self.check_failure()?;
+        Ok(gate)
     }
 
     fn try_lock_range(&self, range: impl RangeBounds<u64>) -> Result<bool> {
@@ -213,13 +228,15 @@ impl CheckedBackend {
     fn close(&self) -> Result {
         self.closed.store(true, Ordering::Release);
         self.io_failed.store(true, Ordering::Release);
+        // Waits for the accesses in progress, which the flags above do not stop
+        let _gate = self.io_gate.write().unwrap_or_else(PoisonError::into_inner);
         self.file.close()?;
 
         Ok(())
     }
 
     fn len(&self) -> Result<u64> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         let result = self.file.len();
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
@@ -228,7 +245,7 @@ impl CheckedBackend {
     }
 
     fn read(&self, offset: u64, out: &mut [u8]) -> Result<()> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         let result = self.file.read(offset, out);
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
@@ -237,7 +254,7 @@ impl CheckedBackend {
     }
 
     fn set_len(&self, len: u64) -> Result<()> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         let result = self.file.set_len(len);
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
@@ -246,7 +263,7 @@ impl CheckedBackend {
     }
 
     fn sync_data(&self) -> Result<()> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         let result = self.file.sync_data();
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
@@ -255,7 +272,7 @@ impl CheckedBackend {
     }
 
     fn write(&self, offset: u64, data: &[u8]) -> Result<()> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         let result = self.file.write(offset, data);
         if result.is_err() {
             self.io_failed.store(true, Ordering::Release);
@@ -267,7 +284,7 @@ impl CheckedBackend {
     // optimization depends on, latching would turn every later operation into a PreviousIo error
     // over data that nothing was waiting on.
     fn write_best_effort(&self, offset: u64, data: &[u8]) -> Result<()> {
-        self.check_failure()?;
+        let _gate = self.enter()?;
         self.file.write(offset, data).map_err(StorageError::from)
     }
 }
@@ -1020,7 +1037,92 @@ mod test {
     use crate::tree_store::PageHint;
     use crate::tree_store::page_store::cached_file::PagedCachedFile;
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    // Holds the first read until the test passes `release`, and records the order in which that
+    // read returns and close() is called
+    #[derive(Debug)]
+    struct Hold {
+        next_read: AtomicBool,
+        held: std::sync::Barrier,
+        release: std::sync::Barrier,
+        events: std::sync::Mutex<Vec<&'static str>>,
+    }
+
+    #[derive(Debug)]
+    struct HoldingBackend {
+        inner: InMemoryBackend,
+        hold: Arc<Hold>,
+    }
+
+    impl StorageBackend for HoldingBackend {
+        fn len(&self) -> Result<u64, BackendIoError> {
+            self.inner.len()
+        }
+
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+            if self.hold.next_read.swap(false, Ordering::SeqCst) {
+                self.hold.held.wait();
+                self.hold.release.wait();
+                self.inner.read(offset, out)?;
+                self.hold.events.lock().unwrap().push("read");
+                return Ok(());
+            }
+            self.inner.read(offset, out)
+        }
+
+        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+            self.inner.set_len(len)
+        }
+
+        fn sync_data(&self) -> Result<(), BackendIoError> {
+            self.inner.sync_data()
+        }
+
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+            self.inner.write(offset, data)
+        }
+
+        fn close(&self) -> Result<(), BackendIoError> {
+            self.hold.events.lock().unwrap().push("close");
+            Ok(())
+        }
+    }
+
+    // Once the backend's locks are released, another handle may rewrite the page being read, so
+    // close() must not reach the backend while a read of it is in progress
+    #[test]
+    fn close_waits_for_a_read_in_progress() {
+        let inner = InMemoryBackend::new();
+        inner.set_len(1024).unwrap();
+        let hold = Arc::new(Hold {
+            next_read: AtomicBool::new(true),
+            held: std::sync::Barrier::new(2),
+            release: std::sync::Barrier::new(2),
+            events: std::sync::Mutex::new(vec![]),
+        });
+        let backend = HoldingBackend {
+            inner,
+            hold: hold.clone(),
+        };
+        let cached_file = Arc::new(PagedCachedFile::new(Box::new(backend), 128, 1024));
+
+        let reader = {
+            let cached_file = cached_file.clone();
+            std::thread::spawn(move || cached_file.read(0, 128, PageHint::None).map(drop))
+        };
+        hold.held.wait();
+        let closer = {
+            let cached_file = cached_file.clone();
+            std::thread::spawn(move || cached_file.close())
+        };
+        // Long enough for close() to reach the backend, if nothing holds it up
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        hold.release.wait();
+        reader.join().unwrap().unwrap();
+        closer.join().unwrap().unwrap();
+        assert_eq!(*hold.events.lock().unwrap(), ["read", "close"]);
+    }
 
     #[derive(Debug)]
     struct CountingBackend {
