@@ -354,11 +354,8 @@ fn wrong_types() {
         .err()
         .unwrap()
         .to_string();
-    #[cfg(feature = "experimental-api-5")]
     let expected = "x has key type u32 and value type u32, but was opened with key type u64 and \
                     value type u64";
-    #[cfg(not(feature = "experimental-api-5"))]
-    let expected = "x has key type u32 and value type u32";
     assert_eq!(message, expected);
 }
 
