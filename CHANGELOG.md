@@ -72,9 +72,8 @@
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
   work in `#![no_std]` crates.
-* The published package includes the license texts and a README.
 
-## 4.6.0 - 2026-XX-XX
+## 4.6.0 - 2026-11-13
 ### Minor improvements
 * A new database starts at 72 KiB instead of about 1 MiB, and grows as it is written to.
 
