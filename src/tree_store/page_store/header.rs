@@ -631,7 +631,6 @@ impl TransactionHeader {
 
 #[cfg(test)]
 mod test {
-    #[cfg(feature = "experimental-api-5")]
     use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::{BackendIoError, TableDefinition};

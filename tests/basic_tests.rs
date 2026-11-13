@@ -3625,13 +3625,7 @@ fn range_arc() {
         let read_txn = db.begin_read().unwrap();
         let table = read_txn.open_table(definition).unwrap();
         let start = "hello".to_string();
-        // The 'static range() does not keep the transaction alive, so experimental-api-5 drops it
-        // in favour of range_owned()
-        #[cfg(feature = "experimental-api-5")]
-        let iter = table.range_owned(start.as_str()..).unwrap();
-        #[cfg(not(feature = "experimental-api-5"))]
-        let iter = table.range(start.as_str()..).unwrap();
-        iter
+        table.range_owned(start.as_str()..).unwrap()
     };
     assert_eq!(iter.next().unwrap().unwrap().1.value(), "world");
     assert!(iter.next().is_none());

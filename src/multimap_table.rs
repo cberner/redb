@@ -1195,13 +1195,6 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableMultimapTable::get()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn get<'a>(&self, key: impl Borrow<K::SelfType<'a>>) -> Result<MultimapValue<'static, V>> {
-        self.get_inner(key)
-    }
-
     fn get_inner<'a>(
         &self,
         key: impl Borrow<K::SelfType<'a>>,
@@ -1239,17 +1232,6 @@ impl<K: Key + 'static, V: Key + 'static> ReadOnlyMultimapTable<K, V> {
             self.get_inner(key)?,
             self.transaction_guard.clone(),
         ))
-    }
-
-    /// This method is like [`ReadableMultimapTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<MultimapRange<'static, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>>,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
-        self.range_in_bounds(lower, upper)
     }
 
     fn range_in_bounds(

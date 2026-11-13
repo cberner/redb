@@ -27,7 +27,6 @@ fn file_backend(file: std::fs::File) -> FileBackend {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod shared_reader {
     use super::*;
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{ReadableDatabase, TableDefinition};
     use std::path::Path;
@@ -509,7 +508,6 @@ fn a_refused_writable_open_does_not_refuse_a_read_only_open() {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn an_integrity_check_syncs_to_a_peers_commits() {
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{ReadableDatabase, TableDefinition};
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
@@ -561,7 +559,6 @@ fn an_integrity_check_syncs_to_a_peers_commits() {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn a_corrupt_primary_is_not_repaired_from_under_a_peers_read() {
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{ReadableDatabase, TableDefinition};
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -1065,7 +1062,6 @@ mod peer_commits {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn file_backend_custom_open_supports_shared_modes() {
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{ReadableDatabase, TableDefinition};
 
@@ -1460,7 +1456,6 @@ mod failed_unlock {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod reclamation {
     use super::*;
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{ReadableDatabase, TableDefinition};
 
@@ -1529,7 +1524,6 @@ mod reclamation {
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 mod compaction {
     use super::*;
-    #[cfg(feature = "experimental-api-5")]
     use redb::ReadableTable;
     use redb::{
         CompactionError, MultimapTableDefinition, ReadOnlyDatabase, ReadableDatabase,

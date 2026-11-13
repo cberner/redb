@@ -927,16 +927,6 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
         })
     }
 
-    /// This method is like [`ReadableTable::get()`], but the [`AccessGuard`] is reference counted
-    /// and keeps the transaction alive until it is dropped.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn get<'a>(
-        &self,
-        key: impl Borrow<K::SelfType<'a>>,
-    ) -> Result<Option<AccessGuard<'static, V>>> {
-        self.tree.get(key.borrow())
-    }
-
     /// This method is like [`ReadableTable::get()`], but the returned [`OwnedAccessGuard`] is
     /// reference counted and keeps the transaction alive until it is dropped.
     pub fn get_owned<'a>(
@@ -947,17 +937,6 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
             .tree
             .get(key.borrow())?
             .map(|x| OwnedAccessGuard::new(x, self.transaction_guard.clone())))
-    }
-
-    /// This method is like [`ReadableTable::range()`], but the iterator is reference counted and keeps the transaction
-    /// alive until it is dropped.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn range<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<Range<'static, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>>,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
-        self.range_in_bounds(lower, upper)
     }
 
     fn range_in_bounds(

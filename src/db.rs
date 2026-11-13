@@ -3896,7 +3896,6 @@ mod consistent_byte_test {
 #[cfg(all(test, any(target_os = "linux", target_vendor = "apple", windows)))]
 mod unflushed_primary_test {
     use super::{ConcurrencyMode, Database, ReadOnlyDatabase, ReadableDatabase};
-    #[cfg(feature = "experimental-api-5")]
     use crate::ReadableTable;
     use crate::backends::FileBackend;
     use crate::db::BackendIoError;
@@ -4420,7 +4419,6 @@ mod active_transaction_test {
     #[test]
     fn read_only_snapshot_survives_new_read_before_construction() {
         use super::{ReadTransaction, TransactionGuard};
-        #[cfg(feature = "experimental-api-5")]
         use crate::ReadableTable;
 
         for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
