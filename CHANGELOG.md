@@ -69,7 +69,7 @@
   `CompactionError::TransactionInProgress` while a writable `ExclusiveWriter` open of the same file
   was being refused.
 
-## redb-derive 0.2.1 - 2026-XX-XX
+## redb-derive 0.2.1 - 2026-11-13
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
   work in `#![no_std]` crates.
 
