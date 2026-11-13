@@ -1,14 +1,11 @@
-// Converting into BackendIoError is the identity without experimental-api-5
-#![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
-
 use rand::RngExt;
 use rand::prelude::SliceRandom;
 #[cfg(feature = "experimental-api-5")]
 use redb::KeyRange;
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
-    AccessGuard, Builder, CommitError, CompactionError, Database, Durability, Key, MultimapRange,
-    MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
+    AccessGuard, BackendError, Builder, CommitError, CompactionError, Database, Durability, Key,
+    MultimapRange, MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
     ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
     TransactionError, Value, WriteTransaction,
 };
@@ -23,12 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread;
 use std::time::Duration;
-
-// The error type of StorageBackend's I/O methods
-#[cfg(feature = "experimental-api-5")]
-type BackendIoError = redb::BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-type BackendIoError = std::io::Error;
 
 const ELEMENTS: usize = 100;
 const PAGE_REUSE_VALUE_LEN: usize = 512 * 1024;
@@ -135,28 +126,28 @@ struct BlockingSyncBackend {
 }
 
 impl StorageBackend for BlockingSyncBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         self.state.maybe_block();
         self.inner.sync_data()
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.inner.write(offset, data)
     }
 
-    fn close(&self) -> Result<(), BackendIoError> {
+    fn close(&self) -> Result<(), BackendError> {
         self.inner.close()
     }
 }
@@ -167,11 +158,11 @@ struct SharedInMemoryBackend {
 }
 
 impl StorageBackend for SharedInMemoryBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.inner.read().unwrap().len() as u64)
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let offset = usize::try_from(offset).unwrap();
         let end = offset + out.len();
         let guard = self.inner.read().unwrap();
@@ -183,7 +174,7 @@ impl StorageBackend for SharedInMemoryBackend {
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.inner
             .write()
             .unwrap()
@@ -191,11 +182,11 @@ impl StorageBackend for SharedInMemoryBackend {
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let offset = usize::try_from(offset).unwrap();
         let end = offset + data.len();
         let mut guard = self.inner.write().unwrap();
@@ -215,23 +206,23 @@ struct WriteCountingBackend {
 }
 
 impl StorageBackend for WriteCountingBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         self.inner.sync_data()
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.writes.fetch_add(1, Ordering::SeqCst);
         self.inner.write(offset, data)
     }
@@ -272,22 +263,22 @@ impl FailingBackend {
 }
 
 impl StorageBackend for FailingBackend {
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         if self.fail_reads.load(Ordering::SeqCst) {
             return Err(std::io::Error::from(ErrorKind::Other).into());
         }
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         let exhausted = self
             .syncs_left
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
@@ -300,7 +291,7 @@ impl StorageBackend for FailingBackend {
         self.inner.sync_data()
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.inner.write(offset, data)
     }
 }
@@ -664,36 +655,36 @@ fn close_called_exactly_once_on_shutdown_io_error() {
     }
 
     impl StorageBackend for FaultBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             if self.should_fail() {
                 return Err(std::io::Error::other("injected fault").into());
             }
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             if self.should_fail() {
                 return Err(std::io::Error::other("injected fault").into());
             }
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             if self.should_fail() {
                 return Err(std::io::Error::other("injected fault").into());
             }
             self.inner.write(offset, data)
         }
 
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -749,32 +740,32 @@ fn close_called_exactly_once_when_open_fails() {
     }
 
     impl StorageBackend for CountingBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             if self.len_fails {
                 return Err(std::io::Error::other("injected fault").into());
             }
             Ok(self.data.len() as u64)
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             let start = usize::try_from(offset).unwrap();
             out.copy_from_slice(&self.data[start..start + out.len()]);
             Ok(())
         }
 
-        fn set_len(&self, _len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, _len: u64) -> Result<(), BackendError> {
             Ok(())
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             Ok(())
         }
 
-        fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, _offset: u64, _data: &[u8]) -> Result<(), BackendError> {
             Ok(())
         }
 
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

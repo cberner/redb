@@ -28,16 +28,10 @@ fn file_backend(file: std::fs::File) -> FileBackend {
 mod shared_reader {
     use super::*;
     use redb::ReadableTable;
-    use redb::{ReadableDatabase, TableDefinition};
+    use redb::{BackendError, ReadableDatabase, TableDefinition};
     use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-
-    // The error type of StorageBackend's I/O methods
-    #[cfg(feature = "experimental-api-5")]
-    type BackendIoError = redb::BackendError;
-    #[cfg(not(feature = "experimental-api-5"))]
-    type BackendIoError = std::io::Error;
 
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
@@ -133,25 +127,25 @@ mod shared_reader {
     }
 
     impl redb::StorageBackend for CrashBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.set_len(len)
         }
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.sync_data()
         }
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -1146,12 +1140,6 @@ mod unsupported_io_error {
     use std::io;
     use std::ops::Bound;
 
-    // The error type of StorageBackend's I/O methods
-    #[cfg(feature = "experimental-api-5")]
-    type BackendIoError = redb::BackendError;
-    #[cfg(not(feature = "experimental-api-5"))]
-    type BackendIoError = std::io::Error;
-
     #[derive(Debug)]
     struct NoLocks {
         inner: InMemoryBackend,
@@ -1170,23 +1158,23 @@ mod unsupported_io_error {
     }
 
     impl StorageBackend for NoLocks {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
 
@@ -1253,26 +1241,26 @@ mod unsupported_io_error {
     struct UnsupportedSync(InMemoryBackend);
 
     impl StorageBackend for UnsupportedSync {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.0.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.0.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.0.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "fdatasync is not supported",
             ))?
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.0.write(offset, data)
         }
     }
@@ -1305,12 +1293,6 @@ mod failed_unlock {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    // The error type of StorageBackend's I/O methods
-    #[cfg(feature = "experimental-api-5")]
-    type BackendIoError = redb::BackendError;
-    #[cfg(not(feature = "experimental-api-5"))]
-    type BackendIoError = std::io::Error;
-
     const TABLE: TableDefinition<u64, u64> = TableDefinition::new("x");
 
     /// Fails to release the header lock while `stuck`, and leaves it held
@@ -1321,27 +1303,27 @@ mod failed_unlock {
     }
 
     impl StorageBackend for StuckHeaderLock {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
 
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.inner.close()
         }
 

@@ -14,7 +14,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use redb::{
-    Database, MultimapTableDefinition, MultimapTableHandle, ReadableDatabase,
+    BackendError, Database, MultimapTableDefinition, MultimapTableHandle, ReadableDatabase,
     ReadableMultimapTable, ReadableTable, StorageBackend, TableDefinition, TableHandle,
 };
 use std::convert::TryFrom;
@@ -46,11 +46,11 @@ impl MemoryBackend {
 }
 
 impl StorageBackend for MemoryBackend {
-    fn len(&self) -> Result<u64, io::Error> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.0.read().unwrap().len() as u64)
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let data = self.0.read().unwrap();
         let start = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
         let end = start
@@ -61,17 +61,17 @@ impl StorageBackend for MemoryBackend {
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         let len = usize::try_from(len).map_err(|_| Self::out_of_range())?;
         self.0.write().unwrap().resize(len, 0);
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), io::Error> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let mut storage = self.0.write().unwrap();
         let start = usize::try_from(offset).map_err(|_| Self::out_of_range())?;
         let end = start
