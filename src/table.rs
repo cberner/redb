@@ -1,4 +1,3 @@
-#[cfg(feature = "experimental-api-5")]
 use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
@@ -268,33 +267,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// poisoned and [`crate::WriteTransaction::commit`] will return
     /// [`crate::CommitError::TransactionPoisoned`].
     ///
-    #[cfg(feature = "experimental-api-5")]
     pub fn retain_in<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl KeyRange<K>,
         predicate: F,
     ) -> Result {
         let (lower, upper) = range.key_bounds();
-        self.retain_in_bounds(lower, upper, predicate)
-    }
-
-    /// Applies `predicate` to all key-value pairs in the range `start..end`. All entries for which
-    /// `predicate` evaluates to `false` are removed.
-    ///
-    /// The predicate must not panic. If it panics, the write transaction is
-    /// poisoned and [`crate::WriteTransaction::commit`] will return
-    /// [`crate::CommitError::TransactionPoisoned`].
-    ///
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn retain_in<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
-        &mut self,
-        range: impl RangeBounds<KR> + 'a,
-        predicate: F,
-    ) -> Result
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.retain_in_bounds(lower, upper, predicate)
     }
 
@@ -533,18 +511,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for Table<'_, K, 
         self.tree.get(key.borrow())
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
-        self.range_in_bounds(lower, upper)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
 
@@ -690,48 +658,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>>;
-
-    /// Returns a double-ended iterator over a range of elements in the table
-    ///
-    /// # Examples
-    ///
-    /// Usage:
-    /// ```rust
-    /// use redb::*;
-    /// # use tempfile::NamedTempFile;
-    /// const TABLE: TableDefinition<&str, u64> = TableDefinition::new("my_data");
-    ///
-    /// # fn main() -> Result<(), Error> {
-    /// # #[cfg(not(target_os = "wasi"))]
-    /// # let tmpfile = NamedTempFile::new().unwrap();
-    /// # #[cfg(target_os = "wasi")]
-    /// # let tmpfile = NamedTempFile::new_in("/tmp").unwrap();
-    /// # let filename = tmpfile.path();
-    /// let db = Database::create(filename)?;
-    /// let write_txn = db.begin_write()?;
-    /// {
-    ///     let mut table = write_txn.open_table(TABLE)?;
-    ///     table.insert("a", &0)?;
-    ///     table.insert("b", &1)?;
-    ///     table.insert("c", &2)?;
-    /// }
-    /// write_txn.commit()?;
-    ///
-    /// let read_txn = db.begin_read()?;
-    /// let table = read_txn.open_table(TABLE)?;
-    /// let mut iter = table.range("a".."c")?;
-    /// let (key, value) = iter.next().unwrap()?;
-    /// assert_eq!("a", key.value());
-    /// assert_eq!(0, value.value());
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a;
 
     /// Returns the first key-value pair in the table, if it exists
     fn first(&self) -> Result<Option<(AccessGuard<'_, K>, AccessGuard<'_, V>)>>;
@@ -831,11 +758,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<'_, K, V>> {
-        #[cfg(feature = "experimental-api-5")]
-        let range = self.range(..);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let range = self.range::<K::SelfType<'_>>(..);
-        range
+        self.range(..)
     }
 }
 
@@ -952,24 +875,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadOnlyTable<K, V> {
     /// This method is like [`ReadableTable::range()`], but the returned iterator is reference
     /// counted and keeps the transaction alive until it is dropped, as do the
     /// [`OwnedAccessGuard`]s it yields.
-    #[cfg(feature = "experimental-api-5")]
     pub fn range_owned(&self, range: impl KeyRange<K>) -> Result<OwnedRange<K, V>> {
         let (lower, upper) = range.key_bounds();
-        Ok(OwnedRange::new(
-            self.range_in_bounds(lower, upper)?,
-            self.transaction_guard.clone(),
-        ))
-    }
-
-    /// This method is like [`ReadableTable::range()`], but the returned iterator is reference
-    /// counted and keeps the transaction alive until it is dropped, as do the
-    /// [`OwnedAccessGuard`]s it yields.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn range_owned<'a, KR>(&self, range: impl RangeBounds<KR>) -> Result<OwnedRange<K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>>,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         Ok(OwnedRange::new(
             self.range_in_bounds(lower, upper)?,
             self.transaction_guard.clone(),
@@ -1001,18 +908,8 @@ impl<K: Key + 'static, V: Value + 'static> ReadableTable<K, V> for ReadOnlyTable
         self.tree.get(key.borrow())
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> Result<Range<'_, K, V>> {
         let (lower, upper) = range.key_bounds();
-        self.range_in_bounds(lower, upper)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> Result<Range<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.range_in_bounds(lower, upper)
     }
 

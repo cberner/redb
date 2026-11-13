@@ -10,7 +10,6 @@ use redb::{
 };
 use std::cmp::Ordering;
 use std::num::{NonZeroI32, NonZeroU32, NonZeroU64};
-#[cfg(feature = "experimental-api-5")]
 use std::ops::Bound;
 #[cfg(not(target_os = "wasi"))]
 use std::sync;
@@ -25,31 +24,8 @@ const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice")
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
-// Bridges the range signature change made by the experimental-api-5 feature, so that these tests
-// cover both configurations. The 5.0 signature infers the key type from the range itself, and an
-// unbounded range has none to infer, so today's signature needs it named.
-macro_rules! range_all {
-    ($table:expr, $key:ty) => {{
-        #[cfg(feature = "experimental-api-5")]
-        let range = $table.range(..);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let range = $table.range::<$key>(..);
-        range
-    }};
-}
-
-macro_rules! range_owned_all {
-    ($table:expr, $key:ty) => {{
-        #[cfg(feature = "experimental-api-5")]
-        let range = $table.range_owned(..);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let range = $table.range_owned::<$key>(..);
-        range
-    }};
-}
-
-// Likewise for extract_if(), which takes a range under experimental-api-5, where it also replaces
-// extract_from_if()
+// Bridges extract_if(), which takes a range under experimental-api-5, where it also replaces
+// extract_from_if(), so that these tests cover both configurations
 macro_rules! extract_all_if {
     ($table:expr, $predicate:expr) => {{
         #[cfg(feature = "experimental-api-5")]
@@ -2699,7 +2675,7 @@ fn i128_type() {
     let read_txn = db.begin_read().unwrap();
     let table = read_txn.open_table(definition).unwrap();
     assert_eq!(-2, table.get(&-1).unwrap().unwrap().value());
-    let mut iter: OwnedRange<i128, i128> = range_owned_all!(table, i128).unwrap();
+    let mut iter: OwnedRange<i128, i128> = table.range_owned(..).unwrap();
     for i in -11..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i);
     }
@@ -2875,7 +2851,7 @@ fn array_type() {
     let hello = b"hello";
     assert_eq!(b"world_123", table.get(hello).unwrap().unwrap().value());
 
-    let mut iter: OwnedRange<&[u8; 5], &[u8; 9]> = range_owned_all!(table, &[u8; 5]).unwrap();
+    let mut iter: OwnedRange<&[u8; 5], &[u8; 9]> = table.range_owned(..).unwrap();
     assert_eq!(iter.next().unwrap().unwrap().1.value(), b"world_123");
     assert!(iter.next().is_none());
 }
@@ -4208,7 +4184,7 @@ fn owned_get_signatures() {
 
     assert_eq!(2, table.get(&1).unwrap().unwrap().value());
 
-    let mut iter: OwnedRange<u32, u32> = range_owned_all!(table, u32).unwrap();
+    let mut iter: OwnedRange<u32, u32> = table.range_owned(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
@@ -4218,22 +4194,16 @@ fn owned_get_signatures() {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
-    // Naming the key type is only needed for today's signature: with a `KR` type parameter to
-    // infer, a reference bound is ambiguous.
-    #[cfg(feature = "experimental-api-5")]
     let mut iter = table.range(&0..&10).unwrap();
-    #[cfg(not(feature = "experimental-api-5"))]
-    let mut iter = table.range::<&u32>(&0..&10).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), i + 1);
     }
     assert!(iter.next().is_none());
 }
 
-// Every range shape the range taking methods accept under experimental-api-5, without a type
-// annotation. `..` in particular carries no key type, which is why the methods take a KeyRange
-// rather than a RangeBounds over a key type parameter.
-#[cfg(feature = "experimental-api-5")]
+// Every range shape the range taking methods accept, without a type annotation. `..` in particular
+// carries no key type, which is why the methods take a KeyRange rather than a RangeBounds over a
+// key type parameter.
 #[test]
 fn range_signature_inference() {
     let tmpfile = create_tempfile();
@@ -4265,7 +4235,10 @@ fn range_signature_inference() {
 
         table.retain_in(.., |_, _| true).unwrap();
         table.retain_in(0..1, |_, _| true).unwrap();
+        // extract_if() takes a range only under experimental-api-5
+        #[cfg(feature = "experimental-api-5")]
         assert_eq!(table.extract_if(.., |_, _| false).unwrap().count(), 0);
+        #[cfg(feature = "experimental-api-5")]
         assert_eq!(table.extract_if(2..8, |_, _| false).unwrap().count(), 0);
     }
     {
@@ -4310,7 +4283,7 @@ fn ref_get_signatures() {
 
     let start = vec![0u8];
     let end = vec![10u8];
-    let mut iter = range_all!(table, &[u8]).unwrap();
+    let mut iter = table.range(..).unwrap();
     for i in 0..10 {
         assert_eq!(iter.next().unwrap().unwrap().1.value(), &[i + 1]);
     }

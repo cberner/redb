@@ -3,7 +3,6 @@
 
 use rand::RngExt;
 use rand::prelude::SliceRandom;
-#[cfg(feature = "experimental-api-5")]
 use redb::KeyRange;
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
@@ -17,8 +16,6 @@ use std::borrow::Borrow;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::marker::PhantomData;
-#[cfg(not(feature = "experimental-api-5"))]
-use std::ops::RangeBounds;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, mpsc};
 use std::thread;
@@ -4393,16 +4390,7 @@ impl<K: Key + 'static, V: Value + 'static, T: ReadableTable<K, V>> ReadableTable
         self.inner.get(key)
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> redb::Result<Range<'_, K, V>> {
-        self.inner.range(range)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(&self, range: impl RangeBounds<KR> + 'a) -> redb::Result<Range<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
         self.inner.range(range)
     }
 
@@ -4454,19 +4442,7 @@ impl<K: Key + 'static, V: Key + 'static, T: ReadableMultimapTable<K, V>> Readabl
         self.inner.get(key)
     }
 
-    #[cfg(feature = "experimental-api-5")]
     fn range(&self, range: impl KeyRange<K>) -> redb::Result<MultimapRange<'_, K, V>> {
-        self.inner.range(range)
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn range<'a, KR>(
-        &self,
-        range: impl RangeBounds<KR> + 'a,
-    ) -> redb::Result<MultimapRange<'_, K, V>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
         self.inner.range(range)
     }
 }

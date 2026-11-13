@@ -83,7 +83,6 @@ pub use error::{
 };
 #[cfg(feature = "experimental-api-5")]
 pub use error::{TableTypeMismatch, TypeDefinitionInfo};
-#[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
 #[cfg(feature = "experimental-niches")]
 pub use legacy_types::Legacy;
@@ -113,7 +112,6 @@ pub mod backends;
 mod complex_types;
 mod db;
 mod error;
-#[cfg(feature = "experimental-api-5")]
 mod key_range;
 #[cfg(feature = "experimental-niches")]
 mod legacy_types;
