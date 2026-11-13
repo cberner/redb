@@ -100,6 +100,8 @@
 * Fix a read that was in progress when its database was closed returning data from a later commit,
   instead of completing or returning `StorageError::DatabaseClosed`. Closing now waits for the
   reads and writes in progress.
+* Fix `check_integrity()`, and opens that verify or repair, taking exponential time on a damaged
+  B-tree whose pages are shared between several parents.
 
 ## redb-derive 0.2.1 - 2026-XX-XX
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
