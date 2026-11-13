@@ -42,17 +42,10 @@ use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, warn};
 
-// The error type of the I/O methods of StorageBackend
-#[cfg(feature = "experimental-api-5")]
-pub(crate) type BackendIoError = BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-pub(crate) type BackendIoError = std::io::Error;
-
 #[allow(clippy::len_without_is_empty)]
 /// Implements persistent storage for a database.
 ///
-/// Failures are reported as [`BackendError`]. Without `experimental-api-5`, the I/O methods report
-/// [`std::io::Error`](https://doc.rust-lang.org/std/io/struct.Error.html) instead.
+/// Failures are reported as [`BackendError`].
 ///
 /// Locking is optional. Backends that implement it must override the lock methods. Locks belong to
 /// a backend instance and must conflict with locks held by independently opened instances,
@@ -80,23 +73,23 @@ pub(crate) type BackendIoError = std::io::Error;
 /// whether it is returned as `BackendError::Io` or wrapped in `BackendError::Other`.
 pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// Gets the current length of the storage.
-    fn len(&self) -> core::result::Result<u64, BackendIoError>;
+    fn len(&self) -> core::result::Result<u64, BackendError>;
 
     /// Reads the specified array of bytes from the storage.
     ///
     /// If `out.len()` + `offset` exceeds the length of the storage an appropriate `Error` must be returned.
-    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), BackendIoError>;
+    fn read(&self, offset: u64, out: &mut [u8]) -> core::result::Result<(), BackendError>;
 
     /// Sets the length of the storage.
     ///
     /// New positions in the storage must be initialized to zero.
-    fn set_len(&self, len: u64) -> core::result::Result<(), BackendIoError>;
+    fn set_len(&self, len: u64) -> core::result::Result<(), BackendError>;
 
     /// Syncs all buffered data with the persistent storage.
-    fn sync_data(&self) -> core::result::Result<(), BackendIoError>;
+    fn sync_data(&self) -> core::result::Result<(), BackendError>;
 
     /// Writes the specified array to the storage.
-    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendIoError>;
+    fn write(&self, offset: u64, data: &[u8]) -> core::result::Result<(), BackendError>;
 
     /// Release any resources held by the backend
     ///
@@ -107,7 +100,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     /// point, when that transaction completes, or if opening the database fails. For a read-only
     /// database, it is called by `ReadOnlyDatabase::close()`, or once the database and all of its
     /// read transactions have been dropped
-    fn close(&self) -> core::result::Result<(), BackendIoError> {
+    fn close(&self) -> core::result::Result<(), BackendError> {
         Ok(())
     }
 
@@ -2497,8 +2490,8 @@ impl core::fmt::Debug for Database {
 
 #[cfg(test)]
 mod test {
+    use crate::BackendError;
     use crate::backends::FileBackend;
-    use crate::db::BackendIoError;
     use crate::{
         CommitError, Database, DatabaseError, Durability, ReadableTable, StorageBackend,
         StorageError, TableDefinition, TransactionError,
@@ -2546,25 +2539,25 @@ mod test {
     }
 
     impl StorageBackend for FailingBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
 
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.check_countdown()?;
             self.inner.read(offset, out)
         }
 
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
 
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.check_countdown()?;
             self.inner.sync_data()
         }
 
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.decrement_countdown()?;
             self.inner.write(offset, data)
         }
@@ -3655,7 +3648,6 @@ mod writer_byte_test {
 mod consistent_byte_test {
     use super::{CONSISTENT_BYTE, ConcurrencyMode, Database, byte_range};
     use crate::backends::FileBackend;
-    use crate::db::BackendIoError;
     use crate::tree_store::file_backend::range_lock::RangeLock;
     use crate::{BackendError, StorageBackend, TableDefinition};
     use std::fs::{File, OpenOptions};
@@ -3700,25 +3692,25 @@ mod consistent_byte_test {
     }
 
     impl StorageBackend for CrashBackend {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.set_len(len)
         }
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
             self.inner.sync_data()
         }
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             if self.dead.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -3809,22 +3801,22 @@ mod consistent_byte_test {
     }
 
     impl StorageBackend for ReaderAtConsistentByte {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             self.inner.sync_data()
         }
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             self.inner.write(offset, data)
         }
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.inner.close()
         }
         fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {
@@ -3898,7 +3890,6 @@ mod unflushed_primary_test {
     use super::{ConcurrencyMode, Database, ReadOnlyDatabase, ReadableDatabase};
     use crate::ReadableTable;
     use crate::backends::FileBackend;
-    use crate::db::BackendIoError;
     use crate::tree_store::page_store::header::is_primary_unflushed;
     use crate::{BackendError, StorageBackend, TableDefinition, TableError};
     use std::fmt::{self, Debug, Formatter};
@@ -3992,21 +3983,21 @@ mod unflushed_primary_test {
     }
 
     impl StorageBackend for Observed {
-        fn len(&self) -> Result<u64, BackendIoError> {
+        fn len(&self) -> Result<u64, BackendError> {
             self.inner.len()
         }
-        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+        fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
             self.inner.read(offset, out)
         }
-        fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+        fn set_len(&self, len: u64) -> Result<(), BackendError> {
             self.inner.set_len(len)
         }
-        fn sync_data(&self) -> Result<(), BackendIoError> {
+        fn sync_data(&self) -> Result<(), BackendError> {
             (self.at_flush)(&self.inner)?;
             self.events.lock().unwrap().push(Event::Flush);
             self.inner.sync_data()
         }
-        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+        fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
             if offset == 0 {
                 self.events
                     .lock()
@@ -4015,7 +4006,7 @@ mod unflushed_primary_test {
             }
             self.inner.write(offset, data)
         }
-        fn close(&self) -> Result<(), BackendIoError> {
+        fn close(&self) -> Result<(), BackendError> {
             self.inner.close()
         }
         fn try_lock_range(&self, start: Bound<u64>, end: Bound<u64>) -> Result<bool, BackendError> {

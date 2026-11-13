@@ -1,7 +1,6 @@
 use crate::BackendError;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::DatabaseError;
-use crate::db::BackendIoError;
 #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
 use crate::db::MODE_RANGE;
 #[cfg(any(
@@ -361,31 +360,29 @@ impl StorageBackend for FileBackend {
             .map_err(BackendError::from_lock_io)
     }
 
-    fn close(&self) -> Result<(), BackendIoError> {
+    fn close(&self) -> Result<(), BackendError> {
         self.release_all_locks()?;
         Ok(())
     }
 
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.file.metadata()?.len())
     }
 
     #[cfg(unix)]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         self.file.read_exact_at(out, offset)?;
         Ok(())
     }
 
     #[cfg(target_os = "wasi")]
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         read_exact_at(&self.file, out, offset)?;
         Ok(())
     }
 
-    // The conversion is the identity without experimental-api-5
     #[cfg(windows)]
-    #[cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
-    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, mut offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let mut data_offset = 0;
         while data_offset < out.len() {
             let read = self.file.seek_read(&mut out[data_offset..], offset)?;
@@ -404,31 +401,30 @@ impl StorageBackend for FileBackend {
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.file.set_len(len)?;
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         self.file.sync_data()?;
         Ok(())
     }
 
     #[cfg(unix)]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.file.write_all_at(data, offset)?;
         Ok(())
     }
 
     #[cfg(target_os = "wasi")]
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         write_all_at(&self.file, data, offset)?;
         Ok(())
     }
 
     #[cfg(windows)]
-    #[cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
-    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, mut offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let mut data_offset = 0;
         while data_offset < data.len() {
             let written = self.file.seek_write(&data[data_offset..], offset)?;

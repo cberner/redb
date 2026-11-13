@@ -2,7 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use redb::{
-    AccessGuard, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
+    AccessGuard, BackendError, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
     MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
     Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
 };
@@ -70,28 +70,28 @@ impl FuzzerBackend {
 }
 
 impl StorageBackend for FuzzerBackend {
-    fn len(&self) -> Result<u64, std::io::Error> {
+    fn len(&self) -> Result<u64, BackendError> {
         self.check_countdown()?;
         self.inner.len()
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), std::io::Error> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         self.check_countdown()?;
         self.inner.read(offset, out)
     }
 
-    fn set_len(&self, len: u64) -> Result<(), std::io::Error> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.decrement_countdown()?;
         self.inner.set_len(len)
     }
 
-    fn sync_data(&self) -> Result<(), std::io::Error> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         self.decrement_countdown()?;
         // No-op. The fuzzer doesn't test crashes, so fsync is unnecessary
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), std::io::Error> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.decrement_countdown()?;
         self.inner.write(offset, data)
     }

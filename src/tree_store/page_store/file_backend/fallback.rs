@@ -1,7 +1,7 @@
 use crate::BackendError;
 #[cfg(not(feature = "experimental-api-5"))]
 use crate::DatabaseError;
-use crate::db::{BackendIoError, FULL_RANGE};
+use crate::db::FULL_RANGE;
 use crate::{Result, StorageBackend};
 use std::fs::{File, TryLockError};
 use std::io;
@@ -109,33 +109,33 @@ impl StorageBackend for FileBackend {
         Err(BackendError::Unsupported)
     }
 
-    fn close(&self) -> Result<(), BackendIoError> {
+    fn close(&self) -> Result<(), BackendError> {
         self.unlock_range(FULL_RANGE.0, FULL_RANGE.1)?;
         Ok(())
     }
 
-    fn len(&self) -> Result<u64, BackendIoError> {
+    fn len(&self) -> Result<u64, BackendError> {
         Ok(self.file.lock().unwrap().metadata()?.len())
     }
 
-    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendIoError> {
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(out)?;
         Ok(())
     }
 
-    fn set_len(&self, len: u64) -> Result<(), BackendIoError> {
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
         self.file.lock().unwrap().set_len(len)?;
         Ok(())
     }
 
-    fn sync_data(&self) -> Result<(), BackendIoError> {
+    fn sync_data(&self) -> Result<(), BackendError> {
         self.file.lock().unwrap().sync_data()?;
         Ok(())
     }
 
-    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendIoError> {
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         let mut file = self.file.lock().unwrap();
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(data)?;

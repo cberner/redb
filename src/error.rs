@@ -59,16 +59,8 @@ impl BackendError {
     }
 }
 
-#[cfg(not(feature = "experimental-api-5"))]
-impl From<std::io::Error> for BackendError {
-    /// Preserves unsupported-operation errors as [`Self::Unsupported`].
-    fn from(err: std::io::Error) -> Self {
-        Self::from_lock_io(err)
-    }
-}
-
 // Lossless, since the I/O methods report an io::Error through it too
-#[cfg(all(feature = "experimental-api-5", not(redb_no_std)))]
+#[cfg(not(redb_no_std))]
 impl From<std::io::Error> for BackendError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
