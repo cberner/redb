@@ -1,7 +1,6 @@
 // Converting into BackendIoError is the identity without experimental-api-5
 #![cfg_attr(not(feature = "experimental-api-5"), allow(clippy::useless_conversion))]
 
-#[cfg(feature = "experimental-api-5")]
 use redb::ReadableTable;
 use redb::backends::InMemoryBackend;
 use redb::{Database, Durability, ReadableDatabase, TableDefinition, WriteTransaction};
