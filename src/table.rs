@@ -754,53 +754,7 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// This is analogous to [`BTreeMap::lower_bound`].
     ///
     /// [`BTreeMap::lower_bound`]: alloc::collections::BTreeMap::lower_bound
-    #[cfg(feature = "experimental-api-5")]
     fn lower_bound<'a>(
-        &self,
-        bound: Bound<impl Borrow<K::SelfType<'a>>>,
-    ) -> Result<Cursor<'_, K, V>>;
-
-    /// Returns a read-only [`Cursor`] pointing at the gap before the smallest
-    /// key greater than the given bound.
-    ///
-    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
-    /// before the smallest key greater than or equal to `x`.
-    ///
-    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
-    /// before the smallest key greater than `x`.
-    ///
-    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
-    /// before the smallest key in the table.
-    ///
-    /// This is analogous to [`BTreeMap::lower_bound`].
-    ///
-    /// [`BTreeMap::lower_bound`]: alloc::collections::BTreeMap::lower_bound
-    #[cfg(not(feature = "experimental-api-5"))]
-    #[allow(unused_variables)]
-    fn lower_bound<'a>(
-        &self,
-        bound: Bound<impl Borrow<K::SelfType<'a>>>,
-    ) -> Result<Cursor<'_, K, V>> {
-        unimplemented!("ReadableTable::lower_bound()")
-    }
-
-    /// Returns a read-only [`Cursor`] pointing at the gap after the greatest
-    /// key smaller than the given bound.
-    ///
-    /// Passing `Bound::Included(x)` will return a cursor pointing to the gap
-    /// after the greatest key smaller than or equal to `x`.
-    ///
-    /// Passing `Bound::Excluded(x)` will return a cursor pointing to the gap
-    /// after the greatest key smaller than `x`.
-    ///
-    /// Passing `Bound::Unbounded` will return a cursor pointing to the gap
-    /// after the greatest key in the table.
-    ///
-    /// This is analogous to [`BTreeMap::upper_bound`].
-    ///
-    /// [`BTreeMap::upper_bound`]: alloc::collections::BTreeMap::upper_bound
-    #[cfg(feature = "experimental-api-5")]
-    fn upper_bound<'a>(
         &self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
     ) -> Result<Cursor<'_, K, V>>;
@@ -820,14 +774,10 @@ pub trait ReadableTable<K: Key + 'static, V: Value + 'static>: ReadableTableMeta
     /// This is analogous to [`BTreeMap::upper_bound`].
     ///
     /// [`BTreeMap::upper_bound`]: alloc::collections::BTreeMap::upper_bound
-    #[cfg(not(feature = "experimental-api-5"))]
-    #[allow(unused_variables)]
     fn upper_bound<'a>(
         &self,
         bound: Bound<impl Borrow<K::SelfType<'a>>>,
-    ) -> Result<Cursor<'_, K, V>> {
-        unimplemented!("ReadableTable::upper_bound()")
-    }
+    ) -> Result<Cursor<'_, K, V>>;
 
     /// Returns a double-ended iterator over all elements in the table
     fn iter(&self) -> Result<Range<'_, K, V>> {
