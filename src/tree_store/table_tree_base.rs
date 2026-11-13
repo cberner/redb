@@ -137,14 +137,12 @@ impl InternalTableDefinition {
         if self.private_get_key_alignment() != ALIGNMENT {
             return Err(TableError::type_definition_changed(
                 self.private_key_type(),
-                self.private_get_key_alignment(),
                 self.private_get_fixed_key_size(),
             ));
         }
         if self.private_get_value_alignment() != ALIGNMENT {
             return Err(TableError::type_definition_changed(
                 self.private_value_type(),
-                self.private_get_value_alignment(),
                 self.private_get_fixed_value_size(),
             ));
         }
@@ -180,14 +178,12 @@ impl InternalTableDefinition {
         if self.private_get_fixed_key_size() != K::fixed_width() {
             return Err(TableError::type_definition_changed(
                 K::type_name(),
-                self.private_get_key_alignment(),
                 self.private_get_fixed_key_size(),
             ));
         }
         if self.private_get_fixed_value_size() != V::fixed_width() {
             return Err(TableError::type_definition_changed(
                 V::type_name(),
-                self.private_get_value_alignment(),
                 self.private_get_fixed_value_size(),
             ));
         }

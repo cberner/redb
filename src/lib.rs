@@ -81,7 +81,6 @@ pub use error::{
     BackendError, CommitError, CompactionError, CursorError, DatabaseError, Error, SavepointError,
     SetDurabilityError, StorageError, TableError, TransactionError,
 };
-#[cfg(feature = "experimental-api-5")]
 pub use error::{TableTypeMismatch, TypeDefinitionInfo};
 #[cfg(feature = "experimental-api-5")]
 pub use key_range::KeyRange;
