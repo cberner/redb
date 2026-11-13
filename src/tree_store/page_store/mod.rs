@@ -10,6 +10,7 @@ pub mod file_backend;
 pub(crate) mod header;
 mod layout;
 mod lru_cache;
+mod page_buffer;
 pub(crate) mod page_manager;
 mod region;
 mod savepoint;
@@ -24,6 +25,7 @@ pub(crate) use base::{
 pub(crate) use fast_hash::{PageNumberHashMap, PageNumberHashSet};
 pub(crate) use header::PAGE_SIZE;
 pub(crate) use layout::DatabaseLayout;
+pub(crate) use page_buffer::PageBuffer;
 pub(crate) use page_manager::{
     AllocationPolicy, FILE_FORMAT_VERSION3, HeaderGuard, PageAllocator, PageResolver, ShrinkPolicy,
     TransactionalMemory, WriterLock, xxh3_checksum,

@@ -3,6 +3,7 @@ use crate::sync::{Mutex, MutexGuard, RwLock};
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::PageHint;
 use crate::tree_store::page_store::lru_cache::LRUCache;
+use crate::tree_store::page_store::page_buffer::PageBuffer;
 use crate::{CacheStats, Result, StorageError};
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -14,17 +15,10 @@ use core::slice::SliceIndex;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-// Allocates an `Arc<[u8]>` in one step. `Arc::<[u8]>::from(vec![0; len])` would
-// allocate the Vec and then allocate a new Arc and memcpy into it.
-fn zero_filled_arc(len: usize) -> Arc<[u8]> {
-    // This is documented to do a single allocation: https://doc.rust-lang.org/std/sync/struct.Arc.html#iterators-of-known-length
-    core::iter::repeat_n(0u8, len).collect()
-}
-
 pub(super) struct WritablePage {
     buffer: Arc<Mutex<LRUWriteCache>>,
     offset: u64,
-    data: Arc<[u8]>,
+    data: PageBuffer,
 }
 
 impl WritablePage {
@@ -33,7 +27,7 @@ impl WritablePage {
     }
 
     pub(super) fn mem_mut(&mut self) -> &mut [u8] {
-        Arc::get_mut(&mut self.data).unwrap()
+        self.data.get_mut().unwrap()
     }
 }
 
@@ -62,7 +56,7 @@ impl<I: SliceIndex<[u8]>> IndexMut<I> for WritablePage {
 
 #[derive(Default)]
 struct LRUWriteCache {
-    cache: LRUCache<Option<Arc<[u8]>>>,
+    cache: LRUCache<Option<PageBuffer>>,
 }
 
 impl LRUWriteCache {
@@ -72,15 +66,15 @@ impl LRUWriteCache {
         }
     }
 
-    fn insert(&mut self, key: u64, value: Arc<[u8]>) {
+    fn insert(&mut self, key: u64, value: PageBuffer) {
         assert!(self.cache.insert(key, Some(value)).is_none());
     }
 
-    fn get(&self, key: u64) -> Option<&Arc<[u8]>> {
+    fn get(&self, key: u64) -> Option<&PageBuffer> {
         self.cache.get(key).map(|x| x.as_ref().unwrap())
     }
 
-    fn remove(&mut self, key: u64) -> Option<Arc<[u8]>> {
+    fn remove(&mut self, key: u64) -> Option<PageBuffer> {
         if let Some(value) = self.cache.remove(key) {
             assert!(value.is_some());
             return value;
@@ -88,11 +82,11 @@ impl LRUWriteCache {
         None
     }
 
-    fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
+    fn return_value(&mut self, key: u64, value: PageBuffer) {
         assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
     }
 
-    fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
+    fn take_value(&mut self, key: u64) -> Option<PageBuffer> {
         if let Some(value) = self.cache.get_mut(key) {
             let result = value.take().unwrap();
             return Some(result);
@@ -100,7 +94,7 @@ impl LRUWriteCache {
         None
     }
 
-    fn pop_lowest_priority(&mut self) -> Option<(u64, Arc<[u8]>)> {
+    fn pop_lowest_priority(&mut self) -> Option<(u64, PageBuffer)> {
         for _ in 0..self.cache.len() {
             if let Some((k, v)) = self.cache.pop_lowest_priority() {
                 if let Some(v_inner) = v {
@@ -333,7 +327,7 @@ pub(super) struct PagedCachedFile {
     writes_hits: AtomicU64,
     #[cfg(feature = "cache_metrics")]
     evictions: AtomicU64,
-    read_cache: Vec<RwLock<LRUCache<Arc<[u8]>>>>,
+    read_cache: Vec<RwLock<LRUCache<PageBuffer>>>,
     // Striped by page offset, like read_cache, so that concurrent writers
     // (tables of one WriteTransaction used from different threads) do not
     // contend on a single lock. Each stripe is individually Arc'd because
@@ -665,18 +659,17 @@ impl PagedCachedFile {
         Ok(buffer)
     }
 
-    // Like `read_direct`, but writes directly into an `Arc<[u8]>` instead of a
-    // `Vec<u8>` that is then copied into an `Arc`. The buffer is zero-filled
-    // because `StorageBackend::read` takes `&mut [u8]`.
-    fn read_direct_into_arc(&self, offset: u64, len: usize) -> Result<Arc<[u8]>> {
-        let mut arc = zero_filled_arc(len);
-        self.file.read(offset, Arc::get_mut(&mut arc).unwrap())?;
-        Ok(arc)
+    // Like `read_direct`, but reads into a `PageBuffer` that can be cached. The buffer is
+    // zero-filled because `StorageBackend::read` takes `&mut [u8]`.
+    fn read_direct_into_page(&self, offset: u64, len: usize) -> Result<PageBuffer> {
+        let mut buffer = PageBuffer::zeroed(len);
+        self.file.read(offset, buffer.get_mut().unwrap())?;
+        Ok(buffer)
     }
 
     // Read with caching. Caller must not read overlapping ranges without first calling invalidate_cache().
     // Doing so will not cause UB, but is a logic error.
-    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<Arc<[u8]>> {
+    pub(super) fn read(&self, offset: u64, len: usize, hint: PageHint) -> Result<PageBuffer> {
         debug_assert_eq!(0, offset % self.page_size);
         // Before the hit counter: see cache_stats()
         #[cfg(feature = "cache_metrics")]
@@ -719,7 +712,7 @@ impl PagedCachedFile {
                 let result = cached.clone();
                 // Copy the page into the read cache, so that further reads of it are served by
                 // the striped read locks rather than serializing on this stripe's mutex. Both
-                // caches then hold the same Arc and count it, which only makes the budget
+                // caches then hold the same buffer and count it, which only makes the budget
                 // conservative; whichever copy is dropped first -- the buffer's, once it is
                 // flushed, or the read cache's, once it is evicted -- leaves the other counted
                 // exactly once.
@@ -738,7 +731,7 @@ impl PagedCachedFile {
             }
         }
 
-        let buffer = self.read_direct_into_arc(offset, len)?;
+        let buffer = self.read_direct_into_page(offset, len)?;
 
         // Pages a non-durable commit left in the write buffer would otherwise hold up to half the
         // cache until the next durable commit. They can always be written out, so reclaim their
@@ -997,9 +990,9 @@ impl PagedCachedFile {
             } else if overwrite {
                 #[cfg(feature = "cache_metrics")]
                 self.writes_hits.fetch_add(1, Ordering::AcqRel);
-                zero_filled_arc(len)
+                PageBuffer::zeroed(len)
             } else {
-                self.read_direct_into_arc(offset, len)?
+                self.read_direct_into_page(offset, len)?
             };
             lock.insert(offset, result);
             lock.take_value(offset).unwrap()

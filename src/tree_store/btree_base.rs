@@ -1,5 +1,5 @@
 use crate::tree_store::page_store::{
-    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageImpl, PageMut, xxh3_checksum,
+    MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageBuffer, PageImpl, PageMut, xxh3_checksum,
 };
 use crate::tree_store::{PageAllocator, PageNumber, PageTracker};
 use crate::types::{Key, MutInPlaceValue, Value};
@@ -202,7 +202,7 @@ enum EitherPage<'txn> {
     Immutable(PageImpl),
     Mutable(PageMut<'txn>),
     OwnedMemory(Vec<u8>),
-    ArcMemory(Arc<[u8]>),
+    SharedMemory(PageBuffer),
 }
 
 impl EitherPage<'_> {
@@ -211,7 +211,7 @@ impl EitherPage<'_> {
             EitherPage::Immutable(page) => page.memory(),
             EitherPage::Mutable(page) => page.memory(),
             EitherPage::OwnedMemory(mem) => mem.as_slice(),
-            EitherPage::ArcMemory(mem) => mem,
+            EitherPage::SharedMemory(mem) => mem,
         }
     }
 }
@@ -238,9 +238,9 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
         }
     }
 
-    pub(crate) fn with_arc_page(page: Arc<[u8]>, range: Range<usize>) -> Self {
+    pub(crate) fn with_shared_page(page: PageBuffer, range: Range<usize>) -> Self {
         Self {
-            page: EitherPage::ArcMemory(page),
+            page: EitherPage::SharedMemory(page),
             offset: range.start,
             len: range.len(),
             on_drop: OnDrop::None,
@@ -283,17 +283,21 @@ impl<'a, V: Value + 'static> AccessGuard<'a, V> {
         V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
     }
 
-    pub(crate) fn arc_view(&self) -> (Arc<[u8]>, Range<usize>) {
+    pub(crate) fn shared_view(&self) -> (PageBuffer, Range<usize>) {
         match &self.page {
-            EitherPage::Immutable(page) => (page.to_arc(), self.offset..(self.offset + self.len)),
-            EitherPage::ArcMemory(arc) => (arc.clone(), self.offset..(self.offset + self.len)),
+            EitherPage::Immutable(page) => {
+                (page.to_buffer(), self.offset..(self.offset + self.len))
+            }
+            EitherPage::SharedMemory(buffer) => {
+                (buffer.clone(), self.offset..(self.offset + self.len))
+            }
             EitherPage::OwnedMemory(vec) => {
                 let bytes = &vec[self.offset..(self.offset + self.len)];
-                (Arc::from(bytes), 0..self.len)
+                (PageBuffer::copy_from_slice(bytes), 0..self.len)
             }
             EitherPage::Mutable(page) => {
                 let bytes = &page.memory()[self.offset..(self.offset + self.len)];
-                (Arc::from(bytes), 0..self.len)
+                (PageBuffer::copy_from_slice(bytes), 0..self.len)
             }
         }
     }

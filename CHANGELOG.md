@@ -2,6 +2,7 @@
 
 ## 5.0.0 - 2026-XX-XX
 ### Breaking changes
+* The minimum supported Rust version is 1.100.
 * Turning off the `std` feature now builds redb without the standard library (see below). If you
   depend on redb with `default-features = false`, add `features = ["std"]` to keep the std build.
 * The range taking methods -- `ReadableTable::range()`, `ReadOnlyTable::range_owned()`,
@@ -66,6 +67,10 @@
 
 ### Minor improvements
 * A new database starts at 72 KiB instead of about 1 MiB, and grows as it is written to.
+* The page cache allocates from the system allocator, so it stays close to the size set with
+  `Builder::set_cache_size()` when the program's global allocator is jemalloc or mimalloc. Before,
+  they rounded each cached page up to a larger size class, and the cache used about 25-35% more
+  memory than configured.
 
 ### Bug fixes
 * Fix repair falling back to a commit slot that failed its checksum, which could open a damaged

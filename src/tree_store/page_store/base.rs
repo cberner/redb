@@ -5,6 +5,7 @@ use crate::tree_store::page_store::cached_file::WritablePage;
 #[cfg(debug_assertions)]
 use crate::tree_store::page_store::fast_hash::PageNumberHashMap;
 use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
+use crate::tree_store::page_store::page_buffer::PageBuffer;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use alloc::sync::Arc;
 use core::cmp::Ordering;
@@ -179,14 +180,14 @@ pub(crate) trait Page {
 }
 
 pub struct PageImpl {
-    pub(super) mem: Arc<[u8]>,
+    pub(super) mem: PageBuffer,
     pub(super) page_number: PageNumber,
     #[cfg(debug_assertions)]
     pub(super) open_pages: Arc<Mutex<PageNumberHashMap<u64>>>,
 }
 
 impl PageImpl {
-    pub(crate) fn to_arc(&self) -> Arc<[u8]> {
+    pub(crate) fn to_buffer(&self) -> PageBuffer {
         self.mem.clone()
     }
 }
@@ -212,7 +213,7 @@ impl Drop for PageImpl {
 
 impl Page for PageImpl {
     fn memory(&self) -> &[u8] {
-        self.mem.as_ref()
+        &self.mem
     }
 
     fn get_page_number(&self) -> PageNumber {
