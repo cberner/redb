@@ -4658,20 +4658,15 @@ fn changed_fixed_width_is_refused() {
 
     let write_txn = db.begin_write().unwrap();
     let err = write_txn.open_table(wide).err().unwrap();
-    #[cfg(feature = "experimental-api-5")]
-    let expected =
-        "Current definition of test::Fixed does not match stored definition (width=Some(4))";
-    #[cfg(not(feature = "experimental-api-5"))]
-    let expected = "Current definition of test::Fixed does not match stored definition (width=Some(4), alignment=1)";
-    assert_eq!(err.to_string(), expected);
-    #[cfg(feature = "experimental-api-5")]
-    {
-        let TableError::TypeDefinitionChanged(info) = err else {
-            panic!("expected a changed type definition");
-        };
-        assert_eq!(info.name().name(), "test::Fixed");
-        assert_eq!(info.width(), Some(4));
-    }
+    assert_eq!(
+        err.to_string(),
+        "Current definition of test::Fixed does not match stored definition (width=Some(4))"
+    );
+    let TableError::TypeDefinitionChanged(info) = err else {
+        panic!("expected a changed type definition");
+    };
+    assert_eq!(info.name().name(), "test::Fixed");
+    assert_eq!(info.width(), Some(4));
 }
 
 #[test]
@@ -4698,17 +4693,13 @@ fn nonzero_type_does_not_alias_its_primitive() {
         write_txn.open_table(nonzero_key),
         Err(TableError::TableTypeMismatch { .. })
     ));
-    #[cfg(feature = "experimental-api-5")]
-    {
-        let Err(TableError::TableTypeMismatch(mismatch)) = write_txn.open_table(nonzero_key) else {
-            panic!("expected a type mismatch");
-        };
-        assert_eq!(mismatch.table(), "x");
-        assert_eq!(mismatch.stored_key().name(), "u32");
-        assert_eq!(mismatch.requested_key().name(), "NonZeroU32");
-        assert_eq!(mismatch.requested_value().name(), "u32");
-    }
-    #[cfg(feature = "experimental-api-5")]
+    let Err(TableError::TableTypeMismatch(mismatch)) = write_txn.open_table(nonzero_key) else {
+        panic!("expected a type mismatch");
+    };
+    assert_eq!(mismatch.table(), "x");
+    assert_eq!(mismatch.stored_key().name(), "u32");
+    assert_eq!(mismatch.requested_key().name(), "NonZeroU32");
+    assert_eq!(mismatch.requested_value().name(), "u32");
     assert_eq!(
         write_txn.open_table(nonzero_key).err().unwrap().to_string(),
         "x has key type u32 and value type u32, but was opened with key type NonZeroU32 and \
