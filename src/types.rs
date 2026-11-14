@@ -314,7 +314,6 @@ impl Value for bool {
         Self: 'a;
 
     // `false` and `true` encode to 0 and 1, so nothing encodes to 0xff
-    #[cfg(feature = "experimental-niches")]
     const NICHE: Option<&'static [u8]> = Some(&[0xff]);
 
     fn fixed_width() -> Option<usize> {
@@ -776,7 +775,6 @@ fn array_end_offset(data: &[u8], index: usize) -> usize {
 }
 
 // The niche of `&str` and `String`: no UTF-8 string contains the byte 0xff
-#[cfg(feature = "experimental-niches")]
 const STR_NICHE: &[u8] = &[0xff];
 
 impl Value for &str {
@@ -789,7 +787,6 @@ impl Value for &str {
     where
         Self: 'a;
 
-    #[cfg(feature = "experimental-niches")]
     const NICHE: Option<&'static [u8]> = Some(STR_NICHE);
 
     fn fixed_width() -> Option<usize> {
@@ -860,7 +857,6 @@ impl Value for String {
     where
         Self: 'a;
 
-    #[cfg(feature = "experimental-niches")]
     const NICHE: Option<&'static [u8]> = Some(STR_NICHE);
 
     fn fixed_width() -> Option<usize> {
@@ -910,7 +906,6 @@ impl Value for char {
         Self: 'a;
 
     // A code point is at most 0x10ffff, so nothing encodes to 0xffffff
-    #[cfg(feature = "experimental-niches")]
     const NICHE: Option<&'static [u8]> = Some(&[0xff; 3]);
 
     fn fixed_width() -> Option<usize> {
@@ -1219,17 +1214,7 @@ mod tests {
     #[test]
     fn option_separator() {
         // (left, right, the shortest separator)
-        #[cfg(not(feature = "experimental-niches"))]
-        let cases: &[(Option<&str>, Option<&str>, &[u8])] = &[
-            // The payloads separate as `&str` does, behind the `Some` tag
-            (Some("abc0suffix"), Some("abc1suffix"), b"\x01abc1"),
-            // `None` encodes as the tag alone, so nothing is shorter
-            (None, Some("abc"), b"\x00"),
-            // Nothing shorter than `left` sorts above it
-            (Some("abc"), Some("abd-suffix"), b"\x01abc"),
-        ];
         // `&str` declares a niche, so a `Some` is encoded as its payload and `None` as the niche
-        #[cfg(feature = "experimental-niches")]
         let cases: &[(Option<&str>, Option<&str>, &[u8])] = &[
             (Some("abc0suffix"), Some("abc1suffix"), b"abc1"),
             (None, Some("abc"), b"\xff"),
@@ -1266,105 +1251,62 @@ mod tests {
         assert_eq!(<Option<()> as Value>::as_bytes(&Some(())), [1]);
     }
 
-    // `bool` keeps the tag without the feature, and drops it with the feature for the 0xff
-    // niche, which neither of its values encodes to
+    // `bool` drops the tag for the 0xff niche, which neither of its values encodes to
     #[test]
     fn option_bool_encoding() {
-        #[cfg(not(feature = "experimental-niches"))]
-        {
-            assert_eq!(<bool as Value>::NICHE, None);
-            assert_eq!(<Option<bool> as Value>::fixed_width(), Some(2));
-            assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0, 0]);
-            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [1, 0]);
-            assert_eq!(<Option<bool> as Value>::type_name().name(), "Option<bool>");
+        assert_eq!(<bool as Value>::NICHE, Some([0xff].as_slice()));
+        assert_eq!(<Option<bool> as Value>::fixed_width(), Some(1));
+        assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0xff]);
+        assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [0]);
+        assert_eq!(<Option<bool> as Value>::as_bytes(&Some(true)), [1]);
+        for value in [None, Some(false), Some(true)] {
+            let encoded = <Option<bool> as Value>::as_bytes(&value);
+            assert_eq!(<Option<bool> as Value>::from_bytes(&encoded), value);
         }
-        #[cfg(feature = "experimental-niches")]
-        {
-            assert_eq!(<bool as Value>::NICHE, Some([0xff].as_slice()));
-            assert_eq!(<Option<bool> as Value>::fixed_width(), Some(1));
-            assert_eq!(<Option<bool> as Value>::as_bytes(&None), [0xff]);
-            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(false)), [0]);
-            assert_eq!(<Option<bool> as Value>::as_bytes(&Some(true)), [1]);
-            for value in [None, Some(false), Some(true)] {
-                let encoded = <Option<bool> as Value>::as_bytes(&value);
-                assert_eq!(<Option<bool> as Value>::from_bytes(&encoded), value);
-            }
-            assert_eq!(
-                <Option<bool> as Value>::type_name().name(),
-                "niche::Option<bool>"
-            );
-        }
+        assert_eq!(
+            <Option<bool> as Value>::type_name().name(),
+            "niche::Option<bool>"
+        );
     }
 
-    // `char` keeps the tag without the feature, and drops it with the feature for the 0xffffff
-    // niche, which lies beyond the last code point
+    // `char` drops the tag for the 0xffffff niche, which lies beyond the last code point
     #[test]
     fn option_char_encoding() {
-        #[cfg(not(feature = "experimental-niches"))]
-        {
-            assert_eq!(<char as Value>::NICHE, None);
-            assert_eq!(<Option<char> as Value>::fixed_width(), Some(4));
-            assert_eq!(<Option<char> as Value>::as_bytes(&None), [0; 4]);
-            assert_eq!(
-                <Option<char> as Value>::as_bytes(&Some('a')),
-                [1, b'a', 0, 0]
-            );
-            assert_eq!(<Option<char> as Value>::type_name().name(), "Option<char>");
+        assert_eq!(<char as Value>::NICHE, Some([0xff; 3].as_slice()));
+        assert_eq!(<Option<char> as Value>::fixed_width(), Some(3));
+        assert_eq!(<Option<char> as Value>::as_bytes(&None), [0xff; 3]);
+        assert_eq!(<Option<char> as Value>::as_bytes(&Some('a')), [b'a', 0, 0]);
+        for value in [None, Some('\0'), Some('a'), Some(char::MAX)] {
+            let encoded = <Option<char> as Value>::as_bytes(&value);
+            assert_eq!(<Option<char> as Value>::from_bytes(&encoded), value);
         }
-        #[cfg(feature = "experimental-niches")]
-        {
-            assert_eq!(<char as Value>::NICHE, Some([0xff; 3].as_slice()));
-            assert_eq!(<Option<char> as Value>::fixed_width(), Some(3));
-            assert_eq!(<Option<char> as Value>::as_bytes(&None), [0xff; 3]);
-            assert_eq!(<Option<char> as Value>::as_bytes(&Some('a')), [b'a', 0, 0]);
-            for value in [None, Some('\0'), Some('a'), Some(char::MAX)] {
-                let encoded = <Option<char> as Value>::as_bytes(&value);
-                assert_eq!(<Option<char> as Value>::from_bytes(&encoded), value);
-            }
-            assert_eq!(
-                <Option<char> as Value>::type_name().name(),
-                "niche::Option<char>"
-            );
-        }
+        assert_eq!(
+            <Option<char> as Value>::type_name().name(),
+            "niche::Option<char>"
+        );
     }
 
-    // `&str` and `String` keep the tag without the feature, and drop it with the feature for the
-    // 0xff niche, which no UTF-8 string contains
+    // `&str` and `String` drop the tag for the 0xff niche, which no UTF-8 string contains
     #[test]
     fn option_str_encoding() {
         assert_eq!(<Option<&str> as Value>::fixed_width(), None);
         assert_eq!(<Option<String> as Value>::fixed_width(), None);
-        #[cfg(not(feature = "experimental-niches"))]
-        {
-            assert_eq!(<&str as Value>::NICHE, None);
-            assert_eq!(<String as Value>::NICHE, None);
-            assert_eq!(<Option<&str> as Value>::as_bytes(&None), [0]);
-            assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [1, b'a']);
-            assert_eq!(<Option<String> as Value>::as_bytes(&None), [0]);
-            assert_eq!(
-                <Option<String> as Value>::as_bytes(&Some("a".to_string())),
-                [1, b'a']
-            );
-        }
-        #[cfg(feature = "experimental-niches")]
-        {
-            assert_eq!(<&str as Value>::NICHE, Some([0xff].as_slice()));
-            assert_eq!(<String as Value>::NICHE, Some([0xff].as_slice()));
-            assert_eq!(<Option<&str> as Value>::as_bytes(&None), [0xff]);
-            assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [b'a']);
-            assert!(<Option<&str> as Value>::as_bytes(&Some("")).is_empty());
-            assert_eq!(<Option<String> as Value>::as_bytes(&None), [0xff]);
-            assert_eq!(
-                <Option<String> as Value>::as_bytes(&Some("a".to_string())),
-                [b'a']
-            );
-            for value in [None, Some(""), Some("a"), Some("\u{ff}\u{10ffff}")] {
-                let encoded = <Option<&str> as Value>::as_bytes(&value);
-                assert_eq!(<Option<&str> as Value>::from_bytes(&encoded), value);
-                let owned = value.map(str::to_string);
-                assert_eq!(<Option<String> as Value>::as_bytes(&owned), encoded);
-                assert_eq!(<Option<String> as Value>::from_bytes(&encoded), owned);
-            }
+        assert_eq!(<&str as Value>::NICHE, Some([0xff].as_slice()));
+        assert_eq!(<String as Value>::NICHE, Some([0xff].as_slice()));
+        assert_eq!(<Option<&str> as Value>::as_bytes(&None), [0xff]);
+        assert_eq!(<Option<&str> as Value>::as_bytes(&Some("a")), [b'a']);
+        assert!(<Option<&str> as Value>::as_bytes(&Some("")).is_empty());
+        assert_eq!(<Option<String> as Value>::as_bytes(&None), [0xff]);
+        assert_eq!(
+            <Option<String> as Value>::as_bytes(&Some("a".to_string())),
+            [b'a']
+        );
+        for value in [None, Some(""), Some("a"), Some("\u{ff}\u{10ffff}")] {
+            let encoded = <Option<&str> as Value>::as_bytes(&value);
+            assert_eq!(<Option<&str> as Value>::from_bytes(&encoded), value);
+            let owned = value.map(str::to_string);
+            assert_eq!(<Option<String> as Value>::as_bytes(&owned), encoded);
+            assert_eq!(<Option<String> as Value>::from_bytes(&encoded), owned);
         }
     }
 
@@ -1396,39 +1338,28 @@ mod tests {
         assert_eq!(user.name(), "niche::Option<test::NonMaxU16>");
         assert!(user.is_user_defined());
 
-        #[cfg(feature = "experimental-niches")]
-        {
-            assert_eq!(
-                <Option<&str> as Value>::type_name().name(),
-                "niche::Option<&str>"
-            );
-            assert_eq!(
-                <Option<String> as Value>::type_name().name(),
-                "niche::Option<String>"
-            );
-            // The legacy type has the name and the encoding `&str` had without the niche
-            assert_eq!(
-                <crate::Legacy<&str> as Value>::type_name(),
-                <&str as Value>::type_name()
-            );
-            assert_eq!(
-                <Option<crate::Legacy<&str>> as Value>::type_name(),
-                TypeName::internal("Option<&str>").into_composite(false)
-            );
-            assert_eq!(<Option<crate::Legacy<&str>> as Value>::as_bytes(&None), [0]);
-            assert_eq!(
-                <Option<crate::Legacy<&str>> as Value>::as_bytes(&Some("a")),
-                [1, b'a']
-            );
-        }
-        #[cfg(not(feature = "experimental-niches"))]
-        {
-            assert_eq!(<Option<&str> as Value>::type_name().name(), "Option<&str>");
-            assert_eq!(
-                <Option<String> as Value>::type_name().name(),
-                "Option<String>"
-            );
-        }
+        assert_eq!(
+            <Option<&str> as Value>::type_name().name(),
+            "niche::Option<&str>"
+        );
+        assert_eq!(
+            <Option<String> as Value>::type_name().name(),
+            "niche::Option<String>"
+        );
+        // The legacy type has the name and the encoding `&str` had without the niche
+        assert_eq!(
+            <crate::Legacy<&str> as Value>::type_name(),
+            <&str as Value>::type_name()
+        );
+        assert_eq!(
+            <Option<crate::Legacy<&str>> as Value>::type_name(),
+            TypeName::internal("Option<&str>").into_composite(false)
+        );
+        assert_eq!(<Option<crate::Legacy<&str>> as Value>::as_bytes(&None), [0]);
+        assert_eq!(
+            <Option<crate::Legacy<&str>> as Value>::as_bytes(&Some("a")),
+            [1, b'a']
+        );
     }
 
     // A fixed width key type with a niche: a `u16` that is never `u16::MAX`, which frees that
@@ -1925,14 +1856,7 @@ mod tests {
             <String as Key>::min_encoded_key().as_deref(),
             Some(b"".as_slice())
         );
-        // `Option` needs its tag, which is also what `None` encodes to
-        #[cfg(not(feature = "experimental-niches"))]
-        assert_eq!(
-            <Option<&str> as Key>::min_encoded_key().as_deref(),
-            Some([0].as_slice())
-        );
-        // Unless the type declares a niche, which `None` then encodes to
-        #[cfg(feature = "experimental-niches")]
+        // `&str` declares a niche, which `None` encodes to
         assert_eq!(
             <Option<&str> as Key>::min_encoded_key().as_deref(),
             Some([0xff].as_slice())
