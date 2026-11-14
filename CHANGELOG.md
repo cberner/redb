@@ -37,6 +37,9 @@
 * `Builder::create_file()` is removed; use `Builder::create_with_backend(FileBackend::new(file))`.
 * `FileBackend::new()` returns `FileBackend` instead of `Result<FileBackend, DatabaseError>`.
 * `WriteTransaction::print_allocated_page_debug()`, an internal debugging aid, is removed.
+* A read-only open fails with `DatabaseError::LockProtocolMismatch` while a read-only handle of
+  redb 4.3 or 4.4 has the file open, in `ExclusiveWriter` mode as in the other modes. 4.5 and 4.6
+  opened beside such a handle in `ExclusiveWriter` mode.
 * A database file is locked with byte-range locks alone, rather than also with the whole-file lock
   earlier versions take. On Linux, do not use redb 4.2 or earlier on a database that redb 5 has
   open: only an `ExclusiveWriter` writer detects them.

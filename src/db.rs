@@ -227,8 +227,8 @@ const _: () = assert!(
         && PROTOCOL_GENERATION_BYTE < PROTOCOL_GENERATION_BYTES.end
 );
 /// Never locked, except within an exclusive writer's whole range. A reader of 4.3 or 4.4 holds it
-/// along with every generation byte, so a reader that finds it locked skips the generation check,
-/// except under `experimental-api-5`.
+/// along with every generation byte. A reader of 4.5 or 4.6 that finds it locked skips the
+/// generation check, so readers leave it unlocked, to never be mistaken for a reader of 4.3 or 4.4.
 pub(crate) const LEGACY_READER_BYTE: u64 = PROTOCOL_GENERATION_BYTES.end;
 const _: () = assert!(LEGACY_READER_BYTE < BACKEND_LOCK_RANGE.start);
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
