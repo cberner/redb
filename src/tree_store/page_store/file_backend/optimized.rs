@@ -1,14 +1,8 @@
 use crate::BackendError;
-#[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+#[cfg(target_os = "linux")]
 use crate::db::MODE_RANGE;
-#[cfg(any(
-    windows,
-    all(test, any(target_os = "linux", target_vendor = "apple")),
-    all(target_os = "linux", not(feature = "experimental-api-5"))
-))]
+#[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
 use crate::db::{BACKEND_LOCK_RANGE, byte_range};
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-use crate::db::{SHARED_READER_BYTE, SHARED_WRITER_BYTE};
 use crate::{Result, StorageBackend};
 use std::collections::HashSet;
 use std::fs::{File, TryLockError};
@@ -28,34 +22,6 @@ use super::range_lock::RangeLock;
 fn is_whole_storage(range: (Bound<u64>, Bound<u64>)) -> bool {
     matches!(range.0, Bound::Unbounded | Bound::Included(0)) && range.1 == Bound::Unbounded
 }
-
-// The suffix an exclusive-writer open takes, which stands for the whole-file lock of redb before
-// 4.3 in the mode of the open. It is the first range such an open takes.
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-const LEGACY_WRITER_RANGE: (Bound<u64>, Bound<u64>) =
-    (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
-
-// The ranges whose holder also holds the whole-file lock redb took before 4.3: the suffix above,
-// and the byte a shared-mode open takes to announce its mode, which stands for that lock shared,
-// so that the cohort shares the lock while a writer of such a version, which takes it exclusive,
-// is excluded and excludes the cohort. Every handle of 2.x takes it exclusive. A read-only handle
-// of 4.0 to 4.2 takes it shared, so a single writer does not exclude one: the writer and its
-// readers must share the lock, which leaves no mode that would.
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-fn needs_legacy_lock(range: (Bound<u64>, Bound<u64>)) -> bool {
-    range == LEGACY_WRITER_RANGE
-        || range == byte_range(SHARED_WRITER_BYTE)
-        || range == byte_range(SHARED_READER_BYTE)
-}
-
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-fn legacy_lock_shared(range: (Bound<u64>, Bound<u64>), shared: bool) -> bool {
-    shared || range != LEGACY_WRITER_RANGE
-}
-
-// Detects whether flock and byte-range locks share a namespace.
-#[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-const NAMESPACE_PROBE_BYTE: u64 = BACKEND_LOCK_RANGE.start;
 
 // Serializes Windows queries and lock retries to avoid conflicts with temporary query locks.
 #[cfg(any(windows, all(test, any(target_os = "linux", target_vendor = "apple"))))]
@@ -112,29 +78,9 @@ impl FileBackend {
         }
     }
 
-    // Best-effort compatibility with redb before 4.3: when an open takes a range that stands for
-    // the whole-file lock of those versions, also take the flock they used, unless it shares the
-    // range-lock namespace.
-    #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-    fn lock_legacy_file(&self, shared: bool) -> io::Result<bool> {
-        match self.lock_whole_file(shared) {
-            Ok(false) => return Ok(false),
-            Ok(true) => {
-                if !matches!(
-                    self.file.query_lock(byte_range(NAMESPACE_PROBE_BYTE)),
-                    Ok(false)
-                ) {
-                    self.unlock_whole_file()?;
-                }
-            }
-            Err(_) => {}
-        }
-        Ok(true)
-    }
-
     // Not held, since on NFS a held flock covers every byte. Called before the first range an
     // exclusive writer takes, so the release cannot drop any of this open's locks.
-    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[cfg(target_os = "linux")]
     fn whole_file_locked_elsewhere(&self) -> io::Result<bool> {
         match self.file.try_lock() {
             Ok(()) => self.file.unlock().map(|()| false),
@@ -144,11 +90,7 @@ impl FileBackend {
     }
 
     fn try_lock(&self, range: (Bound<u64>, Bound<u64>), shared: bool) -> io::Result<bool> {
-        #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-        if needs_legacy_lock(range) && !self.lock_legacy_file(legacy_lock_shared(range, shared))? {
-            return Ok(false);
-        }
-        #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+        #[cfg(target_os = "linux")]
         if range == MODE_RANGE && !shared && self.whole_file_locked_elsewhere()? {
             return Ok(false);
         }
@@ -161,10 +103,6 @@ impl FileBackend {
             return acquired;
         }
 
-        #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-        if needs_legacy_lock(range) {
-            self.unlock_whole_file()?;
-        }
         match acquired {
             Err(err) if err.kind() == io::ErrorKind::Unsupported && is_whole_storage(range) => {
                 self.lock_whole_file(shared)
@@ -333,10 +271,6 @@ impl StorageBackend for FileBackend {
 
         self.unlock_native_range(range)
             .map_err(BackendError::from_lock_io)?;
-        #[cfg(all(target_os = "linux", not(feature = "experimental-api-5")))]
-        if needs_legacy_lock(range) {
-            self.unlock_whole_file()?;
-        }
         Ok(())
     }
 

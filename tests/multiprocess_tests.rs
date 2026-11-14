@@ -245,9 +245,7 @@ mod shared_reader {
         }
     }
 
-    /// Without `experimental-api-5`, as in redb 4, an exclusive-writer open is refused by a
-    /// shared-mode handle only after it has taken the range that holds the active transaction
-    /// bytes, so a read that begins meanwhile waits for it
+    /// A read that begins while a shared-mode handle refuses an exclusive-writer open does not fail
     #[test]
     fn a_refused_exclusive_open_does_not_fail_a_read() {
         use std::sync::atomic::AtomicU64;
@@ -426,11 +424,8 @@ fn compact_beside_refused_opens(open: fn(&std::path::Path) -> Result<(), Databas
 }
 
 /// An exclusive-writer open that a shared-mode handle refuses takes no active transaction byte,
-/// where its lock would read as a transaction in progress. 4.x takes those bytes first
-#[cfg(all(
-    any(target_os = "linux", target_vendor = "apple", windows),
-    feature = "experimental-api-5"
-))]
+/// where its lock would read as a transaction in progress
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 #[test]
 fn a_refused_exclusive_open_does_not_refuse_a_compaction() {
     compact_beside_refused_opens(|path| Database::create(path).map(drop));
