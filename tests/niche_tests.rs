@@ -1,6 +1,5 @@
 // Tables of `Option<&str>`, `Option<String>`, `Option<bool>`, and `Option<char>` written by
 // redb 2.6, before the types declared a niche, are opened through the legacy type
-#![cfg(feature = "experimental-niches")]
 
 use redb::{Database, Legacy, ReadableDatabase, ReadableTable, TableDefinition, TableError};
 
