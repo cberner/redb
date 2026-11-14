@@ -1339,32 +1339,6 @@ impl TransactionalMemory {
         assert!(self.allocated_pages.lock().unwrap().insert(page));
     }
 
-    // Only for print_allocated_page_debug(), which the redb 5 API removes
-    #[cfg(debug_assertions)]
-    #[cfg_attr(feature = "experimental-api-5", expect(dead_code))]
-    pub(crate) fn all_allocated_pages(&self) -> Vec<PageNumber> {
-        self.allocated_pages
-            .lock()
-            .unwrap()
-            .iter()
-            .copied()
-            .collect()
-    }
-
-    #[cfg(debug_assertions)]
-    #[cfg_attr(feature = "experimental-api-5", expect(dead_code))]
-    pub(crate) fn debug_check_allocator_consistency(&self) {
-        let state = self.state.lock().unwrap();
-        let allocators = state.allocators();
-        let mut region_pages = vec![vec![]; allocators.region_allocators.len()];
-        for p in self.allocated_pages.lock().unwrap().iter() {
-            region_pages[p.region as usize].push(*p);
-        }
-        for (i, allocator) in allocators.region_allocators.iter().enumerate() {
-            allocator.check_allocated_pages(i.try_into().unwrap(), &region_pages[i]);
-        }
-    }
-
     pub(crate) fn clear_read_cache(&self) {
         self.storage.invalidate_cache_all();
     }

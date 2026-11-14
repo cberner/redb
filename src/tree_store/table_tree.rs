@@ -274,41 +274,6 @@ impl TableTreeMut {
         self.pending_table_updates.clear();
     }
 
-    #[cfg_attr(
-        any(not(debug_assertions), feature = "experimental-api-5"),
-        expect(dead_code)
-    )]
-    pub(crate) fn visit_all_pages<F>(&self, mut visitor: F) -> Result
-    where
-        F: FnMut(&PagePath) -> Result,
-    {
-        // All the pages in the table tree itself
-        self.tree.visit_all_pages(&mut visitor)?;
-
-        // All the normal tables
-        for entry in self.list_tables(TableType::Normal)? {
-            let definition = self
-                .get_table_untyped(&entry, TableType::Normal)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
-            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
-                visitor(path)
-            })?;
-        }
-
-        for entry in self.list_tables(TableType::Multimap)? {
-            let definition = self
-                .get_table_untyped(&entry, TableType::Multimap)
-                .map_err(|e| e.into_storage_error_or_corrupted("Internal corruption"))?
-                .unwrap();
-            definition.visit_all_pages(self.page_allocator.resolver(), PageHint::None, |path| {
-                visitor(path)
-            })?;
-        }
-
-        Ok(())
-    }
-
     // Queues an update to the table root
     pub(crate) fn stage_update_table_root(
         &mut self,

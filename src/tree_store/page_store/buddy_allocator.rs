@@ -1,7 +1,4 @@
-use crate::tree_store::PageNumber;
 use crate::tree_store::page_store::bitmap::{BtreeBitmap, read_u32};
-#[cfg(test)]
-use crate::tree_store::page_store::fast_hash::PageNumberHashSet;
 use crate::tree_store::page_store::page_manager::MAX_MAX_PAGE_ORDER;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -193,28 +190,6 @@ impl BuddyAllocator {
         }
 
         free_pages
-    }
-
-    #[cfg_attr(not(debug_assertions), expect(dead_code))]
-    #[cfg_attr(not(test), expect(clippy::unused_self))]
-    #[cfg_attr(not(test), expect(unused_variables))]
-    pub(crate) fn check_allocated_pages(&self, region: u32, allocated_pages: &[PageNumber]) {
-        #[cfg(test)]
-        // Check the result against the free index to be sure it matches
-        {
-            let mut free_check = PageNumberHashSet::default();
-            for i in 0..self.len() {
-                if self.find_free_order(i).is_none() {
-                    free_check.insert(PageNumber::new(region, i, 0));
-                }
-            }
-
-            let mut check_result = PageNumberHashSet::default();
-            for page in allocated_pages {
-                check_result.extend(page.to_order0());
-            }
-            assert_eq!(free_check, check_result);
-        }
     }
 
     pub(crate) fn len(&self) -> u32 {
