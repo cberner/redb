@@ -720,7 +720,7 @@ fn handle_table_op(
                 .filter(|(key, _)| *key % modulus == 0)
                 .map(|(key, value_len)| (*key, *value_len))
                 .collect();
-            let iter = table.extract_if(|x, _| x % modulus == 0)?;
+            let iter = table.extract_if(.., |x, _| x % modulus == 0)?;
             let removed = check_extract_iter(iter, &matching, take.value, *reversed, *alternate)?;
             for x in removed {
                 reference.remove(&x);
@@ -742,7 +742,7 @@ fn handle_table_op(
                 .filter(|(key, _)| *key % modulus == 0)
                 .map(|(key, value_len)| (*key, *value_len))
                 .collect();
-            let iter = table.extract_from_if(start..end, |x, _| x % modulus == 0)?;
+            let iter = table.extract_if(start..end, |x, _| x % modulus == 0)?;
             let removed = check_extract_iter(iter, &matching, take.value, *reversed, *alternate)?;
             for x in removed {
                 reference.remove(&x);

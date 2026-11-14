@@ -19,28 +19,6 @@ const SLICE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("slice")
 const STR_TABLE: TableDefinition<&str, &str> = TableDefinition::new("x");
 const U64_TABLE: TableDefinition<u64, u64> = TableDefinition::new("u64");
 
-// Bridges extract_if(), which takes a range under experimental-api-5, where it also replaces
-// extract_from_if(), so that these tests cover both configurations
-macro_rules! extract_all_if {
-    ($table:expr, $predicate:expr) => {{
-        #[cfg(feature = "experimental-api-5")]
-        let extracted = $table.extract_if(.., $predicate);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let extracted = $table.extract_if($predicate);
-        extracted
-    }};
-}
-
-macro_rules! extract_range_if {
-    ($table:expr, $range:expr, $predicate:expr) => {{
-        #[cfg(feature = "experimental-api-5")]
-        let extracted = $table.extract_if($range, $predicate);
-        #[cfg(not(feature = "experimental-api-5"))]
-        let extracted = $table.extract_from_if($range, $predicate);
-        extracted
-    }};
-}
-
 fn create_tempfile() -> tempfile::NamedTempFile {
     if cfg!(target_os = "wasi") {
         tempfile::NamedTempFile::new_in("/tmp").unwrap()
@@ -585,12 +563,12 @@ fn extract_if() {
             table.insert(&i, &i).unwrap();
         }
         // Test retain uncommitted data
-        let mut extracted = extract_all_if!(table, |k, _| k >= 5).unwrap();
+        let mut extracted = table.extract_if(.., |k, _| k >= 5).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 5);
         extracted.close().unwrap();
         assert_eq!(table.len().unwrap(), 9);
 
-        let mut extracted = extract_range_if!(table, 5.., |k, _| k < 8).unwrap();
+        let mut extracted = table.extract_if(5.., |k, _| k < 8).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 6);
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 7);
         assert!(extracted.next().is_none());
@@ -608,7 +586,7 @@ fn extract_if() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         assert_eq!(table.len().unwrap(), 10);
-        let mut extracted = extract_all_if!(table, |_, _| true).unwrap();
+        let mut extracted = table.extract_if(.., |_, _| true).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().1.value(), 0);
         drop(extracted);
         assert_eq!(table.len().unwrap(), 9);
@@ -619,8 +597,8 @@ fn extract_if() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         assert_eq!(table.len().unwrap(), 10);
-        for _ in extract_all_if!(table, |x, _| x % 2 != 0).unwrap() {}
-        extract_all_if!(table, |_, _| true).unwrap().next_back();
+        for _ in table.extract_if(.., |x, _| x % 2 != 0).unwrap() {}
+        table.extract_if(.., |_, _| true).unwrap().next_back();
     }
     write_txn.commit().unwrap();
 
@@ -650,11 +628,12 @@ fn extract_if_predicate_panic_poisons_transaction() {
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut extracted = extract_all_if!(table, |key, _| {
-                assert_ne!(key, 2);
-                key == 0
-            })
-            .unwrap();
+            let mut extracted = table
+                .extract_if(.., |key, _| {
+                    assert_ne!(key, 2);
+                    key == 0
+                })
+                .unwrap();
             assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
             let _ = extracted.next();
         }));
@@ -679,7 +658,7 @@ fn extract_if_caller_panic_does_not_poison_transaction() {
         }
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut extracted = extract_all_if!(table, |key, _| key == 0).unwrap();
+            let mut extracted = table.extract_if(.., |key, _| key == 0).unwrap();
             assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
             panic!("caller panic");
         }));
@@ -701,11 +680,12 @@ fn extract_if_is_lazy_until_read() {
 
         let mut predicate_calls = 0;
         drop(
-            extract_all_if!(table, |_, _| {
-                predicate_calls += 1;
-                true
-            })
-            .unwrap(),
+            table
+                .extract_if(.., |_, _| {
+                    predicate_calls += 1;
+                    true
+                })
+                .unwrap(),
         );
         assert_eq!(predicate_calls, 0);
         assert_eq!(table.len().unwrap(), 10);
@@ -724,7 +704,7 @@ fn extract_if_mixed_direction_removes_only_yielded_entries() {
             table.insert(&i, &i).unwrap();
         }
 
-        let mut extracted = extract_all_if!(table, |key, _| key % 2 == 0).unwrap();
+        let mut extracted = table.extract_if(.., |key, _| key % 2 == 0).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 0);
         assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 8);
         drop(extracted);
@@ -750,7 +730,7 @@ fn extract_from_if_mixed_direction_early_drop_range() {
             table.insert(&i, &i).unwrap();
         }
 
-        let mut extracted = extract_range_if!(table, 200..800, |key, _| key % 5 == 0).unwrap();
+        let mut extracted = table.extract_if(200..800, |key, _| key % 5 == 0).unwrap();
         assert_eq!(extracted.next().unwrap().unwrap().0.value(), 200);
         assert_eq!(extracted.next_back().unwrap().unwrap().0.value(), 795);
         drop(extracted);
@@ -781,7 +761,7 @@ fn extract_from_if_next_back_large_range() {
             .filter(|key| key % 7 == 0)
             .rev()
             .collect::<Vec<_>>();
-        let mut extracted = extract_range_if!(table, n / 2.., |key, _| key % 7 == 0).unwrap();
+        let mut extracted = table.extract_if(n / 2.., |key, _| key % 7 == 0).unwrap();
         let mut removed = vec![];
         while let Some(entry) = extracted.next_back() {
             removed.push(entry.unwrap().0.value());
@@ -808,7 +788,7 @@ fn extract_if_returned_guards_survive_finalize() {
             table.insert(&i, &(i * 10)).unwrap();
         }
 
-        let mut extracted = extract_all_if!(table, |key, _| key == 4).unwrap();
+        let mut extracted = table.extract_if(.., |key, _| key == 4).unwrap();
         let (key, value) = extracted.next().unwrap().unwrap();
         assert!(extracted.next().is_none());
         assert_eq!(key.value(), 4);
@@ -823,7 +803,7 @@ fn extract_if_returned_guards_survive_finalize() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
-        let mut extracted = extract_all_if!(table, |key, _| key == 5).unwrap();
+        let mut extracted = table.extract_if(.., |key, _| key == 5).unwrap();
         let (key, value) = extracted.next().unwrap().unwrap();
         drop(extracted);
         assert_eq!(key.value(), 5);
@@ -853,7 +833,7 @@ fn extract_if_all_guards_survive_iteration() {
             table.insert(&i, &(i * 10)).unwrap();
         }
         let mut guards = vec![];
-        for entry in extract_all_if!(table, |key, _| key % 2 == 0).unwrap() {
+        for entry in table.extract_if(.., |key, _| key % 2 == 0).unwrap() {
             guards.push(entry.unwrap());
         }
         assert_eq!(guards.len() as u64, elements / 2);
@@ -871,7 +851,7 @@ fn extract_if_all_guards_survive_iteration() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         let mut guards = vec![];
-        let mut iter = extract_all_if!(table, |_, _| true).unwrap();
+        let mut iter = table.extract_if(.., |_, _| true).unwrap();
         for entry in &mut iter {
             guards.push(entry.unwrap());
         }
@@ -906,7 +886,7 @@ fn extract_from_if_alternating_drain() {
     let write_txn = db.begin_write().unwrap();
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
-        let mut extracted = extract_range_if!(table, 1000..9000, |_, _| true).unwrap();
+        let mut extracted = table.extract_if(1000..9000, |_, _| true).unwrap();
         let mut front_next = 1000;
         let mut back_next = 8999;
         let mut front = true;
@@ -963,7 +943,7 @@ fn extract_from_if_alternating_directions() {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         let mut expected: std::collections::BTreeSet<u64> =
             (1000..9000).filter(|key| key % 3 == 0).collect();
-        let mut extracted = extract_range_if!(table, 1000..9000, |key, _| key % 3 == 0).unwrap();
+        let mut extracted = table.extract_if(1000..9000, |key, _| key % 3 == 0).unwrap();
         let mut front = true;
         loop {
             let entry = if front {
@@ -1023,7 +1003,7 @@ fn extract_if_alternating_directions_dense_removals() {
         let mut got: Vec<u64> = vec![];
         {
             // Remove everything except key 0, alternating directions.
-            let mut extracted = extract_all_if!(table, |k, _| k != 0).unwrap();
+            let mut extracted = table.extract_if(.., |k, _| k != 0).unwrap();
             let mut front = true;
             loop {
                 let entry = if front {
@@ -1067,7 +1047,7 @@ fn extract_if_alternating_directions_partial_consumption() {
     {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         {
-            let mut extracted = extract_all_if!(table, |k, _| k != 0).unwrap();
+            let mut extracted = table.extract_if(.., |k, _| k != 0).unwrap();
             let mut front = true;
             // Consume most of the range, then drop the iterator.
             for _ in 0..280 {
@@ -1111,7 +1091,7 @@ fn extract_if_mostly_forward_occasional_next_back() {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         let mut got: Vec<u64> = vec![];
         {
-            let mut extracted = extract_all_if!(table, |k, _| k != 0).unwrap();
+            let mut extracted = table.extract_if(.., |k, _| k != 0).unwrap();
             let mut i = 0u64;
             loop {
                 let entry = if i.is_multiple_of(50) {
@@ -1155,7 +1135,7 @@ fn extract_if_alternating_directions_held_guards() {
         let mut table = write_txn.open_table(U64_TABLE).unwrap();
         let mut held = vec![];
         {
-            let mut extracted = extract_all_if!(table, |k, _| k != 0).unwrap();
+            let mut extracted = table.extract_if(.., |k, _| k != 0).unwrap();
             let mut front = true;
             loop {
                 let entry = if front {
@@ -2987,7 +2967,7 @@ fn extract_from_if_empty() {
             table.insert(i, i).unwrap();
         }
         #[expect(clippy::reversed_empty_ranges)]
-        let mut iter = extract_range_if!(table, 500..0, |_, _| true).unwrap();
+        let mut iter = table.extract_if(500..0, |_, _| true).unwrap();
         assert!(iter.next().is_none());
     }
     write_txn.commit().unwrap();
@@ -4224,10 +4204,7 @@ fn range_signature_inference() {
 
         table.retain_in(.., |_, _| true).unwrap();
         table.retain_in(0..1, |_, _| true).unwrap();
-        // extract_if() takes a range only under experimental-api-5
-        #[cfg(feature = "experimental-api-5")]
         assert_eq!(table.extract_if(.., |_, _| false).unwrap().count(), 0);
-        #[cfg(feature = "experimental-api-5")]
         assert_eq!(table.extract_if(2..8, |_, _| false).unwrap().count(), 0);
     }
     {
@@ -4371,11 +4348,11 @@ fn signature_lifetimes() {
             table.range(key.as_str()..).unwrap()
         };
 
-        let _ = { extract_all_if!(table, |_, _| true).unwrap() };
+        let _ = { table.extract_if(.., |_, _| true).unwrap() };
 
         let _ = {
             let key = "hi".to_string();
-            extract_range_if!(table, key.as_str().., |_, _| true).unwrap()
+            table.extract_if(key.as_str().., |_, _| true).unwrap()
         };
     }
     write_txn.commit().unwrap();
