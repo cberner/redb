@@ -2,8 +2,6 @@ use crate::KeyRange;
 use crate::db::TransactionGuard;
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
-#[cfg(not(feature = "experimental-api-5"))]
-use crate::tree_store::encode_bounds;
 use crate::tree_store::{
     AccessGuardMutInPlace, Btree, BtreeCursor, BtreeCursorMut, BtreeCursorRange, BtreeExtractIf,
     BtreeHeader, BtreeMut, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, PageAllocator, PageHint, PageNumber,
@@ -21,8 +19,6 @@ use core::fmt::{Debug, Formatter};
 #[cfg(not(feature = "experimental-api-5"))]
 use core::marker::PhantomData;
 use core::ops::Bound;
-#[cfg(not(feature = "experimental-api-5"))]
-use core::ops::RangeBounds;
 
 /// Informational storage stats about a table
 #[derive(Debug)]
@@ -154,27 +150,6 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
         self.tree.pop_last()
     }
 
-    /// Applies `predicate` to all key-value pairs. All entries for which
-    /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
-    ///
-    /// Note: values not read from the iterator will not be removed
-    ///
-    /// If the iterator returns an error, later calls keep returning an error
-    /// (the failure is not recoverable). Entries already yielded stay
-    /// removed; if finalizing their removal fails too, the write transaction
-    /// is poisoned and cannot be committed.
-    ///
-    /// The predicate must not panic. If it panics, the write transaction is
-    /// poisoned and [`crate::WriteTransaction::commit`] will return
-    /// [`crate::CommitError::TransactionPoisoned`].
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
-        &mut self,
-        predicate: F,
-    ) -> Result<ExtractIf<'_, K, V, F>> {
-        self.extract_in_bounds(Bound::Unbounded, Bound::Unbounded, predicate)
-    }
-
     /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
     /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
     ///
@@ -190,39 +165,12 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     /// [`crate::CommitError::TransactionPoisoned`].
     ///
     /// Pass `..` as the range to visit the whole table.
-    #[cfg(feature = "experimental-api-5")]
     pub fn extract_if<F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
         &mut self,
         range: impl KeyRange<K>,
         predicate: F,
     ) -> Result<ExtractIf<'_, K, V, F>> {
         let (lower, upper) = range.key_bounds();
-        self.extract_in_bounds(lower, upper, predicate)
-    }
-
-    /// Applies `predicate` to all key-value pairs in the specified range. All entries for which
-    /// `predicate` evaluates to `true` are returned in an iterator, and those which are read from the iterator are removed
-    ///
-    /// Note: values not read from the iterator will not be removed
-    ///
-    /// If the iterator returns an error, later calls keep returning an error
-    /// (the failure is not recoverable). Entries already yielded stay
-    /// removed; if finalizing their removal fails too, the write transaction
-    /// is poisoned and cannot be committed.
-    ///
-    /// The predicate must not panic. If it panics, the write transaction is
-    /// poisoned and [`crate::WriteTransaction::commit`] will return
-    /// [`crate::CommitError::TransactionPoisoned`].
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn extract_from_if<'a, KR, F: for<'f> FnMut(K::SelfType<'f>, V::SelfType<'f>) -> bool>(
-        &mut self,
-        range: impl RangeBounds<KR> + 'a,
-        predicate: F,
-    ) -> Result<ExtractIf<'_, K, V, F>>
-    where
-        KR: Borrow<K::SelfType<'a>> + 'a,
-    {
-        let (lower, upper) = encode_bounds::<K, KR, _>(&range);
         self.extract_in_bounds(lower, upper, predicate)
     }
 
