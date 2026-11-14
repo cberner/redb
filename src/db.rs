@@ -217,19 +217,16 @@ pub(crate) const CONSISTENT_BYTE: u64 = LOCK_BASE + 4;
 /// the generation it implements while the database is open, and an open fails while a byte of
 /// another generation is locked. Processes that disagree on what the other lock bytes mean
 /// therefore never share a file. Each change to the protocol that a released version cannot
-/// follow takes the next byte.
-pub(crate) const PROTOCOL_GENERATION_BYTES: Range<u64> = LOCK_BASE + 5..LOCK_BASE + 69;
+/// follow takes the next byte. The last byte is never a generation's own: a reader of 4.5 or 4.6
+/// that finds it locked skips the generation check.
+pub(crate) const PROTOCOL_GENERATION_BYTES: Range<u64> = LOCK_BASE + 5..LOCK_BASE + 70;
 /// The byte of the generation this version implements.
 pub(crate) const PROTOCOL_GENERATION_BYTE: u64 = PROTOCOL_GENERATION_BYTES.start;
 const _: () = assert!(
     PROTOCOL_GENERATION_BYTE >= PROTOCOL_GENERATION_BYTES.start
-        && PROTOCOL_GENERATION_BYTE < PROTOCOL_GENERATION_BYTES.end
+        && PROTOCOL_GENERATION_BYTE < PROTOCOL_GENERATION_BYTES.end - 1
 );
-/// Never locked, except within an exclusive writer's whole range. A reader of 4.3 or 4.4 holds it
-/// along with every generation byte. A reader of 4.5 or 4.6 that finds it locked skips the
-/// generation check, so readers leave it unlocked, to never be mistaken for a reader of 4.3 or 4.4.
-pub(crate) const LEGACY_READER_BYTE: u64 = PROTOCOL_GENERATION_BYTES.end;
-const _: () = assert!(LEGACY_READER_BYTE < BACKEND_LOCK_RANGE.start);
+const _: () = assert!(PROTOCOL_GENERATION_BYTES.end <= BACKEND_LOCK_RANGE.start);
 /// Base of the "active transaction range": a handle reading transaction `t` holds `TXN_BASE + t`
 /// shared for as long as it is reading it
 pub(crate) const TXN_BASE: u64 = LOCK_BASE + 1024;
