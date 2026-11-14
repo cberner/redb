@@ -83,7 +83,6 @@ pub use error::{
 };
 pub use error::{TableTypeMismatch, TypeDefinitionInfo};
 pub use key_range::KeyRange;
-#[cfg(feature = "experimental-niches")]
 pub use legacy_types::Legacy;
 pub use multimap_table::{
     MultimapRange, MultimapTable, MultimapValue, OwnedMultimapRange, OwnedMultimapValue,
@@ -105,7 +104,6 @@ mod complex_types;
 mod db;
 mod error;
 mod key_range;
-#[cfg(feature = "experimental-niches")]
 mod legacy_types;
 mod multimap_table;
 mod sealed;
