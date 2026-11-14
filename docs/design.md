@@ -547,8 +547,8 @@ The multi-process concurrency modes rely on file range locks and define the foll
 | `BASE + 2`                | shared reader byte                 |
 | `BASE + 3`                | whole-file reader byte             |
 | `BASE + 4`                | consistent byte                    |
-| `BASE + 5..BASE + 69`     | protocol generation bytes          |
-| `BASE + 69..BASE + 896`   | reserved for the core              |
+| `BASE + 5..BASE + 70`     | protocol generation bytes          |
+| `BASE + 70..BASE + 896`   | reserved for the core              |
 | `BASE + 896..BASE + 1024` | reserved for backend locking       |
 | `BASE + 1024`             | active transaction base (TXN_BASE) |
 | `TXN_BASE..2^63`          | active transaction range           |
