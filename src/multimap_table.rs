@@ -3,12 +3,12 @@ use crate::db::TransactionGuard;
 use crate::multimap_table::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::sealed::Sealed;
 use crate::sync::Mutex;
-use crate::table::{CompatBorrow, OwnedAccessGuard, PanicGuard, ReadableTableMetadata, TableStats};
+use crate::table::{OwnedAccessGuard, PanicGuard, ReadableTableMetadata, TableStats};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BRANCH, Btree, BtreeCursorRange, BtreeHeader, BtreeMut,
     DynamicCollection, DynamicCollectionType, LEAF, LeafAccessor, MAX_PAIR_LENGTH,
     MAX_VALUE_LENGTH, Page, PageAllocator, PageHint, PageNumber, PageResolver, PageTracker,
-    RawBtree, RawLeafBuilder, multimap_btree_stats,
+    RawBtree, RawLeafBuilder, ScopedBorrow, multimap_btree_stats,
 };
 use crate::types::{Key, Value};
 use crate::{AccessGuard, MultimapTableHandle, Result, StorageError, WriteTransaction};
@@ -332,7 +332,7 @@ pub struct MultimapRange<'a, K: Key + 'static, V: Key + 'static> {
     _key_type: PhantomData<K>,
     _value_type: PhantomData<V>,
     // Keeps the table borrowed for as long as the range is alive; see `ScopedBorrow`
-    _lifetime: CompatBorrow<'a>,
+    _lifetime: ScopedBorrow<'a>,
 }
 
 impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
@@ -347,14 +347,13 @@ impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
             transaction_guard: guard,
             _key_type: PhantomData,
             _value_type: PhantomData,
-            _lifetime: CompatBorrow::default(),
+            _lifetime: ScopedBorrow::default(),
         }
     }
 }
 
-/// Under the redb 5 API preview a [`MultimapTable`] cannot be mutated while a [`MultimapRange`]
-/// over it is alive, even after the range's last use, since the range still holds the table's
-/// pages:
+/// A [`MultimapTable`] cannot be mutated while a [`MultimapRange`] over it is alive, even after the
+/// range's last use, since the range still holds the table's pages:
 ///
 /// ```compile_fail,E0502
 /// use redb::{Database, MultimapTableDefinition, ReadableMultimapTable};
@@ -376,7 +375,7 @@ impl<K: Key + 'static, V: Key + 'static> MultimapRange<'_, K, V> {
 ///     Ok(())
 /// }
 /// ```
-#[cfg(all(doctest, feature = "experimental-api-5"))]
+#[cfg(doctest)]
 mod multimap_range_keeps_the_table_borrowed {}
 
 impl<'a, K: Key + 'static, V: Key + 'static> Iterator for MultimapRange<'a, K, V> {

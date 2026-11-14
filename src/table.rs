@@ -16,8 +16,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt::{Debug, Formatter};
-#[cfg(not(feature = "experimental-api-5"))]
-use core::marker::PhantomData;
 use core::ops::Bound;
 
 /// Informational storage stats about a table
@@ -909,14 +907,6 @@ impl<
     }
 }
 
-/// The borrow of a table that a stable iterator type holds: a [`ScopedBorrow`] under the redb 5
-/// API preview, and until then the borrow that ends at the iterator's last use, as in earlier
-/// versions, since extending it rejects code that compiles today.
-#[cfg(feature = "experimental-api-5")]
-pub(crate) type CompatBorrow<'a> = ScopedBorrow<'a>;
-#[cfg(not(feature = "experimental-api-5"))]
-pub(crate) type CompatBorrow<'a> = PhantomData<&'a ()>;
-
 /// An iterator over the entries of a table in a range of keys, in key order
 ///
 /// Returned by [`ReadableTable::range`] and [`ReadableTable::iter`]. It holds the pages it reads,
@@ -926,7 +916,7 @@ pub struct Range<'a, K: Key + 'static, V: Value + 'static> {
     inner: BtreeCursorRange<K, V>,
     _transaction_guard: Arc<TransactionGuard>,
     // Keeps the table borrowed for as long as the range is alive; see `ScopedBorrow`
-    _lifetime: CompatBorrow<'a>,
+    _lifetime: ScopedBorrow<'a>,
 }
 
 impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
@@ -934,13 +924,13 @@ impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
         Self {
             inner,
             _transaction_guard: guard,
-            _lifetime: CompatBorrow::default(),
+            _lifetime: ScopedBorrow::default(),
         }
     }
 }
 
-/// Under the redb 5 API preview a [`Table`] cannot be mutated while a [`Range`] over it is alive,
-/// even after the range's last use, since the range still holds the table's pages:
+/// A [`Table`] cannot be mutated while a [`Range`] over it is alive, even after the range's last
+/// use, since the range still holds the table's pages:
 ///
 /// ```compile_fail,E0502
 /// use redb::{Database, ReadableTable, TableDefinition};
@@ -962,7 +952,7 @@ impl<K: Key + 'static, V: Value + 'static> Range<'_, K, V> {
 ///     Ok(())
 /// }
 /// ```
-#[cfg(all(doctest, feature = "experimental-api-5"))]
+#[cfg(doctest)]
 mod range_keeps_the_table_borrowed {}
 
 impl<'a, K: Key + 'static, V: Value + 'static> Iterator for Range<'a, K, V> {
