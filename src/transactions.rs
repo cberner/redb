@@ -7,8 +7,6 @@ use crate::table::ReadOnlyUntypedTable;
 use crate::transaction_tracker::{
     LocalSavepointId, SavepointId, TransactionId, TransactionTracker,
 };
-#[cfg(all(debug_assertions, not(feature = "experimental-api-5")))]
-use crate::tree_store::PageNumberHashSet;
 use crate::tree_store::{
     AllocationPolicy, Btree, BtreeHeader, BtreeMut, DatabaseLayout, HeaderGuard,
     InternalTableDefinition, MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageAllocator, PageHint,
@@ -1042,107 +1040,6 @@ impl WriteTransaction {
             || system_tables
                 .get_system_table_root(SYSTEM_FREED_TABLE)?
                 .is_some())
-    }
-
-    /// Prints the pages that each part of the database holds, and any it has leaked. Only
-    /// present in debug builds.
-    #[cfg(all(debug_assertions, not(feature = "experimental-api-5")))]
-    #[deprecated(
-        since = "4.5.0",
-        note = "an internal debugging aid, removed in redb 5.0"
-    )]
-    pub fn print_allocated_page_debug(&self) {
-        let mut all_allocated = PageNumberHashSet::from_iter(self.mem.all_allocated_pages());
-
-        self.mem.debug_check_allocator_consistency();
-
-        let mut table_pages = vec![];
-        self.tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .visit_all_pages(|path| {
-                table_pages.push(path.page_number());
-                Ok(())
-            })
-            .unwrap();
-        println!("Tables");
-        for p in table_pages {
-            assert!(all_allocated.remove(&p));
-            println!("{p:?}");
-        }
-
-        let mut system_table_pages = vec![];
-        self.system_tables
-            .lock()
-            .unwrap()
-            .table_tree
-            .visit_all_pages(|path| {
-                system_table_pages.push(path.page_number());
-                Ok(())
-            })
-            .unwrap();
-        println!("System tables");
-        for p in system_table_pages {
-            assert!(all_allocated.remove(&p));
-            println!("{p:?}");
-        }
-
-        {
-            println!("Pending free (in data freed table)");
-            let mut system_tables = self.system_tables.lock().unwrap();
-            let data_freed = system_tables.open_system_table(DATA_FREED_TABLE).unwrap();
-            for entry in data_freed.range::<TransactionIdWithPagination>(..).unwrap() {
-                let (_, entry) = entry.unwrap();
-                for p in entry.value().pages().unwrap() {
-                    assert!(all_allocated.remove(&p));
-                    println!("{p:?}");
-                }
-            }
-        }
-        {
-            println!("Pending free (in system freed table)");
-            let mut system_tables = self.system_tables.lock().unwrap();
-            let system_freed = system_tables.open_system_table(SYSTEM_FREED_TABLE).unwrap();
-            for entry in system_freed
-                .range::<TransactionIdWithPagination>(..)
-                .unwrap()
-            {
-                let (_, entry) = entry.unwrap();
-                for p in entry.value().pages().unwrap() {
-                    assert!(all_allocated.remove(&p));
-                    println!("{p:?}");
-                }
-            }
-        }
-        {
-            let tables = self.tables.lock().unwrap();
-            let pages = tables.freed_pages.lock().unwrap();
-            if !pages.is_empty() {
-                println!("Pages in in-memory data freed_pages");
-                for p in pages.iter() {
-                    println!("{p:?}");
-                    assert!(all_allocated.remove(p));
-                }
-            }
-        }
-        {
-            let system_tables = self.system_tables.lock().unwrap();
-            let pages = system_tables.freed_pages.lock().unwrap();
-            if !pages.is_empty() {
-                println!("Pages in in-memory system freed_pages");
-                for p in pages.iter() {
-                    println!("{p:?}");
-                    assert!(all_allocated.remove(p));
-                }
-            }
-        }
-        if !all_allocated.is_empty() {
-            println!("Leaked pages");
-            for p in all_allocated {
-                println!("{p:?}");
-            }
-        }
     }
 
     /// Creates a snapshot of the current database state, which can be used to rollback the database.
