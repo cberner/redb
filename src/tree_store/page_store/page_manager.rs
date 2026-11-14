@@ -791,12 +791,7 @@ impl TransactionalMemory {
             // The generation query runs as soon as this handle's own generation byte is held, so
             // that a writer of another generation is reported as a mismatch rather than as a
             // lock conflict on one of the later ranges.
-            if read_only
-                && taken == 0
-                && (cfg!(feature = "experimental-api-5")
-                    || !storage.query_lock_range(byte_range(LEGACY_READER_BYTE))?)
-                && Self::another_protocol_generation_open(storage)?
-            {
+            if read_only && taken == 0 && Self::another_protocol_generation_open(storage)? {
                 return Err(DatabaseError::LockProtocolMismatch);
             }
             // The later ranges hold the active transaction range and the writer byte, where a
@@ -3598,19 +3593,14 @@ mod lock_protocol_test {
         }
     }
 
-    /// Beside a reader of 4.3 or 4.4, a read-only exclusive-writer handle opens, except under
-    /// `experimental-api-5`, and an exclusive writer is refused. The other modes report a mismatch.
+    /// Beside a reader of 4.3 or 4.4, an exclusive writer is refused, and every read-only open and
+    /// every shared-mode writer reports a mismatch.
     #[test]
     fn opens_beside_a_reader_of_an_older_version() {
         let tmpfile = crate::create_tempfile();
         let older = reopen(tmpfile.path());
         lock_as_older_reader(&older);
-        let reader = exclusive_writer(tmpfile.path(), true);
-        if cfg!(feature = "experimental-api-5") {
-            assert!(mismatched(reader));
-        } else {
-            reader.unwrap().close().unwrap();
-        }
+        assert!(mismatched(exclusive_writer(tmpfile.path(), true)));
         assert!(refused(exclusive_writer(tmpfile.path(), false)));
         for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
             for read_only in [false, true] {
@@ -4012,10 +4002,9 @@ mod lock_failure_test {
         storage.close().unwrap();
     }
 
-    /// Only a read-only exclusive-writer open queries the legacy reader byte, and skips the
-    /// generation check when it is locked. Under `experimental-api-5` no open queries it.
+    /// A locked legacy reader byte does not mask the generation bytes: no open queries it.
     #[test]
-    fn a_locked_legacy_reader_byte_masks_the_generation_bytes_from_a_reader() {
+    fn a_locked_legacy_reader_byte_does_not_mask_the_generation_bytes() {
         for (mode, read_only) in ASKING {
             for answer in [Answer::Acquired, Answer::Failed] {
                 let (mut backend, _) = backend(Answer::Acquired, Answer::Refused);
@@ -4023,14 +4012,7 @@ mod lock_failure_test {
                 backend.generation_querying = Answer::Acquired;
                 let storage = PagedCachedFile::new(Box::new(backend), 4096, 0);
                 let result = TransactionalMemory::lock_for_open(&storage, read_only, mode);
-                if mode != ConcurrencyMode::ExclusiveWriter || cfg!(feature = "experimental-api-5")
-                {
-                    assert!(mismatched(result), "{mode:?} read_only={read_only}");
-                } else if answer == Answer::Acquired {
-                    result.unwrap();
-                } else {
-                    assert!(failed(result));
-                }
+                assert!(mismatched(result), "{mode:?} read_only={read_only}");
                 storage.close().unwrap();
             }
         }
