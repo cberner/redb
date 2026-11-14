@@ -836,7 +836,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
     ) -> Result<(), redb::Error>,
 ) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
-    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
+    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
     let mut countdown = backend.countdown.clone();
 
     let mut db = Database::builder()
@@ -904,7 +904,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
 
                     // Repair the database
                     let backend =
-                        FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
+                        FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
                     db = Database::builder()
                         .set_page_size(config.page_size.value)
                         .set_cache_size(config.cache_size.value)
@@ -953,7 +953,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
                 assert_ne!(god_byte[0] & 2, 0);
 
                 // Repair the database
-                let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
+                let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
                 db = Database::builder()
                     .set_page_size(config.page_size.value)
                     .set_cache_size(config.cache_size.value)
@@ -997,7 +997,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
             reference = non_durable_reference.clone();
             savepoint_manager.clean_shutdown();
 
-            let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file))?);
+            let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
             countdown = backend.countdown.clone();
             db = Database::builder()
                 .set_page_size(config.page_size.value)
@@ -1022,7 +1022,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
     // Repair the database, if needed, and disable IO error simulation
     countdown.swap(u64::MAX, Ordering::SeqCst);
     drop(db);
-    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)).unwrap());
+    let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
     db = Database::builder()
         .set_page_size(config.page_size.value)
         .set_cache_size(config.cache_size.value)

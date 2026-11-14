@@ -1,6 +1,4 @@
 use crate::BackendError;
-#[cfg(not(feature = "experimental-api-5"))]
-use crate::DatabaseError;
 #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
 use crate::db::MODE_RANGE;
 #[cfg(any(
@@ -101,18 +99,11 @@ pub struct FileBackend {
 
 impl FileBackend {
     /// Creates a new backend which stores data to the given file.
-    #[cfg(feature = "experimental-api-5")]
     pub fn new(file: File) -> Self {
         Self::from_file(file)
     }
 
-    /// Creates a new backend which stores data to the given file.
-    #[cfg(not(feature = "experimental-api-5"))]
-    pub fn new(file: File) -> Result<Self, DatabaseError> {
-        Ok(Self::from_file(file))
-    }
-
-    // Infallible under either API, for callers inside the crate
+    // The same as new(), for callers inside the crate
     pub(crate) fn from_file(file: File) -> Self {
         Self {
             whole_file_locked: AtomicBool::new(false),
