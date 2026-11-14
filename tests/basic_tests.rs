@@ -2122,7 +2122,6 @@ fn entry_borrowed_key_in_loop() {
 }
 
 // The key has its own lifetime, so the guard an entry returns can outlive the key
-#[cfg(feature = "experimental-api-5")]
 #[test]
 fn entry_guard_outlives_key() {
     let tmpfile = create_tempfile();
@@ -2150,7 +2149,6 @@ fn entry_guard_outlives_key() {
 
 // Generic code can call entry() repeatedly with keys whose lifetime is unrelated to the table
 // borrow
-#[cfg(feature = "experimental-api-5")]
 #[test]
 fn entry_in_generic_code() {
     fn count<'k, K: Key + 'static>(
