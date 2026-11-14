@@ -1,5 +1,4 @@
 use crate::CacheStats;
-#[cfg(feature = "experimental-api-5")]
 use crate::db::MODE_RANGE;
 use crate::db::{
     BACKEND_LOCK_RANGE, CONSISTENT_BYTE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
@@ -723,22 +722,10 @@ impl TransactionalMemory {
         // progress. Every shared-mode handle holds the shared writer byte or the shared reader
         // byte, so a writer first takes the range that starts with those: one that such a handle
         // refuses then never holds the suffix
-        #[cfg(feature = "experimental-api-5")]
         let writer_ranges = [
             MODE_RANGE,
             suffix_range,
             (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
-        ];
-        // The ranges of 4.x in its order, where the file backend ties its whole-file lock to the
-        // suffix
-        #[cfg(not(feature = "experimental-api-5"))]
-        let writer_ranges = [
-            suffix_range,
-            (
-                Bound::Excluded(SHARED_WRITER_BYTE),
-                Bound::Excluded(BACKEND_LOCK_RANGE.start),
-            ),
-            (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
         ];
         // A read-only handle leaves the shared writer byte, the other generations' protocol bytes
         // and the legacy reader byte unlocked, because it queries them below, and the consistent
@@ -3212,106 +3199,8 @@ mod lock_protocol_test {
         }
     }
 
-    /// With `older` holding the whole-file lock of redb before 4.3 exclusive, as a writer of
-    /// such a version does, `open` is refused. On Windows that lock covers the query mutex, so
-    /// the open waits for it instead.
-    #[cfg(not(feature = "experimental-api-5"))]
-    fn assert_excluded_by_older_writer(
-        older: &File,
-        open: impl FnOnce() -> Result<PagedCachedFile, DatabaseError> + Send + 'static,
-    ) {
-        older.try_lock().unwrap();
-        #[cfg(not(windows))]
-        {
-            assert!(refused(open()));
-            older.unlock().unwrap();
-        }
-        #[cfg(windows)]
-        {
-            use std::sync::mpsc;
-            use std::time::Duration;
-
-            let (result_tx, result_rx) = mpsc::channel();
-            let worker = std::thread::spawn(move || {
-                result_tx.send(open()).unwrap();
-            });
-            let while_locked = result_rx.recv_timeout(Duration::from_millis(100));
-            older.unlock().unwrap();
-            assert!(matches!(while_locked, Err(mpsc::RecvTimeoutError::Timeout)));
-            result_rx
-                .recv_timeout(Duration::from_secs(5))
-                .unwrap()
-                .unwrap()
-                .close()
-                .unwrap();
-            worker.join().unwrap();
-        }
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    #[test]
-    fn exclusive_writer_opens_exclude_older_whole_file_writers() {
-        let tmpfile = crate::create_tempfile();
-        let older = reopen(tmpfile.path());
-        for read_only in [false, true] {
-            let storage = exclusive_writer(tmpfile.path(), read_only).unwrap();
-            assert!(matches!(
-                older.try_lock(),
-                Err(std::fs::TryLockError::WouldBlock)
-            ));
-            storage.close().unwrap();
-
-            let path = tmpfile.path().to_owned();
-            assert_excluded_by_older_writer(&older, move || exclusive_writer(&path, read_only));
-        }
-    }
-
-    #[cfg(not(feature = "experimental-api-5"))]
-    #[test]
-    fn each_whole_file_reader_excludes_older_whole_file_writers() {
-        let tmpfile = crate::create_tempfile();
-        let older = reopen(tmpfile.path());
-        let first = exclusive_writer(tmpfile.path(), true).unwrap();
-        let second = exclusive_writer(tmpfile.path(), true).unwrap();
-        first.close().unwrap();
-        assert!(matches!(
-            older.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ));
-        second.close().unwrap();
-        older.try_lock().unwrap();
-    }
-
-    /// A shared-mode handle holds the whole-file lock of redb before 4.3 shared, so a writer of
-    /// such a version, which takes it exclusive, is excluded while one is open, and excludes one.
-    /// A reader of 4.0 to 4.2 holds it shared as well, so it is admitted beside a shared-mode
-    /// reader, as it is beside a whole-file reader.
-    #[cfg(not(feature = "experimental-api-5"))]
-    #[test]
-    fn shared_mode_opens_exclude_older_whole_file_writers() {
-        let tmpfile = crate::create_tempfile();
-        let older = reopen(tmpfile.path());
-        for mode in [ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter] {
-            for read_only in [false, true] {
-                let storage = open(tmpfile.path(), read_only, mode).unwrap();
-                assert!(
-                    matches!(older.try_lock(), Err(std::fs::TryLockError::WouldBlock)),
-                    "{mode:?}, read_only={read_only}"
-                );
-                if read_only {
-                    older.try_lock_shared().unwrap();
-                    older.unlock().unwrap();
-                }
-                storage.close().unwrap();
-
-                let path = tmpfile.path().to_owned();
-                assert_excluded_by_older_writer(&older, move || open(&path, read_only, mode));
-            }
-        }
-    }
-
     /// Whether flock and range locks are independent here, as on a local filesystem
-    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[cfg(target_os = "linux")]
     fn flock_is_separate_from_ranges(path: &Path) -> bool {
         use crate::db::{BACKEND_LOCK_RANGE, byte_range};
 
@@ -3326,7 +3215,7 @@ mod lock_protocol_test {
     }
 
     /// An exclusive writer is refused by an older redb's flock, and holds none itself
-    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_exclusive_writer_open_is_refused_by_an_older_whole_file_lock() {
         let tmpfile = crate::create_tempfile();
@@ -3351,7 +3240,7 @@ mod lock_protocol_test {
     }
 
     /// Only an exclusive writer checks
-    #[cfg(all(target_os = "linux", feature = "experimental-api-5"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn other_opens_do_not_check_for_a_whole_file_lock() {
         let tmpfile = crate::create_tempfile();
@@ -3631,7 +3520,6 @@ mod lock_protocol_test {
 #[cfg(test)]
 mod lock_failure_test {
     use super::TransactionalMemory;
-    #[cfg(feature = "experimental-api-5")]
     use crate::db::MODE_RANGE;
     use crate::db::{
         BACKEND_LOCK_RANGE, ConcurrencyMode, FULL_RANGE, LEGACY_READER_BYTE,
@@ -3864,25 +3752,14 @@ mod lock_failure_test {
 
     // In the order an exclusive writer takes them. The range that starts with the shared writer
     // and shared reader bytes comes before the suffix, so that an open a shared-mode handle
-    // refuses holds no active transaction byte. 4.x takes the suffix first
+    // refuses holds no active transaction byte
     fn exclusive_writer_ranges() -> Vec<(Bound<u64>, Bound<u64>)> {
         let suffix = (Bound::Included(BACKEND_LOCK_RANGE.end), Bound::Unbounded);
-        #[cfg(feature = "experimental-api-5")]
-        let ranges = [
+        vec![
             MODE_RANGE,
             suffix,
             (Bound::Unbounded, Bound::Excluded(SHARED_WRITER_BYTE)),
-        ];
-        #[cfg(not(feature = "experimental-api-5"))]
-        let ranges = [
-            suffix,
-            (
-                Bound::Excluded(SHARED_WRITER_BYTE),
-                Bound::Excluded(BACKEND_LOCK_RANGE.start),
-            ),
-            (Bound::Unbounded, Bound::Included(SHARED_WRITER_BYTE)),
-        ];
-        ranges.to_vec()
+        ]
     }
 
     #[test]
