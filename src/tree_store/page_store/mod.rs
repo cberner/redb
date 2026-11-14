@@ -5,7 +5,7 @@ mod bitmap;
 mod buddy_allocator;
 mod cached_file;
 mod fast_hash;
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 pub mod file_backend;
 pub(crate) mod header;
 mod layout;

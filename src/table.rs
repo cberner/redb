@@ -125,7 +125,7 @@ impl<'txn, K: Key + 'static, V: Value + 'static> Table<'txn, K, V> {
     }
 
     #[allow(dead_code)]
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self, include_values: bool) -> Result {
         self.tree.print_debug(include_values)
     }

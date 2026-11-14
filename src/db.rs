@@ -23,9 +23,9 @@ use core::fmt::{Debug, Display, Formatter};
 use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::ops::{Bound, Range};
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 use std::fs::OpenOptions;
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 use std::path::Path;
 
 use crate::error::TransactionError;
@@ -35,7 +35,7 @@ use crate::transactions::{
     DATA_FREED_TABLE, PageList, SAVEPOINT_TABLE, SYSTEM_FREED_TABLE, SystemTableDefinition,
     TransactionIdWithPagination,
 };
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 use crate::tree_store::file_backend::FileBackend;
 #[cfg(feature = "logging")]
 use log::{debug, warn};
@@ -178,7 +178,7 @@ pub trait StorageBackend: 'static + Debug + Send + Sync {
     }
 }
 
-#[cfg_attr(redb_no_std, allow(dead_code))]
+#[cfg_attr(not(feature = "std"), allow(dead_code))]
 pub(crate) const FULL_RANGE: (Bound<u64>, Bound<u64>) = (Bound::Unbounded, Bound::Unbounded);
 
 #[cfg_attr(not(any(windows, unix, target_os = "wasi")), allow(dead_code))]
@@ -690,7 +690,7 @@ impl ReadableDatabase for ReadOnlyDatabase {
 
 impl ReadOnlyDatabase {
     /// Opens an existing redb database.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<ReadOnlyDatabase, DatabaseError> {
         Builder::new().open_read_only(path)
     }
@@ -826,7 +826,7 @@ impl Database {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn create(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().create(path)
     }
@@ -836,7 +836,7 @@ impl Database {
     /// The open trusts a file that was shut down cleanly and may panic if it was corrupted outside
     /// redb. [`Builder::set_check_integrity_on_open`] reports corruption as
     /// [`StorageError::Corrupted`] instead.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn open(path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         Self::builder().open(path)
     }
@@ -2351,7 +2351,7 @@ impl Builder {
     /// * if the file does not exist, or is an empty file, a new database will be initialized in it
     /// * if the file is a valid redb database, it will be opened
     /// * otherwise this function will return an error
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn create(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new()
             .read(true)
@@ -2375,7 +2375,7 @@ impl Builder {
     }
 
     /// Opens an existing redb database.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn open(&self, path: impl AsRef<Path>) -> Result<Database, DatabaseError> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
 
@@ -2402,7 +2402,7 @@ impl Builder {
     /// Only an `ExclusiveWriter` writer is refused: in the other modes, a reader opened in the
     /// writer's mode shares the file with it and picks up its commits. See
     /// [`Self::set_concurrency_mode`].
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub fn open_read_only(
         &self,
         path: impl AsRef<Path>,
