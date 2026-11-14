@@ -12,7 +12,7 @@ use core::panic;
 #[non_exhaustive]
 pub enum BackendError {
     /// The underlying storage operation failed. Not available without std.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     Io(std::io::Error),
     /// The backend failed with an error that is not an I/O error.
     Other(Box<dyn core::error::Error + Send + Sync>),
@@ -23,14 +23,14 @@ pub enum BackendError {
 impl BackendError {
     // With std, an io::Error of the matching kind. Without it the kind is dropped
     pub(crate) fn invalid_input(message: &'static str) -> Self {
-        #[cfg(not(redb_no_std))]
+        #[cfg(feature = "std")]
         {
             Self::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 message,
             ))
         }
-        #[cfg(redb_no_std)]
+        #[cfg(not(feature = "std"))]
         {
             Self::Other(message.into())
         }
@@ -38,7 +38,7 @@ impl BackendError {
 
     // An I/O error wrapped in Other is unwrapped, so that it is matched as one
     fn normalize(self) -> Self {
-        #[cfg(not(redb_no_std))]
+        #[cfg(feature = "std")]
         if let Self::Other(err) = self {
             return match err.downcast::<std::io::Error>() {
                 Ok(err) => Self::Io(*err),
@@ -50,7 +50,7 @@ impl BackendError {
 
     // A lock method's error, with an unsupported operation reported as Self::Unsupported, as the
     // StorageBackend docs specify
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub(crate) fn from_lock_io(err: std::io::Error) -> Self {
         if err.kind() == std::io::ErrorKind::Unsupported {
             return Self::Unsupported;
@@ -60,14 +60,14 @@ impl BackendError {
 }
 
 // Lossless, since the I/O methods report an io::Error through it too
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 impl From<std::io::Error> for BackendError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
     }
 }
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 impl From<BackendError> for std::io::Error {
     fn from(err: BackendError) -> Self {
         match err.normalize() {
@@ -90,7 +90,7 @@ impl From<BackendError> for Error {
 impl Display for BackendError {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::Other(err) => write!(f, "Storage backend error: {err}"),
             Self::Unsupported => f.write_str("The storage backend does not support this operation"),
@@ -101,7 +101,7 @@ impl Display for BackendError {
 impl core::error::Error for BackendError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             Self::Io(err) => Some(err),
             Self::Other(err) => Some(&**err),
             Self::Unsupported => None,
@@ -118,7 +118,7 @@ pub enum StorageError {
     /// The value being inserted exceeds the maximum of 3GiB
     ValueTooLarge(usize),
     /// An I/O error from the storage backend. Not available without std.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     Io(std::io::Error),
     /// The storage backend failed with an error that is not an I/O error.
     Backend(Box<dyn core::error::Error + Send + Sync>),
@@ -146,14 +146,14 @@ impl StorageError {
     // open() and create() have reported it since 2.4. Without std, Corrupted, so that it is not
     // mistaken for a failure of the backend
     pub(crate) fn not_a_database(message: &'static str) -> Self {
-        #[cfg(not(redb_no_std))]
+        #[cfg(feature = "std")]
         {
             Self::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 message,
             ))
         }
-        #[cfg(redb_no_std)]
+        #[cfg(not(feature = "std"))]
         {
             Self::Corrupted(message.to_string())
         }
@@ -163,7 +163,7 @@ impl StorageError {
     // wrapped it, since the callers fall back to a whole-storage lock only on Unsupported
     pub(crate) fn from_lock_error(err: BackendError) -> Self {
         match Self::from(err) {
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             Self::Io(err) if err.kind() == std::io::ErrorKind::Unsupported => Self::Unsupported,
             err => err,
         }
@@ -185,7 +185,7 @@ impl<G> LockResultExt<G> for Result<G, PoisonError<G>> {
     }
 }
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 impl From<std::io::Error> for StorageError {
     fn from(err: std::io::Error) -> StorageError {
         StorageError::Io(err)
@@ -195,7 +195,7 @@ impl From<std::io::Error> for StorageError {
 impl From<BackendError> for StorageError {
     fn from(err: BackendError) -> Self {
         match err.normalize() {
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             BackendError::Io(err) => Self::Io(err),
             BackendError::Other(err) => Self::Backend(err),
             BackendError::Unsupported => Self::Unsupported,
@@ -208,7 +208,7 @@ impl From<StorageError> for Error {
         match err {
             StorageError::Corrupted(msg) => Error::Corrupted(msg),
             StorageError::ValueTooLarge(x) => Error::ValueTooLarge(x),
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             StorageError::Io(x) => Error::Io(x),
             StorageError::Backend(x) => Error::Backend(x),
             StorageError::Unsupported => Error::Unsupported,
@@ -232,7 +232,7 @@ impl Display for StorageError {
                     MAX_VALUE_LENGTH / 1024 / 1024 / 1024
                 )
             }
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             StorageError::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
@@ -486,7 +486,7 @@ impl From<DatabaseError> for Error {
     }
 }
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 impl From<std::io::Error> for DatabaseError {
     fn from(err: std::io::Error) -> DatabaseError {
         DatabaseError::Storage(StorageError::Io(err))
@@ -917,7 +917,7 @@ pub enum Error {
     // mutable references to the same dirty pages, or multiple mutable references via insert_reserve()
     TableAlreadyOpen(String, &'static panic::Location<'static>),
     /// An I/O error from the storage backend. Not available without std.
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     Io(std::io::Error),
     /// The storage backend failed with an error that is not an I/O error.
     Backend(Box<dyn core::error::Error + Send + Sync>),
@@ -934,7 +934,7 @@ pub enum Error {
     WouldBlock,
 }
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Error {
         Error::Io(err)
@@ -996,7 +996,7 @@ impl Display for Error {
             Error::TableAlreadyOpen(name, location) => {
                 write!(f, "Table '{name}' already opened at: {location}")
             }
-            #[cfg(not(redb_no_std))]
+            #[cfg(feature = "std")]
             Error::Io(err) => {
                 write!(f, "I/O error: {err}")
             }
@@ -1107,7 +1107,7 @@ mod test {
     }
 
     // A poisoned lock is reported at the line that took it, not inside this module
-    #[cfg(all(not(redb_no_std), panic = "unwind"))]
+    #[cfg(all(feature = "std", panic = "unwind"))]
     #[test]
     fn lock_poisoned_reports_the_lock_site() {
         use super::LockResultExt;
@@ -1127,7 +1127,7 @@ mod test {
     }
 
     // However the backend wrapped it, an io::Error is reported as one
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     #[test]
     fn other_holding_an_io_error_is_an_io_error() {
         use std::io::ErrorKind;

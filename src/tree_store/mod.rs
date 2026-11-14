@@ -20,7 +20,7 @@ pub(crate) use btree_iters::{AllPageNumbersBtreeIter, encode_bounds};
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 pub use page_store::file_backend;
 pub(crate) use page_store::{
     AllocationPolicy, DatabaseLayout, FILE_FORMAT_VERSION3, HeaderGuard, MAX_PAIR_LENGTH,

@@ -1,4 +1,4 @@
-#![cfg_attr(redb_no_std, no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![deny(clippy::all, clippy::pedantic, clippy::disallowed_methods)]
 #![allow(
     clippy::if_not_else,
@@ -118,7 +118,7 @@ mod types;
 // core cannot tell whether the current thread is unwinding, and redb's Drop impls consult that in
 // opposite ways, so neither constant is safe to assume. Restricted to panic = "abort" instead,
 // where nothing unwinds and panicking() below is vacuously correct.
-#[cfg(all(redb_no_std, panic = "unwind"))]
+#[cfg(all(not(feature = "std"), panic = "unwind"))]
 compile_error!(
     "redb is being built without the standard library, because its \"std\" feature is disabled \
      (for example by `default-features = false`). Enable the \"std\" feature, or set \
@@ -134,12 +134,12 @@ compile_error!(
      AtomicU64. Disable the feature on this target."
 );
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 pub(crate) fn panicking() -> bool {
     std::thread::panicking()
 }
 
-#[cfg(redb_no_std)]
+#[cfg(not(feature = "std"))]
 pub(crate) fn panicking() -> bool {
     false
 }

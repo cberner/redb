@@ -2572,7 +2572,7 @@ impl WriteTransaction {
     }
 
     #[allow(dead_code)]
-    #[cfg(not(redb_no_std))]
+    #[cfg(feature = "std")]
     pub(crate) fn print_debug(&self) -> Result {
         // Flush any pending updates to make sure we get the latest root
         let mut tables = self.tables.lock().unwrap();

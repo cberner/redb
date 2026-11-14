@@ -1,12 +1,12 @@
 // The synchronization primitives redb locks with. std's are used whenever it is available; builds
 // without it get the spinning implementations below.
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 pub(crate) use std::sync::{
     Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 
-#[cfg(redb_no_std)]
+#[cfg(not(feature = "std"))]
 pub(crate) use spin::{
     Condvar, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
@@ -14,8 +14,8 @@ pub(crate) use spin::{
 // Compiled for test builds as well, so that the tests below run as part of the normal test suite
 // rather than only in the no_std configuration. Nothing outside this module uses it in that case,
 // so the parts the tests do not reach are expected to be unused there.
-#[cfg(any(redb_no_std, test))]
-#[cfg_attr(not(redb_no_std), allow(dead_code))]
+#[cfg(any(not(feature = "std"), test))]
+#[cfg_attr(feature = "std", allow(dead_code))]
 mod spin {
     use core::cell::UnsafeCell;
     use core::fmt::{Debug, Formatter};
