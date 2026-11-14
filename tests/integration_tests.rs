@@ -48,14 +48,8 @@ fn create_tempfile() -> tempfile::NamedTempFile {
     }
 }
 
-#[cfg(feature = "experimental-api-5")]
 fn file_backend(file: fs::File) -> FileBackend {
     FileBackend::new(file)
-}
-
-#[cfg(not(feature = "experimental-api-5"))]
-fn file_backend(file: fs::File) -> FileBackend {
-    FileBackend::new(file).unwrap()
 }
 
 #[derive(Debug)]

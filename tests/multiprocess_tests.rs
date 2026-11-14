@@ -8,20 +8,9 @@ fn shared_modes() -> &'static [ConcurrencyMode] {
     &[ConcurrencyMode::SingleWriter, ConcurrencyMode::MultiWriter]
 }
 
-#[cfg(all(
-    any(target_os = "linux", target_vendor = "apple", windows),
-    feature = "experimental-api-5"
-))]
+#[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 fn file_backend(file: std::fs::File) -> FileBackend {
     FileBackend::new(file)
-}
-
-#[cfg(all(
-    any(target_os = "linux", target_vendor = "apple", windows),
-    not(feature = "experimental-api-5")
-))]
-fn file_backend(file: std::fs::File) -> FileBackend {
-    FileBackend::new(file).unwrap()
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
