@@ -1,7 +1,7 @@
 // The lookup tables that redb uses on hot paths, all keyed by an integer. `alloc` has no hash map,
 // so builds without std substitute the ordered collections. That costs O(log n) lookups, but the
 // iteration order of these tables is never observable, so nothing else changes.
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 mod hash {
     use crate::tree_store::PageNumber;
     use core::hash::{BuildHasherDefault, Hasher};
@@ -40,7 +40,7 @@ mod hash {
     }
 }
 
-#[cfg(redb_no_std)]
+#[cfg(not(feature = "std"))]
 mod hash {
     use crate::tree_store::PageNumber;
     use alloc::collections::{BTreeMap, BTreeSet};
@@ -58,7 +58,7 @@ pub(crate) trait Shrink {
     fn shrink(&mut self);
 }
 
-#[cfg(not(redb_no_std))]
+#[cfg(feature = "std")]
 mod shrink {
     use super::Shrink;
     use core::hash::{BuildHasher, Hash};
@@ -77,7 +77,7 @@ mod shrink {
     }
 }
 
-#[cfg(redb_no_std)]
+#[cfg(not(feature = "std"))]
 mod shrink {
     use super::Shrink;
     use alloc::collections::{BTreeMap, BTreeSet};

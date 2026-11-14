@@ -46,11 +46,11 @@ use core::arch::x86_64::*;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 macro_rules! x86_feature_detected {
     ($feature:tt) => {{
-        #[cfg(not(redb_no_std))]
+        #[cfg(feature = "std")]
         {
             std::arch::is_x86_feature_detected!($feature)
         }
-        #[cfg(redb_no_std)]
+        #[cfg(not(feature = "std"))]
         {
             cfg!(target_feature = $feature)
         }
@@ -60,11 +60,11 @@ macro_rules! x86_feature_detected {
 #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
 macro_rules! aarch64_feature_detected {
     ($feature:tt) => {{
-        #[cfg(not(redb_no_std))]
+        #[cfg(feature = "std")]
         {
             std::arch::is_aarch64_feature_detected!($feature)
         }
-        #[cfg(redb_no_std)]
+        #[cfg(not(feature = "std"))]
         {
             cfg!(target_feature = $feature)
         }
