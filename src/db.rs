@@ -199,7 +199,6 @@ pub(crate) const SHARED_READER_BYTE: u64 = LOCK_BASE + 2;
 /// up to the backend's bytes. It starts with the shared writer byte and the shared reader byte.
 /// Every shared-mode handle holds one of the two, so it refuses the writer whichever of them has
 /// the database open.
-#[cfg(feature = "experimental-api-5")]
 pub(crate) const MODE_RANGE: (Bound<u64>, Bound<u64>) = (
     Bound::Included(SHARED_WRITER_BYTE),
     Bound::Excluded(BACKEND_LOCK_RANGE.start),
@@ -2221,13 +2220,12 @@ impl RepairSession {
 /// [`DatabaseError::DatabaseAlreadyOpen`](crate::DatabaseError::DatabaseAlreadyOpen) whatever
 /// generation each implements.
 ///
-/// A `SingleWriter` or `MultiWriter` handle also excludes a writer running redb before 4.3, which
-/// locks the whole file, and is excluded by one. A read-only handle of redb 4.0 to 4.2 holds that
-/// lock shared, and on Linux, where it is a separate lock from the byte-range locks, is not
-/// excluded by a writer in either mode: it must not be opened on a database such a writer has
-/// open, since it reads a snapshot the writer may reuse. Under the `experimental-api-5` feature
-/// the whole-file lock is not held, and on Linux only an `ExclusiveWriter` writer detects a version
-/// before 4.3.
+/// redb before 4.3 locks the whole file, which a read-only handle of 4.0 to 4.2 holds shared.
+/// Outside Linux that lock and the byte-range locks exclude each other, so a `SingleWriter` or
+/// `MultiWriter` handle excludes a writer of such a version, and is excluded by one. On Linux they
+/// are separate locks, and redb does not take the whole-file lock: only an `ExclusiveWriter` writer
+/// detects a version before 4.3, and its open is refused while one has the file open. Do not use
+/// redb 4.2 or earlier on a database that this version has open on Linux.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
 #[non_exhaustive]
 pub enum ConcurrencyMode {
