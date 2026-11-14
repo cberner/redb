@@ -2,6 +2,8 @@
 
 ## 5.0.0 - 2026-XX-XX
 ### Breaking changes
+* The `experimental-api-5` and `experimental-niches` features are removed, since what they enabled
+  is now part of every build. Remove them from your dependency on redb.
 * Turning off the `std` feature now builds redb without the standard library (see below). If you
   depend on redb with `default-features = false`, add `features = ["std"]` to keep the std build.
 * The range taking methods -- `ReadableTable::range()`, `ReadOnlyTable::range_owned()`,

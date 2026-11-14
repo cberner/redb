@@ -71,9 +71,6 @@ std = []
 logging = ["dep:log"]
 # Enable cache hit metrics
 cache_metrics = []
-# Unstable additions and changes to the public API, planned for redb 5. May change incompatibly, or
-# be removed, in any release
-experimental-api-5 = []
 
 [profile.bench]
 debug = true
