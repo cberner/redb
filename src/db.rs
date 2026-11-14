@@ -23,8 +23,6 @@ use core::fmt::{Debug, Display, Formatter};
 use alloc::sync::Arc;
 use core::marker::PhantomData;
 use core::ops::{Bound, Range};
-#[cfg(all(not(redb_no_std), not(feature = "experimental-api-5")))]
-use std::fs::File;
 #[cfg(not(redb_no_std))]
 use std::fs::OpenOptions;
 #[cfg(not(redb_no_std))]
@@ -2436,29 +2434,6 @@ impl Builder {
             None,
             self.cache_size,
             self.concurrency_mode,
-        )
-    }
-
-    /// Open an existing or create a new database in the given `file`.
-    ///
-    /// The file must be empty or contain a valid database.
-    #[cfg(all(not(redb_no_std), not(feature = "experimental-api-5")))]
-    #[deprecated(
-        since = "4.5.0",
-        note = "use `create_with_backend(FileBackend::new(file)?)` instead"
-    )]
-    pub fn create_file(&self, file: File) -> Result<Database, DatabaseError> {
-        Database::new(
-            Box::new(FileBackend::from_file(file)),
-            true,
-            self.page_size,
-            self.region_size,
-            self.cache_size,
-            self.concurrency_mode,
-            RepairConfig {
-                check_integrity: self.check_integrity_on_open,
-                callback: &self.repair_callback,
-            },
         )
     }
 
