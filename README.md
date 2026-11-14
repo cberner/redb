@@ -49,7 +49,7 @@ are any future changes to it.
 
 ## `no_std`
 
-Turning off the `std` feature, with `experimental-api-5` on, builds redb without the standard
+Turning off the `std` feature builds redb without the standard
 library. It needs `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3
 and above, but not Cortex-M0. Embedded targets abort on panic by default. Tests always unwind, so
 tests run on the host need the `std` feature, which a dev-dependency on redb can enable. There is no

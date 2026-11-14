@@ -61,8 +61,8 @@
 //!
 //! # Crate features
 //!
-//! - `std`: enabled by default. With `experimental-api-5` on, disable it to build redb as a
-//!   `no_std` crate; see the README for what that mode requires and leaves out.
+//! - `std`: enabled by default. Disable it to build redb as a `no_std` crate; see the README for
+//!   what that mode requires and leaves out.
 //!
 //! [lmdb]: https://www.lmdb.tech/doc/
 //! [design]: https://github.com/cberner/redb/blob/master/docs/design.md

@@ -8,7 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
-redb = { path = "../..", default-features = false, features = ["experimental-api-5"] }
+redb = { path = "../..", default-features = false }
 redb-derive = { path = "../redb-derive" }
 
 [profile.dev]

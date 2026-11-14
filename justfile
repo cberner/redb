@@ -75,8 +75,8 @@ build_no_std:
     # created when missing, so that running this does not re-resolve an existing one.
     [ -f Cargo.lock ] || cargo generate-lockfile
     # Uses cargo pkgid because "redb" is ambiguous with the test dependency on an old version of redb
-    cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
-    RUSTDOCFLAGS="--deny warnings" cargo doc -p $(cargo pkgid) --no-deps --target thumbv7em-none-eabihf --no-default-features --features experimental-api-5
+    cargo check -p $(cargo pkgid) --target thumbv7em-none-eabihf --no-default-features
+    RUSTDOCFLAGS="--deny warnings" cargo doc -p $(cargo pkgid) --no-deps --target thumbv7em-none-eabihf --no-default-features
 
 test_wasi:
     rustup install nightly-2025-07-26 --target wasm32-wasip1-threads
