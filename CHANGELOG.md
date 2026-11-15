@@ -1,78 +1,80 @@
 # redb - Changelog
 
 ## 5.0.0 - 2026-XX-XX
-### Breaking changes
-* The `experimental-api-5` and `experimental-niches` features are removed, since what they enabled
-  is now part of every build. Remove them from your dependency on redb.
-* Turning off the `std` feature now builds redb without the standard library (see below). If you
-  depend on redb with `default-features = false`, add `features = ["std"]` to keep the std build.
-* The range taking methods -- `ReadableTable::range()`, `ReadOnlyTable::range_owned()`,
-  `Table::retain_in()`, `Table::extract_if()`, and their multimap equivalents -- take a `KeyRange`
-  instead of a `RangeBounds` over a borrowed key type, so `table.range(..)` replaces
-  `table.range::<KeyType>(..)`. Calls that named the key type in a turbofish must drop it, and
-  implementations of `ReadableTable` or `ReadableMultimapTable` must update their `range()`
-  signature.
-* `Table::extract_if()` takes a range before the predicate, as `BTreeMap::extract_if()` does, and
-  `Table::extract_from_if()` is removed. Use `extract_if(.., predicate)` for the whole table.
-* The inherent `get()` and `range()` of `ReadOnlyTable` and `ReadOnlyMultimapTable` are removed,
-  since their `'static` guards and iterators did not keep the transaction alive. Use the
-  `ReadableTable` and `ReadableMultimapTable` methods, or `get_owned()` and `range_owned()` when
-  the result must outlive the table.
-* `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` have no default
-  implementation, so implementations of `ReadableTable` must provide them.
-* `ReadableDatabase` is sealed, and can no longer be implemented outside of redb.
-* `StorageError` and `Error` no longer implement `From<PoisonError<T>>`.
-* The `TableTypeMismatch` and `TypeDefinitionChanged` variants of `TableError` and `Error` hold a
-  boxed `TableTypeMismatch` or `TypeDefinitionInfo`, whose accessors replace the variants' fields.
-  A `TableTypeMismatch` also reports the types the table was opened with. `TypeDefinitionInfo` has
-  no counterpart to `alignment`, which was always 1.
-* The I/O methods of `StorageBackend` return `BackendError` instead of `io::Error`, as its lock
-  methods already do. `?` still converts an `io::Error`, now always into `BackendError::Io`, so
-  that one of kind `Unsupported` keeps its message. A lock method may report an unsupported lock
-  either way.
-* `Entry`, `OccupiedEntry` and `VacantEntry` take a second lifetime, for the key, which no longer
-  has to live as long as the table borrow. Code that names these types must add it, as in
-  `Entry<'_, '_, K, V>`.
-* `Range` and `MultimapRange` keep the table borrowed until they are dropped, rather than until
-  their last use. Mutating the table while a range over it is still in scope, which could panic,
-  no longer compiles.
-* `Builder::create_file()` is removed; use `Builder::create_with_backend(FileBackend::new(file))`.
-* `FileBackend::new()` returns `FileBackend` instead of `Result<FileBackend, DatabaseError>`.
-* `WriteTransaction::print_allocated_page_debug()`, an internal debugging aid, is removed.
-* A read-only open fails with `DatabaseError::LockProtocolMismatch` while a read-only handle of
-  redb 4.3 or 4.4 has the file open, in `ExclusiveWriter` mode as in the other modes. 4.5 and 4.6
-  opened beside such a handle in `ExclusiveWriter` mode.
-* A database file is locked with byte-range locks alone, rather than also with the whole-file lock
-  earlier versions take. On Linux, do not use redb 4.2 or earlier on a database that redb 5 has
-  open: only an `ExclusiveWriter` writer detects them.
-* `&str`, `String`, `bool` and `char` declare a `NICHE`, so `Option` of them is stored without a
-  tag byte. Tables of these `Option` types written by earlier versions no longer open as before:
-  open them as `Option<Legacy<T>>`, at any depth of nesting, and migrate by copying them into a
-  new table. The file format is unchanged.
-* The type check cannot detect a `Value` implementation of your own whose encoding goes through
-  `Option<&str>`, `Option<String>`, `Option<bool>` or `Option<char>`, including inside a `Vec`,
-  array or tuple, while its `TypeName` stays the same: redb 5 silently misreads its existing
-  tables. Read them with a version of the type that encodes through `Option<Legacy<T>>` instead,
-  and give the new encoding a new `TypeName`.
 
-### New features
-* Add `Legacy<T>`, which is `T` without the niche it declares, for opening tables written before
-  `T` declared one.
-* Add `BackendError::Other`, for a storage backend failure that is not an `io::Error`. It is
+### Breaking changes
+`&str`, `String`, `bool`, and `char` now declare a `NICHE`, which optimizes the storage of an `Option`
+of these types. The new encoding is not compatible with the one used in prior versions.
+Tables that contain these `Option` types, and were created prior to version 5.0, will fail to open with
+`TableTypeMismatch`. To load them, wrap the inner type in the new `Legacy` type. For example,
+`TableDefinition<u64, Option<&str>>` becomes `TableDefinition<u64, Option<Legacy<&str>>>`. This also
+applies to an `Option` that is nested inside another type, such as a tuple.
+The recommended pattern to migrate is to create a new table, and then copy the data from the old table to the new table.
+
+**Important: If you have implemented `Value` for your own type, and its encoding uses
+`Option<&str>`, `Option<String>`, `Option<bool>`, or `Option<char>` (including inside a `Vec`,
+array, or tuple), redb cannot detect the change and will silently misread existing tables.
+Change the implementation to use `Option<Legacy<T>>` to read existing tables, and use a new
+`TypeName` for the new encoding.**
+
+A number of other APIs have been changed in breaking ways:
+* Remove the inherent `get()` and `range()` methods of `ReadOnlyTable` and `ReadOnlyMultimapTable`.
+  They returned `'static` guards and iterators, which did not keep the transaction alive. Use the
+  methods on `ReadableTable` and `ReadableMultimapTable` instead, which borrow the table, or
+  `get_owned()` and `range_owned()` if the result must outlive the table.
+* Change `Range` and `MultimapRange` to borrow the table until they are dropped. Mutating a table
+  while a range over it is still in scope could panic, and is now a compile error.
+* Change `Entry`, `OccupiedEntry`, and `VacantEntry` to take a second lifetime, for the key, which
+  no longer needs to live as long as the borrow of the table. For example, `Entry<'_, K, V>`
+  becomes `Entry<'_, '_, K, V>`.
+* Change `FileBackend::new()` to return `FileBackend` instead of a `Result`.
+* Change `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` to be required methods.
+  Implementations of `ReadableTable` must provide them.
+* Change `ReadableDatabase` to be a sealed trait. It can no longer be implemented outside of redb.
+* Remove `Table::extract_from_if()`. Use `extract_if()` instead.
+* Change `Table::extract_if()` to take a range as its first argument, like
+  `BTreeMap::extract_if()`. Use `extract_if(.., predicate)` to visit the whole table.
+* Remove `Builder::create_file()`. Use `Builder::create_with_backend(FileBackend::new(file))`
+  instead.
+* Remove `WriteTransaction::print_allocated_page_debug()`.
+* Remove `From<PoisonError<T>>` for `StorageError` and `Error`.
+* Change `range()`, `range_owned()`, `retain_in()`, and `extract_if()` to take a `KeyRange` instead
+  of a `RangeBounds`. The key type no longer needs to be specified. For example,
+  `table.range::<u64>(..)` becomes `table.range(..)`. Implementations of `ReadableTable` and
+  `ReadableMultimapTable` must update the signature of `range()`.
+* Change the I/O methods of `StorageBackend` to return `BackendError` instead of `io::Error`. An
+  `io::Error` can still be converted with `?`. Note that an `io::Error` of kind `Unsupported` is
+  now converted to `BackendError::Io` instead of `BackendError::Unsupported`. Lock methods may
+  return either to indicate that locking is not supported.
+* Change the `TableTypeMismatch` and `TypeDefinitionChanged` variants of `TableError` and `Error`
+  to contain a `Box`. Their fields are replaced by methods on the new `TableTypeMismatch` and
+  `TypeDefinitionInfo` structs. `TableTypeMismatch` also reports the types that the table was
+  opened with. `alignment` has been removed, because it was always 1.
+
+### `no_std` support
+redb can now be built without the standard library, for use on embedded targets, by disabling the
+`std` feature.
+
+If you depend on redb with `default-features = false`, add `features = ["std"]` to continue
+building with the standard library.
+
+### File locking changes
+Database files are now locked using only byte-range locks. Prior versions also acquired a lock on
+the whole file. On Linux, do not use redb 4.2 or earlier on a database that redb 5 has open. Their
+locking is incompatible, and only an `ExclusiveWriter` writer can detect the older version.
+
+A read-only open now fails with `DatabaseError::LockProtocolMismatch` if a read-only handle from
+redb 4.3 or 4.4 has the file open. Previously, this was allowed in `ExclusiveWriter` mode.
+
+### Other changes
+* Add `Legacy<T>`, for reading tables of `Option<T>` that were created prior to version 5.0.
+* Add `BackendError::Other`, for errors from a storage backend that are not an `io::Error`. It is
   reported as `StorageError::Backend` and `Error::Backend`.
-* Turning off the `std` feature builds redb as a `no_std` crate, for embedded targets. It requires
-  `alloc`, `panic = "abort"`, and a target with atomic compare-and-swap -- Cortex-M3 and above,
-  but not Cortex-M0. Storage is supplied through `Builder::create_with_backend()` or
-  `Builder::open_read_only_with_backend()`; the file backend and everything that opens a database
-  from a path or a `File` are unavailable. The `Io` variants of `BackendError`, `StorageError` and
-  `Error` require std; without it, a backend reports its failures with `BackendError::Other`. The
-  `chrono_v0_4` and `uuid` features require std, and `cache_metrics` requires a target with 64-bit
-  atomics.
 
 ### Bug fixes
-* Fix `compact()` on a `SingleWriter` or `MultiWriter` database returning
-  `CompactionError::TransactionInProgress` while a writable `ExclusiveWriter` open of the same file
-  was being refused.
+* Fix a bug where `compact()` on a `SingleWriter` or `MultiWriter` database could return
+  `CompactionError::TransactionInProgress`, while an attempt to open the same file for writing in
+  `ExclusiveWriter` mode was being refused.
 
 ## redb-derive 0.2.1 - 2026-11-13
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
