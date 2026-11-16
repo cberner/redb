@@ -227,7 +227,8 @@ impl PyDatabase {
     fn compact(&self, py: Python<'_>) -> PyResult<bool> {
         let mut guard = self.exclusive()?;
         let db = guard.as_mut().ok_or_else(closed)?;
-        py.detach(|| db.compact()).pyerr()
+        py.detach(|| db.compact(::redb::CompactionMode::Balanced))
+            .pyerr()
     }
 
     /// Verifies every page of the file: `True` if it was sound, `False` if it had to be

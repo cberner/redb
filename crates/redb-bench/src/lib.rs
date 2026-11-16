@@ -1022,7 +1022,7 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
     }
 
     fn compact(&mut self) -> bool {
-        self.db.compact().unwrap();
+        self.db.compact(redb::CompactionMode::Balanced).unwrap();
         true
     }
 }

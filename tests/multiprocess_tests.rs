@@ -1,7 +1,7 @@
 #[cfg(any(target_os = "linux", target_vendor = "apple", windows))]
 use redb::backends::FileBackend;
 use redb::backends::InMemoryBackend;
-use redb::{ConcurrencyMode, Database, DatabaseError, StorageError};
+use redb::{CompactionMode, ConcurrencyMode, Database, DatabaseError, StorageError};
 
 /// The modes in which processes share a file
 fn shared_modes() -> &'static [ConcurrencyMode] {
@@ -416,7 +416,7 @@ fn compact_beside_refused_opens(open: fn(&std::path::Path) -> Result<(), Databas
         while refused.load(Ordering::Relaxed) == 0 {
             std::thread::yield_now();
         }
-        let compacted = (0..300).try_for_each(|_| db.compact().map(|_| ()));
+        let compacted = (0..300).try_for_each(|_| db.compact(CompactionMode::Balanced).map(|_| ()));
         stop.store(true, Ordering::Relaxed);
         opener.join().unwrap();
         compacted.unwrap_or_else(|err| panic!("{mode:?}: {err:?}"));
@@ -760,7 +760,7 @@ mod peer_commits {
 
         db.begin_write().unwrap().abort().unwrap();
         assert!(matches!(
-            db.compact(),
+            db.compact(CompactionMode::Balanced),
             Err(CompactionError::PersistentSavepointExists)
         ));
         let txn = db.begin_write().unwrap();
@@ -780,7 +780,7 @@ mod peer_commits {
         assert!(txn.delete_persistent_savepoint(own_savepoint).unwrap());
         txn.commit().unwrap();
         // Straight to the compaction: it refreshes the savepoints the peer deleted itself
-        db.compact().unwrap();
+        db.compact(CompactionMode::Balanced).unwrap();
     }
 
     #[test]
@@ -857,7 +857,7 @@ mod peer_commits {
             txn.abort().unwrap();
             drop(replacement);
             drop(another_handle);
-            db.compact().unwrap();
+            db.compact(CompactionMode::Balanced).unwrap();
             assert!(db.check_integrity().unwrap());
         }
     }
@@ -1536,14 +1536,14 @@ mod compaction {
             let pinned = reader.begin_read().unwrap();
             assert!(
                 matches!(
-                    writer.compact(),
+                    writer.compact(CompactionMode::Balanced),
                     Err(CompactionError::TransactionInProgress)
                 ),
                 "{mode:?}"
             );
 
             drop(pinned);
-            writer.compact().unwrap();
+            writer.compact(CompactionMode::Balanced).unwrap();
             let read = reader.begin_read().unwrap();
             let t = read.open_table(TABLE).unwrap();
             assert_eq!(t.get(&0).unwrap().unwrap().value(), [1u8; 512].as_slice());
@@ -1593,7 +1593,7 @@ mod compaction {
                 }
                 assert!(
                     matches!(
-                        writer.compact(),
+                        writer.compact(CompactionMode::Balanced),
                         Err(CompactionError::TransactionInProgress)
                     ),
                     "{mode:?}, multimap={multimap}"
@@ -1608,7 +1608,7 @@ mod compaction {
                 assert_eq!(after.branch_pages(), before.branch_pages());
 
                 drop(table);
-                writer.compact().unwrap();
+                writer.compact(CompactionMode::Balanced).unwrap();
             }
         }
     }
@@ -1641,7 +1641,10 @@ mod compaction {
             txn.commit().unwrap();
 
             let before = std::fs::metadata(tmpfile.path()).unwrap().len();
-            assert!(writer.compact().unwrap(), "{mode:?}");
+            assert!(
+                writer.compact(CompactionMode::Balanced).unwrap(),
+                "{mode:?}"
+            );
             let after = std::fs::metadata(tmpfile.path()).unwrap().len();
             assert!(after < before, "{mode:?}: {before} -> {after}");
 

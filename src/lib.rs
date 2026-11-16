@@ -71,12 +71,12 @@
 // std builds.
 extern crate alloc;
 
-pub use db::ConcurrencyMode;
 pub use db::{
     Builder, CacheStats, Database, MultimapTableDefinition, MultimapTableHandle, ReadOnlyDatabase,
     ReadableDatabase, RepairSession, StorageBackend, TableDefinition, TableHandle,
     UntypedMultimapTableHandle, UntypedTableHandle,
 };
+pub use db::{CompactionMode, ConcurrencyMode};
 pub use error::{
     BackendError, CommitError, CompactionError, CursorError, DatabaseError, Error, SavepointError,
     SetDurabilityError, StorageError, TableError, TransactionError,
