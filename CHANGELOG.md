@@ -75,6 +75,9 @@ redb 4.3 or 4.4 has the file open. Previously, this was allowed in `ExclusiveWri
 * Fix a bug where `compact()` on a `SingleWriter` or `MultiWriter` database could return
   `CompactionError::TransactionInProgress`, while an attempt to open the same file for writing in
   `ExclusiveWriter` mode was being refused.
+* Fix a process abort when a panic, such as one from a `StorageBackend`, unwound while a page of
+  the write buffer was in use. The panic now propagates, and later operations return
+  `StorageError::PreviousIo` until the database is reopened.
 
 ## redb-derive 0.2.1 - 2026-11-13
 * The derived implementations no longer name `std`, so `#[derive(Key)]` and `#[derive(Value)]`
