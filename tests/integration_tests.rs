@@ -3,10 +3,10 @@ use rand::prelude::SliceRandom;
 use redb::KeyRange;
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{
-    AccessGuard, BackendError, Builder, CommitError, CompactionError, Database, Durability, Key,
-    MultimapRange, MultimapTableDefinition, MultimapValue, Range, ReadableDatabase, ReadableTable,
-    ReadableTableMetadata, SetDurabilityError, StorageBackend, TableDefinition, TableStats,
-    TransactionError, Value, WriteTransaction,
+    AccessGuard, BackendError, Builder, CommitError, CompactionError, CompactionMode, Database,
+    Durability, Key, MultimapRange, MultimapTableDefinition, MultimapValue, Range,
+    ReadableDatabase, ReadableTable, ReadableTableMetadata, SetDurabilityError, StorageBackend,
+    TableDefinition, TableStats, TransactionError, Value, WriteTransaction,
 };
 use redb::{DatabaseError, ReadableMultimapTable, SavepointError, StorageError, TableError};
 use std::borrow::Borrow;
@@ -1822,7 +1822,7 @@ fn small_db_is_small_file() {
     drop(table);
     wtx.commit().unwrap();
 
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 
     drop(db);
     let metadata = tmpfile.as_file().metadata().unwrap();
@@ -2965,7 +2965,7 @@ fn regression21() {
 
     write_tx.commit().unwrap();
     assert!(matches!(
-        db.compact().unwrap_err(),
+        db.compact(CompactionMode::Balanced).unwrap_err(),
         CompactionError::TransactionInProgress
     ));
     drop(read_tx);
@@ -4145,7 +4145,7 @@ fn compaction() {
     let file_size = tmpfile.as_file().metadata().unwrap().len();
     let mut db = Database::open(tmpfile.path()).unwrap();
 
-    assert!(db.compact().unwrap());
+    assert!(db.compact(CompactionMode::Balanced).unwrap());
     drop(db);
     let file_size2 = tmpfile.as_file().metadata().unwrap().len();
     assert!(file_size2 < file_size);
@@ -4166,7 +4166,7 @@ fn compact_after_non_durable_commit() {
     txn.commit().unwrap();
 
     // The pending non-durable root pins its durable ancestor internally.
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 #[test]
@@ -4194,7 +4194,7 @@ fn compact_after_post_commit_page_reuse() {
     }
     txn.commit().unwrap();
 
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 // Regression test for https://github.com/cberner/redb/issues/1165: a packed
@@ -4224,7 +4224,7 @@ fn compact_does_not_grow_file() {
 
     {
         let mut db = Database::open(tmpfile.path()).unwrap();
-        db.compact().unwrap();
+        db.compact(CompactionMode::Balanced).unwrap();
     }
 
     let after = tmpfile.as_file().metadata().unwrap().len();
@@ -4252,7 +4252,7 @@ fn compact_returns_persistent_savepoint_error() {
     let _id = txn.persistent_savepoint().unwrap();
     txn.commit().unwrap();
 
-    let err = db.compact().unwrap_err();
+    let err = db.compact(CompactionMode::Balanced).unwrap_err();
     assert!(
         matches!(err, CompactionError::PersistentSavepointExists),
         "expected PersistentSavepointExists, got {err:?}"
@@ -4277,7 +4277,7 @@ fn compact_returns_ephemeral_savepoint_error() {
     let savepoint = txn.ephemeral_savepoint().unwrap();
     txn.commit().unwrap();
 
-    let err = db.compact().unwrap_err();
+    let err = db.compact(CompactionMode::Balanced).unwrap_err();
     assert!(
         matches!(err, CompactionError::EphemeralSavepointExists),
         "expected EphemeralSavepointExists, got {err:?}"
@@ -4305,7 +4305,7 @@ fn compact_returns_persistent_savepoint_error_after_reopen() {
     }
 
     let mut db = Database::open(tmpfile.path()).unwrap();
-    let err = db.compact().unwrap_err();
+    let err = db.compact(CompactionMode::Balanced).unwrap_err();
     assert!(
         matches!(err, CompactionError::PersistentSavepointExists),
         "expected PersistentSavepointExists, got {err:?}"
@@ -4326,7 +4326,7 @@ fn compact_returns_transaction_in_progress_error() {
     txn.commit().unwrap();
 
     let read_txn = db.begin_read().unwrap();
-    let err = db.compact().unwrap_err();
+    let err = db.compact(CompactionMode::Balanced).unwrap_err();
     assert!(
         matches!(err, CompactionError::TransactionInProgress),
         "expected TransactionInProgress, got {err:?}"
@@ -4334,7 +4334,7 @@ fn compact_returns_transaction_in_progress_error() {
     drop(read_txn);
 
     // Once the read transaction is dropped, compaction is allowed
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 // compact() must not block when the caller still holds the write transaction that created a
@@ -4358,7 +4358,7 @@ fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let result = db.compact();
+        let result = db.compact(CompactionMode::Balanced);
         sender.send(()).unwrap();
         (db, result)
     });
@@ -4374,7 +4374,7 @@ fn compact_does_not_block_on_held_write_transaction_with_savepoint() {
 
     drop(savepoint);
     txn.abort().unwrap();
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 // The same with no savepoint: a held write transaction is a transaction in progress, not a
@@ -4387,7 +4387,7 @@ fn compact_does_not_block_on_held_write_transaction() {
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let result = db.compact();
+        let result = db.compact(CompactionMode::Balanced);
         sender.send(()).unwrap();
         (db, result)
     });
@@ -4402,7 +4402,7 @@ fn compact_does_not_block_on_held_write_transaction() {
     );
 
     txn.abort().unwrap();
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 // A persistent savepoint created by a still-uncommitted transaction must already block
@@ -4423,7 +4423,7 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
 
     let (sender, receiver) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let result = db.compact();
+        let result = db.compact(CompactionMode::Balanced);
         sender.send(()).unwrap();
         (db, result)
     });
@@ -4439,7 +4439,7 @@ fn compact_returns_persistent_savepoint_error_before_commit() {
 
     // Aborting rolls back the persistent savepoint, so compaction is allowed again
     txn.abort().unwrap();
-    db.compact().unwrap();
+    db.compact(CompactionMode::Balanced).unwrap();
 }
 
 fn require_send<T: Send>(_: &T) {}

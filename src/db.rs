@@ -1231,10 +1231,11 @@ impl Database {
         )?)
     }
 
-    /// Compacts the database file
+    /// Compacts the database file, as thoroughly as `mode` asks
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
-    pub fn compact(&mut self) -> Result<bool, CompactionError> {
+    pub fn compact(&mut self, mode: CompactionMode) -> Result<bool, CompactionError> {
+        let CompactionMode::Balanced = mode;
         // These checks must run before begin_write(): the caller may legally hold an open
         // WriteTransaction (it is not lifetime-bound to the Database), on which begin_write()
         // below would wait forever. Savepoints must be diagnosed before read references,
@@ -2244,6 +2245,18 @@ impl ConcurrencyMode {
     }
 }
 
+/// How thoroughly [`Database::compact()`] compacts the database file
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+#[non_exhaustive]
+pub enum CompactionMode {
+    /// Balances how much the file shrinks against insert performance after the compaction. Moves
+    /// pages towards the start of the file, and truncates the free space this leaves at its end,
+    /// but keeps the contents of each page: the free space inside partially filled pages is left
+    /// for later inserts to fill, without splitting pages. The default.
+    #[default]
+    Balanced,
+}
+
 // How an open treats a file that needs a repair, or is asked for one
 struct RepairConfig<'a> {
     check_integrity: bool,
@@ -2963,7 +2976,7 @@ mod test {
         }
         txn.commit().unwrap();
 
-        assert!(db.compact().unwrap());
+        assert!(db.compact(super::CompactionMode::Balanced).unwrap());
         let file_size = tmpfile.as_file().metadata().unwrap().len();
         assert!(file_size < 2 * region_size, "{file_size}");
     }
@@ -3526,7 +3539,7 @@ mod writer_byte_test {
         let mut db = create(tmpfile.path(), ConcurrencyMode::MultiWriter);
         commit_one(&db);
 
-        db.compact().unwrap();
+        db.compact(super::CompactionMode::Balanced).unwrap();
         assert!(
             Database::get_allocator_state_table(&db.mem)
                 .unwrap()
