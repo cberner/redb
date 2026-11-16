@@ -2618,23 +2618,25 @@ impl WriteTransaction {
 
 impl Drop for WriteTransaction {
     fn drop(&mut self) {
-        if !self.completed && !crate::panicking() && !self.mem.storage_failure() {
-            #[allow(unused_variables)]
-            if let Err(error) = self.abort_inner() {
-                #[cfg(feature = "logging")]
-                warn!("Failure automatically aborting transaction: {error}");
-            }
-        } else if !self.completed && self.mem.storage_failure() {
+        if self.completed {
+            // Nothing to roll back
+        } else if crate::panicking() {
+            // The abort is skipped while unwinding, leaking this transaction's pages: the
+            // session stays usable, but the leak must not outlive the process. The tables
+            // are not locked, even after a storage failure: the panic may have poisoned them
+            self.mem.mark_needs_repair();
+        } else if self.mem.storage_failure() {
             self.tables
                 .lock()
                 .unwrap()
                 .table_tree
                 .clear_root_updates_and_close();
-        } else if !self.completed {
-            // The abort is skipped while unwinding, leaking this transaction's pages: the
-            // session stays usable, but the leak must not outlive the process
-            assert!(crate::panicking());
-            self.mem.mark_needs_repair();
+        } else {
+            #[allow(unused_variables)]
+            if let Err(error) = self.abort_inner() {
+                #[cfg(feature = "logging")]
+                warn!("Failure automatically aborting transaction: {error}");
+            }
         }
         // A failed commit or panic may skip abort_inner(). Retire any remaining registrations
         // before releasing the writer lock, since peers can reuse their persistent IDs.

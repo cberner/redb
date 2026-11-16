@@ -296,6 +296,88 @@ fn previous_io_error() {
     ));
 }
 
+// An in-memory backend whose writes panic while the flag is set
+#[cfg(panic = "unwind")]
+#[derive(Debug)]
+struct PanickingBackend {
+    inner: SharedInMemoryBackend,
+    panic_writes: Arc<AtomicBool>,
+}
+
+#[cfg(panic = "unwind")]
+impl StorageBackend for PanickingBackend {
+    fn len(&self) -> Result<u64, BackendError> {
+        self.inner.len()
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), BackendError> {
+        self.inner.read(offset, out)
+    }
+
+    fn set_len(&self, len: u64) -> Result<(), BackendError> {
+        self.inner.set_len(len)
+    }
+
+    fn sync_data(&self) -> Result<(), BackendError> {
+        self.inner.sync_data()
+    }
+
+    fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
+        assert!(!self.panic_writes.load(Ordering::SeqCst), "backend panic");
+        self.inner.write(offset, data)
+    }
+}
+
+// A panic while part of the write buffer is locked may lose buffered pages. It surfaces as that
+// panic, and fails the storage so that nothing is committed afterwards
+#[cfg(panic = "unwind")]
+#[test]
+fn panic_in_write_buffer_fails_storage() {
+    let storage = SharedInMemoryBackend::default();
+    let panic_writes = Arc::new(AtomicBool::new(false));
+    let backend = PanickingBackend {
+        inner: storage.clone(),
+        panic_writes: panic_writes.clone(),
+    };
+    // Zero cache, so that dirty pages are written to the backend as they are buffered
+    let db = Builder::new()
+        .set_cache_size(0)
+        .create_with_backend(backend)
+        .unwrap();
+
+    let txn = db.begin_write().unwrap();
+    {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        table.insert(&0, &0).unwrap();
+    }
+    txn.commit().unwrap();
+
+    let txn = db.begin_write().unwrap();
+    panic_writes.store(true, Ordering::SeqCst);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut table = txn.open_table(U64_TABLE).unwrap();
+        for i in 1..10_000u64 {
+            table.insert(&i, &i).unwrap();
+        }
+    }))
+    .err()
+    .unwrap();
+    assert_eq!(*panic.downcast_ref::<&str>().unwrap(), "backend panic");
+    panic_writes.store(false, Ordering::SeqCst);
+    drop(txn);
+
+    assert!(matches!(
+        db.begin_write().err().unwrap(),
+        TransactionError::Storage(StorageError::PreviousIo)
+    ));
+    drop(db);
+
+    let db = Database::builder().create_with_backend(storage).unwrap();
+    let table = db.begin_read().unwrap().open_table(U64_TABLE).unwrap();
+    assert_eq!(table.len().unwrap(), 1);
+    assert_eq!(table.get(&0).unwrap().unwrap().value(), 0);
+}
+
 #[test]
 fn close_returns_errors() {
     let open = || {
@@ -588,6 +670,42 @@ fn extract_if_error_commit_reports_storage_failure() {
     assert!(matches!(
         err,
         CommitError::Storage(StorageError::PreviousIo)
+    ));
+}
+
+// As above, for a panic that also poisons the transaction's tables lock. Dropping the
+// transaction during the unwind must not panic on that lock, which would abort the process
+#[cfg(panic = "unwind")]
+#[test]
+fn panic_in_open_table_fails_storage() {
+    let storage = SharedInMemoryBackend::default();
+    let panic_writes = Arc::new(AtomicBool::new(false));
+    let backend = PanickingBackend {
+        inner: storage.clone(),
+        panic_writes: panic_writes.clone(),
+    };
+    let db = Builder::new()
+        .set_cache_size(0)
+        .create_with_backend(backend)
+        .unwrap();
+
+    let txn = db.begin_write().unwrap();
+    panic_writes.store(true, Ordering::SeqCst);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        for i in 0..10_000 {
+            let name = format!("table{i}");
+            let definition: TableDefinition<u64, u64> = TableDefinition::new(&name);
+            txn.open_table(definition).unwrap();
+        }
+    }))
+    .err()
+    .unwrap();
+    assert_eq!(*panic.downcast_ref::<&str>().unwrap(), "backend panic");
+    panic_writes.store(false, Ordering::SeqCst);
+
+    assert!(matches!(
+        db.begin_write().err().unwrap(),
+        TransactionError::Storage(StorageError::PreviousIo)
     ));
 }
 
