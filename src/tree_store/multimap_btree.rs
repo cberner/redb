@@ -280,6 +280,17 @@ pub(super) fn relocate_subtrees(
     Ok((new_page_number, DEFERRED))
 }
 
+// The subtree that a multimap table's value holds, if its values are not inline
+pub(super) fn collection_subtree(value: &[u8]) -> Option<BtreeHeader> {
+    let collection = UntypedDynamicCollection::from_bytes(value);
+    matches!(collection.collection_type(), SubtreeV2).then(|| collection.as_subtree())
+}
+
+// A multimap table's value that holds the subtree at `root`
+pub(super) fn subtree_collection(root: BtreeHeader) -> Vec<u8> {
+    UntypedDynamicCollection::make_subtree_data(root)
+}
+
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees
 // Returns the root checksum
 pub(super) fn finalize_tree_and_subtree_checksums(

@@ -1235,7 +1235,6 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self, mode: CompactionMode) -> Result<bool, CompactionError> {
-        let CompactionMode::Balanced = mode;
         // These checks must run before begin_write(): the caller may legally hold an open
         // WriteTransaction (it is not lifetime-bound to the Database), on which begin_write()
         // below would wait forever. Savepoints must be diagnosed before read references,
@@ -1318,7 +1317,9 @@ impl Database {
             header_lock.as_ref(),
         )?;
 
-        let mut compacted = false;
+        // Packed before the pages are moved, so that the moves fill the space that packing frees
+        let mut compacted = mode == CompactionMode::Maximum
+            && self.pack_tables(writer_lock.as_ref(), header_lock.as_ref())?;
         // Iteratively compact until no progress is made
         loop {
             let mut progress = false;
@@ -1365,6 +1366,36 @@ impl Database {
         }
 
         Ok(compacted)
+    }
+
+    // Packs the tables into as few pages as their entries fit, a bounded pass per commit, until a
+    // pass finds nothing left to pack. Returns whether any table changed
+    fn pack_tables(
+        &self,
+        writer_lock: Option<&Arc<WriterLock>>,
+        header_lock: Option<&HeaderGuard<'_>>,
+    ) -> Result<bool, CompactionError> {
+        let mut packed = false;
+        loop {
+            // The packed pages fill the lowest free pages, such as those earlier passes freed
+            let mut txn = begin_write_with_allocation_policy(
+                &self.transaction_tracker,
+                &self.mem,
+                writer_lock,
+                header_lock,
+                AllocationPolicy::Lowest,
+            )
+            .map_err(|e| e.into_storage_error())?;
+            txn.skip_allocator_state_record();
+            if !txn.pack_tables()? {
+                txn.abort()?;
+                return Ok(packed);
+            }
+            txn.commit_with(header_lock)
+                .map_err(|e| e.into_storage_error())?;
+            self.drain_pending_free_pages(ShrinkPolicy::Maximum, writer_lock, header_lock)?;
+            packed = true;
+        }
     }
 
     fn drain_pending_free_pages(
@@ -2255,6 +2286,13 @@ pub enum CompactionMode {
     /// for later inserts to fill, without splitting pages. The default.
     #[default]
     Balanced,
+    /// Also packs the entries of partially filled pages into as few pages as they fit.
+    ///
+    /// Slower than [`CompactionMode::Balanced`], since the entries of those pages are copied. It
+    /// rewrites a bounded number of pages per commit, so neither the memory it uses nor how far it
+    /// may temporarily grow the file depends on the size of the database. Every page it rewrites
+    /// is left full, so inserts into a table are slower until its pages have split.
+    Maximum,
 }
 
 // How an open treats a file that needs a repair, or is asked for one
@@ -5096,5 +5134,188 @@ mod active_transaction_test {
         drop(writer_lock);
         assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod maximum_compaction_test {
+    use super::{CompactionMode, Database};
+    use crate::{
+        MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable, ReadableTable,
+        TableDefinition,
+    };
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::vec::Vec;
+
+    const BYTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bytes");
+    const FIXED: TableDefinition<u64, u64> = TableDefinition::new("fixed");
+    const MULTI: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("multi");
+
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: u64) -> usize {
+            usize::try_from(self.next() % bound).unwrap()
+        }
+
+        fn bytes(&mut self, len: usize) -> Vec<u8> {
+            (0..len).map(|_| self.next().to_le_bytes()[0]).collect()
+        }
+    }
+
+    fn check(
+        db: &Database,
+        bytes: &BTreeMap<Vec<u8>, Vec<u8>>,
+        fixed: &BTreeMap<u64, u64>,
+        multi: &BTreeMap<u64, BTreeSet<Vec<u8>>>,
+    ) {
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(BYTES).unwrap();
+        let stored: Vec<(Vec<u8>, Vec<u8>)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value().to_vec(), value.value().to_vec())
+            })
+            .collect();
+        assert!(
+            stored
+                .into_iter()
+                .eq(bytes.iter().map(|(k, v)| (k.clone(), v.clone())))
+        );
+
+        let table = txn.open_table(FIXED).unwrap();
+        let stored: Vec<(u64, u64)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value(), value.value())
+            })
+            .collect();
+        assert!(stored.into_iter().eq(fixed.iter().map(|(k, v)| (*k, *v))));
+
+        let table = txn.open_multimap_table(MULTI).unwrap();
+        let mut stored: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for entry in table.iter().unwrap() {
+            let (key, values) = entry.unwrap();
+            for value in values {
+                stored
+                    .entry(key.value())
+                    .or_default()
+                    .insert(value.unwrap().value().to_vec());
+            }
+        }
+        assert_eq!(&stored, multi);
+    }
+
+    // Small pages make deep trees, keys too large to share a branch page, and many values of a
+    // page or more
+    #[test]
+    fn random_workloads_with_small_pages() {
+        for seed in 1..=6 {
+            let tmpfile = crate::create_tempfile();
+            let mut db = Database::builder()
+                .set_page_size(512)
+                .create(tmpfile.path())
+                .unwrap();
+            let mut rng = XorShift(seed);
+            let mut bytes: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+            let mut fixed: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut multi: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+
+            for round in 0..5 {
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut table = txn.open_table(BYTES).unwrap();
+                    for _ in 0..rng.below(2_000) {
+                        let key_len = if rng.below(50) == 0 {
+                            200 + rng.below(400)
+                        } else {
+                            1 + rng.below(40)
+                        };
+                        let key = rng.bytes(key_len);
+                        let value_len = if rng.below(20) == 0 {
+                            rng.below(2_000)
+                        } else {
+                            rng.below(80)
+                        };
+                        let value = rng.bytes(value_len);
+                        table.insert(key.as_slice(), value.as_slice()).unwrap();
+                        bytes.insert(key, value);
+                    }
+                    // Every few rounds, removes nearly everything
+                    let keep = if round % 3 == 2 { 20 } else { 2 + rng.below(4) };
+                    let keys: Vec<Vec<u8>> = bytes.keys().cloned().collect();
+                    for key in keys {
+                        if rng.below(keep as u64) != 0 {
+                            table.remove(key.as_slice()).unwrap();
+                            bytes.remove(&key);
+                        }
+                    }
+                }
+                {
+                    let mut table = txn.open_table(FIXED).unwrap();
+                    for _ in 0..rng.below(5_000) {
+                        let key = rng.next();
+                        let value = rng.next();
+                        table.insert(key, value).unwrap();
+                        fixed.insert(key, value);
+                    }
+                    let keys: Vec<u64> = fixed.keys().copied().collect();
+                    for key in keys {
+                        if rng.below(3) == 0 {
+                            table.remove(key).unwrap();
+                            fixed.remove(&key);
+                        }
+                    }
+                }
+                {
+                    let mut table = txn.open_multimap_table(MULTI).unwrap();
+                    for _ in 0..rng.below(100) {
+                        let key = rng.next() % 64;
+                        let count = if rng.below(4) == 0 {
+                            rng.below(300)
+                        } else {
+                            rng.below(5)
+                        };
+                        for _ in 0..count {
+                            let value_len = 1 + rng.below(30);
+                            let value = rng.bytes(value_len);
+                            table.insert(key, value.as_slice()).unwrap();
+                            multi.entry(key).or_default().insert(value);
+                        }
+                    }
+                    for (key, values) in &mut multi {
+                        let removed: Vec<Vec<u8>> = values
+                            .iter()
+                            .filter(|_| rng.below(3) == 0)
+                            .cloned()
+                            .collect();
+                        for value in removed {
+                            assert!(table.remove(*key, value.as_slice()).unwrap());
+                            values.remove(&value);
+                        }
+                    }
+                    multi.retain(|_, values| !values.is_empty());
+                }
+                txn.commit().unwrap();
+
+                db.compact(CompactionMode::Maximum).unwrap();
+                check(&db, &bytes, &fixed, &multi);
+                assert!(db.check_integrity().unwrap(), "seed {seed} round {round}");
+                assert!(!db.compact(CompactionMode::Maximum).unwrap());
+            }
+        }
     }
 }

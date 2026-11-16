@@ -4234,6 +4234,372 @@ fn compact_does_not_grow_file() {
     );
 }
 
+mod maximum_compaction {
+    use super::create_tempfile;
+    use redb::{
+        CompactionError, CompactionMode, Database, MultimapTableDefinition, ReadableDatabase,
+        ReadableMultimapTable, ReadableTable, ReadableTableMetadata, TableDefinition,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::Path;
+
+    // Deterministic, so that a failure reproduces
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn bytes(&mut self, len: usize) -> Vec<u8> {
+            (0..len).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().len()
+    }
+
+    fn leaf_pages(db: &Database) -> u64 {
+        let txn = db.begin_write().unwrap();
+        let pages = txn.stats().unwrap().leaf_pages();
+        txn.abort().unwrap();
+        pages
+    }
+
+    fn check_table(
+        db: &Database,
+        definition: TableDefinition<&[u8], &[u8]>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) {
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(definition).unwrap();
+        assert_eq!(table.len().unwrap(), expected.len() as u64);
+        let mut entries = table.range(..).unwrap();
+        for (key, value) in expected {
+            let (stored_key, stored_value) = entries.next().unwrap().unwrap();
+            assert_eq!(stored_key.value(), key.as_slice());
+            assert_eq!(stored_value.value(), value.as_slice());
+        }
+        assert!(entries.next().is_none());
+        for (key, value) in expected.iter().step_by(97) {
+            assert_eq!(
+                table.get(key.as_slice()).unwrap().unwrap().value(),
+                value.as_slice()
+            );
+        }
+    }
+
+    // Random inserts leave pages partially filled, which a quick compaction cannot reclaim
+    #[test]
+    fn packs_partially_filled_pages() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+        let mut rng = XorShift(1);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..20_000 {
+                let key = rng.bytes(24);
+                let value = rng.bytes(150);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            let keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+            for key in keys {
+                if rng.next().is_multiple_of(2) {
+                    table.remove(key.as_slice()).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let quick_len = file_len(tmpfile.path());
+        let quick_leaves = leaf_pages(&db);
+
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        let maximum_len = file_len(tmpfile.path());
+        let maximum_leaves = leaf_pages(&db);
+        assert!(maximum_len < quick_len, "{maximum_len} >= {quick_len}");
+        assert!(
+            maximum_leaves < quick_leaves,
+            "{maximum_leaves} >= {quick_leaves}"
+        );
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+
+        // Nothing is left to pack
+        assert!(!db.compact(CompactionMode::Maximum).unwrap());
+        assert_eq!(file_len(tmpfile.path()), maximum_len);
+
+        // The packed tree takes writes, which split its full pages
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..2_000 {
+                let key = rng.bytes(24);
+                let value = rng.bytes(150);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+            let keys: Vec<Vec<u8>> = expected.keys().step_by(3).cloned().collect();
+            for key in keys {
+                table.remove(key.as_slice()).unwrap();
+                expected.remove(&key);
+            }
+        }
+        txn.commit().unwrap();
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+
+        drop(db);
+        let db = Database::open(tmpfile.path()).unwrap();
+        check_table(&db, definition, &expected);
+    }
+
+    // Values of a page or more are kept in leaves of their own, of a larger order
+    #[test]
+    fn packs_mixed_value_sizes() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+        let mut rng = XorShift(2);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for i in 0..3_000 {
+                let key_len = 1 + (rng.next() % 40) as usize;
+                let key = rng.bytes(key_len);
+                let value_len = if i % 50 == 0 {
+                    4096 + (rng.next() % 12_000) as usize
+                } else {
+                    (rng.next() % 600) as usize
+                };
+                let value = rng.bytes(value_len);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            let keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+            for key in keys {
+                if !rng.next().is_multiple_of(3) {
+                    table.remove(key.as_slice()).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let quick_len = file_len(tmpfile.path());
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(file_len(tmpfile.path()) <= quick_len);
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+    }
+
+    #[test]
+    fn packs_fixed_width_tables() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+        let mut rng = XorShift(3);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..100_000 {
+                let key = rng.next();
+                let value = rng.next();
+                table.insert(key, value).unwrap();
+                expected.insert(key, value);
+            }
+            let keys: Vec<u64> = expected.keys().copied().collect();
+            for key in keys {
+                if !rng.next().is_multiple_of(3) {
+                    table.remove(key).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let quick_leaves = leaf_pages(&db);
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(leaf_pages(&db) < quick_leaves);
+        assert!(db.check_integrity().unwrap());
+
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(definition).unwrap();
+        let stored: Vec<(u64, u64)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value(), value.value())
+            })
+            .collect();
+        let expected: Vec<(u64, u64)> = expected.into_iter().collect();
+        assert_eq!(stored, expected);
+    }
+
+    // Values that do not fit inline are kept in a subtree of their key, which is packed too
+    #[test]
+    fn packs_multimap_tables_and_subtrees() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
+        let mut rng = XorShift(4);
+        let mut expected: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_multimap_table(definition).unwrap();
+            for _ in 0..2_000 {
+                let key = rng.next() % 500;
+                let count = if key.is_multiple_of(25) { 400 } else { 4 };
+                for _ in 0..count {
+                    let value_len = 8 + (rng.next() % 40) as usize;
+                    let value = rng.bytes(value_len);
+                    table.insert(key, value.as_slice()).unwrap();
+                    expected.entry(key).or_default().insert(value);
+                }
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_multimap_table(definition).unwrap();
+            for (key, values) in &mut expected {
+                let removed: Vec<Vec<u8>> = values
+                    .iter()
+                    .filter(|_| rng.next().is_multiple_of(2))
+                    .cloned()
+                    .collect();
+                for value in removed {
+                    assert!(table.remove(*key, value.as_slice()).unwrap());
+                    values.remove(&value);
+                }
+            }
+            for key in 0..500 {
+                if key % 7 == 0 {
+                    table.remove_all(key).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        expected.retain(|_, values| !values.is_empty());
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let quick_len = file_len(tmpfile.path());
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(file_len(tmpfile.path()) < quick_len);
+        assert!(db.check_integrity().unwrap());
+
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_multimap_table(definition).unwrap();
+        let mut stored: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for entry in table.iter().unwrap() {
+            let (key, values) = entry.unwrap();
+            for value in values {
+                stored
+                    .entry(key.value())
+                    .or_default()
+                    .insert(value.unwrap().value().to_vec());
+            }
+        }
+        assert_eq!(stored, expected);
+        let total: usize = expected.values().map(BTreeSet::len).sum();
+        assert_eq!(table.len().unwrap(), total as u64);
+    }
+
+    // Tables already packed, empty, or of a single page are left as they are, while the others
+    // are rewritten
+    #[test]
+    fn rewrites_only_tables_that_shrink() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let mut rng = XorShift(5);
+        let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![];
+        let names: Vec<String> = (0..20).map(|i| format!("table_{i}")).collect();
+
+        let txn = db.begin_write().unwrap();
+        for (i, name) in names.iter().enumerate() {
+            let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new(name);
+            let mut table = txn.open_table(definition).unwrap();
+            let mut entries = BTreeMap::new();
+            let count = match i % 4 {
+                0 => 0,
+                1 => 1,
+                _ => 50 * i,
+            };
+            for _ in 0..count {
+                let key = rng.bytes(16);
+                let value = rng.bytes(100);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                entries.insert(key, value);
+            }
+            if i % 4 == 3 {
+                let keys: Vec<Vec<u8>> = entries.keys().cloned().collect();
+                for key in keys {
+                    if rng.next().is_multiple_of(2) {
+                        table.remove(key.as_slice()).unwrap();
+                        entries.remove(&key);
+                    }
+                }
+            }
+            expected.push(entries);
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Maximum).unwrap();
+        assert!(db.check_integrity().unwrap());
+        for (name, entries) in names.iter().zip(&expected) {
+            check_table(&db, TableDefinition::new(name), entries);
+        }
+        assert!(!db.compact(CompactionMode::Maximum).unwrap());
+    }
+
+    #[test]
+    fn refused_while_a_savepoint_exists() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let savepoint = txn.ephemeral_savepoint().unwrap();
+        txn.commit().unwrap();
+        assert!(matches!(
+            db.compact(CompactionMode::Maximum),
+            Err(CompactionError::EphemeralSavepointExists)
+        ));
+        drop(savepoint);
+        db.compact(CompactionMode::Maximum).unwrap();
+    }
+}
+
 // A persistent savepoint must be reported as PersistentSavepointExists, even though it also
 // holds a read reference internally
 #[test]

@@ -580,6 +580,23 @@ pub fn benchmark<T: BenchDatabase + Send + Sync>(
         results.push(("compacted size".to_string(), ResultType::NA));
     }
 
+    let start = Instant::now();
+    if db.compact_maximum() {
+        let duration = start.elapsed();
+        println!(
+            "{}: Compacted in maximum mode in {}ms",
+            T::db_type_name(),
+            duration.as_millis()
+        );
+        let compacted_size = database_size(path);
+        results.push((
+            "compacted size (maximum)".to_string(),
+            ResultType::SizeInBytes(compacted_size),
+        ));
+    } else {
+        results.push(("compacted size (maximum)".to_string(), ResultType::NA));
+    }
+
     // Sorted inserts: pairs whose keys ascend, all past every existing key, loaded
     // through the fastest sorted-insert path the database offers. The keys extend the
     // largest possible random key by a suffix so they sort past every existing entry,
@@ -844,6 +861,12 @@ pub trait BenchDatabase {
     fn compact(&mut self) -> bool {
         false
     }
+
+    // Compacts as thoroughly as the database can, beyond what compact() does. Returns a boolean
+    // indicating whether such a mode is supported
+    fn compact_maximum(&mut self) -> bool {
+        false
+    }
 }
 
 pub trait BenchDatabaseConnection: Send {
@@ -1023,6 +1046,11 @@ impl BenchDatabase for RedbBenchDatabase<'_> {
 
     fn compact(&mut self) -> bool {
         self.db.compact(redb::CompactionMode::Balanced).unwrap();
+        true
+    }
+
+    fn compact_maximum(&mut self) -> bool {
+        self.db.compact(redb::CompactionMode::Maximum).unwrap();
         true
     }
 }

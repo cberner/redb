@@ -1,5 +1,6 @@
 use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
+use crate::tree_store::btree_pack::{TreeValues, pack_tree};
 use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
 use crate::tree_store::{
     BtreeHeader, PageAllocator, PageHint, PageNumber, PageNumberHashMap, PageResolver,
@@ -275,6 +276,45 @@ impl InternalTableDefinition {
         } else {
             Ok(None)
         }
+    }
+
+    // Packs the table's tree, and the subtrees of a multimap table, into fewer pages, replacing
+    // about `budget` pages at most. Returns the new root, whose checksums are deferred, if it changed
+    pub(crate) fn pack_tree(
+        &mut self,
+        page_allocator: &PageAllocator,
+        freed_pages: &Mutex<Vec<PageNumber>>,
+        budget: &mut usize,
+    ) -> Result<Option<BtreeHeader>> {
+        let (root, key_width, values) = match self {
+            InternalTableDefinition::Normal {
+                table_root: Some(root),
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            } => (*root, *fixed_key_size, TreeValues::Plain(*fixed_value_size)),
+            InternalTableDefinition::Multimap {
+                table_root: Some(root),
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            } => (
+                *root,
+                *fixed_key_size,
+                TreeValues::Multimap(*fixed_value_size),
+            ),
+            InternalTableDefinition::Normal {
+                table_root: None, ..
+            }
+            | InternalTableDefinition::Multimap {
+                table_root: None, ..
+            } => return Ok(None),
+        };
+        let new_root = pack_tree(page_allocator, freed_pages, root, key_width, values, budget)?;
+        if new_root.is_some() {
+            self.set_header(new_root, self.get_length());
+        }
+        Ok(new_root)
     }
 
     fn private_get_root(&self) -> Option<BtreeHeader> {

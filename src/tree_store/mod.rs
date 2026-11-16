@@ -4,6 +4,7 @@ mod btree_cursor;
 mod btree_cursor_range;
 mod btree_iters;
 mod btree_mutator;
+mod btree_pack;
 mod extract_if;
 mod multimap_btree;
 pub(crate) mod page_store;
