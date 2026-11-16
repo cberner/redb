@@ -1,4 +1,5 @@
 use crate::db::StorageBackend;
+use crate::error::LockResultExt;
 use crate::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard};
 use crate::transaction_tracker::TransactionId;
 use crate::tree_store::page_store::base::PageHint;
@@ -8,7 +9,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::{Index, IndexMut, RangeBounds};
+use core::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use core::slice::SliceIndex;
 #[cfg(feature = "cache_metrics")]
 use core::sync::atomic::AtomicU64;
@@ -39,10 +40,15 @@ impl WritablePage {
 
 impl Drop for WritablePage {
     fn drop(&mut self) {
-        self.buffer
-            .lock()
-            .unwrap()
-            .return_value(self.offset, self.data.clone());
+        // A panic here, while another panic unwinds, would abort the process and hide the first
+        // one. A poisoned stripe has already failed the storage (see StripeGuard), and may have
+        // lost this page's slot
+        let (mut buffer, poisoned) = match self.buffer.lock() {
+            Ok(buffer) => (buffer, false),
+            Err(err) => (err.into_inner(), true),
+        };
+        let returned = buffer.return_value(self.offset, self.data.clone());
+        assert!(returned || poisoned);
     }
 }
 
@@ -88,8 +94,11 @@ impl LRUWriteCache {
         None
     }
 
-    fn return_value(&mut self, key: u64, value: Arc<[u8]>) {
-        assert!(self.cache.get_mut(key).unwrap().replace(value).is_none());
+    // Returns false if the value was not out on loan
+    fn return_value(&mut self, key: u64, value: Arc<[u8]>) -> bool {
+        self.cache
+            .get_mut(key)
+            .is_some_and(|slot| slot.replace(value).is_none())
     }
 
     fn take_value(&mut self, key: u64) -> Option<Arc<[u8]>> {
@@ -118,6 +127,39 @@ impl LRUWriteCache {
 
     fn clear(&mut self) {
         self.cache.clear();
+    }
+}
+
+// A locked write buffer stripe. A panic that unwinds past it may leave the stripe without a page
+// that was buffered, which the file does not have either, so it permanently fails the storage:
+// nothing later can be committed over the gap, and the next open recovers the file.
+struct StripeGuard<'a> {
+    stripe: MutexGuard<'a, LRUWriteCache>,
+    file: &'a CheckedBackend,
+    // Like the poison flag of the mutex, not set by a lock that is taken and released during
+    // an unwind
+    panicking: bool,
+}
+
+impl Deref for StripeGuard<'_> {
+    type Target = LRUWriteCache;
+
+    fn deref(&self) -> &LRUWriteCache {
+        &self.stripe
+    }
+}
+
+impl DerefMut for StripeGuard<'_> {
+    fn deref_mut(&mut self) -> &mut LRUWriteCache {
+        &mut self.stripe
+    }
+}
+
+impl Drop for StripeGuard<'_> {
+    fn drop(&mut self) {
+        if !self.panicking && crate::panicking() {
+            self.file.latch_failure();
+        }
     }
 }
 
@@ -211,6 +253,11 @@ impl CheckedBackend {
         self.file
             .query_lock_range(range.start_bound().cloned(), range.end_bound().cloned())
             .map_err(StorageError::from_lock_error)
+    }
+
+    // Fails every later operation, as an I/O error does
+    fn latch_failure(&self) {
+        self.io_failed.store(true, Ordering::Release);
     }
 
     fn check_failure(&self) -> Result<()> {
@@ -420,6 +467,40 @@ impl PagedCachedFile {
         self.file.query_lock_range(range)
     }
 
+    fn guard<'a>(&'a self, stripe: MutexGuard<'a, LRUWriteCache>) -> StripeGuard<'a> {
+        StripeGuard {
+            stripe,
+            file: &self.file,
+            panicking: crate::panicking(),
+        }
+    }
+
+    // A poisoned stripe has failed the storage: see StripeGuard. The latch is set here too,
+    // because a WritablePage locks its stripe without one
+    #[inline]
+    #[track_caller]
+    fn lock_stripe<'a>(&'a self, stripe: &'a Mutex<LRUWriteCache>) -> Result<StripeGuard<'a>> {
+        let result = stripe.lock().or_poisoned();
+        if result.is_err() {
+            self.file.latch_failure();
+        }
+        result.map(|stripe| self.guard(stripe))
+    }
+
+    // For callers that only discard buffered pages, which is safe in a poisoned stripe too
+    fn lock_stripe_to_discard<'a>(&'a self, stripe: &'a Mutex<LRUWriteCache>) -> StripeGuard<'a> {
+        let stripe = stripe.lock().unwrap_or_else(|err| {
+            self.file.latch_failure();
+            err.into_inner()
+        });
+        self.guard(stripe)
+    }
+
+    // None if another thread holds the stripe, or it is poisoned
+    fn try_lock_stripe<'a>(&'a self, stripe: &'a Mutex<LRUWriteCache>) -> Option<StripeGuard<'a>> {
+        stripe.try_lock().ok().map(|stripe| self.guard(stripe))
+    }
+
     fn write_buffer_stripe(&self, offset: u64) -> &Arc<Mutex<LRUWriteCache>> {
         let stripe: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         &self.write_buffer[stripe]
@@ -470,7 +551,7 @@ impl PagedCachedFile {
     // Takes the write buffer locks before the read cache locks, as read() and flush_write_buffer()
     fn clear_cache(&self) {
         for cache_slot in 0..self.read_cache.len() {
-            let mut write_buffer = self.write_buffer[cache_slot].lock().unwrap();
+            let mut write_buffer = self.lock_stripe_to_discard(&self.write_buffer[cache_slot]);
             let bytes: usize = write_buffer
                 .cache
                 .iter()
@@ -503,11 +584,7 @@ impl PagedCachedFile {
     //
     // Caller must hold a write buffer stripe mutex to maintain the lock ordering
     // invariant (write buffer stripe locks are always acquired before read_cache locks).
-    fn evict_from_read_cache(
-        &self,
-        bytes_needed: usize,
-        _write_lock: &MutexGuard<'_, LRUWriteCache>,
-    ) {
+    fn evict_from_read_cache(&self, bytes_needed: usize, _write_lock: &StripeGuard<'_>) {
         let num_stripes = self.read_cache.len();
         let start = self.next_eviction_stripe.fetch_add(1, Ordering::Relaxed) % num_stripes;
         let mut freed = 0;
@@ -534,7 +611,7 @@ impl PagedCachedFile {
 
     fn flush_write_buffer(&self) -> Result {
         for stripe in &self.write_buffer {
-            let mut write_buffer = stripe.lock().unwrap();
+            let mut write_buffer = self.lock_stripe(stripe)?;
 
             for (offset, buffer) in write_buffer.cache.iter() {
                 self.file.write(*offset, buffer.as_ref().unwrap())?;
@@ -575,12 +652,17 @@ impl PagedCachedFile {
         self.committed_pages_buffered
             .store(false, Ordering::Release);
         for stripe in &self.write_buffer {
-            let mut write_buffer = stripe.lock().unwrap();
-            for (_, buffer) in write_buffer.cache.iter() {
+            let mut write_buffer = self.lock_stripe_to_discard(stripe);
+            // A slot is only empty here if a panic poisoned the stripe
+            for buffer in write_buffer
+                .cache
+                .iter()
+                .filter_map(|(_, buffer)| buffer.as_ref())
+            {
                 // Like flush_write_buffer(), decrement per page rather than storing zero: a
                 // concurrent writer may be adding to a stripe this loop has already passed.
                 self.write_buffer_bytes
-                    .fetch_sub(buffer.as_ref().unwrap().len(), Ordering::AcqRel);
+                    .fetch_sub(buffer.len(), Ordering::AcqRel);
             }
             write_buffer.clear();
         }
@@ -593,7 +675,7 @@ impl PagedCachedFile {
         // Growth can occur with writable pages outstanding and leaves every cached page valid.
         let old_len = self.file.len()?;
         if len < old_len {
-            self.invalidate_cache_above(len);
+            self.invalidate_cache_above(len)?;
         }
 
         self.file.set_len(len)
@@ -601,9 +683,9 @@ impl PagedCachedFile {
 
     // Cancel writes before truncating so a concurrent reader's writeback cannot re-extend the
     // file. Take write-buffer locks before read-cache locks, as in read() and flush_write_buffer().
-    fn invalidate_cache_above(&self, threshold: u64) {
+    fn invalidate_cache_above(&self, threshold: u64) -> Result {
         for cache_slot in 0..self.read_cache.len() {
-            let mut write_buffer = self.write_buffer[cache_slot].lock().unwrap();
+            let mut write_buffer = self.lock_stripe(&self.write_buffer[cache_slot])?;
             let stale: Vec<u64> = write_buffer
                 .cache
                 .iter()
@@ -636,6 +718,7 @@ impl PagedCachedFile {
                 }
             }
         }
+        Ok(())
     }
 
     pub(super) fn flush(&self) -> Result {
@@ -701,7 +784,7 @@ impl PagedCachedFile {
 
         // A write transaction's own dirty pages are in the write buffer, so look there first.
         if matches!(hint, PageHint::None) {
-            let lock = self.write_buffer_stripe(offset).lock().unwrap();
+            let lock = self.lock_stripe(self.write_buffer_stripe(offset))?;
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -728,7 +811,7 @@ impl PagedCachedFile {
         // the striped read cache lets run concurrently, off the path of pages cached for reading.
         if matches!(hint, PageHint::Clean) && self.committed_pages_buffered.load(Ordering::Acquire)
         {
-            let lock = self.write_buffer_stripe(offset).lock().unwrap();
+            let lock = self.lock_stripe(self.write_buffer_stripe(offset))?;
             if let Some(cached) = lock.get(offset) {
                 #[cfg(feature = "cache_metrics")]
                 self.reads_hits.fetch_add(1, Ordering::Release);
@@ -819,9 +902,7 @@ impl PagedCachedFile {
     pub(super) fn cancel_pending_write(&self, offset: u64, _len: usize) {
         assert_eq!(0, offset % self.page_size);
         if let Some(removed) = self
-            .write_buffer_stripe(offset)
-            .lock()
-            .unwrap()
+            .lock_stripe_to_discard(self.write_buffer_stripe(offset))
             .remove(offset)
         {
             self.write_buffer_bytes
@@ -915,7 +996,7 @@ impl PagedCachedFile {
                 break;
             }
             let stripe = (start + i) % num_stripes;
-            if let Ok(mut lock) = self.write_buffer[stripe].try_lock() {
+            if let Some(mut lock) = self.try_lock_stripe(&self.write_buffer[stripe]) {
                 flushed += self.flush_lowest_priority(
                     &mut lock,
                     bytes_needed - flushed,
@@ -934,7 +1015,7 @@ impl PagedCachedFile {
         #[cfg(feature = "cache_metrics")]
         self.writes_total.fetch_add(1, Ordering::AcqRel);
         let stripe = self.write_buffer_stripe(offset);
-        let mut lock = stripe.lock().unwrap();
+        let mut lock = self.lock_stripe(stripe)?;
 
         let cache_slot: usize = (offset % Self::lock_stripes()).try_into().unwrap();
         let existing = {
@@ -985,7 +1066,9 @@ impl PagedCachedFile {
                     let own: usize = (offset % Self::lock_stripes()).try_into().unwrap();
                     for i in 1..self.write_buffer.len() {
                         let other = (own + i) % self.write_buffer.len();
-                        if let Ok(mut other_lock) = self.write_buffer[other].try_lock() {
+                        if let Some(mut other_lock) =
+                            self.try_lock_stripe(&self.write_buffer[other])
+                        {
                             excess = excess.saturating_sub(self.flush_lowest_priority(
                                 &mut other_lock,
                                 excess,
@@ -1201,6 +1284,32 @@ mod test {
         let stats = cached_file.cache_stats();
         assert_eq!(stats.write_hits(), writes);
         assert_eq!(stats.write_misses(), 0);
+    }
+
+    // Regression test for https://github.com/cberner/redb/issues/1690
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn panic_under_stripe_lock_fails_storage() {
+        let backend = InMemoryBackend::new();
+        backend.set_len(1024).unwrap();
+        let cached_file = PagedCachedFile::new(Box::new(backend), 128, 1024);
+
+        // Requesting a page that is already out panics with its stripe locked. The first
+        // page then drops during the unwind, which must not panic again and abort
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _page = cached_file.write(0, 128, true).unwrap();
+            let _ = cached_file.write(0, 128, false);
+        }));
+        assert!(panic.is_err());
+
+        assert!(matches!(
+            cached_file.check_io_errors(),
+            Err(crate::StorageError::PreviousIo)
+        ));
+        assert!(matches!(
+            cached_file.flush(),
+            Err(crate::StorageError::LockPoisoned(_))
+        ));
     }
 
     #[test]
