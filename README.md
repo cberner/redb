@@ -70,23 +70,26 @@ volume; remove that volume to force a clean sandbox build.
 ## Benchmarks
 redb has similar performance to other top embedded key-value stores such as lmdb and rocksdb
 
-|                           | redb      | lmdb       | rocksdb        | fjall       | sqlite     |
-|---------------------------|-----------|------------|----------------|-------------|------------|
-| bulk load                 | 17063ms   | **9232ms** | 13969ms        | 18619ms     | 15341ms    |
-| individual writes         | **920ms** | 1598ms     | 2432ms         | 3488ms      | 7040ms     |
-| batch writes              | 1595ms    | 942ms      | 451ms          | **353ms**   | 2625ms     |
-| len()                     | **0ms**   | **0ms**    | 749ms          | 1181ms      | 30ms       |
-| random reads              | 1138ms    | **637ms**  | 2911ms         | 2177ms      | 4283ms     |
-| random reads              | 934ms     | **631ms**  | 2884ms         | 2357ms      | 4281ms     |
-| random range reads        | 1174ms    | **565ms**  | 2734ms         | 2564ms      | 8431ms     |
-| random range reads        | 1173ms    | **565ms**  | 2742ms         | 2690ms      | 8449ms     |
-| random reads (4 threads)  | 1390ms    | **840ms**  | 3995ms         | 2606ms      | 7000ms     |
-| random reads (8 threads)  | 757ms     | **427ms**  | 2147ms         | 1352ms      | 8123ms     |
-| random reads (16 threads) | 652ms     | **216ms**  | 1478ms         | 963ms       | 23022ms    |
-| random reads (32 threads) | 410ms     | **125ms**  | 1100ms         | 576ms       | 26536ms    |
-| removals                  | 23297ms   | 10435ms    | 6900ms         | **6004ms**  | 10323ms    |
-| uncompacted size          | 4.00 GiB  | 2.61 GiB   | **893.18 MiB** | 1000.95 MiB | 1.09 GiB   |
-| compacted size            | 1.69 GiB  | 1.26 GiB   | **454.71 MiB** | 1000.95 MiB | 556.85 MiB |
+|                                   | redb       | lmdb       | rocksdb        | fjall    | sqlite     |
+|-----------------------------------|------------|------------|----------------|----------|------------|
+| bulk load (key/s)                 | **608K**   | 593K       | 365K           | 390K     | 386K       |
+| individual writes (txn/s)         | **1.11K**  | 620        | 408            | 414      | 142        |
+| small batch writes (key/s)        | 79.2K      | 70.7K      | 205K           | **254K** | 37.6K      |
+| sorted inserts (key/s)            | 4.38M      | **7.74M**  | 518K           | 570K     | 868K       |
+| nosync writes (txn/s)             | 88.9K      | 125K       | 382K           | **595K** | 58.3K      |
+| len()                             | **0ms**    | **0ms**    | 701ms          | 972ms    | 25ms       |
+| random reads (key/s)              | 1.18M      | **1.59M**  | 423K           | 360K     | 370K       |
+| random range reads (scan/s)       | 522K       | **933K**   | 155K           | 190K     | 85.5K      |
+| random reads (4 threads) (key/s)  | 4.41M      | **6.01M**  | 1.46M          | 1.44M    | 1.77M      |
+| random reads (8 threads) (key/s)  | 8.28M      | **12.3M**  | 2.53M          | 2.81M    | 3.38M      |
+| random reads (16 threads) (key/s) | 13.7M      | **23.9M**  | 2.12M          | 4.52M    | 2.72M      |
+| random reads (32 threads) (key/s) | 20.3M      | **33.6M**  | 2.07M          | 6.55M    | 2.26M      |
+| removals (key/s)                  | 434K       | 361K       | 367K           | **513K** | 282K       |
+| retain (key/s)                    | 2.22M      | **2.29M**  | 549K           | 271K     | 189K       |
+| extract_if (key/s)                | 1.92M      | **3.50M**  | 544K           | 327K     | 105K       |
+| pop (key/s)                       | 1.73M      | **6.36M**  | 1.94K          | 2.63K    | 110K       |
+| uncompacted size                  | 4.00 GiB   | 3.35 GiB   | **558.01 MiB** | 1.85 GiB | 1.10 GiB   |
+| compacted size                    | 650.89 MiB | 741.61 MiB | **459.28 MiB** | 1.85 GiB | 562.30 MiB |
 
 Source code for benchmark [here](./crates/redb-bench-compare/benches/lmdb_benchmark.rs). Results collected on a Ryzen 9950X3D with Samsung 9100 PRO NVMe.
 
