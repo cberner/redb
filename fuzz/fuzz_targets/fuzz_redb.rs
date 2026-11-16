@@ -2,9 +2,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use redb::{
-    AccessGuard, BackendError, Database, Durability, Error, MultimapTable, MultimapTableDefinition,
-    MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable, ReadableTableMetadata,
-    Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
+    AccessGuard, BackendError, CompactionMode, Database, Durability, Error, MultimapTable,
+    MultimapTableDefinition, MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable,
+    ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
@@ -1089,7 +1089,7 @@ fn run_compaction<T: Clone>(
         txn.delete_persistent_savepoint(id)?;
     }
     txn.commit()?;
-    db.compact()?;
+    db.compact(CompactionMode::Balanced)?;
 
     Ok(())
 }

@@ -50,6 +50,8 @@ A number of other APIs have been changed in breaking ways:
   to contain a `Box`. Their fields are replaced by methods on the new `TableTypeMismatch` and
   `TypeDefinitionInfo` structs. `TableTypeMismatch` also reports the types that the table was
   opened with. `alignment` has been removed, because it was always 1.
+* Change `Database::compact()` to take a `CompactionMode`, which selects how thoroughly to compact.
+  Use `compact(CompactionMode::Balanced)` to compact as before.
 
 ### `no_std` support
 redb can now be built without the standard library, for use on embedded targets, by disabling the
