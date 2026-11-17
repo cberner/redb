@@ -1,7 +1,7 @@
 use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchBuilder, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor,
     LeafBuilder, LeafMutator, OwnedEntryBuffer, RawBranchBuilder, branch_separator,
-    is_single_large_value, leaf_below_merge_threshold, leaf_split_required,
+    is_single_large_value, leaf_below_merge_threshold, leaf_split_required, pack_leaf_ranges,
     retained_after_removals,
 };
 use crate::tree_store::btree_mutator::DeletionResult::{
@@ -396,31 +396,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         let entries: Vec<(&[u8], &[u8])> = buffer.entries().collect();
         let pair_bytes = |(key, value): &(&[u8], &[u8])| key.len() + value.len();
 
-        // Greedy packing: cut a page whenever the next entry would require a
-        // split. Every page is packed as full as the entry stream allows;
-        // like the ordinary merge path, a page can still end up sparse when
-        // the next entry is close to a page in size.
-        let mut plan: Vec<Range<usize>> = vec![];
-        let mut start = 0;
-        let mut bytes = 0;
-        for (index, entry) in entries.iter().enumerate() {
-            let entry_bytes = pair_bytes(entry);
-            if leaf_split_required(
-                index - start + 1,
-                bytes + entry_bytes,
-                fixed_key,
-                fixed_value,
-                page_size,
-            ) {
-                plan.push(start..index);
-                start = index;
-                bytes = 0;
-            }
-            bytes += entry_bytes;
-        }
-        if start < entries.len() {
-            plan.push(start..entries.len());
-        }
+        // Greedy packing: every page is packed as full as the entry stream
+        // allows; like the ordinary merge path, a page can still end up sparse
+        // when the next entry is close to a page in size.
+        let mut plan = pack_leaf_ranges(
+            entries.iter().map(pair_bytes),
+            fixed_key,
+            fixed_value,
+            page_size,
+        );
 
         // Greedy packing can strand a sparse trailing page, which nothing
         // would ever re-merge; rebuild the last two pages with build_split's

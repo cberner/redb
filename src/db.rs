@@ -2286,12 +2286,12 @@ pub enum CompactionMode {
     /// for later inserts to fill, without splitting pages. The default.
     #[default]
     Balanced,
-    /// Also packs the entries of partially filled pages into as few pages as they fit.
+    /// Also packs the entries of partially filled pages into fewer pages.
     ///
     /// Slower than [`CompactionMode::Balanced`], since the entries of those pages are copied. It
     /// rewrites a bounded number of pages per commit, so neither the memory it uses nor how far it
-    /// may temporarily grow the file depends on the size of the database. Every page it rewrites
-    /// is left full, so inserts into a table are slower until its pages have split.
+    /// may temporarily grow the file depends on the size of the database. The pages it rewrites
+    /// are left full, so inserts into a table are slower until its pages have split.
     Maximum,
 }
 
@@ -5134,5 +5134,296 @@ mod active_transaction_test {
         drop(writer_lock);
         assert!(probe.try_lock_range(byte_range(WRITER_BYTE)).unwrap());
         probe.unlock_range(byte_range(WRITER_BYTE)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod maximum_compaction_test {
+    use super::{CompactionMode, Database};
+    use crate::tree_store::{TreeShape, check_tree};
+    use crate::{
+        MultimapTableDefinition, ReadableDatabase, ReadableMultimapTable, ReadableTable,
+        TableDefinition,
+    };
+    use alloc::collections::{BTreeMap, BTreeSet};
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+
+    const BYTES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("bytes");
+    const FIXED: TableDefinition<u64, u64> = TableDefinition::new("fixed");
+    const MULTI: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("multi");
+
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, bound: u64) -> usize {
+            usize::try_from(self.next() % bound).unwrap()
+        }
+
+        fn bytes(&mut self, len: usize) -> Vec<u8> {
+            (0..len).map(|_| self.next().to_le_bytes()[0]).collect()
+        }
+    }
+
+    // Checks the tree of every table, and each multimap subtree, and adds up what they are made of
+    fn check_trees(db: &Database) -> TreeShape {
+        use crate::tree_store::{
+            DynamicCollection, DynamicCollectionType, InternalTableDefinition, PageHint,
+            PageResolver, TableTree, TableType,
+        };
+        use crate::types::{Key, Value};
+
+        let resolver = PageResolver::new(db.mem.clone());
+        let tables = TableTree::new(
+            db.mem.get_data_root(),
+            PageHint::None,
+            Arc::new(super::TransactionGuard::untracked()),
+            resolver.clone(),
+        )
+        .unwrap();
+        let mut shape = TreeShape::default();
+        for (name, compare) in [
+            ("bytes", <&[u8] as Key>::compare as fn(&[u8], &[u8]) -> _),
+            ("fixed", <u64 as Key>::compare),
+        ] {
+            let Some(InternalTableDefinition::Normal {
+                table_root: Some(root),
+                fixed_key_size,
+                fixed_value_size,
+                ..
+            }) = tables.get_table_untyped(name, TableType::Normal).unwrap()
+            else {
+                continue;
+            };
+            check_tree(
+                &resolver,
+                root.root,
+                fixed_key_size,
+                fixed_value_size,
+                compare,
+                &mut |_| {},
+                &mut shape,
+            );
+        }
+        if let Some(InternalTableDefinition::Multimap {
+            table_root: Some(root),
+            fixed_key_size,
+            fixed_value_size,
+            ..
+        }) = tables
+            .get_table_untyped("multi", TableType::Multimap)
+            .unwrap()
+        {
+            let mut subtrees = alloc::vec![];
+            check_tree(
+                &resolver,
+                root.root,
+                fixed_key_size,
+                DynamicCollection::<&[u8]>::fixed_width_with(fixed_value_size),
+                <u64 as Key>::compare,
+                &mut |value| {
+                    let collection = DynamicCollection::<&[u8]>::new(value);
+                    if matches!(
+                        collection.collection_type(),
+                        DynamicCollectionType::SubtreeV2
+                    ) {
+                        subtrees.push(collection.as_subtree().root);
+                    }
+                },
+                &mut shape,
+            );
+            for subtree in subtrees {
+                check_tree(
+                    &resolver,
+                    subtree,
+                    fixed_value_size,
+                    <() as Value>::fixed_width(),
+                    <&[u8] as Key>::compare,
+                    &mut |_| {},
+                    &mut shape,
+                );
+            }
+        }
+        shape
+    }
+
+    fn check(
+        db: &Database,
+        bytes: &BTreeMap<Vec<u8>, Vec<u8>>,
+        fixed: &BTreeMap<u64, u64>,
+        multi: &BTreeMap<u64, BTreeSet<Vec<u8>>>,
+    ) {
+        let txn = db.begin_read().unwrap();
+        // Lookups descend by the branch keys, which iteration does not
+        let table = txn.open_table(BYTES).unwrap();
+        for (key, value) in bytes {
+            assert_eq!(table.get(key.as_slice()).unwrap().unwrap().value(), value);
+        }
+        let table = txn.open_table(FIXED).unwrap();
+        for (key, value) in fixed {
+            assert_eq!(table.get(key).unwrap().unwrap().value(), *value);
+        }
+        let table = txn.open_multimap_table(MULTI).unwrap();
+        for (key, values) in multi {
+            let stored: BTreeSet<Vec<u8>> = table
+                .get(key)
+                .unwrap()
+                .map(|value| value.unwrap().value().to_vec())
+                .collect();
+            assert_eq!(&stored, values);
+        }
+
+        let table = txn.open_table(BYTES).unwrap();
+        let stored: Vec<(Vec<u8>, Vec<u8>)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value().to_vec(), value.value().to_vec())
+            })
+            .collect();
+        assert!(
+            stored
+                .into_iter()
+                .eq(bytes.iter().map(|(k, v)| (k.clone(), v.clone())))
+        );
+
+        let table = txn.open_table(FIXED).unwrap();
+        let stored: Vec<(u64, u64)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value(), value.value())
+            })
+            .collect();
+        assert!(stored.into_iter().eq(fixed.iter().map(|(k, v)| (*k, *v))));
+
+        let table = txn.open_multimap_table(MULTI).unwrap();
+        let mut stored: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for entry in table.iter().unwrap() {
+            let (key, values) = entry.unwrap();
+            for value in values {
+                stored
+                    .entry(key.value())
+                    .or_default()
+                    .insert(value.unwrap().value().to_vec());
+            }
+        }
+        assert_eq!(&stored, multi);
+    }
+
+    // Small pages make deep trees, keys too large to share a branch page, and many values of a
+    // page or more
+    #[test]
+    fn random_workloads_with_small_pages() {
+        for seed in 1..=6 {
+            let tmpfile = crate::create_tempfile();
+            let mut db = Database::builder()
+                .set_page_size(512)
+                .create(tmpfile.path())
+                .unwrap();
+            let mut rng = XorShift(seed);
+            let mut bytes: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+            let mut fixed: BTreeMap<u64, u64> = BTreeMap::new();
+            let mut multi: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+
+            for round in 0..5 {
+                let txn = db.begin_write().unwrap();
+                {
+                    let mut table = txn.open_table(BYTES).unwrap();
+                    for _ in 0..rng.below(2_000) {
+                        let key_len = if rng.below(50) == 0 {
+                            200 + rng.below(400)
+                        } else {
+                            1 + rng.below(40)
+                        };
+                        let key = rng.bytes(key_len);
+                        let value_len = if rng.below(20) == 0 {
+                            rng.below(2_000)
+                        } else {
+                            rng.below(80)
+                        };
+                        let value = rng.bytes(value_len);
+                        table.insert(key.as_slice(), value.as_slice()).unwrap();
+                        bytes.insert(key, value);
+                    }
+                    // Every few rounds, removes nearly everything
+                    let keep = if round % 3 == 2 { 20 } else { 2 + rng.below(4) };
+                    let keys: Vec<Vec<u8>> = bytes.keys().cloned().collect();
+                    for key in keys {
+                        if rng.below(keep as u64) != 0 {
+                            table.remove(key.as_slice()).unwrap();
+                            bytes.remove(&key);
+                        }
+                    }
+                }
+                {
+                    let mut table = txn.open_table(FIXED).unwrap();
+                    for _ in 0..rng.below(5_000) {
+                        let key = rng.next();
+                        let value = rng.next();
+                        table.insert(key, value).unwrap();
+                        fixed.insert(key, value);
+                    }
+                    let keys: Vec<u64> = fixed.keys().copied().collect();
+                    for key in keys {
+                        if rng.below(3) == 0 {
+                            table.remove(key).unwrap();
+                            fixed.remove(&key);
+                        }
+                    }
+                }
+                {
+                    let mut table = txn.open_multimap_table(MULTI).unwrap();
+                    for _ in 0..rng.below(100) {
+                        let key = rng.next() % 64;
+                        let count = if rng.below(4) == 0 {
+                            rng.below(300)
+                        } else {
+                            rng.below(5)
+                        };
+                        for _ in 0..count {
+                            let value_len = 1 + rng.below(30);
+                            let value = rng.bytes(value_len);
+                            table.insert(key, value.as_slice()).unwrap();
+                            multi.entry(key).or_default().insert(value);
+                        }
+                    }
+                    for (key, values) in &mut multi {
+                        let removed: Vec<Vec<u8>> = values
+                            .iter()
+                            .filter(|_| rng.below(3) == 0)
+                            .cloned()
+                            .collect();
+                        for value in removed {
+                            assert!(table.remove(*key, value.as_slice()).unwrap());
+                            values.remove(&value);
+                        }
+                    }
+                    multi.retain(|_, values| !values.is_empty());
+                }
+                txn.commit().unwrap();
+
+                let before = check_trees(&db);
+                db.compact(CompactionMode::Maximum).unwrap();
+                let after = check_trees(&db);
+                // Packing grows no branch past a page of order 2, and no table at all
+                assert!(after.largest_branch <= before.largest_branch.max(512 << 2));
+                assert!(after.bytes <= before.bytes);
+                check(&db, &bytes, &fixed, &multi);
+                assert!(db.check_integrity().unwrap(), "seed {seed} round {round}");
+                assert!(!db.compact(CompactionMode::Maximum).unwrap());
+            }
+        }
     }
 }

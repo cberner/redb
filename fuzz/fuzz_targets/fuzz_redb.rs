@@ -4,7 +4,8 @@ use libfuzzer_sys::fuzz_target;
 use redb::{
     AccessGuard, BackendError, CompactionMode, Database, Durability, Error, MultimapTable,
     MultimapTableDefinition, MultimapValue, ReadableDatabase, ReadableMultimapTable, ReadableTable,
-    ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, WriteTransaction,
+    ReadableTableMetadata, Savepoint, StorageBackend, Table, TableDefinition, TableError,
+    WriteTransaction,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::{Debug, Formatter};
@@ -834,6 +835,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
         &mut SavepointManager<T>,
         usize,
     ) -> Result<(), redb::Error>,
+    verify: fn(&Database, &BTreeMap<u64, T>) -> Result<(), redb::Error>,
 ) -> Result<(), redb::Error> {
     let mut redb_file: NamedTempFile = NamedTempFile::new().unwrap();
     let backend = FuzzerBackend::new(FileBackend::new(open_dup(&redb_file)));
@@ -1016,7 +1018,12 @@ fn exec_table_crash_support<T: Clone + Debug>(
         CompactionMode::Balanced
     };
     match run_compaction(&mut db, &mut savepoint_manager, mode) {
-        Ok(_) => {}
+        Ok(_) => {
+            // Compaction moves and repacks the entries, and must leave what the last commit did
+            let old_countdown = countdown.swap(u64::MAX, Ordering::SeqCst);
+            verify(&db, &non_durable_reference)?;
+            countdown.store(old_countdown, Ordering::SeqCst);
+        }
         Err(err) => {
             if !is_simulated_io_error(&err) {
                 return Err(err);
@@ -1282,6 +1289,55 @@ fn apply_crashable_transaction(
     Ok(())
 }
 
+// Checks that the table holds what `reference` does, both in the order it iterates in and by
+// looking each key up, which descends by the branch keys
+fn verify_table(db: &Database, reference: &BTreeMap<u64, usize>) -> Result<(), redb::Error> {
+    let txn = db.begin_read()?;
+    let table = match txn.open_table(TABLE_DEF) {
+        Ok(table) => table,
+        // No transaction that opened it has committed
+        Err(TableError::TableDoesNotExist(_)) => {
+            assert!(reference.is_empty());
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut entries = table.iter()?;
+    for (key, value_len) in reference {
+        let (stored_key, stored_value) = entries.next().unwrap()?;
+        assert_eq!(stored_key.value(), *key);
+        assert_eq!(stored_value.value().len(), *value_len);
+        assert_eq!(table.get(key)?.unwrap().value().len(), *value_len);
+    }
+    assert!(entries.next().is_none());
+    Ok(())
+}
+
+fn verify_multimap_table(
+    db: &Database,
+    reference: &BTreeMap<u64, BTreeSet<usize>>,
+) -> Result<(), redb::Error> {
+    let txn = db.begin_read()?;
+    let table = match txn.open_multimap_table(MULTIMAP_TABLE_DEF) {
+        Ok(table) => table,
+        // No transaction that opened it has committed
+        Err(TableError::TableDoesNotExist(_)) => {
+            assert!(reference.values().all(BTreeSet::is_empty));
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let mut entries = table.iter()?;
+    for (key, values) in reference.iter().filter(|(_, values)| !values.is_empty()) {
+        let (stored_key, stored_values) = entries.next().unwrap()?;
+        assert_eq!(stored_key.value(), *key);
+        assert_multimap_value_eq(stored_values, Some(values))?;
+        assert_multimap_value_eq(table.get(key)?, Some(values))?;
+    }
+    assert!(entries.next().is_none());
+    Ok(())
+}
+
 fn assert_multimap_value_eq(
     mut iter: MultimapValue<&[u8]>,
     reference: Option<&BTreeSet<usize>>,
@@ -1303,8 +1359,13 @@ fn assert_multimap_value_eq(
 
 fuzz_target!(|config: FuzzConfig| {
     if config.multimap_table {
-        exec_table_crash_support(&config, apply_crashable_transaction_multimap).unwrap();
+        exec_table_crash_support(
+            &config,
+            apply_crashable_transaction_multimap,
+            verify_multimap_table,
+        )
+        .unwrap();
     } else {
-        exec_table_crash_support(&config, apply_crashable_transaction).unwrap();
+        exec_table_crash_support(&config, apply_crashable_transaction, verify_table).unwrap();
     }
 });
