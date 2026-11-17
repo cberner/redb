@@ -4348,10 +4348,12 @@ mod maximum_compaction {
         db.compact(CompactionMode::Balanced).unwrap();
         let balanced_len = file_len(tmpfile.path());
         let balanced_leaves = leaf_pages(&db);
+        let balanced_branches = branch_pages(&db);
 
         assert!(db.compact(CompactionMode::Maximum).unwrap());
         let maximum_len = file_len(tmpfile.path());
         let maximum_leaves = leaf_pages(&db);
+        let maximum_branches = branch_pages(&db);
         assert!(
             maximum_len < balanced_len,
             "{maximum_len} >= {balanced_len}"
@@ -4359,6 +4361,11 @@ mod maximum_compaction {
         assert!(
             maximum_leaves < balanced_leaves,
             "{maximum_leaves} >= {balanced_leaves}"
+        );
+        // The branches left with fewer leaves are merged
+        assert!(
+            maximum_branches < balanced_branches,
+            "{maximum_branches} >= {balanced_branches}"
         );
         check_table(&db, definition, &expected);
         assert!(db.check_integrity().unwrap());
