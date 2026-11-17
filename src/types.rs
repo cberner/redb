@@ -12,8 +12,6 @@ use core::num::{
     NonZeroI8, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI128, NonZeroU8, NonZeroU16, NonZeroU32,
     NonZeroU64, NonZeroU128,
 };
-#[cfg(feature = "chrono_v0_4")]
-mod chrono_v0_4;
 #[cfg(feature = "uuid")]
 mod uuid;
 
