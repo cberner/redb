@@ -1010,7 +1010,12 @@ fn exec_table_crash_support<T: Clone + Debug>(
         }
     }
 
-    match run_compaction(&mut db, &mut savepoint_manager) {
+    let mode = if config.maximum_compaction {
+        CompactionMode::Maximum
+    } else {
+        CompactionMode::Balanced
+    };
+    match run_compaction(&mut db, &mut savepoint_manager, mode) {
         Ok(_) => {}
         Err(err) => {
             if !is_simulated_io_error(&err) {
@@ -1081,6 +1086,7 @@ fn exec_table_crash_support<T: Clone + Debug>(
 fn run_compaction<T: Clone>(
     db: &mut Database,
     savepoint_manager: &mut SavepointManager<T>,
+    mode: CompactionMode,
 ) -> Result<(), Error> {
     savepoint_manager.savepoints.clear();
     let txn = db.begin_write()?;
@@ -1089,7 +1095,7 @@ fn run_compaction<T: Clone>(
         txn.delete_persistent_savepoint(id)?;
     }
     txn.commit()?;
-    db.compact(CompactionMode::Balanced)?;
+    db.compact(mode)?;
 
     Ok(())
 }

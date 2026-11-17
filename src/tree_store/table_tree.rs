@@ -698,6 +698,34 @@ impl TableTreeMut {
         Ok(())
     }
 
+    // Packs the tables into fewer pages, replacing about `budget` pages at most. Returns whether
+    // any table changed
+    pub(crate) fn pack_tables(&mut self, budget: &mut usize) -> Result<bool> {
+        let mut packed = false;
+        for entry in self.tree.range::<RangeFull, &str>(&(..))? {
+            if *budget == 0 {
+                break;
+            }
+            let entry = entry?;
+            let mut definition = entry.value();
+            if let Some((updated_root, updated_length, _)) =
+                self.pending_table_updates.get(entry.key())
+            {
+                definition.set_header(*updated_root, *updated_length);
+            }
+            if let Some(new_root) =
+                definition.pack_tree(&self.page_allocator, &self.freed_pages, budget)?
+            {
+                self.pending_table_updates.insert(
+                    entry.key().to_string(),
+                    (Some(new_root), definition.get_length(), true),
+                );
+                packed = true;
+            }
+        }
+        Ok(packed)
+    }
+
     pub fn stats(&self) -> Result<DatabaseStats> {
         let master_tree_stats = self.tree.stats()?;
         let mut max_subtree_height = 0;

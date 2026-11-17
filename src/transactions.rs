@@ -41,6 +41,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::{debug, warn};
 
 const MAX_PAGES_PER_COMPACTION: usize = 1_000_000;
+// The pages that a pass of maximum compaction replaces before it commits. Small in unit tests, so
+// that they cover a compaction spread over many passes
+const MAX_PAGES_PER_PACK: usize = if cfg!(test) {
+    64
+} else {
+    MAX_PAGES_PER_COMPACTION
+};
 const NEXT_SAVEPOINT_TABLE: SystemTableDefinition<(), SavepointId> =
     SystemTableDefinition::new("next_savepoint_id");
 pub(crate) const SAVEPOINT_TABLE: SystemTableDefinition<SavepointId, SerializedSavepoint> =
@@ -2231,6 +2238,15 @@ impl WriteTransaction {
         }
 
         Ok(())
+    }
+
+    // Packs the user tables into fewer pages, replacing about MAX_PAGES_PER_PACK pages at most.
+    // Returns true if a table changed
+    pub(crate) fn pack_tables(&mut self) -> Result<bool> {
+        let mut budget = MAX_PAGES_PER_PACK;
+        let mut tables = self.tables.lock().unwrap();
+        assert!(tables.open_tables.is_empty());
+        tables.table_tree.pack_tables(&mut budget)
     }
 
     // Relocate pages to lower number regions/pages
