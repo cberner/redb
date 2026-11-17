@@ -1,9 +1,10 @@
 // Packs the entries of a tree into fewer pages, for the maximum compaction mode.
 //
-// The tree is walked, and at each branch whose children are leaves, the pairs of those leaves are
-// repacked into as few leaves as they fit. The keys under the branch are unchanged by that, so
-// the key that its parent holds for it stays valid. That is what lets this run on untyped trees:
-// it never compares keys.
+// The tree is walked bottom-up. At each branch whose children are leaves, the pairs of those
+// leaves are repacked into as few leaves as they fit. At each branch above those, adjacent child
+// branches are merged while they fit a page. Either way the keys under the branch are unchanged,
+// so the key that its parent holds for it stays valid. That is what lets this run on untyped
+// trees: it never compares keys.
 //
 // Only the children of one branch are held at a time, and a pass stops once it has replaced its
 // budget of pages, so memory use does not depend on the size of the tree.
@@ -113,6 +114,8 @@ impl<'a> Packer<'a> {
                 changed = true;
             }
         } else {
+            // The trees below the children are packed before the children are merged, so that
+            // merging them sees how few children each was left with
             for child in &mut children {
                 if *self.budget == 0 {
                     break;
@@ -122,6 +125,10 @@ impl<'a> Packer<'a> {
                     child.checksum = checksum;
                     changed = true;
                 }
+            }
+            if let Some(packed) = self.pack_branches(&children, is_root)? {
+                children = packed;
+                changed = true;
             }
         }
         if !changed {
@@ -283,6 +290,100 @@ impl<'a> Packer<'a> {
             .sum();
         let old_pages = branch_size / page_size + old_leaf_pages;
         (new_pages < old_pages).then_some(new_leaves)
+    }
+
+    // Merges adjacent branches in `children` while they fit a page. Returns the new children of
+    // their branch, if that saves a page
+    fn pack_branches(&mut self, children: &[Child], is_root: bool) -> Result<Option<Vec<Child>>> {
+        if *self.budget == 0 {
+            return Ok(None);
+        }
+        let page_size = self.page_allocator.get_page_size();
+        let mut branches = vec![];
+        for child in children {
+            branches.push(self.get_page(child.page, PageType::Branch)?);
+        }
+        let accessors: Vec<BranchAccessor<'_, PageImpl>> = branches
+            .iter()
+            .map(|page| BranchAccessor::new(page, self.key_width))
+            .collect();
+
+        // Each group takes the branches from `start` on, for as long as they fit a page as one.
+        // The key that is between two branches goes between their children
+        let mut plan: Vec<Range<usize>> = vec![];
+        let mut start = 0;
+        // The keys that the group has so far, and their bytes
+        let mut num_keys = 0;
+        let mut key_bytes = 0;
+        for (index, accessor) in accessors.iter().enumerate() {
+            let keys = accessor.count_children() - 1;
+            let bytes: usize = (0..keys).map(|i| accessor.key(i).unwrap().len()).sum();
+            if index > start {
+                let merged_keys = num_keys + 1 + keys;
+                let merged_bytes =
+                    key_bytes + children[index - 1].key.as_ref().unwrap().len() + bytes;
+                let required =
+                    RawBranchBuilder::required_bytes(merged_keys, merged_bytes, self.key_width);
+                // The number of keys is stored as a u16
+                if required <= page_size && u16::try_from(merged_keys).is_ok() {
+                    num_keys = merged_keys;
+                    key_bytes = merged_bytes;
+                    continue;
+                }
+                plan.push(start..index);
+                start = index;
+            }
+            num_keys = keys;
+            key_bytes = bytes;
+        }
+        plan.push(start..children.len());
+        // A branch other than the root keeps two children, so its last child is left as it is
+        if !is_root && plan.len() == 1 {
+            let last = children.len() - 1;
+            plan = vec![0..last, last..children.len()];
+        }
+        if plan.len() == children.len() {
+            return Ok(None);
+        }
+
+        let mut new_children = vec![];
+        for group in &plan {
+            if group.len() == 1 {
+                new_children.push(children[group.start].clone());
+                continue;
+            }
+            let capacity = accessors[group.clone()]
+                .iter()
+                .map(BranchAccessor::count_children)
+                .sum();
+            let mut builder = BranchBuilder::new(
+                self.page_allocator,
+                &self.allocated,
+                capacity,
+                self.key_width,
+            );
+            for i in group.clone() {
+                builder.push_all(&accessors[i]);
+                if i + 1 < group.end {
+                    builder.push_key(children[i].key.as_deref().unwrap());
+                }
+            }
+            new_children.push(Child {
+                page: builder.build()?.get_page_number(),
+                checksum: DEFERRED,
+                key: children[group.end - 1].key.clone(),
+            });
+        }
+        drop(accessors);
+        drop(branches);
+        for group in plan {
+            if group.len() > 1 {
+                for child in &children[group] {
+                    self.free(child.page);
+                }
+            }
+        }
+        Ok(Some(new_children))
     }
 
     fn build_leaf(&self, pairs: &[(usize, &[u8], &[u8])]) -> Result<PageNumber> {
@@ -517,7 +618,7 @@ mod test {
     }
 
     #[test]
-    fn a_branch_keeps_two_children() {
+    fn a_branch_keeps_two_children_and_a_root_does_not() {
         let page_allocator = make_allocator();
         // Two branches, of three leaves each that would fit one
         let mut branches = vec![];
@@ -530,9 +631,12 @@ mod test {
         let root = branch(&page_allocator, &branches);
         assert_eq!(shape(&page_allocator, root), (6, 3, 2));
 
-        // Each branch is left with two leaves, though the three would fit one
+        // Each branch is left with two leaves, and the two then fit one branch, which is the root
         let root = pack(&page_allocator, root).unwrap();
-        assert_eq!(shape(&page_allocator, root), (4, 3, 2));
+        assert_eq!(shape(&page_allocator, root), (4, 1, 1));
+        // The leaves of a root may become one, which is then the root
+        let root = pack(&page_allocator, root).unwrap();
+        assert_eq!(shape(&page_allocator, root), (1, 0, 0));
         assert!(pack(&page_allocator, root).is_none());
     }
 }
