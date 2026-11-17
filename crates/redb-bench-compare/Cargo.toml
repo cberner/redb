@@ -17,7 +17,7 @@ redb = { path = "../..", features = ["experimental-api-5"] }
 rand = "0.10.1"
 tempfile = "3.5.0"
 heed = { version = "0.22", default-features = false }
-rocksdb = { version = "0.24.0", default-features = false, features = ["lz4", "bindgen-runtime"] }
+rocksdb = { version = "0.24.0", default-features = false, features = ["bindgen-runtime"] }
 fjall = "=3.1.6"
 rusqlite = { version = "0.41.0", features = ["bundled"] }
 ctrlc = "3.2.3"
