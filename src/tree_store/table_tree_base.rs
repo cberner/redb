@@ -277,6 +277,20 @@ impl InternalTableDefinition {
         }
     }
 
+    // Packs the table's tree into fewer pages, replacing about `budget` pages at most. Returns the
+    // new root, whose checksums are deferred, if it changed
+    #[expect(clippy::unused_self, reason = "packing is not implemented yet")]
+    pub(crate) fn pack_tree(
+        &mut self,
+        page_allocator: &PageAllocator,
+        freed_pages: &Mutex<Vec<PageNumber>>,
+        budget: &mut usize,
+    ) -> Result<Option<BtreeHeader>> {
+        // Not implemented yet: every table is left as it is
+        let _ = (page_allocator, freed_pages, budget);
+        Ok(None)
+    }
+
     fn private_get_root(&self) -> Option<BtreeHeader> {
         match self {
             InternalTableDefinition::Normal { table_root, .. }

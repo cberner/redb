@@ -4234,6 +4234,58 @@ fn compact_does_not_grow_file() {
     );
 }
 
+mod maximum_compaction {
+    use super::create_tempfile;
+    use redb::{CompactionError, CompactionMode, Database, TableDefinition};
+
+    // Maximum compacts at least as far as Balanced does
+    #[test]
+    fn moves_pages_as_balanced_does() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<u32, &[u8]> = TableDefinition::new("x");
+        let big_value = vec![0u8; 100 * 1024];
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for i in 0..100 {
+                table.insert(&i, big_value.as_slice()).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for i in 0..90 {
+                table.remove(&i).unwrap();
+            }
+        }
+        txn.commit().unwrap();
+
+        let before = tmpfile.as_file().metadata().unwrap().len();
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        let after = tmpfile.as_file().metadata().unwrap().len();
+        assert!(after < before, "{before} -> {after}");
+        assert!(db.check_integrity().unwrap());
+        assert!(!db.compact(CompactionMode::Maximum).unwrap());
+    }
+
+    #[test]
+    fn refused_while_a_savepoint_exists() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let txn = db.begin_write().unwrap();
+        let savepoint = txn.ephemeral_savepoint().unwrap();
+        txn.commit().unwrap();
+        assert!(matches!(
+            db.compact(CompactionMode::Maximum),
+            Err(CompactionError::EphemeralSavepointExists)
+        ));
+        drop(savepoint);
+        db.compact(CompactionMode::Maximum).unwrap();
+    }
+}
+
 // A persistent savepoint must be reported as PersistentSavepointExists, even though it also
 // holds a read reference internally
 #[test]
