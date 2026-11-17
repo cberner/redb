@@ -1656,4 +1656,64 @@ mod compaction {
             assert!(t.get(&8).unwrap().is_none());
         }
     }
+
+    /// A maximum compaction packs the tables under a peer that has the file open, and the
+    /// peer's next read follows the packed trees
+    #[test]
+    fn maximum_compaction_packs_tables_a_peer_has_open() {
+        for &mode in shared_modes() {
+            let tmpfile = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = create(tmpfile.path(), mode);
+            let value = vec![7u8; 100];
+            // Scattered keys leave the leaves partially filled
+            let keys: Vec<u64> = (0..4096u64)
+                .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect();
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                for key in &keys {
+                    t.insert(key, value.as_slice()).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+
+            let reader = open_read_only(tmpfile.path(), mode);
+            {
+                let read = reader.begin_read().unwrap();
+                let t = read.open_table(TABLE).unwrap();
+                assert_eq!(t.len().unwrap(), 4096);
+            }
+
+            let txn = writer.begin_write().unwrap();
+            {
+                let mut t = txn.open_table(TABLE).unwrap();
+                for key in keys.iter().step_by(2) {
+                    t.remove(key).unwrap();
+                }
+            }
+            txn.commit().unwrap();
+
+            writer.compact(CompactionMode::Balanced).unwrap();
+            let balanced = std::fs::metadata(tmpfile.path()).unwrap().len();
+            assert!(writer.compact(CompactionMode::Maximum).unwrap(), "{mode:?}");
+            let maximum = std::fs::metadata(tmpfile.path()).unwrap().len();
+            assert!(maximum < balanced, "{mode:?}: {balanced} -> {maximum}");
+
+            let read = reader.begin_read().unwrap();
+            let t = read.open_table(TABLE).unwrap();
+            assert_eq!(t.len().unwrap(), 2048);
+            for (i, key) in keys.iter().enumerate() {
+                let stored = t.get(key).unwrap();
+                if i % 2 == 0 {
+                    assert!(stored.is_none());
+                } else {
+                    assert_eq!(stored.unwrap().value(), value.as_slice());
+                }
+            }
+            drop(t);
+            drop(read);
+            assert!(writer.check_integrity().unwrap(), "{mode:?}");
+        }
+    }
 }

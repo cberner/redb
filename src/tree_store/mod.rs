@@ -4,6 +4,7 @@ mod btree_cursor;
 mod btree_cursor_range;
 mod btree_iters;
 mod btree_mutator;
+mod btree_pack;
 mod extract_if;
 mod multimap_btree;
 pub(crate) mod page_store;
@@ -17,6 +18,8 @@ pub(crate) use btree_base::{BRANCH, LEAF, LeafAccessor, RawLeafBuilder};
 pub(crate) use btree_cursor::{BtreeCursor, BtreeCursorMut};
 pub(crate) use btree_cursor_range::BtreeCursorRange;
 pub(crate) use btree_iters::{AllPageNumbersBtreeIter, encode_bounds};
+#[cfg(test)]
+pub(crate) use btree_pack::{TreeShape, check_tree};
 pub(crate) use extract_if::BtreeExtractIf;
 pub(crate) use multimap_btree::{DynamicCollection, DynamicCollectionType, multimap_btree_stats};
 pub(crate) use page_store::ReadOnlyBackend;
