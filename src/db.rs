@@ -1235,7 +1235,6 @@ impl Database {
     ///
     /// Returns `true` if compaction was performed, and `false` if no futher compaction was possible
     pub fn compact(&mut self, mode: CompactionMode) -> Result<bool, CompactionError> {
-        let CompactionMode::Balanced = mode;
         // These checks must run before begin_write(): the caller may legally hold an open
         // WriteTransaction (it is not lifetime-bound to the Database), on which begin_write()
         // below would wait forever. Savepoints must be diagnosed before read references,
@@ -1318,7 +1317,9 @@ impl Database {
             header_lock.as_ref(),
         )?;
 
-        let mut compacted = false;
+        // Packed before the pages are moved, so that the moves fill the space that packing frees
+        let mut compacted = mode == CompactionMode::Maximum
+            && self.pack_tables(writer_lock.as_ref(), header_lock.as_ref())?;
         // Iteratively compact until no progress is made
         loop {
             let mut progress = false;
@@ -1365,6 +1366,36 @@ impl Database {
         }
 
         Ok(compacted)
+    }
+
+    // Packs the tables into as few pages as their entries fit, a bounded pass per commit, until a
+    // pass finds nothing left to pack. Returns whether any table changed
+    fn pack_tables(
+        &self,
+        writer_lock: Option<&Arc<WriterLock>>,
+        header_lock: Option<&HeaderGuard<'_>>,
+    ) -> Result<bool, CompactionError> {
+        let mut packed = false;
+        loop {
+            // The packed pages fill the lowest free pages, such as those earlier passes freed
+            let mut txn = begin_write_with_allocation_policy(
+                &self.transaction_tracker,
+                &self.mem,
+                writer_lock,
+                header_lock,
+                AllocationPolicy::Lowest,
+            )
+            .map_err(|e| e.into_storage_error())?;
+            txn.skip_allocator_state_record();
+            if !txn.pack_tables()? {
+                txn.abort()?;
+                return Ok(packed);
+            }
+            txn.commit_with(header_lock)
+                .map_err(|e| e.into_storage_error())?;
+            self.drain_pending_free_pages(ShrinkPolicy::Maximum, writer_lock, header_lock)?;
+            packed = true;
+        }
     }
 
     fn drain_pending_free_pages(
@@ -2255,6 +2286,13 @@ pub enum CompactionMode {
     /// for later inserts to fill, without splitting pages. The default.
     #[default]
     Balanced,
+    /// Also packs the entries of partially filled pages into as few pages as they fit.
+    ///
+    /// Slower than [`CompactionMode::Balanced`], since the entries of those pages are copied. It
+    /// rewrites a bounded number of pages per commit, so neither the memory it uses nor how far it
+    /// may temporarily grow the file depends on the size of the database. Every page it rewrites
+    /// is left full, so inserts into a table are slower until its pages have split.
+    Maximum,
 }
 
 // How an open treats a file that needs a repair, or is asked for one
