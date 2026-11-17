@@ -52,6 +52,9 @@ A number of other APIs have been changed in breaking ways:
   opened with. `alignment` has been removed, because it was always 1.
 * Change `Database::compact()` to take a `CompactionMode`, which selects how thoroughly to compact.
   Use `compact(CompactionMode::Balanced)` to compact as before.
+* Remove the `chrono_v0_4` feature, because the `chrono` crate is no longer maintained. To read
+  existing tables of its types, implement `Value` and `Key` for a type of your own with the same
+  `TypeName` and encoding.
 
 ### `no_std` support
 redb can now be built without the standard library, for use on embedded targets, by disabling the

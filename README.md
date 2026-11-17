@@ -55,8 +55,8 @@ and above, but not Cortex-M0. Embedded targets abort on panic by default. Tests 
 tests run on the host need the `std` feature, which a dev-dependency on redb can enable. There is no
 filesystem, so storage is supplied by implementing `StorageBackend`, which reports failures with
 `BackendError::Other`, and passing it to `Builder::create_with_backend()` or
-`Builder::open_read_only_with_backend()`. The `chrono_v0_4` and `uuid` features require std, and
-`cache_metrics` requires a target with 64-bit atomics.
+`Builder::open_read_only_with_backend()`. The `uuid` feature requires std, and `cache_metrics`
+requires a target with 64-bit atomics.
 
 ## Development
 
