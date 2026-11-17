@@ -5,6 +5,7 @@ use crate::tree_store::btree_base::{
     BRANCH, BranchAccessor, BranchMutator, Checksum, DEFERRED, LEAF, LeafAccessor, LeafPageMut,
     PageType,
 };
+use crate::tree_store::btree_pack::pack_tree;
 use crate::tree_store::multimap_btree::DynamicCollectionType::{Inline, SubtreeV2};
 use crate::tree_store::{
     AllPageNumbersBtreeIter, BtreeHeader, BtreeStats, Page, PageAllocator, PageHint, PageNumber,
@@ -278,6 +279,96 @@ pub(super) fn relocate_subtrees(
         freed_pages.lock().unwrap().push(old_page_number);
     }
     Ok((new_page_number, DEFERRED))
+}
+
+// Packs the subtrees of the multimap table at `root` into fewer pages, as `pack_tree()` does a
+// tree. Returns the page that replaces `root`, if any subtree changed
+pub(super) fn pack_subtrees(
+    root: PageNumber,
+    key_size: Option<usize>,
+    value_size: Option<usize>,
+    page_allocator: &PageAllocator,
+    freed_pages: &Mutex<Vec<PageNumber>>,
+    budget: &mut usize,
+) -> Result<Option<PageNumber>> {
+    let old_page = page_allocator.get_page(root, PageHint::None)?;
+    // No need to track allocations, because this method is only called during compaction when
+    // there can't be any savepoints
+    let ignore = PageTracker::ignore();
+    let new_page_number = match PageType::from_page(&old_page)? {
+        PageType::Leaf => {
+            let collection_size = UntypedDynamicCollection::fixed_width_with(value_size);
+            let accessor = LeafAccessor::new(old_page.memory(), key_size, collection_size);
+            let mut new_collections = vec![];
+            for i in 0..accessor.num_pairs() {
+                if *budget == 0 {
+                    break;
+                }
+                let entry = accessor.entry(i).unwrap();
+                let collection = UntypedDynamicCollection::from_bytes(entry.value());
+                if matches!(collection.collection_type(), SubtreeV2)
+                    && let Some(new_root) = pack_tree(
+                        page_allocator,
+                        freed_pages,
+                        collection.as_subtree(),
+                        value_size,
+                        <() as Value>::fixed_width(),
+                        budget,
+                    )?
+                {
+                    let new_collection = UntypedDynamicCollection::make_subtree_data(new_root);
+                    new_collections.push((i, new_collection));
+                }
+            }
+            if new_collections.is_empty() {
+                return Ok(None);
+            }
+            let mut new_page = page_allocator.allocate(old_page.memory().len(), &ignore)?;
+            new_page.memory_mut().copy_from_slice(old_page.memory());
+            let new_page_number = new_page.get_page_number();
+            let mut leaf_page = LeafPageMut::new(new_page, key_size, collection_size);
+            for (i, new_collection) in new_collections {
+                leaf_page.replace_value(i, &new_collection);
+            }
+            new_page_number
+        }
+        PageType::Branch => {
+            let accessor = BranchAccessor::new(&old_page, key_size);
+            let mut new_children = vec![];
+            for i in 0..accessor.count_children() {
+                if *budget == 0 {
+                    break;
+                }
+                if let Some(new_child) = pack_subtrees(
+                    accessor.child_page(i).unwrap(),
+                    key_size,
+                    value_size,
+                    page_allocator,
+                    freed_pages,
+                    budget,
+                )? {
+                    new_children.push((i, new_child));
+                }
+            }
+            if new_children.is_empty() {
+                return Ok(None);
+            }
+            let mut new_page = page_allocator.allocate(old_page.memory().len(), &ignore)?;
+            new_page.memory_mut().copy_from_slice(old_page.memory());
+            let mut mutator = BranchMutator::new(new_page.memory_mut());
+            for (i, new_child) in new_children {
+                mutator.write_child_page(i, new_child, DEFERRED);
+            }
+            new_page.get_page_number()
+        }
+    };
+
+    drop(old_page);
+    if !page_allocator.free_if_uncommitted(root, &ignore) {
+        freed_pages.lock().unwrap().push(root);
+    }
+    *budget = budget.saturating_sub(1);
+    Ok(Some(new_page_number))
 }
 
 // Finalize all the checksums in the tree, including any Dynamic collection subtrees
