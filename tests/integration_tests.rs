@@ -4236,7 +4236,347 @@ fn compact_does_not_grow_file() {
 
 mod maximum_compaction {
     use super::create_tempfile;
-    use redb::{CompactionError, CompactionMode, Database, TableDefinition};
+    use redb::{
+        CompactionError, CompactionMode, Database, ReadableDatabase, ReadableTable,
+        ReadableTableMetadata, TableDefinition,
+    };
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    // Deterministic, so that a failure reproduces
+    struct XorShift(u64);
+
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn bytes(&mut self, len: usize) -> Vec<u8> {
+            (0..len).map(|_| self.next() as u8).collect()
+        }
+    }
+
+    fn file_len(path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().len()
+    }
+
+    fn leaf_pages(db: &Database) -> u64 {
+        let txn = db.begin_write().unwrap();
+        let pages = txn.stats().unwrap().leaf_pages();
+        txn.abort().unwrap();
+        pages
+    }
+
+    // The pages allocated beyond one for each leaf and branch, which are those of the leaves and
+    // branches that are larger than a page, and a few that hold no table
+    fn pages_of_large_nodes(db: &Database) -> u64 {
+        let txn = db.begin_write().unwrap();
+        let stats = txn.stats().unwrap();
+        txn.abort().unwrap();
+        stats.allocated_pages() - stats.leaf_pages() - stats.branch_pages()
+    }
+
+    fn branch_pages(db: &Database) -> u64 {
+        let txn = db.begin_write().unwrap();
+        let pages = txn.stats().unwrap().branch_pages();
+        txn.abort().unwrap();
+        pages
+    }
+
+    fn check_table(
+        db: &Database,
+        definition: TableDefinition<&[u8], &[u8]>,
+        expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+    ) {
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(definition).unwrap();
+        assert_eq!(table.len().unwrap(), expected.len() as u64);
+        let mut entries = table.range(..).unwrap();
+        for (key, value) in expected {
+            let (stored_key, stored_value) = entries.next().unwrap().unwrap();
+            assert_eq!(stored_key.value(), key.as_slice());
+            assert_eq!(stored_value.value(), value.as_slice());
+        }
+        assert!(entries.next().is_none());
+        // Lookups descend by the branch keys, which iteration does not
+        for (key, value) in expected {
+            assert_eq!(
+                table.get(key.as_slice()).unwrap().unwrap().value(),
+                value.as_slice()
+            );
+        }
+    }
+
+    // Random inserts leave pages partially filled, which a balanced compaction cannot reclaim
+    #[test]
+    fn packs_partially_filled_pages() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+        let mut rng = XorShift(1);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..20_000 {
+                let key = rng.bytes(24);
+                let value = rng.bytes(150);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            let keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+            for key in keys {
+                if rng.next().is_multiple_of(2) {
+                    table.remove(key.as_slice()).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_len = file_len(tmpfile.path());
+        let balanced_leaves = leaf_pages(&db);
+
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        let maximum_len = file_len(tmpfile.path());
+        let maximum_leaves = leaf_pages(&db);
+        assert!(
+            maximum_len < balanced_len,
+            "{maximum_len} >= {balanced_len}"
+        );
+        assert!(
+            maximum_leaves < balanced_leaves,
+            "{maximum_leaves} >= {balanced_leaves}"
+        );
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+
+        // Nothing is left to pack
+        assert!(!db.compact(CompactionMode::Maximum).unwrap());
+        assert_eq!(file_len(tmpfile.path()), maximum_len);
+
+        // The packed tree takes writes, which split its full pages
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..2_000 {
+                let key = rng.bytes(24);
+                let value = rng.bytes(150);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+            let keys: Vec<Vec<u8>> = expected.keys().step_by(3).cloned().collect();
+            for key in keys {
+                table.remove(key.as_slice()).unwrap();
+                expected.remove(&key);
+            }
+        }
+        txn.commit().unwrap();
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+
+        drop(db);
+        let db = Database::open(tmpfile.path()).unwrap();
+        check_table(&db, definition, &expected);
+    }
+
+    // A leaf that ends where no leaf did needs the whole key of its last pair in the branch above
+    // it, where the keys of byte strings are otherwise shortened. Keys this long would swell the
+    // branch to many pages, so its leaves are left as they are instead
+    #[test]
+    fn long_keys_do_not_swell_a_branch() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+        let mut rng = XorShift(7);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..4_000 {
+                let key = rng.bytes(1900);
+                let value = rng.bytes(10);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+            let keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+            for key in keys {
+                if rng.next().is_multiple_of(10) {
+                    table.remove(key.as_slice()).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_len = file_len(tmpfile.path());
+        let balanced_large = pages_of_large_nodes(&db);
+        db.compact(CompactionMode::Maximum).unwrap();
+        let maximum_len = file_len(tmpfile.path());
+        assert!(
+            maximum_len <= balanced_len,
+            "{maximum_len} > {balanced_len}"
+        );
+        // No branch has grown past the four pages that it may
+        assert!(pages_of_large_nodes(&db) <= balanced_large + 3 * branch_pages(&db));
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+    }
+
+    // Values of a page or more are kept in leaves of their own, of a larger order
+    #[test]
+    fn packs_mixed_value_sizes() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
+        let mut rng = XorShift(2);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for i in 0..3_000 {
+                let key_len = 1 + (rng.next() % 40) as usize;
+                let key = rng.bytes(key_len);
+                let value_len = if i % 50 == 0 {
+                    4096 + (rng.next() % 12_000) as usize
+                } else {
+                    (rng.next() % 600) as usize
+                };
+                let value = rng.bytes(value_len);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                expected.insert(key, value);
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            let keys: Vec<Vec<u8>> = expected.keys().cloned().collect();
+            for key in keys {
+                if !rng.next().is_multiple_of(3) {
+                    table.remove(key.as_slice()).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_len = file_len(tmpfile.path());
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(file_len(tmpfile.path()) <= balanced_len);
+        check_table(&db, definition, &expected);
+        assert!(db.check_integrity().unwrap());
+    }
+
+    #[test]
+    fn packs_fixed_width_tables() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: TableDefinition<u64, u64> = TableDefinition::new("x");
+        let mut rng = XorShift(3);
+        let mut expected = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_table(definition).unwrap();
+            for _ in 0..100_000 {
+                let key = rng.next();
+                let value = rng.next();
+                table.insert(key, value).unwrap();
+                expected.insert(key, value);
+            }
+            let keys: Vec<u64> = expected.keys().copied().collect();
+            for key in keys {
+                if !rng.next().is_multiple_of(3) {
+                    table.remove(key).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_leaves = leaf_pages(&db);
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(leaf_pages(&db) < balanced_leaves);
+        assert!(db.check_integrity().unwrap());
+
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_table(definition).unwrap();
+        let stored: Vec<(u64, u64)> = table
+            .iter()
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.value(), value.value())
+            })
+            .collect();
+        let expected: Vec<(u64, u64)> = expected.into_iter().collect();
+        assert_eq!(stored, expected);
+    }
+
+    // Tables already packed, empty, or of a single page are left as they are, while the others
+    // are packed
+    #[test]
+    fn packs_only_tables_that_shrink() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let mut rng = XorShift(5);
+        let mut expected: Vec<BTreeMap<Vec<u8>, Vec<u8>>> = vec![];
+        let names: Vec<String> = (0..20).map(|i| format!("table_{i}")).collect();
+
+        let txn = db.begin_write().unwrap();
+        for (i, name) in names.iter().enumerate() {
+            let definition: TableDefinition<&[u8], &[u8]> = TableDefinition::new(name);
+            let mut table = txn.open_table(definition).unwrap();
+            let mut entries = BTreeMap::new();
+            let count = match i % 4 {
+                0 => 0,
+                1 => 1,
+                _ => 50 * i,
+            };
+            for _ in 0..count {
+                let key = rng.bytes(16);
+                let value = rng.bytes(100);
+                table.insert(key.as_slice(), value.as_slice()).unwrap();
+                entries.insert(key, value);
+            }
+            if i % 4 == 3 {
+                let keys: Vec<Vec<u8>> = entries.keys().cloned().collect();
+                for key in keys {
+                    if rng.next().is_multiple_of(2) {
+                        table.remove(key.as_slice()).unwrap();
+                        entries.remove(&key);
+                    }
+                }
+            }
+            expected.push(entries);
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Maximum).unwrap();
+        assert!(db.check_integrity().unwrap());
+        for (name, entries) in names.iter().zip(&expected) {
+            check_table(&db, TableDefinition::new(name), entries);
+        }
+        assert!(!db.compact(CompactionMode::Maximum).unwrap());
+    }
 
     // Maximum compacts at least as far as Balanced does
     #[test]
