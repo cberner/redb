@@ -4237,10 +4237,10 @@ fn compact_does_not_grow_file() {
 mod maximum_compaction {
     use super::create_tempfile;
     use redb::{
-        CompactionError, CompactionMode, Database, ReadableDatabase, ReadableTable,
-        ReadableTableMetadata, TableDefinition,
+        CompactionError, CompactionMode, Database, MultimapTableDefinition, ReadableDatabase,
+        ReadableMultimapTable, ReadableTable, ReadableTableMetadata, TableDefinition,
     };
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
 
     // Deterministic, so that a failure reproduces
@@ -4535,6 +4535,123 @@ mod maximum_compaction {
             })
             .collect();
         let expected: Vec<(u64, u64)> = expected.into_iter().collect();
+        assert_eq!(stored, expected);
+    }
+
+    // Values that do not fit inline are kept in a subtree of their key, which is packed too
+    #[test]
+    fn packs_multimap_tables_and_subtrees() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: MultimapTableDefinition<u64, &[u8]> = MultimapTableDefinition::new("x");
+        let mut rng = XorShift(4);
+        let mut expected: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_multimap_table(definition).unwrap();
+            for _ in 0..2_000 {
+                let key = rng.next() % 500;
+                let count = if key.is_multiple_of(25) { 400 } else { 4 };
+                for _ in 0..count {
+                    let value_len = 8 + (rng.next() % 40) as usize;
+                    let value = rng.bytes(value_len);
+                    table.insert(key, value.as_slice()).unwrap();
+                    expected.entry(key).or_default().insert(value);
+                }
+            }
+        }
+        txn.commit().unwrap();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_multimap_table(definition).unwrap();
+            for (key, values) in &mut expected {
+                let removed: Vec<Vec<u8>> = values
+                    .iter()
+                    .filter(|_| rng.next().is_multiple_of(2))
+                    .cloned()
+                    .collect();
+                for value in removed {
+                    assert!(table.remove(*key, value.as_slice()).unwrap());
+                    values.remove(&value);
+                }
+            }
+            for key in 0..500 {
+                if key % 7 == 0 {
+                    table.remove_all(key).unwrap();
+                    expected.remove(&key);
+                }
+            }
+        }
+        expected.retain(|_, values| !values.is_empty());
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_len = file_len(tmpfile.path());
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        assert!(file_len(tmpfile.path()) < balanced_len);
+        assert!(db.check_integrity().unwrap());
+
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_multimap_table(definition).unwrap();
+        let mut stored: BTreeMap<u64, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for entry in table.iter().unwrap() {
+            let (key, values) = entry.unwrap();
+            for value in values {
+                stored
+                    .entry(key.value())
+                    .or_default()
+                    .insert(value.unwrap().value().to_vec());
+            }
+        }
+        assert_eq!(stored, expected);
+        let total: usize = expected.values().map(BTreeSet::len).sum();
+        assert_eq!(table.len().unwrap(), total as u64);
+    }
+
+    // A key whose values are kept in a subtree, in a table too small for anything else to pack
+    #[test]
+    fn packs_a_subtree() {
+        let tmpfile = create_tempfile();
+        let mut db = Database::create(tmpfile.path()).unwrap();
+        let definition: MultimapTableDefinition<u64, u64> = MultimapTableDefinition::new("x");
+        let mut rng = XorShift(6);
+        let mut expected = BTreeSet::new();
+        let txn = db.begin_write().unwrap();
+        {
+            let mut table = txn.open_multimap_table(definition).unwrap();
+            for _ in 0..20_000 {
+                let value = rng.next();
+                table.insert(0, value).unwrap();
+                expected.insert(value);
+            }
+            let values: Vec<u64> = expected.iter().copied().collect();
+            for value in values {
+                if rng.next().is_multiple_of(2) {
+                    assert!(table.remove(0, value).unwrap());
+                    expected.remove(&value);
+                }
+            }
+        }
+        txn.commit().unwrap();
+
+        db.compact(CompactionMode::Balanced).unwrap();
+        let balanced_leaves = leaf_pages(&db);
+        assert!(db.compact(CompactionMode::Maximum).unwrap());
+        let maximum_leaves = leaf_pages(&db);
+        assert!(
+            maximum_leaves < balanced_leaves,
+            "{maximum_leaves} >= {balanced_leaves}"
+        );
+        assert!(db.check_integrity().unwrap());
+
+        let txn = db.begin_read().unwrap();
+        let table = txn.open_multimap_table(definition).unwrap();
+        let stored: BTreeSet<u64> = table
+            .get(0)
+            .unwrap()
+            .map(|value| value.unwrap().value())
+            .collect();
         assert_eq!(stored, expected);
     }
 
