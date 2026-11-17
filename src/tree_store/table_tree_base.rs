@@ -1,7 +1,8 @@
 use crate::sync::Mutex;
 use crate::tree_store::btree::{PagePath, UntypedBtree, UntypedBtreeMut};
+use crate::tree_store::btree_base::DEFERRED;
 use crate::tree_store::btree_pack::pack_tree;
-use crate::tree_store::multimap_btree::{UntypedMultiBtree, relocate_subtrees};
+use crate::tree_store::multimap_btree::{UntypedMultiBtree, pack_subtrees, relocate_subtrees};
 use crate::tree_store::{
     BtreeHeader, DynamicCollection, PageAllocator, PageHint, PageNumber, PageNumberHashMap,
     PageResolver,
@@ -279,39 +280,55 @@ impl InternalTableDefinition {
         }
     }
 
-    // Packs the table's tree into fewer pages, replacing about `budget` pages at most. Returns the
-    // new root, whose checksums are deferred, if it changed
+    // Packs the table's tree, and the subtrees of a multimap table, into fewer pages, replacing
+    // about `budget` pages at most. Returns the new root, whose checksums are deferred, if it changed
     pub(crate) fn pack_tree(
         &mut self,
         page_allocator: &PageAllocator,
         freed_pages: &Mutex<Vec<PageNumber>>,
         budget: &mut usize,
     ) -> Result<Option<BtreeHeader>> {
-        let Some(root) = self.private_get_root() else {
+        let Some(original_root) = self.private_get_root() else {
             return Ok(None);
         };
+        let mut root = original_root;
         let key_width = self.private_get_fixed_key_size();
         let value_width = match self {
             InternalTableDefinition::Normal {
                 fixed_value_size, ..
             } => *fixed_value_size,
-            // The values are copied as they are, so any subtrees they hold are left where they are
             InternalTableDefinition::Multimap {
                 fixed_value_size, ..
-            } => DynamicCollection::<()>::fixed_width_with(*fixed_value_size),
+            } => {
+                if let Some(new_root) = pack_subtrees(
+                    root.root,
+                    0,
+                    key_width,
+                    *fixed_value_size,
+                    page_allocator,
+                    freed_pages,
+                    budget,
+                )? {
+                    root = BtreeHeader::new(new_root, DEFERRED, root.length);
+                }
+                DynamicCollection::<()>::fixed_width_with(*fixed_value_size)
+            }
         };
-        let new_root = pack_tree(
+        if let Some(new_root) = pack_tree(
             page_allocator,
             freed_pages,
             root,
             key_width,
             value_width,
             budget,
-        )?;
-        if new_root.is_some() {
-            self.set_header(new_root, self.get_length());
+        )? {
+            root = new_root;
         }
-        Ok(new_root)
+        if root == original_root {
+            return Ok(None);
+        }
+        self.set_header(Some(root), self.get_length());
+        Ok(Some(root))
     }
 
     fn private_get_root(&self) -> Option<BtreeHeader> {
