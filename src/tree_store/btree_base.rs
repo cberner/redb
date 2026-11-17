@@ -1013,7 +1013,7 @@ impl<'a, 'b> LeafBuilder<'a, 'b> {
 // page sizes and tiny pairs); otherwise build() would panic in RawLeafBuilder::new.
 // build_split() clamps each half. A single pair never splits: it gets its own larger page,
 // matching the single-large-value handling elsewhere. Shared by LeafBuilder::should_split and
-// the mutator's run repacking (build_replacement_leaves), which must agree.
+// the greedy packing of runs (pack_leaf_ranges), which must agree.
 pub(super) fn leaf_split_required(
     num_pairs: usize,
     keys_values_bytes: usize,
@@ -1028,6 +1028,42 @@ pub(super) fn leaf_split_required(
         fixed_value_size,
         page_size,
     ) && num_pairs > 1
+}
+
+// Greedy packing of pairs into leaves: the range of the pairs that each leaf takes, given the key
+// and value bytes of each pair. A leaf is cut whenever the next pair would require a split, so
+// every leaf is packed as full as the pairs allow. A leaf can still end up sparse when the next
+// pair is close to a page in size. Shared by the mutator's run repacking
+// (build_replacement_leaves) and compaction's leaf packing.
+pub(super) fn pack_leaf_ranges(
+    pair_bytes: impl Iterator<Item = usize>,
+    fixed_key_size: Option<usize>,
+    fixed_value_size: Option<usize>,
+    page_size: usize,
+) -> Vec<Range<usize>> {
+    let mut plan = Vec::new();
+    let mut start = 0;
+    let mut end = 0;
+    let mut bytes = 0;
+    for pair_bytes in pair_bytes {
+        if leaf_split_required(
+            end - start + 1,
+            bytes + pair_bytes,
+            fixed_key_size,
+            fixed_value_size,
+            page_size,
+        ) {
+            plan.push(start..end);
+            start = end;
+            bytes = 0;
+        }
+        bytes += pair_bytes;
+        end += 1;
+    }
+    if start < end {
+        plan.push(start..end);
+    }
+    plan
 }
 
 // True when a leaf holding these pairs fits into a single order zero page.

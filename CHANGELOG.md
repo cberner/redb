@@ -72,9 +72,9 @@ A read-only open now fails with `DatabaseError::LockProtocolMismatch` if a read-
 redb 4.3 or 4.4 has the file open. Previously, this was allowed in `ExclusiveWriter` mode.
 
 ### Other changes
-* Add `CompactionMode::Maximum`, which also packs the entries of partially filled pages into as few
-  pages as they fit. This reclaims the free space inside pages, which `CompactionMode::Balanced`
-  leaves for later inserts to fill.
+* Add `CompactionMode::Maximum`, which also packs the entries of partially filled pages into fewer
+  pages. This reclaims the free space inside pages, which `CompactionMode::Balanced` leaves for
+  later inserts to fill.
 * Add `Legacy<T>`, for reading tables of `Option<T>` that were created prior to version 5.0.
 * Add `BackendError::Other`, for errors from a storage backend that are not an `io::Error`. It is
   reported as `StorageError::Backend` and `Error::Backend`.
