@@ -63,6 +63,7 @@ fn main() {
         opts.set_write_buffer_manager(&write_buffer);
         opts.set_max_write_buffer_size_to_maintain((CACHE_SIZE / 2) as i64);
         opts.create_if_missing(true);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.increase_parallelism(
             std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
         );

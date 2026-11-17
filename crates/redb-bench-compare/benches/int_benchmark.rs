@@ -91,6 +91,7 @@ fn main() {
         let mut opts = rocksdb::Options::default();
         opts.set_block_based_table_factory(&bb);
         opts.create_if_missing(true);
+        opts.set_compression_type(rocksdb::DBCompressionType::None);
         opts.increase_parallelism(
             std::thread::available_parallelism().map_or(1, |n| n.get()) as i32
         );
