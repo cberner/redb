@@ -1,6 +1,6 @@
 # redb - Changelog
 
-## 5.0.0 - 2026-XX-XX
+## 5.0.0 - 2026-11-18
 
 ### Breaking changes
 The encoding of `Option<&str>`, `Option<String>`, `Option<bool>`, and `Option<char>` has been changed
