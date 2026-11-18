@@ -111,6 +111,11 @@ impl<'a> Packer<'a> {
                 key: accessor.key(i).map(<[u8]>::to_vec),
             })
             .collect();
+        // Packing relies on a branch other than the root having two children. One that does not
+        // is left as it is, along with the tree below it
+        if !is_root && children.len() < 2 {
+            return Ok(None);
+        }
         let mut changed = false;
 
         // The leaves of a tree are all at the same depth, so one child tells what the others are
@@ -535,11 +540,12 @@ mod test {
     use crate::StorageError;
     use crate::sync::Mutex;
     use crate::tree_store::btree_base::{
-        BranchBuilder, BranchMutator, BtreeHeader, DEFERRED, LeafBuilder,
+        BRANCH, BranchAccessor, BranchBuilder, BranchMutator, BtreeHeader, DEFERRED, LeafBuilder,
+        RawBranchBuilder,
     };
     use crate::tree_store::page_store::Page;
     use crate::tree_store::{
-        AllocationPolicy, InMemoryBackend, PageAllocator, PageNumber, PageTracker,
+        AllocationPolicy, InMemoryBackend, PageAllocator, PageHint, PageNumber, PageTracker,
         TransactionalMemory,
     };
     use crate::types::{Key, Value};
@@ -592,6 +598,25 @@ mod test {
             builder.push_key(key.to_le_bytes().to_vec());
         }
         builder.build().unwrap().get_page_number()
+    }
+
+    // A branch of one child, which redb does not build
+    fn single_child_branch(page_allocator: &PageAllocator, child: PageNumber) -> PageNumber {
+        let tracker = PageTracker::ignore();
+        let size = RawBranchBuilder::required_bytes(0, 0, u64::fixed_width());
+        let mut page = page_allocator.allocate(size, &tracker).unwrap();
+        page.memory_mut()[0] = BRANCH;
+        page.memory_mut()[2..4].fill(0);
+        BranchMutator::new(page.memory_mut()).write_child_page(0, child, DEFERRED);
+        page.get_page_number()
+    }
+
+    fn children(page_allocator: &PageAllocator, branch: PageNumber) -> Vec<PageNumber> {
+        let page = page_allocator.get_page(branch, PageHint::None).unwrap();
+        let accessor = BranchAccessor::new(&page, u64::fixed_width());
+        (0..accessor.count_children())
+            .map(|i| accessor.child_page(i).unwrap())
+            .collect()
     }
 
     fn pack(page_allocator: &PageAllocator, root: PageNumber) -> Option<PageNumber> {
@@ -648,6 +673,60 @@ mod test {
         let root = pack(&page_allocator, root).unwrap();
         assert_eq!(shape(&page_allocator, root), (1, 0, 0));
         assert!(pack(&page_allocator, root).is_none());
+    }
+
+    #[test]
+    fn a_branch_with_one_child_is_left_as_it_is() {
+        let page_allocator = make_allocator();
+        let two_leaves = |first: u64| {
+            let leaves = [
+                (leaf(&page_allocator, first..first + 1), first),
+                (leaf(&page_allocator, first + 1..first + 2), first + 1),
+            ];
+            branch(&page_allocator, &leaves)
+        };
+        // The first and the last of the four branches above the leaves have one leaf each
+        let first = single_child_branch(&page_allocator, leaf(&page_allocator, 0..1));
+        let last = single_child_branch(&page_allocator, leaf(&page_allocator, 5..6));
+        let left = branch(&page_allocator, &[(first, 0), (two_leaves(1), 2)]);
+        let right = branch(&page_allocator, &[(two_leaves(3), 4), (last, 5)]);
+        let root = branch(&page_allocator, &[(left, 2), (right, 5)]);
+
+        // The two branches below the root fit one branch, which is then the root
+        let root = pack(&page_allocator, root).unwrap();
+        let branches = children(&page_allocator, root);
+        assert_eq!(branches.len(), 4);
+        assert_eq!(branches[0], first);
+        assert_eq!(branches[3], last);
+        assert_eq!(children(&page_allocator, first).len(), 1);
+        assert_eq!(children(&page_allocator, last).len(), 1);
+
+        // Merging takes a branch as it is, so the four become one branch, and its leaves one leaf
+        let root = pack(&page_allocator, root).unwrap();
+        assert_eq!(shape(&page_allocator, root), (6, 1, 1));
+        let root = pack(&page_allocator, root).unwrap();
+        assert_eq!(shape(&page_allocator, root), (1, 0, 0));
+    }
+
+    #[test]
+    fn a_branch_whose_one_child_is_a_branch_is_left_as_it_is() {
+        let page_allocator = make_allocator();
+        // Three leaves that would be packed, below a branch that is the one child of another
+        let lone = |first: u64| {
+            let leaves: Vec<(PageNumber, u64)> = (first..first + 3)
+                .map(|key| (leaf(&page_allocator, key..key + 1), key))
+                .collect();
+            let inner = branch(&page_allocator, &leaves);
+            (single_child_branch(&page_allocator, inner), inner)
+        };
+        let (left, left_inner) = lone(0);
+        let (right, right_inner) = lone(3);
+        let root = branch(&page_allocator, &[(left, 2), (right, 5)]);
+
+        // Nothing below a branch of one child is packed. The two merge into the root
+        let root = pack(&page_allocator, root).unwrap();
+        assert_eq!(children(&page_allocator, root), [left_inner, right_inner]);
+        assert_eq!(shape(&page_allocator, root), (6, 3, 2));
     }
 
     #[test]
