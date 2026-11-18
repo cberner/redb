@@ -3,8 +3,8 @@
 ## 5.0.0 - 2026-XX-XX
 
 ### Breaking changes
-`&str`, `String`, `bool`, and `char` now declare a `NICHE`, which optimizes the storage of an `Option`
-of these types. The new encoding is not compatible with the one used in prior versions.
+The encoding of `Option<&str>`, `Option<String>`, `Option<bool>`, and `Option<char>` has been changed
+to optimize the storage of these types. The new encoding is not compatible with the one used in prior versions.
 Tables that contain these `Option` types, and were created prior to version 5.0, will fail to open with
 `TableTypeMismatch`. To load them, wrap the inner type in the new `Legacy` type. For example,
 `TableDefinition<u64, Option<&str>>` becomes `TableDefinition<u64, Option<Legacy<&str>>>`. This also
@@ -17,39 +17,34 @@ array, or tuple), redb cannot detect the change and will silently misread existi
 Change the implementation to use `Option<Legacy<T>>` to read existing tables, and use a new
 `TypeName` for the new encoding.**
 
-A number of other APIs have been changed in breaking ways:
+A number of other APIs have changed in breaking ways:
 * Remove the inherent `get()` and `range()` methods of `ReadOnlyTable` and `ReadOnlyMultimapTable`.
   They returned `'static` guards and iterators, which did not keep the transaction alive. Use the
-  methods on `ReadableTable` and `ReadableMultimapTable` instead, which borrow the table, or
-  `get_owned()` and `range_owned()` if the result must outlive the table.
+  methods on `ReadableTable` and `ReadableMultimapTable` instead, or `get_owned()` and `range_owned()`
+  if the result must outlive the table.
 * Change `Range` and `MultimapRange` to borrow the table until they are dropped. Mutating a table
   while a range over it is still in scope could panic, and is now a compile error.
 * Change `Entry`, `OccupiedEntry`, and `VacantEntry` to take a second lifetime, for the key, which
-  no longer needs to live as long as the borrow of the table. For example, `Entry<'_, K, V>`
-  becomes `Entry<'_, '_, K, V>`.
+  no longer needs to live as long as the borrow of the table.
 * Change `FileBackend::new()` to return `FileBackend` instead of a `Result`.
 * Change `ReadableTable::lower_bound()` and `ReadableTable::upper_bound()` to be required methods.
-  Implementations of `ReadableTable` must provide them.
-* Change `ReadableDatabase` to be a sealed trait. It can no longer be implemented outside of redb.
+* Change `ReadableDatabase` to be a sealed trait.
 * Remove `Table::extract_from_if()`. Use `extract_if()` instead.
 * Change `Table::extract_if()` to take a range as its first argument, like
   `BTreeMap::extract_if()`. Use `extract_if(.., predicate)` to visit the whole table.
-* Remove `Builder::create_file()`. Use `Builder::create_with_backend(FileBackend::new(file))`
-  instead.
+* Remove `Builder::create_file()`. Use `Builder::create_with_backend(FileBackend::new(file))` instead.
 * Remove `WriteTransaction::print_allocated_page_debug()`.
 * Remove `From<PoisonError<T>>` for `StorageError` and `Error`.
 * Change `range()`, `range_owned()`, `retain_in()`, and `extract_if()` to take a `KeyRange` instead
   of a `RangeBounds`. The key type no longer needs to be specified. For example,
-  `table.range::<u64>(..)` becomes `table.range(..)`. Implementations of `ReadableTable` and
-  `ReadableMultimapTable` must update the signature of `range()`.
+  `table.range::<u64>(..)` becomes `table.range(..)`.
 * Change the I/O methods of `StorageBackend` to return `BackendError` instead of `io::Error`. An
   `io::Error` can still be converted with `?`. Note that an `io::Error` of kind `Unsupported` is
   now converted to `BackendError::Io` instead of `BackendError::Unsupported`. Lock methods may
   return either to indicate that locking is not supported.
 * Change the `TableTypeMismatch` and `TypeDefinitionChanged` variants of `TableError` and `Error`
   to contain a `Box`. Their fields are replaced by methods on the new `TableTypeMismatch` and
-  `TypeDefinitionInfo` structs. `TableTypeMismatch` also reports the types that the table was
-  opened with. `alignment` has been removed, because it was always 1.
+  `TypeDefinitionInfo` structs.
 * Change `Database::compact()` to take a `CompactionMode`, which selects how thoroughly to compact.
   Use `compact(CompactionMode::Balanced)` to compact as before.
 * Remove the `chrono_v0_4` feature, because the `chrono` crate is no longer maintained. To read
@@ -57,24 +52,22 @@ A number of other APIs have been changed in breaking ways:
   `TypeName` and encoding.
 
 ### `no_std` support
-redb can now be built without the standard library, for use on embedded targets, by disabling the
-`std` feature.
+redb can now be built without the standard library by disabling the `std` feature.
 
 If you depend on redb with `default-features = false`, add `features = ["std"]` to continue
 building with the standard library.
 
 ### File locking changes
-Database files are now locked using only byte-range locks. Prior versions also acquired a lock on
-the whole file. On Linux, do not use redb 4.2 or earlier on a database that redb 5 has open. Their
-locking is incompatible, and only an `ExclusiveWriter` writer can detect the older version.
+Database files are now locked using only byte-range locks. On Linux, do not use redb 4.2 or earlier
+on a database that redb 5.x has open. Their locking is incompatible, and only an `ExclusiveWriter`
+writer can detect the older version.
 
 A read-only open now fails with `DatabaseError::LockProtocolMismatch` if a read-only handle from
 redb 4.3 or 4.4 has the file open. Previously, this was allowed in `ExclusiveWriter` mode.
 
 ### Other changes
-* Add `CompactionMode::Maximum`, which also packs the entries of partially filled pages into fewer
-  pages. This reclaims the free space inside pages, which `CompactionMode::Balanced` leaves for
-  later inserts to fill.
+* Add `CompactionMode::Maximum`. This reclaims the free space inside pages, which
+  `CompactionMode::Balanced` leaves for later inserts to fill.
 * Add `Legacy<T>`, for reading tables of `Option<T>` that were created prior to version 5.0.
 * Add `BackendError::Other`, for errors from a storage backend that are not an `io::Error`. It is
   reported as `StorageError::Backend` and `Error::Backend`.
