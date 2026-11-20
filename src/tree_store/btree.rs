@@ -202,21 +202,18 @@ impl UntypedBtreeMut {
             LEAF => leaf_checksum(&page, self.key_width, self.value_width),
             BRANCH => {
                 let accessor = BranchAccessor::new(&page, self.key_width);
-                let mut new_children = vec![];
+                // Only the dirty children, which are usually a small fraction of a branch
+                let mut dirty_children = vec![];
                 for i in 0..accessor.count_children() {
                     let child_page = accessor.child_page(i).unwrap();
                     if self.page_allocator.uncommitted(child_page) {
                         let new_checksum = self.finalize_dirty_checksums_helper(child_page)?;
-                        new_children.push(Some((i, child_page, new_checksum)));
-                    } else {
-                        // Child is clean, skip it
-                        new_children.push(None);
+                        dirty_children.push((i, child_page, new_checksum));
                     }
                 }
 
                 let mut mutator = BranchMutator::new(page.memory_mut());
-                for (child_index, child_page, child_checksum) in new_children.into_iter().flatten()
-                {
+                for (child_index, child_page, child_checksum) in dirty_children {
                     mutator.write_child_page(child_index, child_page, child_checksum);
                 }
 

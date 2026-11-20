@@ -33,7 +33,7 @@ use core::cmp::{max, min};
 use core::convert::TryInto;
 use core::mem;
 use core::ops::{Bound, Deref, Range};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "logging")]
 use log::{error, warn};
 
@@ -133,20 +133,30 @@ const UNCOMMITTED_SHARDS: usize = 64;
 #[repr(align(64))]
 struct UncommittedShard(Mutex<PageNumberHashSet>);
 
+// Bits in `UncommittedPages::filter`
+const UNCOMMITTED_FILTER_BITS_LOG2: u32 = 14;
+
 /// The pages a write transaction has allocated since its last commit, which `uncommitted()`
 /// answers from and rollback frees. Every allocation, free and `uncommitted()` check consults it,
 /// and it can never be switched off, so it is sharded by page to keep concurrent writers -- tables
 /// of one transaction may be written from different threads -- off a single lock.
 struct UncommittedPages {
     shards: Vec<UncommittedShard>,
+    // One bit per hash of every page ever inserted, so a clear bit proves a page absent without
+    // taking its shard's lock. Bits are never cleared, which leaves removals and take_all() only
+    // making the filter conservative. Most checks are of clean pages -- a commit checks every
+    // child of every dirty branch -- and while the transaction is small they end here.
+    filter: Box<[AtomicUsize]>,
 }
 
 impl UncommittedPages {
     fn new() -> Self {
+        let filter_words = (1 << UNCOMMITTED_FILTER_BITS_LOG2) / usize::BITS as usize;
         Self {
             shards: (0..UNCOMMITTED_SHARDS)
                 .map(|_| UncommittedShard(Mutex::new(PageNumberHashSet::default())))
                 .collect(),
+            filter: (0..filter_words).map(|_| AtomicUsize::new(0)).collect(),
         }
     }
 
@@ -154,7 +164,24 @@ impl UncommittedPages {
         &self.shards[page.page_index as usize % UNCOMMITTED_SHARDS].0
     }
 
+    // The word and mask of the page's filter bit
+    fn filter_bit(page: PageNumber) -> (usize, usize) {
+        let key = u64::from(page.page_index)
+            | (u64::from(page.region) << 20)
+            | (u64::from(page.page_order) << 59);
+        // Multiplicative hashing: the high bits of the product depend on every bit of the key
+        let hash = key.wrapping_mul(0xf135_7aea_2e62_a9c5) >> (64 - UNCOMMITTED_FILTER_BITS_LOG2);
+        let bit = usize::try_from(hash).unwrap();
+        let word_bits = usize::BITS as usize;
+        (bit / word_bits, 1 << (bit % word_bits))
+    }
+
     fn insert(&self, page: PageNumber) {
+        // Before the page is in a shard, so that whoever can observe it there sees the bit
+        let (word, mask) = Self::filter_bit(page);
+        if self.filter[word].load(Ordering::Acquire) & mask == 0 {
+            self.filter[word].fetch_or(mask, Ordering::AcqRel);
+        }
         assert!(self.shard(page).lock().unwrap().insert(page));
     }
 
@@ -164,6 +191,10 @@ impl UncommittedPages {
     }
 
     fn contains(&self, page: PageNumber) -> bool {
+        let (word, mask) = Self::filter_bit(page);
+        if self.filter[word].load(Ordering::Acquire) & mask == 0 {
+            return false;
+        }
         self.shard(page).lock().unwrap().contains(&page)
     }
 
