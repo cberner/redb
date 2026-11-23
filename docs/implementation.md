@@ -27,3 +27,10 @@ evidence should layer their own integrity check.
 page checksum before decoding anything, and report a file corrupted outside redb as
 `StorageError::Corrupted` instead of panicking. A plain `open()` trusts the file and may panic on a
 corrupted one. The hot paths do not verify checksums.
+
+Scans do bound the work a corrupted file can cause. A cursor fails with `StorageError::Corrupted`
+once its path exceeds `MAX_BTREE_DEPTH`, which catches cycles, or once it has loaded more pages
+while moving in one direction than the database holds, which catches branch pages that share
+children and would otherwise make a scan take exponential time. A walk of a sound tree in one
+direction loads each page at most once. The page count restarts on a seek or a change of direction,
+since back-and-forth moves reload pages legitimately and are the caller's doing, not the file's.
