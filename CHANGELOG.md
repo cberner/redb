@@ -1,5 +1,12 @@
 # redb - Changelog
 
+## Unreleased
+
+### Bug fixes
+* Fix iteration over a corrupted table that could run for hours without returning an entry or an
+  error. It now returns `StorageError::Corrupted`. This cannot occur in normal operation, and only
+  affects databases which were externally modified.
+
 ## 5.0.0 - 2026-11-18
 
 ### Breaking changes

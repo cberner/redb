@@ -107,6 +107,42 @@ impl Direction {
     }
 }
 
+// Caps the pages a cursor loads while it moves in one direction. A sound tree holds each page once,
+// and a walk in one direction loads each at most once, so the cap is the page count of the file.
+// Branches that share children would otherwise make a walk take exponential time; a read-only
+// open does not run the integrity check that rejects them. The budget restarts on a seek or a
+// change of direction, which the caller makes and the file cannot.
+#[derive(Clone, Default)]
+struct VisitBudget {
+    remaining: u64,
+    direction: Option<Direction>,
+}
+
+impl VisitBudget {
+    fn restart(&mut self, direction: Option<Direction>, page_capacity: u64) {
+        self.remaining = page_capacity;
+        self.direction = direction;
+    }
+
+    // Looking up the page count takes the database's state lock, so it is only done on a change
+    // of direction, not on every step
+    fn start_step(&mut self, direction: Direction, page_capacity: impl FnOnce() -> u64) {
+        if self.direction != Some(direction) {
+            self.restart(Some(direction), page_capacity());
+        }
+    }
+
+    fn spend(&mut self) -> Result {
+        if self.remaining == 0 {
+            return Err(StorageError::Corrupted(
+                "Btree walk visited more pages than the database holds".to_string(),
+            ));
+        }
+        self.remaining -= 1;
+        Ok(())
+    }
+}
+
 fn lower_bound_entry<K: Key>(accessor: &LeafAccessor<'_>, position: Position<'_>) -> usize {
     match position {
         Position::Start => 0,
@@ -473,6 +509,7 @@ pub(super) struct Cursor<K: Key + 'static, V: Value + 'static> {
     leaf: Option<Leaf>,
     manager: PageResolver,
     hint: PageHint,
+    budget: VisitBudget,
     // A failed step leaves the position half-advanced, and continuing from it would silently
     // skip the unreadable subtree, so the first error latches the cursor; seek_to() clears it
     errored: bool,
@@ -488,6 +525,7 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
             leaf: None,
             manager,
             hint,
+            budget: VisitBudget::default(),
             errored: false,
             _key_type: PhantomData,
             _value_type: PhantomData,
@@ -512,16 +550,22 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
         // A seek rebuilds the position from the root, so a previous error does not taint it
         self.errored = false;
         self.path.clear();
+        self.budget.restart(None, self.manager.page_capacity());
         let result = (|| {
+            self.budget.spend()?;
             let root_page = self.manager.get_page(self.root, self.hint)?;
             let Self {
                 manager,
                 hint,
                 path,
                 leaf,
+                budget,
                 ..
             } = self;
-            let mut get_page = |page| manager.get_page(page, *hint);
+            let mut get_page = |page| {
+                budget.spend()?;
+                manager.get_page(page, *hint)
+            };
             *leaf = Some(descend_to_position::<K, V, _>(
                 root_page,
                 position,
@@ -535,15 +579,21 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
 
     fn ensure_has_entry(&mut self, direction: Direction) -> Result<bool> {
         self.check_not_errored()?;
+        self.budget
+            .start_step(direction, || self.manager.page_capacity());
         let result = {
             let Self {
                 manager,
                 hint,
                 path,
                 leaf,
+                budget,
                 ..
             } = self;
-            let mut get_page = |page| manager.get_page(page, *hint);
+            let mut get_page = |page| {
+                budget.spend()?;
+                manager.get_page(page, *hint)
+            };
             prepare_leaf::<K, V, _>(leaf, path, direction, &mut get_page)
         };
         self.latch_errors(result)
@@ -559,14 +609,20 @@ impl<K: Key + 'static, V: Value + 'static> Cursor<K, V> {
             return Ok(());
         }
 
+        self.budget
+            .start_step(Direction::Next, || self.manager.page_capacity());
         let result = {
             let Self {
                 manager,
                 hint,
                 path,
+                budget,
                 ..
             } = self;
-            let mut get_page = |page| manager.get_page(page, *hint);
+            let mut get_page = |page| {
+                budget.spend()?;
+                manager.get_page(page, *hint)
+            };
             move_to_adjacent_leaf::<K, V, _>(path, Direction::Next, &mut get_page)
         };
         if let Some(next_leaf) = self.latch_errors(result)? {
@@ -684,6 +740,7 @@ pub(super) struct CursorState {
     // moves on. Never set by the removal-oriented cursor users. Boxed to keep
     // the state small for those users.
     insert_run: Option<Box<InsertRun>>,
+    budget: VisitBudget,
 }
 
 enum LeafCloseOutcome {
@@ -788,9 +845,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
         let Some(header) = *self.root else {
             return Ok(());
         };
-        let root_page = self.page_allocator.get_page(header.root, PageHint::None)?;
         let page_allocator = self.page_allocator;
-        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        let budget = &mut self.state.budget;
+        budget.restart(None, page_allocator.resolver().page_capacity());
+        budget.spend()?;
+        let root_page = page_allocator.get_page(header.root, PageHint::None)?;
+        let mut get_page = |page| {
+            budget.spend()?;
+            page_allocator.get_page(page, PageHint::None)
+        };
         let mut path = vec![];
         let leaf = descend_to_position::<K, V, _>(root_page, target, &mut path, &mut get_page)?;
         self.state.position = Some(CursorPosition { path, leaf });
@@ -895,7 +958,12 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> CursorMut<'a, 'b, K, V> {
             return Ok(false);
         };
         let page_allocator = self.page_allocator;
-        let mut get_page = |page| page_allocator.get_page(page, PageHint::None);
+        let budget = &mut self.state.budget;
+        budget.start_step(direction, || page_allocator.resolver().page_capacity());
+        let mut get_page = |page| {
+            budget.spend()?;
+            page_allocator.get_page(page, PageHint::None)
+        };
         if let Some(next_leaf) =
             move_to_adjacent_leaf::<K, V, _>(&mut position.path, direction, &mut get_page)?
         {
