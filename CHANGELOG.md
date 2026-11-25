@@ -1,5 +1,11 @@
 # redb - Changelog
 
+## Unreleased
+
+### Bug fixes
+* Split B-tree pages when values grow through `get_mut()` or `entry().and_modify()`, avoiding
+  excessive writes and a possible panic when many large values share a leaf page.
+
 ## 5.0.0 - 2026-11-18
 
 ### Breaking changes
