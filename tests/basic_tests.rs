@@ -1965,6 +1965,111 @@ fn get_mut() {
 }
 
 #[test]
+fn get_mut_growth_splits_tree() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let definition: TableDefinition<u16, &[u8]> = TableDefinition::new("growth");
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for key in 0..512 {
+            table.insert(key, &[] as &[u8]).unwrap();
+        }
+        assert_eq!(table.stats().unwrap().tree_height(), 1);
+    }
+    write_txn.commit().unwrap();
+    let snapshot = db.begin_read().unwrap();
+
+    let value = vec![42; 32 * 1024];
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(definition).unwrap();
+        for key in 0..512 {
+            if key % 2 == 0 {
+                let mut guard = table.get_mut(key).unwrap().unwrap();
+                for replacement in [&value[..8193], &value[..], &value[..8], &value[..]] {
+                    guard.insert(replacement).unwrap();
+                    assert_eq!(guard.value(), replacement);
+                }
+            } else {
+                table
+                    .entry(key)
+                    .unwrap()
+                    .and_modify(|guard| guard.insert(value.as_slice()))
+                    .unwrap();
+            }
+        }
+        assert_eq!(table.len().unwrap(), 512);
+        // Growing values must split both leaves and ancestors, as ordinary inserts do.
+        assert!(table.stats().unwrap().tree_height() >= 3);
+    }
+    write_txn.commit().unwrap();
+    {
+        let table = snapshot.open_table(definition).unwrap();
+        for key in 0..512 {
+            assert!(table.get(key).unwrap().unwrap().value().is_empty());
+        }
+    }
+    drop(snapshot);
+    assert!(db.check_integrity().unwrap());
+    drop(db);
+
+    let db = Database::open(tmpfile.path()).unwrap();
+    let read_txn = db.begin_read().unwrap();
+    let table = read_txn.open_table(definition).unwrap();
+    for key in 0..512 {
+        assert_eq!(table.get(key).unwrap().unwrap().value(), value);
+    }
+}
+
+#[test]
+fn get_mut_growth_with_variable_keys_and_abort() {
+    let tmpfile = create_tempfile();
+    let mut db = Database::create(tmpfile.path()).unwrap();
+    let keys: Vec<_> = (0..256)
+        .map(|i| format!("shared-prefix-{i:04}-{}", "x".repeat(i % 100)))
+        .collect();
+    let write_txn = db.begin_write().unwrap();
+    {
+        let mut table = write_txn.open_table(STR_TABLE).unwrap();
+        for key in &keys {
+            table.insert(key.as_str(), "old").unwrap();
+        }
+    }
+    write_txn.commit().unwrap();
+    let value = "large".repeat(2000);
+    for commit in [false, true] {
+        let write_txn = db.begin_write().unwrap();
+        {
+            let mut table = write_txn.open_table(STR_TABLE).unwrap();
+            for key in keys.iter().rev() {
+                let mut guard = table.entry(key.as_str()).unwrap().or_insert("").unwrap();
+                assert_eq!(guard.value(), "old");
+                guard.insert(value.as_str()).unwrap();
+                guard.insert("short").unwrap();
+                guard.insert(value.as_str()).unwrap();
+                assert_eq!(guard.value(), value);
+            }
+        }
+        if commit {
+            write_txn.commit().unwrap();
+        } else {
+            write_txn.abort().unwrap();
+        }
+        let read_txn = db.begin_read().unwrap();
+        let table = read_txn.open_table(STR_TABLE).unwrap();
+        assert_eq!(table.len().unwrap(), keys.len() as u64);
+        for key in &keys {
+            assert_eq!(
+                table.get(key.as_str()).unwrap().unwrap().value(),
+                if commit { value.as_str() } else { "old" }
+            );
+        }
+    }
+    assert!(db.check_integrity().unwrap());
+}
+
+#[test]
 fn entry_or_insert() {
     use redb::Entry;
 

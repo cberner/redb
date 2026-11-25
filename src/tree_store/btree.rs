@@ -347,7 +347,7 @@ impl UntypedBtreeMut {
 // a whole tree descent: tables of one WriteTransaction share it and may be written from different
 // threads. Callers must merge before propagating errors, since pages queued before a failure still
 // need to be recorded for commit.
-fn merge_freed_pages(freed_pages: &Mutex<Vec<PageNumber>>, freed: &mut Vec<PageNumber>) {
+pub(super) fn merge_freed_pages(freed_pages: &Mutex<Vec<PageNumber>>, freed: &mut Vec<PageNumber>) {
     if !freed.is_empty() {
         freed_pages.lock().unwrap().append(freed);
     }
@@ -612,36 +612,36 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                 root.checksum = DEFERRED;
                 new_page
             };
-            self.get_mut_helper(None, page_mut, query)
+            let Some((value, entry_index)) = self.get_mut_helper(page_mut, query)? else {
+                return Ok(None);
+            };
+            Ok(Some(AccessGuardMut::new::<K>(
+                value,
+                entry_index,
+                &self.page_allocator,
+                &self.allocated_pages,
+                &mut self.root,
+                &self.freed_pages,
+                &mut self.local_freed,
+            )))
         } else {
             Ok(None)
         }
     }
 
     fn get_mut_helper<'txn>(
-        &'txn mut self,
-        parent: Option<(PageMut<'txn>, usize)>,
+        &self,
         mut page: PageMut<'txn>,
         query: &[u8],
-    ) -> Result<Option<AccessGuardMut<'txn, V>>> {
+    ) -> Result<Option<(AccessGuardMutInPlace<'txn, V>, usize)>> {
         let node_mem = page.memory();
         match node_mem[0] {
             LEAF => {
                 let accessor = LeafAccessor::new(page.memory(), K::fixed_width(), V::fixed_width());
                 if let Some(entry_index) = accessor.find_key::<K>(query) {
                     let (start, end) = accessor.value_range(entry_index).unwrap();
-                    let guard = AccessGuardMut::new(
-                        page,
-                        start,
-                        end - start,
-                        entry_index,
-                        parent,
-                        self.page_allocator.clone(),
-                        self.allocated_pages.clone(),
-                        self.root.as_mut().unwrap(),
-                        K::fixed_width(),
-                    );
-                    Ok(Some(guard))
+                    let guard = AccessGuardMutInPlace::new(page, start, end - start);
+                    Ok(Some((guard, entry_index)))
                 } else {
                     Ok(None)
                 }
@@ -674,7 +674,8 @@ impl<K: Key + 'static, V: Value + 'static> BtreeMut<K, V> {
                     mutator.write_child_page(child_index, new_page.get_page_number(), DEFERRED);
                     new_page
                 };
-                self.get_mut_helper(Some((page, child_index)), child_page_mut, query)
+                drop(page);
+                self.get_mut_helper(child_page_mut, query)
             }
             _ => unreachable!(),
         }

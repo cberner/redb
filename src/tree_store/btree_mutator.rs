@@ -664,6 +664,15 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
         key: &K::SelfType<'_>,
         value: &V::SelfType<'_>,
     ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
+        self.insert_bytes(K::as_bytes(key).as_ref(), V::as_bytes(value).as_ref())
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub(super) fn insert_bytes(
+        &mut self,
+        key_bytes: &[u8],
+        value_bytes: &[u8],
+    ) -> Result<(Option<AccessGuard<'a, V>>, AccessGuardMutInPlace<'a, V>)> {
         let (new_root, old_value, guard) = if let Some(BtreeHeader {
             root: p,
             checksum,
@@ -673,8 +682,8 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             let result = self.insert_helper(
                 self.page_allocator.get_page(p, PageHint::None)?,
                 checksum,
-                K::as_bytes(key).as_ref(),
-                V::as_bytes(value).as_ref(),
+                key_bytes,
+                value_bytes,
                 true,
             )?;
 
@@ -697,10 +706,6 @@ impl<'a, 'b, K: Key + 'static, V: Value + 'static> MutateHelper<'a, 'b, K, V> {
             };
             (new_root, result.old_value, result.inserted_value)
         } else {
-            let key_bytes = K::as_bytes(key);
-            let value_bytes = V::as_bytes(value);
-            let key_bytes = key_bytes.as_ref();
-            let value_bytes = value_bytes.as_ref();
             let mut builder = LeafBuilder::new(
                 self.page_allocator,
                 self.allocated,

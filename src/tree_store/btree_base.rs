@@ -1,3 +1,6 @@
+use crate::sync::Mutex;
+use crate::tree_store::btree::merge_freed_pages;
+use crate::tree_store::btree_mutator::MutateHelper;
 use crate::tree_store::page_store::{
     MAX_PAIR_LENGTH, MAX_VALUE_LENGTH, Page, PageImpl, PageMut, xxh3_checksum,
 };
@@ -320,52 +323,54 @@ impl<V: Value + 'static> Drop for AccessGuard<'_, V> {
 }
 
 pub struct AccessGuardMut<'a, V: Value + 'static> {
-    page: PageMut<'a>,
-    offset: usize,
-    len: usize,
+    value: Option<AccessGuardMutInPlace<'a, V>>,
+    old_value: Vec<u8>,
+    key: Option<Vec<u8>>,
     entry_index: usize,
-    parent: Option<(PageMut<'a>, usize)>,
-    page_allocator: PageAllocator,
-    allocated: Arc<PageTracker>,
-    root_ref: &'a mut BtreeHeader,
+    page_allocator: &'a PageAllocator,
+    allocated: &'a Arc<PageTracker>,
+    root_ref: &'a mut Option<BtreeHeader>,
+    freed_pages: &'a Mutex<Vec<PageNumber>>,
+    local_freed: &'a mut Vec<PageNumber>,
     key_width: Option<usize>,
-    _value_type: PhantomData<V>,
+    reinsert: fn(&mut Self, &[u8]) -> Result<()>,
 }
 
 impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
-        page: PageMut<'a>,
-        offset: usize,
-        len: usize,
+    pub(crate) fn new<K: Key + 'static>(
+        value: AccessGuardMutInPlace<'a, V>,
         entry_index: usize,
-        parent: Option<(PageMut<'a>, usize)>,
-        page_allocator: PageAllocator,
-        allocated: Arc<PageTracker>,
-        root_ref: &'a mut BtreeHeader,
-        key_width: Option<usize>,
+        page_allocator: &'a PageAllocator,
+        allocated: &'a Arc<PageTracker>,
+        root_ref: &'a mut Option<BtreeHeader>,
+        freed_pages: &'a Mutex<Vec<PageNumber>>,
+        local_freed: &'a mut Vec<PageNumber>,
     ) -> Self {
-        assert!(page_allocator.uncommitted(page.get_page_number()));
-        if let Some((ref parent_page, _)) = parent {
-            assert!(page_allocator.uncommitted(parent_page.get_page_number()));
-        }
+        assert!(page_allocator.uncommitted(value.page.get_page_number()));
         AccessGuardMut {
-            page,
-            offset,
-            len,
+            value: Some(value),
+            old_value: Vec::new(),
+            key: None,
             entry_index,
-            parent,
             page_allocator,
             allocated,
             root_ref,
-            key_width,
-            _value_type: PhantomData,
+            freed_pages,
+            local_freed,
+            key_width: K::fixed_width(),
+            // Preserve the key comparator without adding a key type to the public guard.
+            reinsert: Self::reinsert::<K>,
         }
     }
 
     /// Access the stored value
     pub fn value(&self) -> V::SelfType<'_> {
-        V::from_bytes(&self.page.memory()[self.offset..(self.offset + self.len)])
+        if let Some(value) = &self.value {
+            V::from_bytes(&value.page.memory()[value.offset..(value.offset + value.len)])
+        } else {
+            V::from_bytes(&self.old_value)
+        }
     }
 
     /// Replace the stored value
@@ -378,69 +383,62 @@ impl<'a, V: Value + 'static> AccessGuardMut<'a, V> {
         if value_len > MAX_VALUE_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len));
         }
-        let key_len = {
-            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
+        let key_len = if let Some(key) = &self.key {
+            key.len()
+        } else {
+            let value = self.value.as_ref().unwrap();
+            let accessor = LeafAccessor::new(value.page.memory(), self.key_width, V::fixed_width());
             accessor.entry(self.entry_index).unwrap().key().len()
         };
         if value_len + key_len > MAX_PAIR_LENGTH {
             return Err(StorageError::ValueTooLarge(value_len + key_len));
         }
 
-        if LeafMutator::sufficient_replace_inplace_space(
-            &self.page,
-            self.entry_index,
-            self.key_width,
-            V::fixed_width(),
-            value_bytes.as_ref(),
-        ) {
-            let mut mutator =
-                LeafMutator::new(self.page.memory_mut(), self.key_width, V::fixed_width());
-            mutator.replace(self.entry_index, value_bytes.as_ref());
-        } else {
-            let accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
-            let mut builder = LeafBuilder::new(
-                &self.page_allocator,
-                &self.allocated,
-                accessor.num_pairs(),
+        if let Some(value) = &mut self.value
+            && LeafMutator::sufficient_replace_inplace_space(
+                &value.page,
+                self.entry_index,
                 self.key_width,
                 V::fixed_width(),
-            );
-
-            for i in 0..accessor.num_pairs() {
-                let entry = accessor.entry(i).unwrap();
-                if i == self.entry_index {
-                    builder.push(entry.key(), value_bytes.as_ref());
-                } else {
-                    builder.push(entry.key(), entry.value());
-                }
-            }
-
-            let new_page = builder.build()?;
-
-            // Update parent branch page if it exists, otherwise update root
-            if let Some((ref mut parent_page, parent_entry_index)) = self.parent {
-                let mut mutator = BranchMutator::new(parent_page.memory_mut());
-                mutator.write_child_page(parent_entry_index, new_page.get_page_number(), DEFERRED);
-            } else {
-                self.root_ref.root = new_page.get_page_number();
-                self.root_ref.checksum = DEFERRED;
-            }
-
-            let old_page_number = self.page.get_page_number();
-            self.page = new_page;
-            assert!(
-                self.page_allocator
-                    .free_if_uncommitted(old_page_number, &self.allocated)
-            );
+                value_bytes.as_ref(),
+            )
+        {
+            let mut mutator =
+                LeafMutator::new(value.page.memory_mut(), self.key_width, V::fixed_width());
+            mutator.replace(self.entry_index, value_bytes.as_ref());
+            let accessor = LeafAccessor::new(value.page.memory(), self.key_width, V::fixed_width());
+            let (start, end) = accessor.value_range(self.entry_index).unwrap();
+            value.offset = start;
+            value.len = end - start;
+            return Ok(());
         }
+        (self.reinsert)(self, value_bytes.as_ref())
+    }
 
-        // Update our page reference to the new page and recalculate offset/length
-        let new_accessor = LeafAccessor::new(self.page.memory(), self.key_width, V::fixed_width());
-        let (new_start, new_end) = new_accessor.value_range(self.entry_index).unwrap();
-
-        self.offset = new_start;
-        self.len = new_end - new_start;
-
+    fn reinsert<K: Key + 'static>(&mut self, value_bytes: &[u8]) -> Result<()> {
+        if let Some(value) = self.value.take() {
+            let accessor = LeafAccessor::new(value.page.memory(), self.key_width, V::fixed_width());
+            let entry = accessor.entry(self.entry_index).unwrap();
+            self.key.get_or_insert_with(|| entry.key().to_vec());
+            // Release the mutable page before traversing from the root. Keep value() usable
+            // if allocation or I/O fails while splitting the tree.
+            self.old_value = entry.value().to_vec();
+        }
+        let key = self.key.as_ref().unwrap();
+        let mut operation: MutateHelper<'a, '_, K, V> = MutateHelper::new(
+            self.root_ref,
+            self.page_allocator,
+            self.local_freed,
+            self.allocated,
+        );
+        let result = operation.insert_bytes(key, value_bytes);
+        merge_freed_pages(self.freed_pages, self.local_freed);
+        let (old_value, value) = result?;
+        drop(old_value);
+        let accessor = LeafAccessor::new(value.page.memory(), self.key_width, V::fixed_width());
+        self.entry_index = accessor.find_key::<K>(key).unwrap();
+        self.value = Some(value);
+        self.old_value = Vec::new();
         Ok(())
     }
 }

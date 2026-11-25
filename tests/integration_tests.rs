@@ -226,6 +226,7 @@ fn random_data(count: usize, key_size: usize, value_size: usize) -> Vec<(Vec<u8>
 struct FailingBackend {
     inner: FileBackend,
     fail_reads: Arc<AtomicBool>,
+    fail_growth: Arc<AtomicBool>,
     fail_syncs: Arc<AtomicBool>,
     syncs_left: Arc<AtomicU64>,
 }
@@ -235,6 +236,7 @@ impl FailingBackend {
         Self {
             inner: backend,
             fail_reads: Arc::new(AtomicBool::new(false)),
+            fail_growth: Arc::new(AtomicBool::new(false)),
             fail_syncs: Arc::new(AtomicBool::new(false)),
             syncs_left: Arc::new(AtomicU64::new(u64::MAX)),
         }
@@ -254,6 +256,9 @@ impl StorageBackend for FailingBackend {
     }
 
     fn set_len(&self, len: u64) -> Result<(), BackendError> {
+        if self.fail_growth.load(Ordering::SeqCst) && len > self.inner.len()? {
+            return Err(std::io::Error::from(ErrorKind::Other).into());
+        }
         self.inner.set_len(len)
     }
 
@@ -273,6 +278,44 @@ impl StorageBackend for FailingBackend {
     fn write(&self, offset: u64, data: &[u8]) -> Result<(), BackendError> {
         self.inner.write(offset, data)
     }
+}
+
+#[test]
+fn get_mut_growth_io_error_preserves_guard() {
+    let tmpfile = create_tempfile();
+    let backend = FailingBackend::new(file_backend(tmpfile.reopen().unwrap()));
+    let fail_growth = backend.fail_growth.clone();
+    let db = Database::builder().create_with_backend(backend).unwrap();
+    let tx = db.begin_write().unwrap();
+    tx.open_table(STR_TABLE)
+        .unwrap()
+        .insert("key", "old")
+        .unwrap();
+    tx.commit().unwrap();
+
+    let tx = db.begin_write().unwrap();
+    {
+        let mut table = tx.open_table(STR_TABLE).unwrap();
+        let mut guard = table.get_mut("key").unwrap().unwrap();
+        fail_growth.store(true, Ordering::SeqCst);
+        assert!(guard.insert("x".repeat(16 * 1024 * 1024).as_str()).is_err());
+        assert_eq!(guard.value(), "old");
+    }
+    drop(tx);
+    drop(db);
+
+    let mut db = Database::open(tmpfile.path()).unwrap();
+    assert!(db.check_integrity().unwrap());
+    let tx = db.begin_read().unwrap();
+    assert_eq!(
+        tx.open_table(STR_TABLE)
+            .unwrap()
+            .get("key")
+            .unwrap()
+            .unwrap()
+            .value(),
+        "old"
+    );
 }
 
 #[test]
